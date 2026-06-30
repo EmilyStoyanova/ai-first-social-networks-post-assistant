@@ -1,7 +1,7 @@
 # AI-First Social Networks Post Assistant — Implementation Plan
 
-> **Status:** v1.0 · 2026-06-26 · Ready for Development  
-> **Stack:** Next.js 14+ (App Router) · TypeScript · PostgreSQL (Neon) · Prisma · Buffer API · Vercel (Hobby)
+> **Status:** v1.1 · 2026-06-30 · Ready for Development  
+> **Stack:** Next.js 16 (App Router) · TypeScript · PostgreSQL (Neon) · Prisma · Buffer API · Vercel (Hobby)
 
 ---
 
@@ -19,13 +19,13 @@ An AI-powered tool that automates social media post creation, scheduling, and pu
 
 | Layer | Technology |
 |---|---|
-| **Frontend** | Next.js 14+ (App Router), React (RSC + Client Components), Tailwind CSS, ShadCN/UI, TanStack Query |
+| **Frontend** | Next.js 16 (App Router), React (RSC + Client Components), Tailwind CSS, ShadCN/UI, TanStack Query, next-intl (i18n: EN / BG) |
 | **Backend** | Next.js Route Handlers, TypeScript (strict), Zod (validation), Prisma ORM |
 | **Database** | PostgreSQL — Neon (serverless, free tier) |
 | **Authentication** | Auth.js v5 (Credentials provider), JWT sessions, bcrypt |
-| **AI — Text** | Claude API (Anthropic) or OpenAI GPT-4o |
+| **AI — Text** | Multi-LLM with runtime switching: Claude (Anthropic), OpenAI GPT-4o, Grok (xAI). Grok recommended for local development (free tier). Active provider configured by global admin and stored in DB. |
 | **AI — Images** | Leonardo.ai API |
-| **Storage** | Cloudinary (media assets, CDN, free tier) |
+| **Storage** | Cloudinary (media assets, CDN, free tier) — required in v1 for logo uploads, user gallery, and AI-generated images; no persistent file system on Vercel serverless |
 | **Deployment** | Vercel (Hobby plan) |
 | **External APIs** | Buffer API (publishing, analytics), Cloudinary API, Leonardo.ai API |
 | **Dev tooling** | ESLint, Prettier, Husky, lint-staged, Sentry (error tracking) |
@@ -69,9 +69,10 @@ An AI-powered tool that automates social media post creation, scheduling, and pu
 - **Vercel Hobby plan** — deployment targets the free Hobby plan; one cron job available with a 60-second function execution limit
 - **Neon free tier** — 512 MB database storage is sufficient for v1 user volumes
 - **Cloudinary free tier** — 25 GB monthly bandwidth is sufficient; per-company gallery capped at 50 assets to stay within limits
-- **LLM API access** — a valid API key for Claude or OpenAI GPT-4o is provided; token costs are absorbed by the operator
+- **LLM API access** — at least one LLM provider API key (Claude, OpenAI, or Grok) is configured by the global admin; Grok's free tier is suitable for local development; token costs in production are absorbed by the operator
 - **Leonardo.ai API access** — a valid API key is provided; free-tier credits are sufficient for v1 usage
-- **Users are comfortable with English UI** — the application interface is in English; generated post content supports multiple languages as configured per company
+- **UI language** — the application interface supports English (EN) and Bulgarian (BG) via `next-intl`; the user selects their preferred language in profile settings
+- **Content language** — generated posts can be produced in EN or BG as configured per company or per channel; the LLM is instructed to generate in the target language
 - **Buffer handles retries at the social network level** — our application only retries failed Buffer API calls, not individual social network delivery failures
 - **No existing data migration** — v1 is a greenfield deployment; no import of historical posts or existing social accounts beyond Buffer OAuth
 
@@ -123,7 +124,7 @@ Next.js Server (Vercel)
         │
         ├──► PostgreSQL via Prisma (Neon free tier)
         ├──► Buffer API (OAuth, drafts, analytics)
-        ├──► LLM API — Claude / GPT-4o (text generation)
+        ├──► LLM Router → Claude / GPT-4o / Grok (active provider from DB)
         ├──► Leonardo.ai (image generation)
         └──► Cloudinary (media storage + CDN)
 ```
@@ -142,7 +143,7 @@ Next.js Server (Vercel)
 | Dependency | Purpose | If Unavailable |
 |---|---|---|
 | **Buffer API** | Social network OAuth, post scheduling, publishing, and analytics | Core publishing is non-functional; no viable v1 fallback — must monitor Buffer's status page |
-| **Claude / OpenAI API** | LLM text generation for posts, hashtags, safety checks | Post generation halts; both providers are abstracted behind a single interface so switching requires a config change only |
+| **LLM Provider (Claude / OpenAI / Grok)** | Text generation for posts, hashtags, safety checks. Active provider is stored in DB and switchable by global admin at runtime. | If the active provider is unavailable, the admin switches to another in the admin panel — no code change required; all providers share a common interface |
 | **Leonardo.ai API** | AI image generation | Users fall back to manual gallery uploads; generation feature is disabled gracefully in UI |
 | **Cloudinary** | Media asset storage and CDN delivery | Image uploads and delivery are blocked; no local file storage on Vercel serverless |
 | **Neon PostgreSQL** | Primary data store for all application data | Entire application is non-functional; Neon provides automatic failover within its free tier |
@@ -165,9 +166,20 @@ Next.js Server (Vercel)
 │       ├── internal/         # cron + health endpoints
 │       └── webhooks/         # Future: external project integration
 ├── components/               # UI primitives (ShadCN), forms, posts, layout
+├── i18n/
+│   ├── messages/
+│   │   ├── en.json           # English translations
+│   │   └── bg.json           # Bulgarian translations
+│   └── config.ts             # next-intl configuration
 ├── lib/
 │   ├── services/             # Business logic (company, post, generation, buffer, audit)
-│   ├── ai/                   # LLM + image generator clients
+│   ├── ai/
+│   │   ├── llm-router.ts     # Reads active provider from DB, delegates to correct client
+│   │   ├── providers/
+│   │   │   ├── claude.ts
+│   │   │   ├── openai.ts
+│   │   │   └── grok.ts
+│   │   └── image-generator.ts  # Leonardo.ai client
 │   ├── buffer/               # Buffer API wrapper
 │   ├── cloudinary/           # Cloudinary client
 │   ├── jobs/                 # Cron dispatcher
@@ -176,9 +188,140 @@ Next.js Server (Vercel)
 │   └── validators/           # Zod schemas
 ├── prisma/                   # schema.prisma + migrations
 ├── types/
-├── middleware.ts             # Route protection
+├── middleware.ts             # Route protection + locale detection
 └── vercel.json              # Cron job definition
 ```
+
+---
+
+## Database Design
+
+### Tables & Relationships
+
+```
+users
+  ├── id, email, password_hash, name, is_global_admin, preferred_language
+  └── preferred_language: 'en' | 'bg'
+
+companies
+  ├── id, name, slug, automation_mode, default_language, created_by → users.id
+  └── automation_mode: 'semi_automated' | 'fully_automated'
+
+company_members                              (many users ↔ many companies)
+  ├── id, company_id → companies.id, user_id → users.id
+  ├── role: 'owner' | 'editor'
+  └── UNIQUE(company_id, user_id)
+
+brand_guidelines                             (one-to-one with companies)
+  ├── id, company_id → companies.id (UNIQUE)
+  └── logo_url, colors (JSONB), fonts (JSONB), tones (TEXT[]),
+      forbidden_words (TEXT[]), target_audience, competitors (TEXT[])
+
+channel_configs                              (one per channel per company)
+  ├── id, company_id → companies.id, channel: 'facebook'|'linkedin'|'instagram'|'tiktok'
+  ├── enabled, image_required, max_text_length, hashtag_style
+  ├── posting_language ('en'|'bg'), posts_per_day, posts_per_week
+  ├── posting_windows (JSONB: [{ days, start, end }])
+  ├── automation_mode_override — overrides company.automation_mode if set
+  ├── buffer_profile_id
+  └── UNIQUE(company_id, channel)
+
+buffer_connections                           (one per company)
+  ├── id, company_id → companies.id
+  └── buffer_user_id, access_token_enc, refresh_token_enc, token_expires_at
+
+llm_configs                                  (global — managed by admin)
+  ├── id, provider: 'claude'|'openai'|'grok'
+  ├── model_name, api_key_enc, base_url
+  └── is_active — only one row is true at a time (enforced in service layer)
+
+content_sources
+  ├── id, company_id → companies.id
+  ├── type: 'rss'|'prompt'|'product_page'|'calendar_event'
+  ├── name, config (JSONB), enabled, last_fetched_at
+  └── config shape varies by type: { url } for rss, { text } for prompt, etc.
+
+feed_items
+  ├── id, source_id → content_sources.id, company_id → companies.id
+  ├── title, content, url, published_at, used_in_post
+  └── UNIQUE(source_id, url)  — prevents duplicate ingestion
+
+media_assets
+  ├── id, company_id → companies.id
+  ├── cloudinary_id, url, thumbnail_url, width, height
+  ├── generated_by: 'user_upload'|'ai'
+  ├── ai_prompt  — populated when generated_by = 'ai'
+  └── uploaded_by → users.id
+
+weekly_schedules
+  ├── id, company_id → companies.id
+  ├── week_start (DATE — always Monday), status: 'generating'|'ready'|'completed'
+  └── UNIQUE(company_id, week_start)
+
+posts
+  ├── id, company_id → companies.id, schedule_id → weekly_schedules.id (nullable)
+  ├── channel, content, language ('en'|'bg'), hashtags (TEXT[])
+  ├── media_asset_id → media_assets.id (nullable)
+  ├── status: 'draft'|'pending_approval'|'approved'|'rejected'|
+  │          'sent_to_buffer'|'published'|'failed'
+  ├── buffer_update_id, scheduled_for, published_at
+  ├── safety_flagged, safety_flag_reason
+  ├── retry_count (max 3), last_error
+  └── generated_by, approved_by, approved_at,
+      rejected_by, rejected_at, rejection_notes  → users.id
+
+post_versions                                (audit trail for edits)
+  ├── id, post_id → posts.id
+  ├── version (INT, monotonically increasing per post)
+  ├── content, changed_by → users.id
+  └── UNIQUE(post_id, version)
+
+audit_logs
+  ├── id, user_id → users.id (nullable for system actions)
+  ├── company_id → companies.id (nullable)
+  ├── action (e.g. 'post.approved', 'company.created')
+  ├── entity_type, entity_id
+  └── metadata (JSONB)
+
+cron_runs
+  ├── id, started_at, completed_at
+  ├── status: 'running'|'completed'|'failed'
+  └── actions_taken (JSONB), error
+
+api_keys                                     (M2M — future external project)
+  ├── id, name, key_hash (SHA-256), created_by → users.id
+  └── last_used_at, expires_at
+```
+
+### Key Relationships Diagram
+
+```
+users ──< company_members >── companies
+                                  │
+              ┌───────────────────┼─────────────────────┐
+              │                   │                     │
+        brand_guidelines   channel_configs      buffer_connections
+                                  │
+                           content_sources
+                                  │
+                            feed_items
+                                  │
+                        weekly_schedules
+                                  │
+                               posts ──── media_assets
+                                  │
+                           post_versions
+```
+
+### Key Indexes
+
+- `company_members(user_id)` — fast lookup of "which companies does this user belong to"
+- `posts(company_id, status)` — approval queue and cron queries
+- `posts(scheduled_for)` WHERE `status IN ('approved', 'sent_to_buffer')` — cron scheduling
+- `posts(retry_count, status)` WHERE `status = 'failed'` — retry queue
+- `feed_items(source_id, published_at DESC)` — latest articles per source
+- `audit_logs(company_id, created_at DESC)` — recent activity per company
+- `weekly_schedules(company_id, week_start DESC)` — current week lookup
 
 ---
 
@@ -220,16 +363,68 @@ Next.js Server (Vercel)
 
 | Phase | Focus | Weeks | Complexity |
 |---|---|---|---|
-| 1 | **Project Initialization** — Next.js setup, DB, Auth.js, CI pipeline, Vercel deploy | 1–2 | Medium |
-| 2 | **Company & Brand Management** — multi-company CRUD, team roles, brand guidelines, global admin | 3–4 | Medium |
-| 3 | **Buffer Integration & Channel Configuration** — OAuth flow, encrypted token storage, per-channel settings UI | 5–6 | High |
-| 4 | **Content Sources & Feed Ingestion** — RSS, product URL crawling, manual prompts, calendar events | 7–8 | Medium |
-| 5 | **AI Content Generation Engine** — weekly schedule generation, channel formatting, safety check, duplicate detection | 9–10 | Very High |
-| 6 | **Media Gallery & Image Generation** — Cloudinary uploads, Leonardo.ai integration, image picker | 11–12 | Medium |
-| 7 | **Post Approval Workflow** — approval queue UI, post editor, version history, audit log page, weekly calendar | 13–14 | Medium |
-| 8 | **Scheduling, Automation & Reliability** — Vercel Cron dispatcher, Buffer send with retry, health endpoint | 15 | Medium |
-| 9 | **Analytics Integration** — Buffer analytics fetch, analytics page, dashboard summary | 16 | Low–Medium |
-| 10 | **Security Hardening & Production Readiness** — Sentry, rate limiting, security audit, mobile layout, performance review | 17–18 | Medium |
+| 1 | **Project Initialization** — Next.js 16 setup, Prisma + Neon, Auth.js, EN/BG i18n, CI pipeline, Vercel deploy | 1–2 | Medium |
+| 2 | **Company & Brand Management** — multi-company CRUD, team invitations, brand guidelines, global admin, LLM config UI | 3–4 | Medium |
+| 3 | **Buffer Integration & Channel Configuration** — OAuth flow, AES-256 token storage, per-channel settings (schedule, windows, language, image rules, automation override) | 5–6 | High |
+| 4 | **Content Sources & Feed Ingestion** — RSS parser, product URL crawler, manual prompts, calendar events, per-source deduplication | 7–8 | Medium |
+| 5 | **AI Content Generation Engine** — LLM router (Claude/GPT-4o/Grok), weekly schedule generation, channel-specific prompt builder, duplicate detection, content safety check | 9–10 | Very High |
+| 6 | **Media Gallery & Image Generation** — Cloudinary signed uploads, Leonardo.ai integration, image picker (gallery + generate tabs), brand-aware generation prompts | 11–12 | Medium |
+| 7 | **Post Approval Workflow** — approval queue driven by company/channel automation mode, post editor with inline image picker, version history, rejection with notes, audit log page, weekly calendar view | 13–14 | Medium |
+| 8 | **Scheduling, Automation & Reliability** — Vercel Cron dispatcher, Buffer send with retry logic, health endpoint | 15 | Medium |
+| 9 | **Analytics Integration** — Buffer analytics fetch, per-post metrics, analytics page, dashboard summary cards | 16 | Low–Medium |
+| 10 | **Security Hardening & Production Readiness** — Sentry, rate limiting on auth, full security audit, mobile layout, performance review | 17–18 | Medium |
+
+### Phase 5 — AI Content Generation Engine (detail)
+
+The LLM router reads the active provider from `llm_configs` at request time and delegates to the corresponding client (`claude.ts`, `openai.ts`, `grok.ts`). All providers implement the same interface so switching is a DB change with no code deployment.
+
+The prompt builder assembles context in layers:
+1. **System prompt** — role definition, output format rules, channel character limits
+2. **Brand context** — tone, forbidden words, target audience, competitors from `brand_guidelines`
+3. **Channel rules** — hashtag style, emoji policy, image requirement, language for this channel
+4. **Source material** — summarised feed items or user-provided prompt text
+5. **Deduplication guard** — last 10 post texts for this company/channel are appended to prevent repetition
+
+Generated posts are checked for content safety (keyword filter + LLM classification) before being written to the database. Flagged posts enter the queue with `safety_flagged = true` and a highlighted warning in the approval UI.
+
+### Phase 6 — Media Gallery & Image Selection (detail)
+
+When a reviewer attaches an image to a post, an **image picker modal** opens with two tabs:
+
+- **Company Gallery** — displays all `media_assets` for the company (`generated_by: user_upload | ai`), ordered by most recent. User clicks to select.
+- **AI Generate** — user enters a prompt pre-filled with brand colors and tone from `brand_guidelines`. On submit, Leonardo.ai is called, the result is saved to `media_assets` with `generated_by = 'ai'`, and automatically selected for the current post.
+
+The selected asset's `id` is stored in `posts.media_asset_id`. When the post is sent to Buffer, `media_assets.url` (Cloudinary CDN) is included in the Buffer API payload where `image_required = true` for the channel.
+
+### Phase 7 — Post Approval Workflow (detail)
+
+The approval path for each post is determined in this order:
+
+1. **Channel override** (`channel_configs.automation_mode_override`) — takes priority if set
+2. **Company default** (`companies.automation_mode`)
+
+| Effective mode | Post status after generation | Next step |
+|---|---|---|
+| `semi_automated` | `pending_approval` | Appears in approval queue; owner or editor must act |
+| `fully_automated` | `approved` (immediately) | Cron picks it up and sends to Buffer without human interaction |
+
+The approval queue page supports filtering by channel, status, and date. Inline editing saves a new `post_versions` row before updating `posts.content`. Rejection moves the post back to `draft` with optional notes visible to whoever regenerates it.
+
+### Phase 8 — Scheduling, Automation & Reliability (detail)
+
+A single Vercel Cron job calls `POST /api/v1/internal/cron` (protected by `CRON_SECRET`) on a configurable interval (default: every 6 hours). Each execution is designed to complete within the 60-second function timeout by processing **one company at a time**, selected by the oldest `last_cron_processed_at` timestamp (round-robin).
+
+Each cron run executes the following steps in order:
+
+1. **Record start** — insert row in `cron_runs` with `status = 'running'`
+2. **Fetch feeds** — for the selected company, fetch new items from all enabled `content_sources` where `last_fetched_at` is stale; deduplicate against existing `feed_items`
+3. **Generate weekly schedule** — if the company has no `weekly_schedules` row for next week, trigger AI generation and create `posts` rows with appropriate initial status
+4. **Auto-approve** — for companies/channels in `fully_automated` mode, transition all `pending_approval` posts to `approved`
+5. **Send to Buffer** — for all `approved` posts with `scheduled_for` within the next 48 hours, call the Buffer API, store `buffer_update_id`, update status to `sent_to_buffer`
+6. **Retry failed** — for `failed` posts with `retry_count < 3`, retry Buffer send with exponential backoff (`retry_count * 10` minutes); increment `retry_count` on each attempt
+7. **Record completion** — update `cron_runs` row with `status = 'completed'` and `actions_taken` summary
+
+If a step throws, the run is marked `failed` and the error is stored; the next run picks up where the round-robin left off. The `/api/v1/internal/health` endpoint surfaces the last run's status and timestamp for operational monitoring.
 
 ---
 
