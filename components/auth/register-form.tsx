@@ -3,15 +3,11 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { loginSchema } from "@/lib/validators/login.schema";
+import { registerSchema } from "@/lib/validators/register.schema";
 
-type FieldErrors = { email?: string; password?: string };
+type FieldErrors = { name?: string; email?: string; password?: string };
 
-interface Props {
-  registered?: boolean;
-}
-
-export function LoginForm({ registered = false }: Props) {
+export function RegisterForm() {
   const router = useRouter();
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -23,16 +19,18 @@ export function LoginForm({ registered = false }: Props) {
 
     const data = new FormData(e.currentTarget);
     const raw = {
+      name: (data.get("name") as string) ?? "",
       email: (data.get("email") as string) ?? "",
       password: (data.get("password") as string) ?? "",
     };
 
-    const parsed = loginSchema.safeParse(raw);
+    const parsed = registerSchema.safeParse(raw);
     if (!parsed.success) {
       const errs: FieldErrors = {};
       for (const issue of parsed.error.issues) {
         const field = issue.path[0];
-        if (field === "email") errs.email = issue.message;
+        if (field === "name") errs.name = issue.message;
+        else if (field === "email") errs.email = issue.message;
         else if (field === "password") errs.password = issue.message;
       }
       setFieldErrors(errs);
@@ -45,32 +43,36 @@ export function LoginForm({ registered = false }: Props) {
     setIsPending(true);
 
     try {
-      const res = await fetch("/api/v1/auth/login", {
+      const res = await fetch("/api/v1/auth/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(parsed.data),
       });
 
-      const body: unknown = await res.json();
-      const errorMessage =
-        body !== null &&
-        typeof body === "object" &&
-        "error" in body &&
-        body.error !== null &&
-        typeof body.error === "object" &&
-        "message" in body.error &&
-        typeof body.error.message === "string"
-          ? body.error.message
-          : "Unexpected server error.";
-
-      if (!res.ok) {
-        setFormError(errorMessage);
+      if (res.status === 409) {
+        setFormError("An account with this email already exists.");
         return;
       }
 
-      router.push("/dashboard");
+      if (!res.ok) {
+        const body: unknown = await res.json().catch(() => null);
+        const message =
+          body !== null &&
+          typeof body === "object" &&
+          "error" in body &&
+          body.error !== null &&
+          typeof body.error === "object" &&
+          "message" in body.error &&
+          typeof body.error.message === "string"
+            ? body.error.message
+            : "Something went wrong. Please try again.";
+        setFormError(message);
+        return;
+      }
+
+      router.push("/login?registered=1");
     } catch {
-      setFormError("Unexpected server error.");
+      setFormError("Something went wrong. Please try again.");
     } finally {
       setIsPending(false);
     }
@@ -79,24 +81,18 @@ export function LoginForm({ registered = false }: Props) {
   return (
     <div className="flex min-h-screen flex-1 items-center justify-center bg-gray-50 px-4 py-12">
       <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white px-8 py-10 shadow-sm">
-        {/* Logo / Title */}
-        <div className="mb-8 text-center">
+        <div className="mb-6 text-center">
           <div className="mb-1 text-2xl font-bold tracking-tight text-gray-900">
             AI-First Social Networks
           </div>
           <p className="text-sm text-gray-500">Post Assistant</p>
         </div>
 
-        <form onSubmit={handleSubmit} noValidate>
-          {registered && (
-            <div
-              role="status"
-              className="mb-5 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700"
-            >
-              Account created successfully. You can now sign in.
-            </div>
-          )}
+        <h1 className="mb-6 text-center text-lg font-semibold text-gray-800">
+          Create your account
+        </h1>
 
+        <form onSubmit={handleSubmit} noValidate>
           {formError && (
             <div
               role="alert"
@@ -105,6 +101,34 @@ export function LoginForm({ registered = false }: Props) {
               {formError}
             </div>
           )}
+
+          {/* Name */}
+          <div className="mb-4">
+            <label htmlFor="name" className="mb-1.5 block text-sm font-medium text-gray-700">
+              Name
+            </label>
+            <input
+              id="name"
+              name="name"
+              type="text"
+              autoComplete="name"
+              autoFocus
+              aria-invalid={fieldErrors.name ? true : undefined}
+              aria-describedby={fieldErrors.name ? "name-error" : undefined}
+              className={[
+                "w-full rounded-lg border px-3 py-2 text-sm transition-colors outline-none",
+                "focus:ring-2 focus:ring-offset-0",
+                fieldErrors.name
+                  ? "border-red-400 bg-red-50 focus:border-red-500 focus:ring-red-200"
+                  : "border-gray-300 bg-white focus:border-blue-500 focus:ring-blue-100",
+              ].join(" ")}
+            />
+            {fieldErrors.name && (
+              <p id="name-error" className="mt-1.5 text-xs text-red-600">
+                {fieldErrors.name}
+              </p>
+            )}
+          </div>
 
           {/* Email */}
           <div className="mb-4">
@@ -116,7 +140,6 @@ export function LoginForm({ registered = false }: Props) {
               name="email"
               type="email"
               autoComplete="email"
-              autoFocus
               aria-invalid={fieldErrors.email ? true : undefined}
               aria-describedby={fieldErrors.email ? "email-error" : undefined}
               className={[
@@ -143,7 +166,7 @@ export function LoginForm({ registered = false }: Props) {
               id="password"
               name="password"
               type="password"
-              autoComplete="current-password"
+              autoComplete="new-password"
               aria-invalid={fieldErrors.password ? true : undefined}
               aria-describedby={fieldErrors.password ? "password-error" : undefined}
               className={[
@@ -161,28 +184,19 @@ export function LoginForm({ registered = false }: Props) {
             )}
           </div>
 
-          {/* Submit */}
           <button
             type="submit"
             disabled={isPending}
             className="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {isPending ? "Signing in…" : "Login"}
+            {isPending ? "Creating account…" : "Create account"}
           </button>
-
-          {/* Forgot password — placeholder */}
-          <div className="mt-4 text-center">
-            <button type="button" disabled className="cursor-not-allowed text-sm text-gray-400">
-              Forgot password
-            </button>
-          </div>
         </form>
 
-        {/* Register */}
         <div className="mt-6 border-t border-gray-100 pt-6 text-center text-sm text-gray-500">
-          Don&apos;t have an account?{" "}
-          <Link href="/register" className="font-medium text-blue-600 hover:underline">
-            Register
+          Already have an account?{" "}
+          <Link href="/login" className="font-medium text-blue-600 hover:underline">
+            Login
           </Link>
         </div>
       </div>

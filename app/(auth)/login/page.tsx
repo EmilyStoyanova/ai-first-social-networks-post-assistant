@@ -5,6 +5,11 @@ export const metadata: Metadata = {
   title: "Login – AI-First Post Assistant",
 };
 
-export default function LoginPage() {
-  return <LoginForm />;
+interface Props {
+  searchParams: Promise<{ registered?: string }>;
+}
+
+export default async function LoginPage({ searchParams }: Props) {
+  const { registered } = await searchParams;
+  return <LoginForm registered={registered === "1"} />;
 }
