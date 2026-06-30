@@ -1,0 +1,376 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  owner
+  editor
+}
+
+enum AutomationMode {
+  semi_automated
+  fully_automated
+}
+
+enum SocialChannel {
+  facebook
+  linkedin
+  instagram
+  tiktok
+}
+
+enum HashtagStyle {
+  inline
+  end_of_post
+  none
+}
+
+enum ContentSourceType {
+  rss
+  prompt
+  product_page
+  calendar_event
+}
+
+enum MediaSource {
+  user_upload
+  ai
+}
+
+enum ScheduleStatus {
+  generating
+  ready
+  completed
+}
+
+enum PostStatus {
+  draft
+  pending_approval
+  approved
+  rejected
+  sent_to_buffer
+  published
+  failed
+}
+
+enum LlmProvider {
+  claude
+  openai
+  grok
+}
+
+enum CronStatus {
+  running
+  completed
+  failed
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String   @map("password_hash")
+  name          String?
+  isGlobalAdmin Boolean  @default(false) @map("is_global_admin")
+  preferredLang String   @default("en") @map("preferred_language")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  companies        CompanyMember[]
+  createdCompanies Company[]       @relation("CompanyCreator")
+  uploadedAssets   MediaAsset[]
+  approvedPosts    Post[]          @relation("PostApprover")
+  rejectedPosts    Post[]          @relation("PostRejecter")
+  generatedPosts   Post[]          @relation("PostGenerator")
+  postVersions     PostVersion[]
+  auditLogs        AuditLog[]
+  apiKeys          ApiKey[]
+  llmConfigs       LlmConfig[]
+
+  @@map("users")
+}
+
+model Company {
+  id             String         @id @default(uuid())
+  name           String
+  slug           String         @unique
+  automationMode AutomationMode @default(semi_automated) @map("automation_mode")
+  defaultLang    String         @default("en") @map("default_language")
+  createdBy      String         @map("created_by")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+
+  creator          User              @relation("CompanyCreator", fields: [createdBy], references: [id])
+  members          CompanyMember[]
+  brandGuidelines  BrandGuidelines?
+  channelConfigs   ChannelConfig[]
+  bufferConnection BufferConnection?
+  contentSources   ContentSource[]
+  mediaAssets      MediaAsset[]
+  weeklySchedules  WeeklySchedule[]
+  posts            Post[]
+  auditLogs        AuditLog[]
+
+  @@map("companies")
+}
+
+model CompanyMember {
+  id        String   @id @default(uuid())
+  companyId String   @map("company_id")
+  userId    String   @map("user_id")
+  role      Role
+  invitedBy String?  @map("invited_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, userId])
+  @@index([userId])
+  @@index([companyId])
+  @@map("company_members")
+}
+
+model BrandGuidelines {
+  id             String   @id @default(uuid())
+  companyId      String   @unique @map("company_id")
+  logoUrl        String?  @map("logo_url")
+  colors         Json?
+  fonts          Json?
+  tones          String[]
+  forbiddenWords String[] @map("forbidden_words")
+  targetAudience String?  @map("target_audience")
+  competitors    String[]
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("brand_guidelines")
+}
+
+model ChannelConfig {
+  id                     String          @id @default(uuid())
+  companyId              String          @map("company_id")
+  channel                SocialChannel
+  enabled                Boolean         @default(true)
+  imageRequired          Boolean?        @map("image_required")
+  maxTextLength          Int?            @map("max_text_length")
+  hashtagStyle           HashtagStyle    @default(end_of_post) @map("hashtag_style")
+  postingLanguage        String          @default("en") @map("posting_language")
+  postsPerDay            Int             @default(1) @map("posts_per_day")
+  postsPerWeek           Int             @default(5) @map("posts_per_week")
+  postingWindows         Json?           @map("posting_windows")
+  automationModeOverride AutomationMode? @map("automation_mode_override")
+  bufferProfileId        String?         @map("buffer_profile_id")
+  updatedAt              DateTime        @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, channel])
+  @@map("channel_configs")
+}
+
+model BufferConnection {
+  id              String    @id @default(uuid())
+  companyId       String    @unique @map("company_id")
+  bufferUserId    String    @map("buffer_user_id")
+  accessTokenEnc  String    @map("access_token_enc")
+  refreshTokenEnc String?   @map("refresh_token_enc")
+  tokenExpiresAt  DateTime? @map("token_expires_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("buffer_connections")
+}
+
+model LlmConfig {
+  id        String      @id @default(uuid())
+  provider  LlmProvider
+  modelName String      @map("model_name")
+  apiKeyEnc String      @map("api_key_enc")
+  baseUrl   String?     @map("base_url")
+  isActive  Boolean     @default(false) @map("is_active")
+  createdBy String      @map("created_by")
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+
+  creator User @relation(fields: [createdBy], references: [id])
+
+  @@map("llm_configs")
+}
+
+model ContentSource {
+  id            String            @id @default(uuid())
+  companyId     String            @map("company_id")
+  type          ContentSourceType
+  name          String
+  config        Json
+  enabled       Boolean           @default(true)
+  lastFetchedAt DateTime?         @map("last_fetched_at")
+  createdAt     DateTime          @default(now()) @map("created_at")
+
+  company   Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  feedItems FeedItem[]
+
+  @@map("content_sources")
+}
+
+model FeedItem {
+  id          String    @id @default(uuid())
+  sourceId    String    @map("source_id")
+  companyId   String    @map("company_id")
+  title       String?
+  content     String?
+  url         String
+  publishedAt DateTime? @map("published_at")
+  usedInPost  Boolean   @default(false) @map("used_in_post")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  source ContentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, url])
+  @@index([sourceId])
+  @@map("feed_items")
+}
+
+model MediaAsset {
+  id           String      @id @default(uuid())
+  companyId    String      @map("company_id")
+  cloudinaryId String      @map("cloudinary_id")
+  url          String
+  thumbnailUrl String?     @map("thumbnail_url")
+  width        Int?
+  height       Int?
+  generatedBy  MediaSource @map("generated_by")
+  aiPrompt     String?     @map("ai_prompt")
+  uploadedBy   String      @map("uploaded_by")
+  createdAt    DateTime    @default(now()) @map("created_at")
+
+  company  Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  uploader User    @relation(fields: [uploadedBy], references: [id])
+  posts    Post[]
+
+  @@index([companyId])
+  @@map("media_assets")
+}
+
+model WeeklySchedule {
+  id          String         @id @default(uuid())
+  companyId   String         @map("company_id")
+  weekStart   DateTime       @map("week_start") @db.Date
+  status      ScheduleStatus @default(generating)
+  generatedAt DateTime?      @map("generated_at")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  posts   Post[]
+
+  @@unique([companyId, weekStart])
+  @@index([companyId])
+  @@map("weekly_schedules")
+}
+
+model Post {
+  id               String        @id @default(uuid())
+  companyId        String        @map("company_id")
+  scheduleId       String?       @map("schedule_id")
+  channel          SocialChannel
+  content          String
+  language         String        @default("en")
+  hashtags         String[]
+  mediaAssetId     String?       @map("media_asset_id")
+  status           PostStatus    @default(draft)
+  bufferUpdateId   String?       @map("buffer_update_id")
+  scheduledFor     DateTime?     @map("scheduled_for")
+  publishedAt      DateTime?     @map("published_at")
+  safetyFlagged    Boolean       @default(false) @map("safety_flagged")
+  safetyFlagReason String?       @map("safety_flag_reason")
+  retryCount       Int           @default(0) @map("retry_count")
+  lastError        String?       @map("last_error")
+  generatedById    String?       @map("generated_by")
+  approvedById     String?       @map("approved_by")
+  approvedAt       DateTime?     @map("approved_at")
+  rejectedById     String?       @map("rejected_by")
+  rejectedAt       DateTime?     @map("rejected_at")
+  rejectionNotes   String?       @map("rejection_notes")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  company     Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  schedule    WeeklySchedule? @relation(fields: [scheduleId], references: [id])
+  mediaAsset  MediaAsset?     @relation(fields: [mediaAssetId], references: [id])
+  generatedBy User?           @relation("PostGenerator", fields: [generatedById], references: [id])
+  approvedBy  User?           @relation("PostApprover", fields: [approvedById], references: [id])
+  rejectedBy  User?           @relation("PostRejecter", fields: [rejectedById], references: [id])
+  versions    PostVersion[]
+
+  @@index([companyId, status])
+  @@index([scheduledFor])
+  @@index([retryCount, status])
+  @@map("posts")
+}
+
+model PostVersion {
+  id        String   @id @default(uuid())
+  postId    String   @map("post_id")
+  version   Int
+  content   String
+  changedBy String   @map("changed_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  post    Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  changer User @relation(fields: [changedBy], references: [id])
+
+  @@unique([postId, version])
+  @@map("post_versions")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String?  @map("user_id")
+  companyId  String?  @map("company_id")
+  action     String
+  entityType String?  @map("entity_type")
+  entityId   String?  @map("entity_id")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user    User?    @relation(fields: [userId], references: [id])
+  company Company? @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+model CronRun {
+  id           String     @id @default(uuid())
+  startedAt    DateTime   @map("started_at")
+  completedAt  DateTime?  @map("completed_at")
+  status       CronStatus @default(running)
+  actionsTaken Json?      @map("actions_taken")
+  error        String?
+
+  @@map("cron_runs")
+}
+
+model ApiKey {
+  id         String    @id @default(uuid())
+  name       String
+  keyHash    String    @unique @map("key_hash")
+  createdBy  String    @map("created_by")
+  lastUsedAt DateTime? @map("last_used_at")
+  expiresAt  DateTime? @map("expires_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  creator User @relation(fields: [createdBy], references: [id])
+
+  @@map("api_keys")
+}
