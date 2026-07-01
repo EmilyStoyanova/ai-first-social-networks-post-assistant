@@ -1,23 +1,17 @@
 import { auth } from "@/lib/auth";
 import { handleBufferCallback } from "@/lib/services/buffer/handle-buffer-callback.service";
 
-interface Context {
-  params: Promise<{ slug: string }>;
-}
-
-export async function GET(request: Request, context: Context) {
-  const { slug } = await context.params;
+export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
   const state = searchParams.get("state");
 
   const session = await auth();
   if (!session) {
-    return Response.redirect(new URL(`/companies/${slug}?buffer=error`, request.url), 302);
+    return Response.redirect(new URL("/dashboard?buffer=error", request.url), 302);
   }
 
   const result = await handleBufferCallback(
-    slug,
     code,
     state,
     session.user.id,
@@ -25,8 +19,11 @@ export async function GET(request: Request, context: Context) {
   );
 
   if (!result.success) {
-    return Response.redirect(new URL(`/companies/${slug}?buffer=error`, request.url), 302);
+    const destination = result.slug
+      ? `/companies/${result.slug}?buffer=error`
+      : "/dashboard?buffer=error";
+    return Response.redirect(new URL(destination, request.url), 302);
   }
 
-  return Response.redirect(new URL(`/companies/${slug}?buffer=connected`, request.url), 302);
+  return Response.redirect(new URL(`/companies/${result.slug}?buffer=connected`, request.url), 302);
 }

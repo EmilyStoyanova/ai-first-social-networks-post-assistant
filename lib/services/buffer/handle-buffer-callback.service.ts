@@ -13,34 +13,36 @@ function getBufferConfig(): { clientId: string; clientSecret: string; redirectUr
 }
 
 export type HandleBufferCallbackResult =
-  | { success: true }
+  | { success: true; slug: string }
   | {
       success: false;
+      slug: string | null;
       code: "INVALID_STATE" | "NOT_FOUND" | "FORBIDDEN" | "EXCHANGE_FAILED" | "MISSING_CONFIG";
     };
 
 export async function handleBufferCallback(
-  slug: string,
   code: string | null,
   state: string | null,
   currentUserId: string,
   isGlobalAdmin: boolean
 ): Promise<HandleBufferCallbackResult> {
-  if (!code || !state) return { success: false, code: "INVALID_STATE" };
+  if (!code || !state) return { success: false, slug: null, code: "INVALID_STATE" };
 
   const payload = verifyOAuthState(state);
-  if (!payload) return { success: false, code: "INVALID_STATE" };
+  if (!payload) return { success: false, slug: null, code: "INVALID_STATE" };
 
-  // Both slug and userId in the state must match the current request context.
-  if (payload.slug !== slug || payload.userId !== currentUserId) {
-    return { success: false, code: "INVALID_STATE" };
+  const { slug } = payload;
+
+  // Verify the authenticated user matches the user who initiated the OAuth flow.
+  if (payload.userId !== currentUserId) {
+    return { success: false, slug, code: "INVALID_STATE" };
   }
 
   const config = getBufferConfig();
-  if (!config) return { success: false, code: "MISSING_CONFIG" };
+  if (!config) return { success: false, slug, code: "MISSING_CONFIG" };
 
   const access = await checkBufferAccess(slug, currentUserId, isGlobalAdmin);
-  if (!access.ok) return { success: false, code: access.error };
+  if (!access.ok) return { success: false, slug, code: access.error };
 
   let accessToken: string;
   let bufferUserId: string;
@@ -55,7 +57,7 @@ export async function handleBufferCallback(
     accessToken = tokens.accessToken;
     bufferUserId = await getBufferUserId(accessToken);
   } catch {
-    return { success: false, code: "EXCHANGE_FAILED" };
+    return { success: false, slug, code: "EXCHANGE_FAILED" };
   }
 
   // Token encrypted before storage — never stored in plain text.
@@ -67,5 +69,5 @@ export async function handleBufferCallback(
     update: { bufferUserId, accessTokenEnc },
   });
 
-  return { success: true };
+  return { success: true, slug };
 }
