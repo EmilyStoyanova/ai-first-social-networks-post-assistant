@@ -4,6 +4,9 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { registerSchema } from "@/lib/validators/register.schema";
+import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
+import { Input } from "@/components/ui/Input";
 
 type FieldErrors = { name?: string; email?: string; password?: string };
 
@@ -81,11 +84,17 @@ export function RegisterForm() {
   return (
     <div className="flex min-h-screen flex-1 items-center justify-center bg-gray-50 px-4 py-12">
       <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white px-8 py-10 shadow-sm">
-        <div className="mb-6 text-center">
-          <div className="mb-1 text-2xl font-bold tracking-tight text-gray-900">
-            AI-First Social Networks
+        {/* Brand */}
+        <div className="mb-8 flex flex-col items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-green-500 shadow-sm">
+            <span className="text-base font-bold text-white">AI</span>
           </div>
-          <p className="text-sm text-gray-500">Post Assistant</p>
+          <div className="text-center">
+            <p className="text-base font-bold tracking-tight text-gray-900">
+              AI-First Social Networks
+            </p>
+            <p className="text-sm text-gray-400">Post Assistant</p>
+          </div>
         </div>
 
         <h1 className="mb-6 text-center text-lg font-semibold text-gray-800">
@@ -94,109 +103,51 @@ export function RegisterForm() {
 
         <form onSubmit={handleSubmit} noValidate>
           {formError && (
-            <div
-              role="alert"
-              className="mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
-            >
+            <Alert variant="error" className="mb-5">
               {formError}
-            </div>
+            </Alert>
           )}
 
-          {/* Name */}
-          <div className="mb-4">
-            <label htmlFor="name" className="mb-1.5 block text-sm font-medium text-gray-700">
-              Name
-            </label>
-            <input
-              id="name"
-              name="name"
-              type="text"
-              autoComplete="name"
-              autoFocus
-              aria-invalid={fieldErrors.name ? true : undefined}
-              aria-describedby={fieldErrors.name ? "name-error" : undefined}
-              className={[
-                "w-full rounded-lg border px-3 py-2 text-sm transition-colors outline-none",
-                "focus:ring-2 focus:ring-offset-0",
-                fieldErrors.name
-                  ? "border-red-400 bg-red-50 focus:border-red-500 focus:ring-red-200"
-                  : "border-gray-300 bg-white focus:border-blue-500 focus:ring-blue-100",
-              ].join(" ")}
-            />
-            {fieldErrors.name && (
-              <p id="name-error" className="mt-1.5 text-xs text-red-600">
-                {fieldErrors.name}
-              </p>
-            )}
-          </div>
+          <Input
+            id="name"
+            name="name"
+            label="Name"
+            type="text"
+            autoComplete="name"
+            autoFocus
+            error={fieldErrors.name}
+            className="mb-4"
+          />
 
-          {/* Email */}
-          <div className="mb-4">
-            <label htmlFor="email" className="mb-1.5 block text-sm font-medium text-gray-700">
-              Email
-            </label>
-            <input
-              id="email"
-              name="email"
-              type="email"
-              autoComplete="email"
-              aria-invalid={fieldErrors.email ? true : undefined}
-              aria-describedby={fieldErrors.email ? "email-error" : undefined}
-              className={[
-                "w-full rounded-lg border px-3 py-2 text-sm transition-colors outline-none",
-                "focus:ring-2 focus:ring-offset-0",
-                fieldErrors.email
-                  ? "border-red-400 bg-red-50 focus:border-red-500 focus:ring-red-200"
-                  : "border-gray-300 bg-white focus:border-blue-500 focus:ring-blue-100",
-              ].join(" ")}
-            />
-            {fieldErrors.email && (
-              <p id="email-error" className="mt-1.5 text-xs text-red-600">
-                {fieldErrors.email}
-              </p>
-            )}
-          </div>
+          <Input
+            id="email"
+            name="email"
+            label="Email"
+            type="email"
+            autoComplete="email"
+            error={fieldErrors.email}
+            className="mb-4"
+          />
 
-          {/* Password */}
-          <div className="mb-6">
-            <label htmlFor="password" className="mb-1.5 block text-sm font-medium text-gray-700">
-              Password
-            </label>
-            <input
-              id="password"
-              name="password"
-              type="password"
-              autoComplete="new-password"
-              aria-invalid={fieldErrors.password ? true : undefined}
-              aria-describedby={fieldErrors.password ? "password-error" : undefined}
-              className={[
-                "w-full rounded-lg border px-3 py-2 text-sm transition-colors outline-none",
-                "focus:ring-2 focus:ring-offset-0",
-                fieldErrors.password
-                  ? "border-red-400 bg-red-50 focus:border-red-500 focus:ring-red-200"
-                  : "border-gray-300 bg-white focus:border-blue-500 focus:ring-blue-100",
-              ].join(" ")}
-            />
-            {fieldErrors.password && (
-              <p id="password-error" className="mt-1.5 text-xs text-red-600">
-                {fieldErrors.password}
-              </p>
-            )}
-          </div>
+          <Input
+            id="password"
+            name="password"
+            label="Password"
+            type="password"
+            autoComplete="new-password"
+            error={fieldErrors.password}
+            className="mb-6"
+          />
 
-          <button
-            type="submit"
-            disabled={isPending}
-            className="w-full rounded-lg bg-blue-600 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          <Button type="submit" size="lg" fullWidth loading={isPending}>
             {isPending ? "Creating account…" : "Create account"}
-          </button>
+          </Button>
         </form>
 
         <div className="mt-6 border-t border-gray-100 pt-6 text-center text-sm text-gray-500">
           Already have an account?{" "}
-          <Link href="/login" className="font-medium text-blue-600 hover:underline">
-            Login
+          <Link href="/login" className="font-medium text-green-600 hover:underline">
+            Sign in
           </Link>
         </div>
       </div>

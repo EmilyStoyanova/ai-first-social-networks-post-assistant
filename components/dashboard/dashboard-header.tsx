@@ -1,4 +1,16 @@
+"use client";
+
+import { Fragment } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { LogoutButton } from "./logout-button";
+import type { BreadcrumbItem } from "./dashboard-layout";
+
+const PAGE_TITLES: Record<string, string> = {
+  "/dashboard": "Dashboard",
+  "/companies": "Companies",
+  "/companies/new": "New Company",
+};
 
 interface SessionUser {
   name?: string | null;
@@ -7,25 +19,75 @@ interface SessionUser {
 
 interface Props {
   user: SessionUser;
+  onMenuClick: () => void;
+  breadcrumb?: BreadcrumbItem[];
 }
 
-export function DashboardHeader({ user }: Props) {
+export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
+  const pathname = usePathname();
   const displayName = user.name ?? user.email ?? "User";
 
-  return (
-    <header className="border-b border-gray-200 bg-white">
-      <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
-        <div className="flex items-baseline gap-2">
-          <span className="text-base font-bold tracking-tight text-gray-900">
-            AI-First Social Networks
-          </span>
-          <span className="hidden text-sm text-gray-400 sm:inline">Post Assistant</span>
-        </div>
+  const fallbackTitle =
+    PAGE_TITLES[pathname] ?? (pathname.startsWith("/companies/") ? "Company" : "");
 
-        <div className="flex items-center gap-4">
-          <span className="hidden text-sm text-gray-600 sm:block">{displayName}</span>
-          <LogoutButton />
-        </div>
+  return (
+    <header className="flex h-16 shrink-0 items-center gap-4 border-b border-gray-200 bg-white px-4 sm:px-6">
+      {/* Hamburger — mobile only */}
+      <button
+        type="button"
+        onClick={onMenuClick}
+        aria-label="Open navigation menu"
+        className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-900 lg:hidden"
+      >
+        <svg
+          className="h-5 w-5"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+          aria-hidden="true"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
+
+      {/* Title / breadcrumb */}
+      <div className="flex min-w-0 flex-1 items-center">
+        {breadcrumb && breadcrumb.length > 0 ? (
+          <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5">
+            {breadcrumb.map((item, i) => (
+              <Fragment key={item.label}>
+                {i > 0 && (
+                  <span className="shrink-0 text-sm text-gray-300" aria-hidden="true">
+                    /
+                  </span>
+                )}
+                {item.href ? (
+                  <Link
+                    href={item.href}
+                    className="shrink-0 text-sm text-gray-500 transition-colors hover:text-gray-900"
+                  >
+                    {item.label}
+                  </Link>
+                ) : (
+                  <span
+                    className="truncate text-sm font-semibold text-gray-900"
+                    aria-current="page"
+                  >
+                    {item.label}
+                  </span>
+                )}
+              </Fragment>
+            ))}
+          </nav>
+        ) : (
+          <h1 className="text-lg font-semibold text-gray-900">{fallbackTitle}</h1>
+        )}
+      </div>
+
+      <div className="flex shrink-0 items-center gap-4">
+        <span className="hidden text-sm text-gray-600 sm:block">{displayName}</span>
+        <LogoutButton />
       </div>
     </header>
   );

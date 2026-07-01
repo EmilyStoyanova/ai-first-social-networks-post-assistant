@@ -13,7 +13,10 @@ export default async function NewCompanyPage() {
   if (!session) redirect("/login");
 
   return (
-    <DashboardLayout user={{ name: session.user.name, email: session.user.email }}>
+    <DashboardLayout
+      user={{ name: session.user.name, email: session.user.email }}
+      breadcrumb={[{ label: "Companies", href: "/companies" }, { label: "New Company" }]}
+    >
       <CreateCompanyForm />
     </DashboardLayout>
   );

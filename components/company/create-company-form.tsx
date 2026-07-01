@@ -1,9 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createCompanySchema } from "@/lib/validators/company.schema";
+import { Alert } from "@/components/ui/Alert";
+import { Button } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
+import { Input } from "@/components/ui/Input";
 
 type FieldErrors = { name?: string; website?: string };
 
@@ -73,96 +76,48 @@ export function CreateCompanyForm() {
   }
 
   return (
-    <div className="mx-auto max-w-lg rounded-2xl border border-gray-200 bg-white px-8 py-10 shadow-sm">
+    <Card className="mx-auto max-w-lg px-8 py-10">
       <h1 className="mb-8 text-xl font-bold tracking-tight text-gray-900">New Company</h1>
 
       <form onSubmit={handleSubmit} noValidate>
         {formError && (
-          <div
-            role="alert"
-            className="mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
-          >
+          <Alert variant="error" className="mb-5">
             {formError}
-          </div>
+          </Alert>
         )}
 
-        {/* Company name */}
-        <div className="mb-4">
-          <label htmlFor="name" className="mb-1.5 block text-sm font-medium text-gray-700">
-            Company name
-          </label>
-          <input
-            id="name"
-            name="name"
-            type="text"
-            autoComplete="organization"
-            autoFocus
-            aria-invalid={fieldErrors.name ? true : undefined}
-            aria-describedby={fieldErrors.name ? "name-error" : undefined}
-            className={[
-              "w-full rounded-lg border px-3 py-2 text-sm transition-colors outline-none",
-              "focus:ring-2 focus:ring-offset-0",
-              fieldErrors.name
-                ? "border-red-400 bg-red-50 focus:border-red-500 focus:ring-red-200"
-                : "border-gray-300 bg-white focus:border-blue-500 focus:ring-blue-100",
-            ].join(" ")}
-          />
-          {fieldErrors.name && (
-            <p id="name-error" className="mt-1.5 text-xs text-red-600">
-              {fieldErrors.name}
-            </p>
-          )}
-        </div>
+        <Input
+          id="name"
+          name="name"
+          label="Company name"
+          type="text"
+          autoComplete="organization"
+          autoFocus
+          error={fieldErrors.name}
+          className="mb-4"
+        />
 
-        {/* Website */}
-        <div className="mb-8">
-          <label htmlFor="website" className="mb-1.5 block text-sm font-medium text-gray-700">
-            Website <span className="font-normal text-gray-400">(optional)</span>
-          </label>
-          <input
-            id="website"
-            name="website"
-            type="url"
-            autoComplete="url"
-            placeholder="https://example.com"
-            aria-invalid={fieldErrors.website ? true : undefined}
-            aria-describedby={fieldErrors.website ? "website-error" : "website-hint"}
-            className={[
-              "w-full rounded-lg border px-3 py-2 text-sm transition-colors outline-none",
-              "focus:ring-2 focus:ring-offset-0",
-              fieldErrors.website
-                ? "border-red-400 bg-red-50 focus:border-red-500 focus:ring-red-200"
-                : "border-gray-300 bg-white focus:border-blue-500 focus:ring-blue-100",
-            ].join(" ")}
-          />
-          {fieldErrors.website ? (
-            <p id="website-error" className="mt-1.5 text-xs text-red-600">
-              {fieldErrors.website}
-            </p>
-          ) : (
-            <p id="website-hint" className="mt-1.5 text-xs text-gray-400">
-              Include https://
-            </p>
-          )}
-        </div>
+        <Input
+          id="website"
+          name="website"
+          label="Website"
+          type="url"
+          autoComplete="url"
+          placeholder="https://example.com"
+          error={fieldErrors.website}
+          helperText={fieldErrors.website ? undefined : "Include https://"}
+          className="mb-8"
+        />
 
-        {/* Actions */}
         <div className="flex items-center gap-3">
-          <button
-            type="submit"
-            disabled={isPending}
-            className="rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
+          <Button type="submit" size="lg" loading={isPending}>
             {isPending ? "Creating…" : "Create Company"}
-          </button>
-          <Link
-            href="/companies"
-            className="rounded-lg px-5 py-2.5 text-sm font-semibold text-gray-600 transition-colors hover:bg-gray-100"
-          >
+          </Button>
+          <Button href="/companies" variant="ghost" size="lg">
             Cancel
-          </Link>
+          </Button>
         </div>
       </form>
-    </div>
+    </Card>
   );
 }

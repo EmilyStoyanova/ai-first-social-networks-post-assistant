@@ -140,16 +140,19 @@ model CompanyMember {
 }
 
 model BrandGuidelines {
-  id             String   @id @default(uuid())
-  companyId      String   @unique @map("company_id")
-  logoUrl        String?  @map("logo_url")
-  colors         Json?
-  fonts          Json?
-  tones          String[]
-  forbiddenWords String[] @map("forbidden_words")
-  targetAudience String?  @map("target_audience")
-  competitors    String[]
-  updatedAt      DateTime @updatedAt @map("updated_at")
+  id                 String   @id @default(uuid())
+  companyId          String   @unique @map("company_id")
+  logoUrl            String?  @map("logo_url")
+  primaryColor       String?  @map("primary_color")
+  secondaryColor     String?  @map("secondary_color")
+  fontFamily         String?  @map("font_family")
+  toneOfVoice        String?  @map("tone_of_voice")
+  companyDescription String?  @map("company_description")
+  targetAudience     String?  @map("target_audience")
+  forbiddenWords     String[] @map("forbidden_words")
+  competitors        String[]
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
