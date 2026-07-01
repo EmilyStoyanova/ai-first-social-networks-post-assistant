@@ -21,7 +21,9 @@ export default async function DashboardPage() {
   const greeting = user?.name ? `, ${user.name}` : "";
 
   return (
-    <DashboardLayout user={{ name: user?.name, email: user?.email }}>
+    <DashboardLayout
+      user={{ name: user?.name, email: user?.email, isGlobalAdmin: user?.isGlobalAdmin }}
+    >
       <div className="space-y-6">
         {/* Welcome card */}
         <Card className="px-8 py-10">

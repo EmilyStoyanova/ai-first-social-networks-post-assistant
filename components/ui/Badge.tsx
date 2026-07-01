@@ -1,4 +1,5 @@
-type Variant = "owner" | "editor" | "comingSoon" | "success" | "warning" | "danger" | "neutral";
+type Variant =
+  "owner" | "editor" | "comingSoon" | "success" | "warning" | "danger" | "neutral" | "readonly";
 
 interface Props {
   variant: Variant;
@@ -14,6 +15,7 @@ const VARIANT_CLASSES: Record<Variant, string> = {
   warning: "bg-yellow-100 text-yellow-700 font-semibold",
   danger: "bg-red-100 text-red-700 font-semibold",
   neutral: "bg-gray-100 text-gray-600 font-semibold",
+  readonly: "bg-gray-100 text-gray-500 font-medium",
 };
 
 export function Badge({ variant, children, className }: Props) {

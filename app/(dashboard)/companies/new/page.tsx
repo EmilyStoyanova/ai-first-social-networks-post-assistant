@@ -14,7 +14,11 @@ export default async function NewCompanyPage() {
 
   return (
     <DashboardLayout
-      user={{ name: session.user.name, email: session.user.email }}
+      user={{
+        name: session.user.name,
+        email: session.user.email,
+        isGlobalAdmin: session.user.isGlobalAdmin,
+      }}
       breadcrumb={[{ label: "Companies", href: "/companies" }, { label: "New Company" }]}
     >
       <CreateCompanyForm />

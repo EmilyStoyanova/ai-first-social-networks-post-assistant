@@ -1,0 +1,168 @@
+"use client";
+
+import { useState } from "react";
+import { Alert } from "@/components/ui/Alert";
+import { Badge } from "@/components/ui/Badge";
+import { Button } from "@/components/ui/Button";
+import { LlmConfigForm } from "./llm-config-form";
+import type { ClientLlmConfig } from "./llm-config-section";
+
+// ─── Provider metadata ────────────────────────────────────────────────────────
+
+const PROVIDER_META: Record<string, { icon: string; label: string }> = {
+  CLAUDE: { icon: "🤖", label: "Claude" },
+  OPENAI: { icon: "🟢", label: "OpenAI" },
+  GROK: { icon: "⚡", label: "Grok" },
+};
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
+interface Props {
+  config: ClientLlmConfig;
+  onUpdated: (config: ClientLlmConfig) => void;
+  onDeleted: (id: string) => void;
+}
+
+export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [isActivating, setIsActivating] = useState(false);
+  const [activateError, setActivateError] = useState("");
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+
+  const meta = PROVIDER_META[config.provider] ?? { icon: "⚙️", label: config.provider };
+
+  async function handleActivate() {
+    setIsActivating(true);
+    setActivateError("");
+    try {
+      const res = await fetch(`/api/v1/admin/llm-configs/${config.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isActive: true }),
+      });
+      const json = (await res.json()) as {
+        config?: ClientLlmConfig;
+        error?: { message?: string };
+      };
+      if (!res.ok) throw new Error(json.error?.message ?? "Failed to activate provider.");
+      onUpdated(json.config!);
+    } catch (err) {
+      setActivateError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setIsActivating(false);
+    }
+  }
+
+  async function handleDelete() {
+    setIsDeleting(true);
+    setDeleteError("");
+    try {
+      const res = await fetch(`/api/v1/admin/llm-configs/${config.id}`, { method: "DELETE" });
+      if (res.status === 204) {
+        onDeleted(config.id);
+        return;
+      }
+      const json = (await res.json()) as { error?: { message?: string } };
+      throw new Error(json.error?.message ?? "Failed to delete provider.");
+    } catch (err) {
+      setIsDeleting(false);
+      setShowDeleteConfirm(false);
+      setDeleteError(err instanceof Error ? err.message : "Something went wrong.");
+    }
+  }
+
+  // ── Edit mode ───────────────────────────────────────────────────────────────
+
+  if (isEditing) {
+    return (
+      <div className="py-4">
+        <div className="mb-3 flex items-center gap-2">
+          <span aria-hidden="true">{meta.icon}</span>
+          <span className="text-sm font-semibold text-gray-900">{meta.label}</span>
+        </div>
+        <LlmConfigForm
+          config={config}
+          onSaved={(updated) => {
+            onUpdated(updated);
+            setIsEditing(false);
+          }}
+          onCancel={() => setIsEditing(false)}
+        />
+      </div>
+    );
+  }
+
+  // ── Display mode ────────────────────────────────────────────────────────────
+
+  return (
+    <div className="py-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {/* Provider info */}
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="text-xl" aria-hidden="true">
+            {meta.icon}
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-gray-900">{meta.label}</p>
+            <p className="mt-0.5 truncate text-xs text-gray-500">{config.model}</p>
+          </div>
+        </div>
+
+        {/* Status + Actions */}
+        <div className="flex flex-wrap items-center gap-2">
+          {config.isActive ? (
+            <Badge variant="success">ACTIVE</Badge>
+          ) : (
+            <Badge variant="neutral">Inactive</Badge>
+          )}
+
+          {!config.isActive && (
+            <Button size="sm" variant="ghost" onClick={handleActivate} disabled={isActivating}>
+              {isActivating ? "Activating…" : "Set Active"}
+            </Button>
+          )}
+
+          <Button size="sm" variant="ghost" onClick={() => setIsEditing(true)}>
+            Edit
+          </Button>
+
+          {!config.isActive &&
+            (showDeleteConfirm ? (
+              <>
+                <span className="text-xs text-gray-500">Delete this provider?</span>
+                <Button size="sm" variant="danger" onClick={handleDelete} disabled={isDeleting}>
+                  {isDeleting ? "Deleting…" : "Confirm"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setShowDeleteConfirm(false)}
+                  disabled={isDeleting}
+                >
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <Button size="sm" variant="danger" onClick={() => setShowDeleteConfirm(true)}>
+                Delete
+              </Button>
+            ))}
+        </div>
+      </div>
+
+      {/* Inline errors */}
+      {activateError && (
+        <Alert variant="error" className="mt-3">
+          {activateError}
+        </Alert>
+      )}
+      {deleteError && (
+        <Alert variant="error" className="mt-3">
+          {deleteError}
+        </Alert>
+      )}
+    </div>
+  );
+}

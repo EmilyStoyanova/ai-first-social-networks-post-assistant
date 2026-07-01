@@ -7,6 +7,7 @@ import { Sidebar } from "./sidebar";
 interface SessionUser {
   name?: string | null;
   email?: string | null;
+  isGlobalAdmin?: boolean;
 }
 
 export type BreadcrumbItem = { label: string; href?: string };
@@ -26,7 +27,11 @@ export function DashboardLayout({ user, children, breadcrumb }: Props) {
 
   return (
     <div className="flex h-screen overflow-hidden bg-gray-50">
-      <Sidebar isOpen={isSidebarOpen} onClose={closeSidebar} />
+      <Sidebar
+        isOpen={isSidebarOpen}
+        onClose={closeSidebar}
+        isGlobalAdmin={user.isGlobalAdmin ?? false}
+      />
 
       {/* Content area: offset by sidebar width on desktop */}
       <div className="flex flex-1 flex-col overflow-hidden lg:pl-64">

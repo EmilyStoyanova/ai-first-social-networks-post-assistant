@@ -8,9 +8,10 @@ import { LogoutButton } from "./logout-button";
 interface Props {
   isOpen: boolean;
   onClose: () => void;
+  isGlobalAdmin: boolean;
 }
 
-export function Sidebar({ isOpen, onClose }: Props) {
+export function Sidebar({ isOpen, onClose, isGlobalAdmin }: Props) {
   const pathname = usePathname();
 
   // Close the mobile sidebar whenever the route changes.
@@ -53,7 +54,7 @@ export function Sidebar({ isOpen, onClose }: Props) {
 
         {/* Navigation */}
         <div className="flex-1 overflow-y-auto px-3 py-5">
-          <Navigation />
+          <Navigation isGlobalAdmin={isGlobalAdmin} />
         </div>
 
         {/* Logout */}
