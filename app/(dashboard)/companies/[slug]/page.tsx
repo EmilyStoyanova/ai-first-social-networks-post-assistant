@@ -5,6 +5,7 @@ import { getCompany } from "@/lib/services/company/get-company.service";
 import { getBrandGuidelines } from "@/lib/services/company/get-brand-guidelines.service";
 import { listMembers } from "@/lib/services/company/list-members.service";
 import { getBufferConnection } from "@/lib/services/buffer/get-buffer-connection.service";
+import { listChannelConfigs } from "@/lib/services/company/list-channel-configs.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompanyHeader } from "@/components/company/company-header";
 import { CompanyOverview } from "@/components/company/company-overview";
@@ -12,6 +13,7 @@ import { CompanySectionCard } from "@/components/company/company-section-card";
 import { BrandGuidelinesForm } from "@/components/company/brand-guidelines-form";
 import { CompanyMembers } from "@/components/company/company-members";
 import { BufferConnectionCard } from "@/components/company/buffer-connection-card";
+import { ChannelConfigSection } from "@/components/company/channel-config-section";
 import { Section } from "@/components/ui/Section";
 
 interface Props {
@@ -57,11 +59,15 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
-  const [brandGuidelines, membersResult, bufferConnection] = await Promise.all([
-    getBrandGuidelines(company.id),
-    listMembers(slug, session.user.id, session.user.isGlobalAdmin),
-    getBufferConnection(company.id),
-  ]);
+  const [brandGuidelines, membersResult, bufferConnection, channelConfigsResult] =
+    await Promise.all([
+      getBrandGuidelines(company.id),
+      listMembers(slug, session.user.id, session.user.isGlobalAdmin),
+      getBufferConnection(company.id),
+      listChannelConfigs(slug, session.user.id, session.user.isGlobalAdmin),
+    ]);
+
+  const channelConfigs = channelConfigsResult.success ? channelConfigsResult.configs : [];
 
   const members = membersResult.success
     ? membersResult.members.map((m) => ({ ...m, joinedAt: m.joinedAt.toISOString() }))
@@ -112,6 +118,18 @@ export default async function CompanyPage({ params, searchParams }: Props) {
             }}
             canManage={canManage}
             bufferParam={bufferParam}
+          />
+        </Section>
+
+        <Section
+          title="Channels"
+          description="Configure how each social network should be used for this company."
+        >
+          <ChannelConfigSection
+            slug={slug}
+            initialConfigs={channelConfigs}
+            canManage={canManage}
+            bufferConnected={bufferConnection.connected}
           />
         </Section>
 
