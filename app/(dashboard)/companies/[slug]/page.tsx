@@ -4,16 +4,19 @@ import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { getBrandGuidelines } from "@/lib/services/company/get-brand-guidelines.service";
 import { listMembers } from "@/lib/services/company/list-members.service";
+import { getBufferConnection } from "@/lib/services/buffer/get-buffer-connection.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompanyHeader } from "@/components/company/company-header";
 import { CompanyOverview } from "@/components/company/company-overview";
 import { CompanySectionCard } from "@/components/company/company-section-card";
 import { BrandGuidelinesForm } from "@/components/company/brand-guidelines-form";
 import { CompanyMembers } from "@/components/company/company-members";
+import { BufferConnectionCard } from "@/components/company/buffer-connection-card";
 import { Section } from "@/components/ui/Section";
 
 interface Props {
   params: Promise<{ slug: string }>;
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
@@ -45,18 +48,19 @@ const UPCOMING_MODULES = [
   },
 ] as const;
 
-export default async function CompanyPage({ params }: Props) {
+export default async function CompanyPage({ params, searchParams }: Props) {
   const session = await auth();
   if (!session) redirect("/login");
 
-  const { slug } = await params;
+  const [{ slug }, resolvedSearch] = await Promise.all([params, searchParams]);
 
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
-  const [brandGuidelines, membersResult] = await Promise.all([
+  const [brandGuidelines, membersResult, bufferConnection] = await Promise.all([
     getBrandGuidelines(company.id),
     listMembers(slug, session.user.id, session.user.isGlobalAdmin),
+    getBufferConnection(company.id),
   ]);
 
   const members = membersResult.success
@@ -64,6 +68,8 @@ export default async function CompanyPage({ params }: Props) {
     : [];
 
   const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
+
+  const bufferParam = typeof resolvedSearch.buffer === "string" ? resolvedSearch.buffer : null;
 
   return (
     <DashboardLayout
@@ -93,6 +99,19 @@ export default async function CompanyPage({ params }: Props) {
             initialMembers={members}
             currentUserEmail={session.user.email}
             canManage={canManage}
+          />
+        </Section>
+
+        <Section title="Integrations">
+          <BufferConnectionCard
+            slug={slug}
+            initialConnection={{
+              connected: bufferConnection.connected,
+              bufferUserId: bufferConnection.bufferUserId,
+              connectedAt: bufferConnection.connectedAt?.toISOString() ?? null,
+            }}
+            canManage={canManage}
+            bufferParam={bufferParam}
           />
         </Section>
 
