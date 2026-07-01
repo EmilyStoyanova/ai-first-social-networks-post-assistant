@@ -6,10 +6,19 @@ export const metadata: Metadata = {
 };
 
 interface Props {
-  searchParams: Promise<{ registered?: string }>;
+  searchParams: Promise<{ registered?: string; callbackUrl?: string }>;
+}
+
+function sanitizeCallbackUrl(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  // Reject absolute URLs (https://…) and protocol-relative URLs (//…).
+  if (!raw.startsWith("/") || raw.startsWith("//")) return undefined;
+  return raw;
 }
 
 export default async function LoginPage({ searchParams }: Props) {
-  const { registered } = await searchParams;
-  return <LoginForm registered={registered === "1"} />;
+  const { registered, callbackUrl } = await searchParams;
+  return (
+    <LoginForm registered={registered === "1"} callbackUrl={sanitizeCallbackUrl(callbackUrl)} />
+  );
 }

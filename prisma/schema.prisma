@@ -101,6 +101,7 @@ model Company {
   id             String         @id @default(uuid())
   name           String
   slug           String         @unique
+  website        String?
   automationMode AutomationMode @default(semi_automated) @map("automation_mode")
   defaultLang    String         @default("en") @map("default_language")
   createdBy      String         @map("created_by")

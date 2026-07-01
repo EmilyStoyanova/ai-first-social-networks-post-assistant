@@ -9,9 +9,10 @@ type FieldErrors = { email?: string; password?: string };
 
 interface Props {
   registered?: boolean;
+  callbackUrl?: string;
 }
 
-export function LoginForm({ registered = false }: Props) {
+export function LoginForm({ registered = false, callbackUrl }: Props) {
   const router = useRouter();
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -68,7 +69,7 @@ export function LoginForm({ registered = false }: Props) {
         return;
       }
 
-      router.push("/dashboard");
+      router.push(callbackUrl ?? "/dashboard");
     } catch {
       setFormError("Unexpected server error.");
     } finally {
