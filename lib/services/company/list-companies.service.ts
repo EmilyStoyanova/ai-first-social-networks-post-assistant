@@ -4,6 +4,7 @@ export type CompanyListItem = {
   id: string;
   name: string;
   slug: string;
+  website: string | null;
   role: "OWNER" | "EDITOR" | null;
 };
 
@@ -18,6 +19,7 @@ export async function listCompanies(
         id: true,
         name: true,
         slug: true,
+        website: true,
         members: {
           where: { userId },
           select: { role: true },
@@ -30,6 +32,7 @@ export async function listCompanies(
       id: c.id,
       name: c.name,
       slug: c.slug,
+      website: c.website,
       role:
         c.members[0]?.role === "owner"
           ? "OWNER"
@@ -45,7 +48,7 @@ export async function listCompanies(
     select: {
       role: true,
       company: {
-        select: { id: true, name: true, slug: true },
+        select: { id: true, name: true, slug: true, website: true },
       },
     },
   });
@@ -54,6 +57,7 @@ export async function listCompanies(
     id: m.company.id,
     name: m.company.name,
     slug: m.company.slug,
+    website: m.company.website,
     role: m.role === "owner" ? "OWNER" : "EDITOR",
   }));
 }
