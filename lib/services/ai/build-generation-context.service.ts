@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db/client";
-import { getActiveLlmInfo, NoActiveProviderError } from "@/lib/ai/router";
+import { getLlmProviderInfo } from "@/lib/ai/llm/llm-provider-factory";
 import type { GenerationContext } from "@/lib/ai/types";
 
 const VALID_CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const;
@@ -14,9 +14,11 @@ const CHANNEL_DEFAULTS: Record<ValidChannel, { postingLanguage: string; imageReq
   };
 
 export type BuildGenerationContextResult =
-  | { success: true; context: GenerationContext }
+  | { success: true; context: GenerationContext; companyId: string }
   | {
       success: false;
+      // NO_ACTIVE_PROVIDER is kept for backward compatibility with existing route handlers
+      // but is no longer returned by this function (provider info comes from env vars).
       code: "NOT_FOUND" | "FORBIDDEN" | "INVALID_CHANNEL" | "NO_ACTIVE_PROVIDER";
     };
 
@@ -62,13 +64,16 @@ export async function buildGenerationContext(
       },
     });
     if (!membership) return { success: false, code: "NOT_FOUND" };
-    if (membership.role !== "owner") return { success: false, code: "FORBIDDEN" };
+    // Both owner and editor can trigger generation
+    if (membership.role !== "owner" && membership.role !== "editor") {
+      return { success: false, code: "FORBIDDEN" };
+    }
     companyId = membership.companyId;
     companyRow = membership.company;
   }
 
   // ── Parallel data load ────────────────────────────────────────────────────
-  const [brand, channelConfig, feedItems, llmInfo] = await Promise.allSettled([
+  const [brand, channelConfig, feedItems] = await Promise.allSettled([
     prisma.brandGuidelines.findUnique({
       where: { companyId },
       select: {
@@ -92,19 +97,9 @@ export async function buildGenerationContext(
       where: { companyId, source: { enabled: true } },
       orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
       take: 5,
-      select: { title: true, content: true, url: true, publishedAt: true },
+      select: { id: true, title: true, content: true, url: true, publishedAt: true },
     }),
-    getActiveLlmInfo(),
   ]);
-
-  // LLM config is a hard requirement
-  if (llmInfo.status === "rejected") {
-    const err = llmInfo.reason;
-    if (err instanceof NoActiveProviderError) {
-      return { success: false, code: "NO_ACTIVE_PROVIDER" };
-    }
-    throw err;
-  }
 
   const brandData = brand.status === "fulfilled" ? brand.value : null;
   const channelConfigData = channelConfig.status === "fulfilled" ? channelConfig.value : null;
@@ -136,13 +131,14 @@ export async function buildGenerationContext(
       automationModeOverride: channelConfigData?.automationModeOverride ?? null,
     },
     feedItems: feedData.map((f) => ({
+      id: f.id,
       title: f.title,
       content: f.content,
       url: f.url,
       publishedAt: f.publishedAt,
     })),
-    llm: llmInfo.value,
+    llm: getLlmProviderInfo(),
   };
 
-  return { success: true, context };
+  return { success: true, context, companyId };
 }

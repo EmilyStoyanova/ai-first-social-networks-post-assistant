@@ -116,7 +116,7 @@ function buildSystemPrompt(ctx: GenerationContext): string {
         ? `- Never use these words: ${brand.forbiddenWords.join(", ")}.`
         : "",
       "- Do not fabricate facts. Use only what the provided content supports.",
-      "- Return only the post text. No explanations, no labels, no quotes."
+      "- Return ONLY a JSON object — no markdown fences, no explanation, no extra text."
     )
   );
 
@@ -137,6 +137,14 @@ function buildSystemPrompt(ctx: GenerationContext): string {
 const CONTENT_PER_ITEM_LIMIT = 900;
 const TOTAL_FEED_CHAR_LIMIT = 5000;
 
+const JSON_FORMAT_INSTRUCTION = `Return ONLY a JSON object in this exact format (no markdown, no explanation):
+{
+  "text": "the post text",
+  "hashtags": ["tag1", "tag2"],
+  "imagePrompt": "visual description for image generation (optional, omit if not relevant)",
+  "notes": "brief creative rationale (optional)"
+}`;
+
 function buildUserPrompt(ctx: GenerationContext): string {
   const { channel, feedItems } = ctx;
   const channelLabel = CHANNEL_LABELS[channel.channel] ?? channel.channel;
@@ -145,8 +153,8 @@ function buildUserPrompt(ctx: GenerationContext): string {
     return [
       `Create an original ${channelLabel} post for ${ctx.company.name}.`,
       `Write in ${channel.postingLanguage.toUpperCase()}.`,
-      "Return only the post text.",
-    ].join("\n");
+      JSON_FORMAT_INSTRUCTION,
+    ].join("\n\n");
   }
 
   // Build feed excerpt, newest first, respecting total char budget
@@ -179,7 +187,7 @@ function buildUserPrompt(ctx: GenerationContext): string {
   return [
     `Write a ${channelLabel} post for ${ctx.company.name}.`,
     feedSection,
-    "Return only the post text. Do not add any introduction or explanation.",
+    JSON_FORMAT_INSTRUCTION,
   ]
     .filter(Boolean)
     .join("\n\n");

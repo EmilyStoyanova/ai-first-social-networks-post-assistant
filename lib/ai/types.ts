@@ -7,6 +7,7 @@ export interface LlmRequest {
 
 export interface LlmResponse {
   text: string;
+  raw?: unknown;
 }
 
 export interface ILlmProvider {
@@ -39,6 +40,7 @@ export interface ChannelContext {
 }
 
 export interface FeedItemContext {
+  id: string;
   title: string | null;
   content: string | null;
   url: string;

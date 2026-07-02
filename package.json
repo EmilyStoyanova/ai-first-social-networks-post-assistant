@@ -16,7 +16,8 @@
     "db:studio": "prisma studio",
     "prepare": "husky",
     "seed:editor": "node scripts/seed-editor.mjs",
-    "seed:admin": "node scripts/seed-admin.mjs"
+    "seed:admin": "node scripts/seed-admin.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "lint-staged": {
     "*.{ts,tsx}": [

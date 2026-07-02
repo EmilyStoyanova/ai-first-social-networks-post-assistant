@@ -7,6 +7,7 @@ import { listMembers } from "@/lib/services/company/list-members.service";
 import { getBufferConnection } from "@/lib/services/buffer/get-buffer-connection.service";
 import { listChannelConfigs } from "@/lib/services/company/list-channel-configs.service";
 import { listContentSources } from "@/lib/services/company/list-content-sources.service";
+import { listPosts } from "@/lib/services/company/list-posts.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompanyHeader } from "@/components/company/company-header";
 import { CompanyOverview } from "@/components/company/company-overview";
@@ -16,6 +17,7 @@ import { CompanyMembers } from "@/components/company/company-members";
 import { BufferConnectionCard } from "@/components/company/buffer-connection-card";
 import { ChannelConfigSection } from "@/components/company/channel-config-section";
 import { ContentSourcesSection } from "@/components/company/content-sources-section";
+import { GeneratedPostsSection } from "@/components/company/generated-posts-section";
 import { Section } from "@/components/ui/Section";
 
 interface Props {
@@ -34,21 +36,19 @@ const UPCOMING_MODULES = [
     title: "Channels",
     description:
       "Set up and manage your social media channels across Facebook, LinkedIn, Instagram, and TikTok.",
+    href: undefined,
   },
   {
     icon: "✍️",
     title: "Posts",
     description: "Create, schedule, and manage posts across all configured channels.",
-  },
-  {
-    icon: "🖼️",
-    title: "Media Gallery",
-    description: "Upload and organize media assets for use in your social content.",
+    href: undefined,
   },
   {
     icon: "📊",
     title: "Analytics",
     description: "Track engagement and performance across all social media channels.",
+    href: undefined,
   },
 ] as const;
 
@@ -67,22 +67,27 @@ export default async function CompanyPage({ params, searchParams }: Props) {
     bufferConnection,
     channelConfigsResult,
     contentSourcesResult,
+    postsResult,
   ] = await Promise.all([
     getBrandGuidelines(company.id),
     listMembers(slug, session.user.id, session.user.isGlobalAdmin),
     getBufferConnection(company.id),
     listChannelConfigs(slug, session.user.id, session.user.isGlobalAdmin),
     listContentSources(slug, session.user.id, session.user.isGlobalAdmin),
+    listPosts(slug, session.user.id, session.user.isGlobalAdmin),
   ]);
 
   const channelConfigs = channelConfigsResult.success ? channelConfigsResult.configs : [];
   const contentSources = contentSourcesResult.success ? contentSourcesResult.sources : [];
+  const initialPosts = postsResult.success ? postsResult.posts : [];
 
   const members = membersResult.success
     ? membersResult.members.map((m) => ({ ...m, joinedAt: m.joinedAt.toISOString() }))
     : [];
 
   const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
+  const canDelete = company.role === "OWNER" || session.user.isGlobalAdmin;
+  const canPublish = canManage;
 
   const bufferParam = typeof resolvedSearch.buffer === "string" ? resolvedSearch.buffer : null;
 
@@ -153,8 +158,34 @@ export default async function CompanyPage({ params, searchParams }: Props) {
           />
         </Section>
 
+        <Section
+          title="AI Generated Posts"
+          description="Generate and review AI-drafted posts for each social channel."
+        >
+          <GeneratedPostsSection
+            slug={slug}
+            initialPosts={initialPosts}
+            canDelete={canDelete}
+            canPublish={canPublish}
+            canApprove={canManage}
+            bufferConnected={bufferConnection.connected}
+          />
+        </Section>
+
         <Section title="Modules">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <CompanySectionCard
+              icon="🖼️"
+              title="Media Gallery"
+              description="Browse and reuse all AI-generated images for this company."
+              href={`/companies/${slug}/media`}
+            />
+            <CompanySectionCard
+              icon="✅"
+              title="Approval Queue"
+              description="Review and approve posts that are pending approval before publishing."
+              href={`/companies/${slug}/approval`}
+            />
             {UPCOMING_MODULES.map((mod) => (
               <CompanySectionCard
                 key={mod.title}

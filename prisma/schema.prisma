@@ -300,6 +300,11 @@ model Post {
   retryCount       Int           @default(0) @map("retry_count")
   lastError        String?       @map("last_error")
   generatedById    String?       @map("generated_by")
+  imagePrompt      String?       @map("image_prompt")
+  notes            String?
+  promptSnapshot   Json?         @map("prompt_snapshot")
+  llmProvider      String?       @map("llm_provider")
+  llmModel         String?       @map("llm_model")
   approvedById     String?       @map("approved_by")
   approvedAt       DateTime?     @map("approved_at")
   rejectedById     String?       @map("rejected_by")

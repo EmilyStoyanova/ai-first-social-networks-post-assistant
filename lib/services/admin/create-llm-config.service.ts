@@ -21,14 +21,16 @@ export async function createLlmConfig(
   const apiKeyEnc = encrypt(data.apiKey);
   const provider = PROVIDER_TO_DB[data.provider];
 
-  const row = await prisma.$transaction(async (tx) => {
-    if (data.isActive) {
-      await tx.llmConfig.updateMany({ data: { isActive: false } });
-    }
-    return tx.llmConfig.create({
-      data: { provider, modelName: data.model, apiKeyEnc, isActive: data.isActive, createdBy },
-      select: CONFIG_SELECT,
-    });
+  // Deactivate all others first, then create — sequential operations are safe
+  // here since this is an admin-only action with no concurrent usage expected.
+  // PrismaNeon's HTTP driver does not support interactive transactions.
+  if (data.isActive) {
+    await prisma.llmConfig.updateMany({ data: { isActive: false } });
+  }
+
+  const row = await prisma.llmConfig.create({
+    data: { provider, modelName: data.model, apiKeyEnc, isActive: data.isActive, createdBy },
+    select: CONFIG_SELECT,
   });
 
   return { success: true, config: toLlmConfigItem(row) };

@@ -1,0 +1,64 @@
+"use client";
+
+import { useState } from "react";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { GeneratePostForm } from "./generate-post-form";
+import { GeneratedPostCard } from "./generated-post-card";
+import type { PostItem } from "@/lib/services/company/list-posts.service";
+
+interface Props {
+  slug: string;
+  initialPosts: PostItem[];
+  canDelete: boolean;
+  canPublish: boolean;
+  canApprove: boolean;
+  bufferConnected: boolean;
+}
+
+export function GeneratedPostsSection({
+  slug,
+  initialPosts,
+  canDelete,
+  canPublish,
+  canApprove,
+  bufferConnected,
+}: Props) {
+  const [posts, setPosts] = useState<PostItem[]>(initialPosts);
+
+  function handleGenerated(post: PostItem) {
+    setPosts((prev) => [post, ...prev]);
+  }
+
+  function handleDelete(id: string) {
+    setPosts((prev) => prev.filter((p) => p.id !== id));
+  }
+
+  return (
+    <div className="space-y-4">
+      <GeneratePostForm slug={slug} onGenerated={handleGenerated} />
+
+      {posts.length === 0 ? (
+        <EmptyState
+          icon="✨"
+          title="No AI-generated posts yet"
+          description="Choose a channel above and click Generate Draft to create your first post."
+        />
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {posts.map((post) => (
+            <GeneratedPostCard
+              key={post.id}
+              slug={slug}
+              post={post}
+              canDelete={canDelete}
+              canPublish={canPublish}
+              canApprove={canApprove}
+              bufferConnected={bufferConnected}
+              onDelete={handleDelete}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

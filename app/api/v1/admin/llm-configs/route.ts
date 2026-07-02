@@ -27,7 +27,8 @@ export async function GET() {
       );
     }
     return Response.json({ configs: result.configs });
-  } catch {
+  } catch (err) {
+    console.error("[llm-configs GET]", err);
     return Response.json(
       { error: { code: "INTERNAL_SERVER_ERROR", message: "Unexpected server error." } },
       { status: 500 }
@@ -75,10 +76,12 @@ export async function POST(request: Request) {
       );
     }
     return Response.json({ config: result.config }, { status: 201 });
-  } catch {
-    return Response.json(
-      { error: { code: "INTERNAL_SERVER_ERROR", message: "Unexpected server error." } },
-      { status: 500 }
-    );
+  } catch (err) {
+    console.error("[llm-configs POST]", err);
+    const message =
+      process.env.NODE_ENV === "development" && err instanceof Error
+        ? err.message
+        : "Unexpected server error.";
+    return Response.json({ error: { code: "INTERNAL_SERVER_ERROR", message } }, { status: 500 });
   }
 }

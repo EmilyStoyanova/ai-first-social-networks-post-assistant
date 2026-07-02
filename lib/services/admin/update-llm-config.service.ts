@@ -16,18 +16,17 @@ export async function updateLlmConfig(
   const existing = await prisma.llmConfig.findUnique({ where: { id }, select: { id: true } });
   if (!existing) return { success: false, code: "NOT_FOUND" };
 
-  const row = await prisma.$transaction(async (tx) => {
-    if (data.isActive === true) {
-      await tx.llmConfig.updateMany({ where: { id: { not: id } }, data: { isActive: false } });
-    }
+  // Sequential operations — PrismaNeon's HTTP driver does not support interactive transactions.
+  if (data.isActive === true) {
+    await prisma.llmConfig.updateMany({ where: { id: { not: id } }, data: { isActive: false } });
+  }
 
-    const patch: { modelName?: string; apiKeyEnc?: string; isActive?: boolean } = {};
-    if (data.model !== undefined) patch.modelName = data.model;
-    if (data.apiKey !== undefined) patch.apiKeyEnc = encrypt(data.apiKey);
-    if (data.isActive !== undefined) patch.isActive = data.isActive;
+  const patch: { modelName?: string; apiKeyEnc?: string; isActive?: boolean } = {};
+  if (data.model !== undefined) patch.modelName = data.model;
+  if (data.apiKey !== undefined) patch.apiKeyEnc = encrypt(data.apiKey);
+  if (data.isActive !== undefined) patch.isActive = data.isActive;
 
-    return tx.llmConfig.update({ where: { id }, data: patch, select: CONFIG_SELECT });
-  });
+  const row = await prisma.llmConfig.update({ where: { id }, data: patch, select: CONFIG_SELECT });
 
   return { success: true, config: toLlmConfigItem(row) };
 }
