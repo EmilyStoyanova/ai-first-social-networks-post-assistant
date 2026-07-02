@@ -1,0 +1,140 @@
+import { prisma } from "@/lib/db/client";
+import { Prisma } from "@prisma/client";
+
+// ─── Action constants ──────────────────────────────────────────────────────────
+// Plain strings — no enum — so future phases can add new actions without migrations.
+
+export const AUDIT_ACTIONS = {
+  POST_GENERATED: "POST_GENERATED",
+  POST_SUBMITTED: "POST_SUBMITTED",
+  POST_APPROVED: "POST_APPROVED",
+  POST_REJECTED: "POST_REJECTED",
+  POST_EDITED: "POST_EDITED",
+  POST_VERSION_RESTORED: "POST_VERSION_RESTORED",
+  POST_PUBLISHED: "POST_PUBLISHED",
+  MEDIA_ATTACHED: "MEDIA_ATTACHED",
+} as const;
+
+// ─── Types ─────────────────────────────────────────────────────────────────────
+
+export interface CreateAuditLogInput {
+  companyId: string;
+  userId?: string;
+  action: string;
+  entityType?: string;
+  entityId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AuditLogItem {
+  id: string;
+  action: string;
+  entityType: string | null;
+  entityId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
+  user: { id: string; name: string | null; email: string } | null;
+}
+
+export interface ListAuditLogsFilters {
+  action?: string;
+  postId?: string;
+  userId?: string;
+  from?: Date;
+  to?: Date;
+  limit?: number;
+}
+
+// ─── Service ───────────────────────────────────────────────────────────────────
+
+/**
+ * Best-effort: never throws. Logs errors internally so callers don't need try/catch.
+ */
+export async function createAuditLog(input: CreateAuditLogInput): Promise<void> {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        companyId: input.companyId,
+        userId: input.userId ?? null,
+        action: input.action,
+        entityType: input.entityType ?? null,
+        entityId: input.entityId ?? null,
+        metadata: input.metadata ? (input.metadata as Prisma.InputJsonValue) : Prisma.JsonNull,
+      },
+    });
+  } catch (err) {
+    console.error("[audit-log] Failed to write audit log:", err);
+  }
+}
+
+export async function listCompanyAuditLogs(
+  companyId: string,
+  filters: ListAuditLogsFilters = {}
+): Promise<AuditLogItem[]> {
+  const { action, postId, userId, from, to, limit = 50 } = filters;
+
+  const rows = await prisma.auditLog.findMany({
+    where: {
+      companyId,
+      ...(action ? { action } : {}),
+      ...(postId ? { entityId: postId, entityType: "post" } : {}),
+      ...(userId ? { userId } : {}),
+      ...((from ?? to)
+        ? {
+            createdAt: {
+              ...(from ? { gte: from } : {}),
+              ...(to ? { lte: to } : {}),
+            },
+          }
+        : {}),
+    },
+    orderBy: { createdAt: "desc" },
+    take: Math.min(limit, 200),
+    select: {
+      id: true,
+      action: true,
+      entityType: true,
+      entityId: true,
+      metadata: true,
+      createdAt: true,
+      user: { select: { id: true, name: true, email: true } },
+    },
+  });
+
+  return rows.map((r) => ({
+    id: r.id,
+    action: r.action,
+    entityType: r.entityType,
+    entityId: r.entityId,
+    metadata: r.metadata !== null ? (r.metadata as Record<string, unknown>) : null,
+    createdAt: r.createdAt.toISOString(),
+    user: r.user,
+  }));
+}
+
+export async function listPostAuditLogs(postId: string): Promise<AuditLogItem[]> {
+  const rows = await prisma.auditLog.findMany({
+    where: { entityId: postId, entityType: "post" },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+    select: {
+      id: true,
+      action: true,
+      entityType: true,
+      entityId: true,
+      metadata: true,
+      createdAt: true,
+      user: { select: { id: true, name: true, email: true } },
+    },
+  });
+
+  return rows.map((r) => ({
+    id: r.id,
+    action: r.action,
+    entityType: r.entityType,
+    entityId: r.entityId,
+    metadata: r.metadata !== null ? (r.metadata as Record<string, unknown>) : null,
+    createdAt: r.createdAt.toISOString(),
+    user: r.user,
+  }));
+}

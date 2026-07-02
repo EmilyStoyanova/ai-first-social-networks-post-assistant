@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db/client";
+import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 
 export interface AttachedMediaDTO {
   id: string;
@@ -58,6 +59,15 @@ export async function attachMedia(
   await prisma.post.update({
     where: { id: postId },
     data: { mediaAssetId: asset.id },
+  });
+
+  await createAuditLog({
+    companyId: post.companyId,
+    userId,
+    action: AUDIT_ACTIONS.MEDIA_ATTACHED,
+    entityType: "post",
+    entityId: postId,
+    metadata: { mediaAssetId: asset.id, url: asset.url },
   });
 
   return {

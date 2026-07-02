@@ -7,6 +7,7 @@ import { parseLlmPost } from "@/lib/ai/parse-llm-post";
 import { LlmProviderError, LlmResponseParseError } from "@/lib/ai/errors";
 import { checkDuplicatePost } from "@/lib/ai/quality/duplicate-detection";
 import { checkContentSafety } from "@/lib/ai/quality/content-safety";
+import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -195,6 +196,19 @@ export async function generateDraftPost(
       llmProvider: true,
       llmModel: true,
       createdAt: true,
+    },
+  });
+
+  await createAuditLog({
+    companyId,
+    userId,
+    action: AUDIT_ACTIONS.POST_GENERATED,
+    entityType: "post",
+    entityId: post.id,
+    metadata: {
+      channel: post.channel,
+      llmProvider: post.llmProvider ?? undefined,
+      llmModel: post.llmModel ?? undefined,
     },
   });
 

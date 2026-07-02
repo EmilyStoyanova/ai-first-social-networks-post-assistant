@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db/client";
+import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 
 export type ApprovalError = "NOT_FOUND" | "FORBIDDEN" | "INVALID_TRANSITION";
 
@@ -9,7 +10,10 @@ async function resolveContext(
   postId: string,
   userId: string,
   isGlobalAdmin: boolean
-): Promise<{ ok: false; code: "NOT_FOUND" } | { ok: true; postStatus: string; isOwner: boolean }> {
+): Promise<
+  | { ok: false; code: "NOT_FOUND" }
+  | { ok: true; postStatus: string; isOwner: boolean; companyId: string }
+> {
   const post = await prisma.post.findUnique({
     where: { id: postId },
     select: { companyId: true, status: true },
@@ -17,7 +21,7 @@ async function resolveContext(
   if (!post) return { ok: false, code: "NOT_FOUND" };
 
   if (isGlobalAdmin) {
-    return { ok: true, postStatus: post.status, isOwner: true };
+    return { ok: true, postStatus: post.status, isOwner: true, companyId: post.companyId };
   }
 
   const membership = await prisma.companyMember.findFirst({
@@ -30,6 +34,7 @@ async function resolveContext(
     ok: true,
     postStatus: post.status,
     isOwner: membership.role === "owner",
+    companyId: post.companyId,
   };
 }
 
@@ -52,6 +57,14 @@ export async function submitForApproval(
   await prisma.post.update({
     where: { id: postId },
     data: { status: "pending_approval" },
+  });
+
+  await createAuditLog({
+    companyId: ctx.companyId,
+    userId,
+    action: AUDIT_ACTIONS.POST_SUBMITTED,
+    entityType: "post",
+    entityId: postId,
   });
 
   return { success: true, status: "PENDING_APPROVAL" };
@@ -80,6 +93,14 @@ export async function approvePost(
     data: { status: "approved", approvedById: userId, approvedAt: new Date() },
   });
 
+  await createAuditLog({
+    companyId: ctx.companyId,
+    userId,
+    action: AUDIT_ACTIONS.POST_APPROVED,
+    entityType: "post",
+    entityId: postId,
+  });
+
   return { success: true, status: "APPROVED" };
 }
 
@@ -104,6 +125,14 @@ export async function rejectPost(
   await prisma.post.update({
     where: { id: postId },
     data: { status: "rejected", rejectedById: userId, rejectedAt: new Date() },
+  });
+
+  await createAuditLog({
+    companyId: ctx.companyId,
+    userId,
+    action: AUDIT_ACTIONS.POST_REJECTED,
+    entityType: "post",
+    entityId: postId,
   });
 
   return { success: true, status: "REJECTED" };

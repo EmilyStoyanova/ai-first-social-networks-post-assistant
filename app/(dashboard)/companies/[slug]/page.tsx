@@ -186,6 +186,12 @@ export default async function CompanyPage({ params, searchParams }: Props) {
               description="Review and approve posts that are pending approval before publishing."
               href={`/companies/${slug}/approval`}
             />
+            <CompanySectionCard
+              icon="📋"
+              title="Audit Log"
+              description="View a chronological record of all post actions — approvals, edits, and publishes."
+              href={`/companies/${slug}/audit-log`}
+            />
             {UPCOMING_MODULES.map((mod) => (
               <CompanySectionCard
                 key={mod.title}

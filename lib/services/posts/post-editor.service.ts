@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db/client";
+import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 
 const EDITABLE_STATUSES = new Set(["draft", "pending_approval", "rejected"]);
 
@@ -97,6 +98,15 @@ export async function updatePost(
     };
   }
 
+  const newContent = input.content.trim();
+  const newHashtags = input.hashtags.map((h) => h.trim()).filter(Boolean);
+
+  const changedFields: string[] = [];
+  if (ctx.post.content !== newContent) changedFields.push("content");
+  if (JSON.stringify([...ctx.post.hashtags].sort()) !== JSON.stringify([...newHashtags].sort())) {
+    changedFields.push("hashtags");
+  }
+
   const version = await nextVersionNumber(postId);
 
   await prisma.postVersion.create({
@@ -105,10 +115,16 @@ export async function updatePost(
 
   await prisma.post.update({
     where: { id: postId },
-    data: {
-      content: input.content.trim(),
-      hashtags: input.hashtags.map((h) => h.trim()).filter(Boolean),
-    },
+    data: { content: newContent, hashtags: newHashtags },
+  });
+
+  await createAuditLog({
+    companyId: ctx.post.companyId,
+    userId,
+    action: AUDIT_ACTIONS.POST_EDITED,
+    entityType: "post",
+    entityId: postId,
+    metadata: { changedFields },
   });
 
   return { success: true };
@@ -182,6 +198,15 @@ export async function restoreVersion(
   await prisma.post.update({
     where: { id: postId },
     data: { content: ver.content },
+  });
+
+  await createAuditLog({
+    companyId: ctx.post.companyId,
+    userId,
+    action: AUDIT_ACTIONS.POST_VERSION_RESTORED,
+    entityType: "post",
+    entityId: postId,
+    metadata: { versionId },
   });
 
   return { success: true };

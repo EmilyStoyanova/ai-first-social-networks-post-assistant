@@ -6,6 +6,7 @@ import {
   BufferTokenExpiredError,
   BufferInvalidProfileError,
 } from "@/lib/buffer/buffer-errors";
+import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 
 const MOCK_BUFFER_POST_ID = "mock-buffer-post";
 
@@ -90,6 +91,15 @@ export async function publishPost(
       },
     });
 
+    await createAuditLog({
+      companyId: post.companyId,
+      userId,
+      action: AUDIT_ACTIONS.POST_PUBLISHED,
+      entityType: "post",
+      entityId: postId,
+      metadata: { profileId, bufferUpdateId: MOCK_BUFFER_POST_ID },
+    });
+
     return {
       success: true,
       data: {
@@ -135,6 +145,15 @@ export async function publishPost(
       bufferUpdateId: bufferResult.updateId,
       publishedAt: new Date(),
     },
+  });
+
+  await createAuditLog({
+    companyId: post.companyId,
+    userId,
+    action: AUDIT_ACTIONS.POST_PUBLISHED,
+    entityType: "post",
+    entityId: postId,
+    metadata: { profileId, bufferUpdateId: bufferResult.updateId },
   });
 
   return {

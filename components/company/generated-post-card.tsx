@@ -9,6 +9,7 @@ import { Card } from "@/components/ui/Card";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { BufferProfileItem } from "@/lib/services/buffer/list-buffer-profiles.service";
 import { EditPostModal } from "./edit-post-modal";
+import { PostActivityModal } from "./post-activity-modal";
 
 type BadgeVariant =
   "owner" | "editor" | "comingSoon" | "success" | "warning" | "danger" | "neutral" | "readonly";
@@ -81,6 +82,9 @@ export function GeneratedPostCard({
   const [localText, setLocalText] = useState(post.text);
   const [localHashtags, setLocalHashtags] = useState<string[]>(post.hashtags);
   const [editOpen, setEditOpen] = useState(false);
+
+  // ── Activity state ────────────────────────────────────────────────────────
+  const [activityOpen, setActivityOpen] = useState(false);
 
   // ── Publish state ─────────────────────────────────────────────────────────
   const [localStatus, setLocalStatus] = useState(post.status);
@@ -487,6 +491,16 @@ export function GeneratedPostCard({
           ))}
       </div>
 
+      {/* View Activity — always available */}
+      <div className="mt-3 border-t border-gray-100 pt-3">
+        <button
+          onClick={() => setActivityOpen(true)}
+          className="text-xs text-gray-400 transition-colors hover:text-gray-600"
+        >
+          View activity
+        </button>
+      </div>
+
       {editOpen && (
         <EditPostModal
           postId={post.id}
@@ -495,6 +509,14 @@ export function GeneratedPostCard({
           canRestore={canApprove}
           onClose={() => setEditOpen(false)}
           onSaved={handlePostSaved}
+        />
+      )}
+
+      {activityOpen && (
+        <PostActivityModal
+          postId={post.id}
+          open={activityOpen}
+          onClose={() => setActivityOpen(false)}
         />
       )}
     </Card>
