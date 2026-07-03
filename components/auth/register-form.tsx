@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { registerSchema } from "@/lib/validators/register.schema";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -12,6 +13,8 @@ type FieldErrors = { name?: string; email?: string; password?: string };
 
 export function RegisterForm() {
   const router = useRouter();
+  const t = useTranslations("auth.register");
+  const tBrand = useTranslations("brand");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
@@ -53,7 +56,7 @@ export function RegisterForm() {
       });
 
       if (res.status === 409) {
-        setFormError("An account with this email already exists.");
+        setFormError(t("emailExists"));
         return;
       }
 
@@ -68,14 +71,14 @@ export function RegisterForm() {
           "message" in body.error &&
           typeof body.error.message === "string"
             ? body.error.message
-            : "Something went wrong. Please try again.";
+            : t("error");
         setFormError(message);
         return;
       }
 
       router.push("/login?registered=1");
     } catch {
-      setFormError("Something went wrong. Please try again.");
+      setFormError(t("error"));
     } finally {
       setIsPending(false);
     }
@@ -90,16 +93,12 @@ export function RegisterForm() {
             <span className="text-base font-bold text-white">AI</span>
           </div>
           <div className="text-center">
-            <p className="text-base font-bold tracking-tight text-gray-900">
-              AI-First Social Networks
-            </p>
-            <p className="text-sm text-gray-400">Post Assistant</p>
+            <p className="text-base font-bold tracking-tight text-gray-900">{tBrand("title")}</p>
+            <p className="text-sm text-gray-400">{tBrand("tagline")}</p>
           </div>
         </div>
 
-        <h1 className="mb-6 text-center text-lg font-semibold text-gray-800">
-          Create your account
-        </h1>
+        <h1 className="mb-6 text-center text-lg font-semibold text-gray-800">{t("title")}</h1>
 
         <form onSubmit={handleSubmit} noValidate>
           {formError && (
@@ -111,7 +110,7 @@ export function RegisterForm() {
           <Input
             id="name"
             name="name"
-            label="Name"
+            label={t("name")}
             type="text"
             autoComplete="name"
             autoFocus
@@ -122,7 +121,7 @@ export function RegisterForm() {
           <Input
             id="email"
             name="email"
-            label="Email"
+            label={t("email")}
             type="email"
             autoComplete="email"
             error={fieldErrors.email}
@@ -132,7 +131,7 @@ export function RegisterForm() {
           <Input
             id="password"
             name="password"
-            label="Password"
+            label={t("password")}
             type="password"
             autoComplete="new-password"
             error={fieldErrors.password}
@@ -140,14 +139,14 @@ export function RegisterForm() {
           />
 
           <Button type="submit" size="lg" fullWidth loading={isPending}>
-            {isPending ? "Creating account…" : "Create account"}
+            {isPending ? t("creatingAccount") : t("createAccount")}
           </Button>
         </form>
 
         <div className="mt-6 border-t border-gray-100 pt-6 text-center text-sm text-gray-500">
-          Already have an account?{" "}
+          {t("hasAccount")}{" "}
           <Link href="/login" className="font-medium text-green-600 hover:underline">
-            Sign in
+            {t("signIn")}
           </Link>
         </div>
       </div>

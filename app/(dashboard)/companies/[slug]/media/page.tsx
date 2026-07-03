@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
+import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { listMedia } from "@/lib/services/company/list-media.service";
@@ -38,6 +39,10 @@ export default async function MediaGalleryPage({ params, searchParams }: Props) 
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
+  const t = await getTranslations("mediaGallery");
+  const tNav = await getTranslations("navigation");
+  const tCommon = await getTranslations("common");
+
   const channel = str(sp.channel);
   const provider = str(sp.provider);
   const sort = str(sp.sort) ?? "newest";
@@ -63,18 +68,18 @@ export default async function MediaGalleryPage({ params, searchParams }: Props) 
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
       breadcrumb={[
-        { label: "Companies", href: "/companies" },
+        { label: tNav("companies"), href: "/companies" },
         { label: company.name, href: `/companies/${slug}` },
-        { label: "Media Gallery" },
+        { label: t("title") },
       ]}
     >
       <div className="space-y-6">
         <PageHeader
-          title="Media Gallery"
-          description={`All AI-generated images for ${company.name}`}
+          title={t("title")}
+          description={t("description", { company: company.name })}
           actions={
             <Button href={`/companies/${slug}`} variant="secondary" size="sm">
-              ← Back to Company
+              {tCommon("backToCompany")}
             </Button>
           }
         />
@@ -88,6 +93,7 @@ export default async function MediaGalleryPage({ params, searchParams }: Props) 
           channel={channel ?? ""}
           provider={provider ?? ""}
           sort={sort}
+          canDelete={company.role === "OWNER" || session.user.isGlobalAdmin}
         />
       </div>
     </DashboardLayout>

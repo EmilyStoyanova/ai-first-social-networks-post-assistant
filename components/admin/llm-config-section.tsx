@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Card } from "@/components/ui/Card";
 import { LlmConfigForm } from "./llm-config-form";
 import { LlmConfigRow } from "./llm-config-row";
@@ -23,6 +24,7 @@ interface Props {
 }
 
 export function LlmConfigSection({ initialConfigs }: Props) {
+  const t = useTranslations("admin");
   const [configs, setConfigs] = useState<ClientLlmConfig[]>(initialConfigs);
 
   function handleCreated(config: ClientLlmConfig) {
@@ -49,13 +51,13 @@ export function LlmConfigSection({ initialConfigs }: Props) {
     <Card className="px-6 py-6">
       {/* Header */}
       <div className="mb-5">
-        <h2 className="text-sm font-semibold text-gray-900">LLM Providers</h2>
+        <h2 className="text-sm font-semibold text-gray-900">{t("llmProviders")}</h2>
       </div>
 
       {/* Add Provider */}
       <div className="mb-5">
         <h3 className="mb-3 text-xs font-semibold tracking-widest text-gray-400 uppercase">
-          Add Provider
+          {t("addProvider")}
         </h3>
         <LlmConfigForm onSaved={handleCreated} />
       </div>
@@ -65,11 +67,11 @@ export function LlmConfigSection({ initialConfigs }: Props) {
       {/* Configured Providers */}
       <div>
         <h3 className="mb-3 text-xs font-semibold tracking-widest text-gray-400 uppercase">
-          Configured Providers
+          {t("configuredProviders")}
         </h3>
 
         {configs.length === 0 ? (
-          <p className="py-4 text-center text-sm text-gray-400">No providers configured yet.</p>
+          <p className="py-4 text-center text-sm text-gray-400">{t("noProviders")}</p>
         ) : (
           <div className="divide-y divide-gray-100">
             {configs.map((config) => (

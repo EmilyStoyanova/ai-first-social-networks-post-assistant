@@ -1,27 +1,24 @@
 "use client";
 
+import { useTranslations } from "next-intl";
 import { NavigationItem } from "./navigation-item";
-
-type NavItem = {
-  label: string;
-  href: string;
-  disabled?: boolean;
-};
-
-const NAV_ITEMS: NavItem[] = [
-  { label: "Dashboard", href: "/dashboard" },
-  { label: "Companies", href: "/companies" },
-  { label: "Posts", href: "/posts", disabled: true },
-  { label: "Media Gallery", href: "/media", disabled: true },
-  { label: "Analytics", href: "/analytics", disabled: true },
-  { label: "Settings", href: "/settings", disabled: true },
-];
 
 interface Props {
   isGlobalAdmin: boolean;
 }
 
 export function Navigation({ isGlobalAdmin }: Props) {
+  const t = useTranslations("navigation");
+
+  const NAV_ITEMS = [
+    { label: t("dashboard"), href: "/dashboard" },
+    { label: t("companies"), href: "/companies" },
+    { label: t("posts"), href: "/posts", disabled: true },
+    { label: t("mediaGallery"), href: "/media", disabled: true },
+    { label: t("analytics"), href: "/analytics", disabled: true },
+    { label: t("settings"), href: "/settings", disabled: true },
+  ];
+
   return (
     <nav aria-label="Main navigation" className="space-y-4">
       <ul role="list" className="space-y-1">
@@ -35,11 +32,11 @@ export function Navigation({ isGlobalAdmin }: Props) {
       {isGlobalAdmin && (
         <div className="border-t border-gray-100 pt-4">
           <p className="mb-1 px-3 text-xs font-semibold tracking-widest text-gray-400 uppercase">
-            Admin
+            {t("admin")}
           </p>
           <ul role="list" className="space-y-1">
             <li>
-              <NavigationItem href="/admin" label="Admin Panel" />
+              <NavigationItem href="/admin" label={t("adminPanel")} />
             </li>
           </ul>
         </div>

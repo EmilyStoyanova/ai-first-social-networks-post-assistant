@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { getTranslations } from "next-intl/server";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import type { AdminCompanyItem } from "@/lib/services/admin/list-companies.service";
@@ -11,23 +12,35 @@ interface Props {
   companies: AdminCompanyItem[];
 }
 
-export function AdminCompaniesTable({ companies }: Props) {
+export async function AdminCompaniesTable({ companies }: Props) {
+  const t = await getTranslations("admin");
+
   if (companies.length === 0) {
-    return <EmptyState icon="🏢" title="No companies found." />;
+    return <EmptyState icon="🏢" title={t("noCompanies")} />;
   }
 
   return (
     <Card className="overflow-hidden px-0 py-0">
-      {/* Desktop header: Name | Slug | Website | Members | Owners | Created */}
+      {/* Desktop header */}
       <div className="hidden grid-cols-[minmax(0,1fr)_8rem_minmax(0,1fr)_4rem_minmax(0,1fr)_7rem] gap-4 border-b border-gray-100 bg-gray-50 px-6 py-3 sm:grid">
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">Name</span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">Slug</span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">Website</span>
-        <span className="text-center text-xs font-medium tracking-wide text-gray-400 uppercase">
-          Members
+        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+          {t("companies")}
         </span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">Owners</span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">Created</span>
+        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+          {t("slug")}
+        </span>
+        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+          {t("website")}
+        </span>
+        <span className="text-center text-xs font-medium tracking-wide text-gray-400 uppercase">
+          {t("membersCol")}
+        </span>
+        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+          {t("owners")}
+        </span>
+        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+          {t("created")}
+        </span>
       </div>
 
       <div className="divide-y divide-gray-100">
@@ -44,12 +57,11 @@ export function AdminCompaniesTable({ companies }: Props) {
               <p className="mt-0.5 text-xs text-gray-400">{c.slug}</p>
               {c.website && <p className="mt-0.5 truncate text-xs text-gray-400">{c.website}</p>}
               <p className="mt-1 text-xs text-gray-400">
-                {c.memberCount === 1 ? "1 member" : `${c.memberCount} members`} &middot;{" "}
-                {fmtDate(c.createdAt)}
+                {t("memberCount", { count: c.memberCount })} &middot; {fmtDate(c.createdAt)}
               </p>
               {c.ownerEmails.length > 0 && (
                 <p className="mt-0.5 text-xs text-gray-400">
-                  Owner{c.ownerEmails.length > 1 ? "s" : ""}: {c.ownerEmails.join(", ")}
+                  {t("owners")}: {c.ownerEmails.join(", ")}
                 </p>
               )}
             </div>

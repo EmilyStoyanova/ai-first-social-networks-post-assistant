@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -65,16 +66,18 @@ const CHANNEL_META: Record<string, ChannelMeta> = {
   },
 };
 
-const AUTOMATION_LABELS: Record<string, string> = {
-  semi_automated: "Semi-automated",
-  fully_automated: "Fully automated",
-};
-
 export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
+  const t = useTranslations("channels");
+  const tCommon = useTranslations("common");
   const [config, setConfig] = useState(initialConfig);
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+
+  const AUTOMATION_LABELS: Record<string, string> = {
+    semi_automated: t("semiAutomated"),
+    fully_automated: t("fullyAutomated"),
+  };
 
   const meta = CHANNEL_META[config.channel] ?? {
     label: config.channel,
@@ -111,7 +114,7 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
       setConfig(json.channel);
       setIsEditing(false);
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
+      setErrorMessage(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setSaving(false);
     }
@@ -131,7 +134,7 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
         <div className="flex flex-1 items-center justify-between gap-2">
           <h3 className="text-sm font-semibold text-gray-900">{meta.label}</h3>
           <Badge variant={config.enabled ? "success" : "neutral"}>
-            {config.enabled ? "Enabled" : "Disabled"}
+            {config.enabled ? t("enabled") : t("disabled")}
           </Badge>
         </div>
       </div>
@@ -157,33 +160,35 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
           {/* Summary */}
           <dl className="mb-4 space-y-1.5 text-sm">
             <div className="flex items-center justify-between">
-              <dt className="text-gray-500">Language</dt>
+              <dt className="text-gray-500">{t("language")}</dt>
               <dd className="font-medium text-gray-900">{config.postingLanguage.toUpperCase()}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-gray-500">Posts / day</dt>
+              <dt className="text-gray-500">{t("postsPerDay")}</dt>
               <dd className="font-medium text-gray-900">{config.postsPerDay}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-gray-500">Posts / week</dt>
+              <dt className="text-gray-500">{t("postsPerWeek")}</dt>
               <dd className="font-medium text-gray-900">{config.postsPerWeek}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-gray-500">Image required</dt>
-              <dd className="font-medium text-gray-900">{config.imageRequired ? "Yes" : "No"}</dd>
+              <dt className="text-gray-500">{t("imageRequired")}</dt>
+              <dd className="font-medium text-gray-900">
+                {config.imageRequired ? t("yes") : t("no")}
+              </dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-gray-500">Automation</dt>
+              <dt className="text-gray-500">{t("automation")}</dt>
               <dd className="font-medium text-gray-900">
                 {config.automationModeOverride
                   ? (AUTOMATION_LABELS[config.automationModeOverride] ??
                     config.automationModeOverride)
-                  : "Company default"}
+                  : t("companyDefault")}
               </dd>
             </div>
             {config.bufferProfileId && (
               <div className="flex items-center justify-between">
-                <dt className="text-gray-500">Buffer Profile ID</dt>
+                <dt className="text-gray-500">{t("bufferProfileId")}</dt>
                 <dd className="truncate font-medium text-gray-900">{config.bufferProfileId}</dd>
               </div>
             )}
@@ -191,10 +196,10 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
 
           {canManage ? (
             <Button variant="secondary" size="sm" onClick={() => setIsEditing(true)}>
-              Edit
+              {tCommon("edit")}
             </Button>
           ) : (
-            <p className="text-xs text-gray-400">Only company owners can edit channel settings.</p>
+            <p className="text-xs text-gray-400">{t("ownersOnly")}</p>
           )}
         </>
       )}

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
+import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { listAdminUsers } from "@/lib/services/admin/list-users.service";
 import { listAdminCompanies } from "@/lib/services/admin/list-companies.service";
@@ -20,6 +21,9 @@ export default async function AdminPage() {
   const session = await auth();
   if (!session) redirect("/login");
   if (!session.user.isGlobalAdmin) notFound();
+
+  const t = await getTranslations("admin");
+  const tNav = await getTranslations("navigation");
 
   const [usersResult, companiesResult, configsResult] = await Promise.all([
     listAdminUsers(session.user.isGlobalAdmin),
@@ -46,13 +50,10 @@ export default async function AdminPage() {
         email: session.user.email,
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
-      breadcrumb={[{ label: "Global Admin" }]}
+      breadcrumb={[{ label: tNav("admin") }]}
     >
       <div className="space-y-8">
-        <PageHeader
-          title="Global Admin"
-          description="System-wide overview of registered users and companies."
-        />
+        <PageHeader title={t("title")} description={t("description")} />
 
         <AdminOverview
           userCount={users.length}
@@ -60,15 +61,15 @@ export default async function AdminPage() {
           adminCount={adminCount}
         />
 
-        <Section title="LLM Providers">
+        <Section title={t("llmProviders")}>
           <LlmConfigSection initialConfigs={configs} />
         </Section>
 
-        <Section title="Users">
+        <Section title={t("users")}>
           <AdminUsersTable users={users} />
         </Section>
 
-        <Section title="Companies">
+        <Section title={t("companies")}>
           <AdminCompaniesTable companies={companies} />
         </Section>
       </div>

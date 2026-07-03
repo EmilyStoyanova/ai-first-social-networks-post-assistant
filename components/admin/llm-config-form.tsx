@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import type { ClientLlmConfig } from "./llm-config-section";
@@ -37,6 +38,8 @@ interface Props {
 }
 
 export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
+  const t = useTranslations("admin");
+  const tCommon = useTranslations("common");
   const isEdit = config !== undefined;
 
   const [provider, setProvider] = useState<"CLAUDE" | "OPENAI" | "GROK">(
@@ -60,11 +63,11 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
 
     let hasError = false;
     if (!model.trim()) {
-      setModelError("Model is required.");
+      setModelError(t("modelRequired"));
       hasError = true;
     }
     if (!isEdit && !apiKey.trim()) {
-      setApiKeyError("API key is required.");
+      setApiKeyError(t("apiKeyRequired"));
       hasError = true;
     }
     if (hasError) return;
@@ -109,7 +112,7 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
       setStatus("idle");
     } catch (err) {
       setStatus("error");
-      setErrorMessage(err instanceof Error ? err.message : "Something went wrong.");
+      setErrorMessage(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     }
   }
 
@@ -125,7 +128,9 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
         {/* Provider selector — create mode only */}
         {!isEdit && (
           <div className="w-40 shrink-0">
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">Provider</label>
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">
+              {t("provider")}
+            </label>
             <select
               value={provider}
               onChange={(e) => setProvider(e.target.value as "CLAUDE" | "OPENAI" | "GROK")}
@@ -141,7 +146,7 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
 
         {/* Model */}
         <div className="min-w-[10rem] flex-1">
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">Model</label>
+          <label className="mb-1.5 block text-sm font-medium text-gray-700">{t("model")}</label>
           <input
             type="text"
             placeholder={MODEL_PLACEHOLDER[provider] ?? "model-name"}
@@ -159,10 +164,10 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
 
         {/* API Key */}
         <div className="min-w-[12rem] flex-1">
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">API Key</label>
+          <label className="mb-1.5 block text-sm font-medium text-gray-700">{t("apiKey")}</label>
           <input
             type="password"
-            placeholder={isEdit ? "Leave empty to keep existing key" : "sk-…"}
+            placeholder={isEdit ? t("apiKeyHint") : "sk-…"}
             value={apiKey}
             onChange={(e) => {
               setApiKey(e.target.value);
@@ -186,18 +191,18 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
               disabled={isSubmitting}
               className="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
             />
-            Active
+            {t("active")}
           </label>
         </div>
 
         {/* Submit + Cancel */}
         <div className="flex shrink-0 items-center gap-2 pb-0.5">
           <Button type="submit" variant="primary" disabled={isSubmitting} loading={isSubmitting}>
-            {isSubmitting ? "Saving…" : "Save"}
+            {isSubmitting ? tCommon("saving") : t("saveShort")}
           </Button>
           {isEdit && onCancel && (
             <Button type="button" variant="ghost" onClick={onCancel} disabled={isSubmitting}>
-              Cancel
+              {tCommon("cancel")}
             </Button>
           )}
         </div>

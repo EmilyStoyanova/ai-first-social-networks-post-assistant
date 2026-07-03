@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
+import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { listPosts } from "@/lib/services/company/list-posts.service";
@@ -27,6 +28,10 @@ export default async function ApprovalQueuePage({ params }: Props) {
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
+  const t = await getTranslations("approval");
+  const tNav = await getTranslations("navigation");
+  const tCommon = await getTranslations("common");
+
   const [postsResult, bufferConnection] = await Promise.all([
     listPosts(slug, session.user.id, session.user.isGlobalAdmin, "pending_approval"),
     getBufferConnection(company.id),
@@ -43,18 +48,18 @@ export default async function ApprovalQueuePage({ params }: Props) {
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
       breadcrumb={[
-        { label: "Companies", href: "/companies" },
+        { label: tNav("companies"), href: "/companies" },
         { label: company.name, href: `/companies/${slug}` },
-        { label: "Approval Queue" },
+        { label: t("title") },
       ]}
     >
       <div className="space-y-6">
         <PageHeader
-          title="Approval Queue"
-          description={`${pendingPosts.length} post${pendingPosts.length === 1 ? "" : "s"} pending approval`}
+          title={t("title")}
+          description={t("description", { count: pendingPosts.length })}
           actions={
             <Button href={`/companies/${slug}`} variant="secondary" size="sm">
-              ← Back to Company
+              {tCommon("backToCompany")}
             </Button>
           }
         />

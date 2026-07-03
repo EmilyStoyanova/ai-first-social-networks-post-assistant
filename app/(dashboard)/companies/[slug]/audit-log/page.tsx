@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
+import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { listCompanyAuditLogs } from "@/lib/services/audit/audit-log.service";
@@ -26,6 +27,10 @@ export default async function AuditLogPage({ params }: Props) {
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
+  const t = await getTranslations("auditLog");
+  const tNav = await getTranslations("navigation");
+  const tCommon = await getTranslations("common");
+
   const logs = await listCompanyAuditLogs(company.id, { limit: 50 });
 
   return (
@@ -36,18 +41,18 @@ export default async function AuditLogPage({ params }: Props) {
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
       breadcrumb={[
-        { label: "Companies", href: "/companies" },
+        { label: tNav("companies"), href: "/companies" },
         { label: company.name, href: `/companies/${slug}` },
-        { label: "Audit Log" },
+        { label: t("title") },
       ]}
     >
       <div className="space-y-6">
         <PageHeader
-          title="Audit Log"
-          description="A chronological record of all actions taken on posts and content for this company."
+          title={t("title")}
+          description={t("description")}
           actions={
             <Button href={`/companies/${slug}`} variant="secondary" size="sm">
-              ← Back to Company
+              {tCommon("backToCompany")}
             </Button>
           }
         />

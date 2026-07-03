@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import type { ClientMember } from "./company-members";
@@ -24,6 +25,8 @@ interface Props {
 }
 
 export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRemoved }: Props) {
+  const t = useTranslations("members");
+  const tCommon = useTranslations("common");
   const [isChangingRole, setIsChangingRole] = useState(false);
   const [roleError, setRoleError] = useState("");
   const [showConfirm, setShowConfirm] = useState(false);
@@ -51,7 +54,7 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
 
       onRoleChanged(member.id, newRole);
     } catch (err) {
-      setRoleError(err instanceof Error ? err.message : "Something went wrong.");
+      setRoleError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setIsChangingRole(false);
     }
@@ -75,7 +78,7 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
     } catch (err) {
       setIsRemoving(false);
       setShowConfirm(false);
-      setRemoveError(err instanceof Error ? err.message : "Something went wrong.");
+      setRemoveError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     }
   }
 
@@ -98,8 +101,8 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
               aria-label={`Role for ${member.email}`}
               className={SELECT_CLS}
             >
-              <option value="OWNER">Owner</option>
-              <option value="EDITOR">Editor</option>
+              <option value="OWNER">{t("owner")}</option>
+              <option value="EDITOR">{t("editor")}</option>
             </select>
           ) : (
             <Badge variant={member.role === "OWNER" ? "owner" : "editor"}>{member.role}</Badge>
@@ -124,8 +127,8 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
               aria-label={`Role for ${member.email}`}
               className={`${SELECT_CLS} w-full`}
             >
-              <option value="OWNER">Owner</option>
-              <option value="EDITOR">Editor</option>
+              <option value="OWNER">{t("owner")}</option>
+              <option value="EDITOR">{t("editor")}</option>
             </select>
           ) : (
             <Badge variant={member.role === "OWNER" ? "owner" : "editor"}>{member.role}</Badge>
@@ -137,7 +140,7 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
           {showActions &&
             (showConfirm ? (
               <>
-                <span className="text-xs text-gray-500">Remove this member?</span>
+                <span className="text-xs text-gray-500">{t("removeMember")}</span>
                 <Button
                   size="sm"
                   variant="danger"
@@ -145,7 +148,7 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
                   disabled={isRemoving}
                   loading={isRemoving}
                 >
-                  {isRemoving ? "…" : "Confirm"}
+                  {isRemoving ? "…" : tCommon("confirm")}
                 </Button>
                 <Button
                   size="sm"
@@ -153,12 +156,12 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
                   onClick={() => setShowConfirm(false)}
                   disabled={isRemoving}
                 >
-                  Cancel
+                  {tCommon("cancel")}
                 </Button>
               </>
             ) : (
               <Button size="sm" variant="danger" onClick={() => setShowConfirm(true)}>
-                Remove
+                {t("remove")}
               </Button>
             ))}
         </div>
@@ -173,7 +176,7 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
         <div className="mt-2 sm:hidden">
           {showConfirm ? (
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-gray-500">Remove this member?</span>
+              <span className="text-xs text-gray-500">{t("removeMember")}</span>
               <Button
                 size="sm"
                 variant="danger"
@@ -181,7 +184,7 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
                 disabled={isRemoving}
                 loading={isRemoving}
               >
-                {isRemoving ? "…" : "Confirm"}
+                {isRemoving ? "…" : tCommon("confirm")}
               </Button>
               <Button
                 size="sm"
@@ -189,12 +192,12 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
                 onClick={() => setShowConfirm(false)}
                 disabled={isRemoving}
               >
-                Cancel
+                {tCommon("cancel")}
               </Button>
             </div>
           ) : (
             <Button size="sm" variant="danger" onClick={() => setShowConfirm(true)}>
-              Remove
+              {t("remove")}
             </Button>
           )}
         </div>

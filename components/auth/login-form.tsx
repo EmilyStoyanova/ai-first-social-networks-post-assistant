@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { loginSchema } from "@/lib/validators/login.schema";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -17,6 +18,8 @@ interface Props {
 
 export function LoginForm({ registered = false, callbackUrl }: Props) {
   const router = useRouter();
+  const t = useTranslations("auth.login");
+  const tBrand = useTranslations("brand");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
@@ -65,7 +68,7 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
         "message" in body.error &&
         typeof body.error.message === "string"
           ? body.error.message
-          : "Unexpected server error.";
+          : t("unexpectedError");
 
       if (!res.ok) {
         setFormError(errorMessage);
@@ -74,7 +77,7 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
 
       router.push(callbackUrl ?? "/dashboard");
     } catch {
-      setFormError("Unexpected server error.");
+      setFormError(t("unexpectedError"));
     } finally {
       setIsPending(false);
     }
@@ -89,17 +92,15 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
             <span className="text-base font-bold text-white">AI</span>
           </div>
           <div className="text-center">
-            <p className="text-base font-bold tracking-tight text-gray-900">
-              AI-First Social Networks
-            </p>
-            <p className="text-sm text-gray-400">Post Assistant</p>
+            <p className="text-base font-bold tracking-tight text-gray-900">{tBrand("title")}</p>
+            <p className="text-sm text-gray-400">{tBrand("tagline")}</p>
           </div>
         </div>
 
         <form onSubmit={handleSubmit} noValidate>
           {registered && (
             <Alert variant="success" className="mb-5">
-              Account created successfully. You can now sign in.
+              {t("accountCreated")}
             </Alert>
           )}
 
@@ -112,7 +113,7 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
           <Input
             id="email"
             name="email"
-            label="Email"
+            label={t("email")}
             type="email"
             autoComplete="email"
             autoFocus
@@ -123,7 +124,7 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
           <Input
             id="password"
             name="password"
-            label="Password"
+            label={t("password")}
             type="password"
             autoComplete="current-password"
             error={fieldErrors.password}
@@ -131,20 +132,20 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
           />
 
           <Button type="submit" size="lg" fullWidth loading={isPending}>
-            {isPending ? "Signing in…" : "Sign in"}
+            {isPending ? t("signingIn") : t("signIn")}
           </Button>
 
           <div className="mt-4 text-center">
             <button type="button" disabled className="cursor-not-allowed text-sm text-gray-400">
-              Forgot password?
+              {t("forgotPassword")}
             </button>
           </div>
         </form>
 
         <div className="mt-6 border-t border-gray-100 pt-6 text-center text-sm text-gray-500">
-          Don&apos;t have an account?{" "}
+          {t("noAccount")}{" "}
           <Link href="/register" className="font-medium text-green-600 hover:underline">
-            Register
+            {t("register")}
           </Link>
         </div>
       </div>

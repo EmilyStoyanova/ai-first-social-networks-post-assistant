@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { inviteMemberSchema } from "@/lib/validators/company-member.schema";
@@ -28,6 +29,8 @@ interface Props {
 }
 
 export function InviteMemberForm({ slug, onInvited }: Props) {
+  const t = useTranslations("members");
+  const tCommon = useTranslations("common");
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"OWNER" | "EDITOR">("EDITOR");
   const [status, setStatus] = useState<"idle" | "submitting" | "success" | "error">("idle");
@@ -72,9 +75,7 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
       setTimeout(() => setStatus("idle"), 3000);
     } catch (err) {
       setStatus("error");
-      setErrorMessage(
-        err instanceof Error ? err.message : "Something went wrong. Please try again."
-      );
+      setErrorMessage(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     }
   }
 
@@ -82,7 +83,7 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
     <form onSubmit={handleSubmit} noValidate>
       {status === "success" && (
         <Alert variant="success" className="mb-3">
-          Member invited successfully.
+          {t("inviteSuccess")}
         </Alert>
       )}
       {status === "error" && (
@@ -95,7 +96,7 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
         {/* Email */}
         <div className="min-w-[14rem] flex-1">
           <label htmlFor="invite-email" className="mb-1.5 block text-sm font-medium text-gray-700">
-            Email
+            {t("email")}
           </label>
           <input
             id="invite-email"
@@ -124,7 +125,7 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
         {/* Role */}
         <div className="w-36 shrink-0">
           <label htmlFor="invite-role" className="mb-1.5 block text-sm font-medium text-gray-700">
-            Role
+            {t("role")}
           </label>
           <select
             id="invite-role"
@@ -134,15 +135,15 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
             disabled={isSubmitting}
             className={fieldCls(false, isSubmitting)}
           >
-            <option value="EDITOR">Editor</option>
-            <option value="OWNER">Owner</option>
+            <option value="EDITOR">{t("editor")}</option>
+            <option value="OWNER">{t("owner")}</option>
           </select>
         </div>
 
         {/* Submit */}
         <div className="shrink-0 pb-0.5">
           <Button type="submit" variant="primary" disabled={isSubmitting} loading={isSubmitting}>
-            {isSubmitting ? "Inviting…" : "Invite"}
+            {isSubmitting ? t("inviting") : t("invite")}
           </Button>
         </div>
       </div>

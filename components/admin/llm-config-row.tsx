@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -24,6 +25,8 @@ interface Props {
 }
 
 export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
+  const t = useTranslations("admin");
+  const tCommon = useTranslations("common");
   const [isEditing, setIsEditing] = useState(false);
   const [isActivating, setIsActivating] = useState(false);
   const [activateError, setActivateError] = useState("");
@@ -49,7 +52,7 @@ export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
       if (!res.ok) throw new Error(json.error?.message ?? "Failed to activate provider.");
       onUpdated(json.config!);
     } catch (err) {
-      setActivateError(err instanceof Error ? err.message : "Something went wrong.");
+      setActivateError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setIsActivating(false);
     }
@@ -69,7 +72,7 @@ export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
     } catch (err) {
       setIsDeleting(false);
       setShowDeleteConfirm(false);
-      setDeleteError(err instanceof Error ? err.message : "Something went wrong.");
+      setDeleteError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     }
   }
 
@@ -113,27 +116,27 @@ export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
         {/* Status + Actions */}
         <div className="flex flex-wrap items-center gap-2">
           {config.isActive ? (
-            <Badge variant="success">ACTIVE</Badge>
+            <Badge variant="success">{t("activeLlm")}</Badge>
           ) : (
-            <Badge variant="neutral">Inactive</Badge>
+            <Badge variant="neutral">{t("inactiveLlm")}</Badge>
           )}
 
           {!config.isActive && (
             <Button size="sm" variant="ghost" onClick={handleActivate} disabled={isActivating}>
-              {isActivating ? "Activating…" : "Set Active"}
+              {isActivating ? t("activating") : t("setActive")}
             </Button>
           )}
 
           <Button size="sm" variant="ghost" onClick={() => setIsEditing(true)}>
-            Edit
+            {tCommon("edit")}
           </Button>
 
           {!config.isActive &&
             (showDeleteConfirm ? (
               <>
-                <span className="text-xs text-gray-500">Delete this provider?</span>
+                <span className="text-xs text-gray-500">{t("deleteProvider")}</span>
                 <Button size="sm" variant="danger" onClick={handleDelete} disabled={isDeleting}>
-                  {isDeleting ? "Deleting…" : "Confirm"}
+                  {isDeleting ? tCommon("deleting") : tCommon("confirm")}
                 </Button>
                 <Button
                   size="sm"
@@ -141,12 +144,12 @@ export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
                   onClick={() => setShowDeleteConfirm(false)}
                   disabled={isDeleting}
                 >
-                  Cancel
+                  {tCommon("cancel")}
                 </Button>
               </>
             ) : (
               <Button size="sm" variant="danger" onClick={() => setShowDeleteConfirm(true)}>
-                Delete
+                {tCommon("delete")}
               </Button>
             ))}
         </div>

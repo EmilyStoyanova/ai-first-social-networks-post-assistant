@@ -1,3 +1,4 @@
+import { getTranslations } from "next-intl/server";
 import { Card } from "@/components/ui/Card";
 
 interface Props {
@@ -6,11 +7,13 @@ interface Props {
   adminCount: number;
 }
 
-export function AdminOverview({ userCount, companyCount, adminCount }: Props) {
+export async function AdminOverview({ userCount, companyCount, adminCount }: Props) {
+  const t = await getTranslations("admin");
+
   const stats = [
-    { label: "Total Users", value: userCount },
-    { label: "Total Companies", value: companyCount },
-    { label: "Global Admins", value: adminCount },
+    { label: t("totalUsers"), value: userCount },
+    { label: t("totalCompanies"), value: companyCount },
+    { label: t("globalAdmins"), value: adminCount },
   ];
 
   return (

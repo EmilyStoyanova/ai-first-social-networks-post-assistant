@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
+import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { Button } from "@/components/ui/Button";
@@ -17,8 +18,18 @@ export default async function DashboardPage() {
     redirect("/login");
   }
 
+  const t = await getTranslations("dashboard");
+  const tNav = await getTranslations("navigation");
+
   const { user } = session;
   const greeting = user?.name ? `, ${user.name}` : "";
+
+  const COMING_SOON = [
+    { icon: "✍️", label: tNav("posts") },
+    { icon: "🖼️", label: tNav("mediaGallery") },
+    { icon: "📊", label: tNav("analytics") },
+    { icon: "⚙️", label: tNav("settings") },
+  ];
 
   return (
     <DashboardLayout
@@ -28,27 +39,20 @@ export default async function DashboardPage() {
         {/* Welcome card */}
         <Card className="px-8 py-10">
           <h1 className="text-2xl font-bold tracking-tight text-gray-900">
-            Welcome back{greeting}!
+            {t("welcome", { greeting })}
           </h1>
-          <p className="mt-2 text-sm text-gray-500">
-            Manage your social media presence from one place.
-          </p>
+          <p className="mt-2 text-sm text-gray-500">{t("tagline")}</p>
           <div className="mt-6 flex flex-wrap gap-3">
             <Button href="/companies" variant="primary">
-              Go to Companies
+              {t("goToCompanies")}
             </Button>
           </div>
         </Card>
 
         {/* Coming soon modules */}
-        <Section title="Coming soon">
+        <Section title={t("comingSoon")}>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {[
-              { icon: "✍️", label: "Posts" },
-              { icon: "🖼️", label: "Media Gallery" },
-              { icon: "📊", label: "Analytics" },
-              { icon: "⚙️", label: "Settings" },
-            ].map(({ icon, label }) => (
+            {COMING_SOON.map(({ icon, label }) => (
               <Card key={label} className="px-5 py-4">
                 <span className="text-xl" aria-hidden="true">
                   {icon}

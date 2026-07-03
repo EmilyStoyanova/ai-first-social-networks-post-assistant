@@ -1,31 +1,13 @@
 "use client";
 
 import { useRouter, usePathname } from "next/navigation";
-import { useTransition } from "react";
+import { useTransition, useState } from "react";
+import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Button } from "@/components/ui/Button";
 import { MediaCard } from "./media-card";
 import type { MediaItem } from "@/lib/services/company/list-media.service";
-
-const CHANNEL_FILTERS = [
-  { value: "", label: "All Channels" },
-  { value: "facebook", label: "Facebook" },
-  { value: "linkedin", label: "LinkedIn" },
-  { value: "instagram", label: "Instagram" },
-  { value: "tiktok", label: "TikTok" },
-] as const;
-
-const PROVIDER_FILTERS = [
-  { value: "", label: "All Providers" },
-  { value: "leonardo", label: "Leonardo" },
-  { value: "mock", label: "Mock" },
-] as const;
-
-const SORT_OPTIONS = [
-  { value: "newest", label: "Newest first" },
-  { value: "oldest", label: "Oldest first" },
-] as const;
 
 interface Props {
   slug: string;
@@ -36,6 +18,7 @@ interface Props {
   channel: string;
   provider: string;
   sort: string;
+  canDelete: boolean;
 }
 
 function FilterPill({
@@ -79,19 +62,47 @@ function SkeletonCard() {
 
 export function MediaGallery({
   slug,
-  items,
-  total,
+  items: initialItems,
+  total: initialTotal,
   page,
   pageSize,
   channel,
   provider,
   sort,
+  canDelete,
 }: Props) {
+  const t = useTranslations("mediaGallery");
   const router = useRouter();
   const pathname = usePathname();
   const [isPending, startTransition] = useTransition();
+  const [items, setItems] = useState<MediaItem[]>(initialItems);
+  const [total, setTotal] = useState(initialTotal);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  const CHANNEL_FILTERS = [
+    { value: "", label: t("allChannels") },
+    { value: "facebook", label: "Facebook" },
+    { value: "linkedin", label: "LinkedIn" },
+    { value: "instagram", label: "Instagram" },
+    { value: "tiktok", label: "TikTok" },
+  ] as const;
+
+  const PROVIDER_FILTERS = [
+    { value: "", label: t("allProviders") },
+    { value: "leonardo", label: "Leonardo" },
+    { value: "mock", label: "Mock" },
+  ] as const;
+
+  const SORT_OPTIONS = [
+    { value: "newest", label: t("newestFirst") },
+    { value: "oldest", label: t("oldestFirst") },
+  ] as const;
+
+  function handleDeleted(id: string) {
+    setItems((prev) => prev.filter((i) => i.id !== id));
+    setTotal((prev) => Math.max(0, prev - 1));
+  }
 
   function navigate(
     updates: Partial<{ channel: string; provider: string; sort: string; page: number }>
@@ -121,7 +132,7 @@ export function MediaGallery({
         {/* Channel pills */}
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="mr-1 text-xs font-semibold tracking-wider text-gray-400 uppercase">
-            Channel
+            {t("channelLabel")}
           </span>
           {CHANNEL_FILTERS.map((f) => (
             <FilterPill
@@ -137,7 +148,7 @@ export function MediaGallery({
         {/* Provider pills */}
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="mr-1 text-xs font-semibold tracking-wider text-gray-400 uppercase">
-            Provider
+            {t("providerLabel")}
           </span>
           {PROVIDER_FILTERS.map((f) => (
             <FilterPill
@@ -152,7 +163,9 @@ export function MediaGallery({
 
         {/* Sort */}
         <div className="ml-auto flex items-center gap-2">
-          <span className="text-xs font-semibold tracking-wider text-gray-400 uppercase">Sort</span>
+          <span className="text-xs font-semibold tracking-wider text-gray-400 uppercase">
+            {t("sortLabel")}
+          </span>
           <select
             value={sort || "newest"}
             onChange={(e) => navigate({ sort: e.target.value })}
@@ -170,8 +183,8 @@ export function MediaGallery({
       {/* Count */}
       {total > 0 && (
         <p className="text-sm text-gray-500">
-          {total} {total === 1 ? "image" : "images"}
-          {channel || provider ? " matching filters" : ""}
+          {t("imageCount", { count: total })}
+          {channel || provider ? t("matchingFilters") : ""}
         </p>
       )}
 
@@ -184,19 +197,15 @@ export function MediaGallery({
         {items.length === 0 ? (
           <EmptyState
             icon="🖼️"
-            title="No generated images yet."
-            description={
-              channel || provider
-                ? "Try adjusting your filters."
-                : "Generate your first image from a draft post."
-            }
+            title={t("noImages")}
+            description={channel || provider ? t("noImagesFilter") : t("noImagesDesc")}
             action={
               !channel && !provider ? (
                 <Link
                   href={`/companies/${slug}`}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-green-600"
                 >
-                  Generate your first image
+                  {t("generateFirst")}
                 </Link>
               ) : undefined
             }
@@ -205,7 +214,15 @@ export function MediaGallery({
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
             {isPending
               ? Array.from({ length: pageSize }).map((_, i) => <SkeletonCard key={i} />)
-              : items.map((item) => <MediaCard key={item.id} item={item} slug={slug} />)}
+              : items.map((item) => (
+                  <MediaCard
+                    key={item.id}
+                    item={item}
+                    slug={slug}
+                    canDelete={canDelete}
+                    onDeleted={handleDeleted}
+                  />
+                ))}
           </div>
         )}
       </div>
@@ -219,18 +236,16 @@ export function MediaGallery({
             disabled={page <= 1 || isPending}
             onClick={() => navigate({ page: page - 1 })}
           >
-            ← Previous
+            {t("previousPage")}
           </Button>
-          <span className="text-sm text-gray-500">
-            Page {page} of {totalPages}
-          </span>
+          <span className="text-sm text-gray-500">{t("page", { page, total: totalPages })}</span>
           <Button
             variant="secondary"
             size="sm"
             disabled={page >= totalPages || isPending}
             onClick={() => navigate({ page: page + 1 })}
           >
-            Next →
+            {t("nextPage")}
           </Button>
         </div>
       )}

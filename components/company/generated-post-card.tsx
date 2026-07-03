@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Image from "next/image";
+import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -10,6 +11,7 @@ import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { BufferProfileItem } from "@/lib/services/buffer/list-buffer-profiles.service";
 import { EditPostModal } from "./edit-post-modal";
 import { PostActivityModal } from "./post-activity-modal";
+import { ImagePickerModal, type GalleryMediaItem } from "@/components/media/ImagePickerModal";
 
 type BadgeVariant =
   "owner" | "editor" | "comingSoon" | "success" | "warning" | "danger" | "neutral" | "readonly";
@@ -19,16 +21,6 @@ const CHANNEL_META: Record<string, { label: string; variant: BadgeVariant }> = {
   LINKEDIN: { label: "LinkedIn", variant: "editor" },
   INSTAGRAM: { label: "Instagram", variant: "warning" },
   TIKTOK: { label: "TikTok", variant: "danger" },
-};
-
-const STATUS_META: Record<string, { label: string; variant: BadgeVariant }> = {
-  DRAFT: { label: "Draft", variant: "neutral" },
-  PENDING_APPROVAL: { label: "Pending Approval", variant: "warning" },
-  APPROVED: { label: "Approved", variant: "success" },
-  REJECTED: { label: "Rejected", variant: "danger" },
-  SENT_TO_BUFFER: { label: "Sent to Buffer", variant: "success" },
-  PUBLISHED: { label: "Published", variant: "success" },
-  FAILED: { label: "Failed", variant: "danger" },
 };
 
 function formatDate(iso: string): string {
@@ -62,6 +54,9 @@ export function GeneratedPostCard({
   onDelete,
   onStatusChange,
 }: Props) {
+  const t = useTranslations("posts");
+  const tCommon = useTranslations("common");
+
   // ── Approval state ────────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
   const [approving, setApproving] = useState(false);
@@ -86,6 +81,13 @@ export function GeneratedPostCard({
   // ── Activity state ────────────────────────────────────────────────────────
   const [activityOpen, setActivityOpen] = useState(false);
 
+  // ── Image picker state ────────────────────────────────────────────────────
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [removeError, setRemoveError] = useState("");
+  const [galleryItems, setGalleryItems] = useState<GalleryMediaItem[]>([]);
+  const [galleryLoading, setGalleryLoading] = useState(false);
+  const [galleryError, setGalleryError] = useState("");
+
   // ── Publish state ─────────────────────────────────────────────────────────
   const [localStatus, setLocalStatus] = useState(post.status);
   const [publishOpen, setPublishOpen] = useState(false);
@@ -100,6 +102,17 @@ export function GeneratedPostCard({
     label: post.channel,
     variant: "neutral" as BadgeVariant,
   };
+
+  const STATUS_META: Record<string, { label: string; variant: BadgeVariant }> = {
+    DRAFT: { label: t("statuses.DRAFT"), variant: "neutral" },
+    PENDING_APPROVAL: { label: t("statuses.PENDING_APPROVAL"), variant: "warning" },
+    APPROVED: { label: t("statuses.APPROVED"), variant: "success" },
+    REJECTED: { label: t("statuses.REJECTED"), variant: "danger" },
+    SENT_TO_BUFFER: { label: t("statuses.SENT_TO_BUFFER"), variant: "success" },
+    PUBLISHED: { label: t("statuses.PUBLISHED"), variant: "success" },
+    FAILED: { label: t("statuses.FAILED"), variant: "danger" },
+  };
+
   const statusMeta = STATUS_META[localStatus] ?? {
     label: localStatus,
     variant: "neutral" as BadgeVariant,
@@ -125,12 +138,12 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/posts/${post.id}/submit`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to submit for approval.");
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
       setLocalStatus("PENDING_APPROVAL");
       onStatusChange?.(post.id, "PENDING_APPROVAL");
     } catch (err) {
-      setApprovalError(err instanceof Error ? err.message : "Something went wrong.");
+      setApprovalError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setSubmitting(false);
     }
@@ -143,12 +156,12 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/posts/${post.id}/approve`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to approve post.");
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
       setLocalStatus("APPROVED");
       onStatusChange?.(post.id, "APPROVED");
     } catch (err) {
-      setApprovalError(err instanceof Error ? err.message : "Something went wrong.");
+      setApprovalError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setApproving(false);
     }
@@ -161,12 +174,12 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/posts/${post.id}/reject`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to reject post.");
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
       setLocalStatus("REJECTED");
       onStatusChange?.(post.id, "REJECTED");
     } catch (err) {
-      setApprovalError(err instanceof Error ? err.message : "Something went wrong.");
+      setApprovalError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setRejecting(false);
     }
@@ -182,11 +195,11 @@ export function GeneratedPostCard({
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to delete.");
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
       onDelete(post.id);
     } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : "Something went wrong.");
+      setDeleteError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
       setDeleting(false);
       setConfirmDelete(false);
     }
@@ -200,14 +213,50 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/posts/${post.id}/generate-image`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Image generation failed.");
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
       const json = (await res.json()) as { media: { id: string; url: string } };
       setImageUrl(json.media.url);
     } catch (err) {
-      setImageError(err instanceof Error ? err.message : "Something went wrong.");
+      setImageError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setGeneratingImage(false);
+    }
+  }
+
+  // ── Gallery fetch (triggered from click handler, not a hook) ────────────
+  async function loadGallery() {
+    setGalleryLoading(true);
+    setGalleryError("");
+    try {
+      const res = await fetch(`/api/v1/companies/${slug}/media?pageSize=48`);
+      if (!res.ok) throw new Error(tCommon("somethingWentWrong"));
+      const json = (await res.json()) as { media: GalleryMediaItem[] };
+      setGalleryItems(json.media);
+    } catch (err) {
+      setGalleryError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
+    } finally {
+      setGalleryLoading(false);
+    }
+  }
+
+  function handleOpenPicker() {
+    setPickerOpen(true);
+    void loadGallery();
+  }
+
+  // ── Remove Image ──────────────────────────────────────────────────────────
+  async function handleRemoveImage() {
+    setRemoveError("");
+    try {
+      const res = await fetch(`/api/v1/posts/${post.id}/detach-media`, { method: "POST" });
+      if (!res.ok) {
+        const json = (await res.json()) as { error?: { message?: string } };
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+      }
+      setImageUrl(null);
+    } catch (err) {
+      setRemoveError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     }
   }
 
@@ -220,13 +269,13 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/companies/${slug}/buffer/profiles`);
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to load Buffer profiles.");
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
       const json = (await res.json()) as { profiles: BufferProfileItem[] };
       setProfiles(json.profiles);
       setSelectedProfileId(json.profiles[0]?.id ?? "");
     } catch (err) {
-      setPublishError(err instanceof Error ? err.message : "Failed to load profiles.");
+      setPublishError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setLoadingProfiles(false);
     }
@@ -244,14 +293,14 @@ export function GeneratedPostCard({
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Publishing failed.");
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
       const json = (await res.json()) as { publishedAt: string };
       setLocalStatus("SENT_TO_BUFFER");
       setPublishedAt(json.publishedAt);
       setPublishOpen(false);
     } catch (err) {
-      setPublishError(err instanceof Error ? err.message : "Something went wrong.");
+      setPublishError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setPublishing(false);
     }
@@ -305,7 +354,7 @@ export function GeneratedPostCard({
       {post.imagePrompt && !imageUrl && (
         <div className="mb-3 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
           <p className="mb-1 text-xs font-semibold tracking-wide text-gray-400 uppercase">
-            Image Prompt
+            {t("imagePrompt")}
           </p>
           <p className="text-xs leading-relaxed text-gray-600">{post.imagePrompt}</p>
         </div>
@@ -314,7 +363,9 @@ export function GeneratedPostCard({
       {/* Notes */}
       {post.notes && (
         <div className="mb-3 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
-          <p className="mb-1 text-xs font-semibold tracking-wide text-gray-400 uppercase">Notes</p>
+          <p className="mb-1 text-xs font-semibold tracking-wide text-gray-400 uppercase">
+            {t("notes")}
+          </p>
           <p className="text-xs leading-relaxed text-gray-600">{post.notes}</p>
         </div>
       )}
@@ -323,7 +374,7 @@ export function GeneratedPostCard({
       {publishedAt && (
         <div className="mb-3 rounded-lg border border-green-100 bg-green-50 px-4 py-3">
           <p className="text-xs font-semibold text-green-700">
-            Sent to Buffer — {formatDate(publishedAt)}
+            {t("sentToBuffer", { date: formatDate(publishedAt) })}
           </p>
         </div>
       )}
@@ -339,6 +390,13 @@ export function GeneratedPostCard({
       {imageError && (
         <Alert variant="error" className="mb-3">
           {imageError}
+        </Alert>
+      )}
+
+      {/* Remove image error */}
+      {removeError && (
+        <Alert variant="error" className="mb-3">
+          {removeError}
         </Alert>
       )}
 
@@ -359,13 +417,11 @@ export function GeneratedPostCard({
       {/* Publish panel */}
       {publishOpen && isApproved && (
         <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
-          <p className="mb-2 text-xs font-semibold text-blue-800">Publish to Buffer</p>
+          <p className="mb-2 text-xs font-semibold text-blue-800">{t("publishPanel.title")}</p>
           {loadingProfiles ? (
-            <p className="text-xs text-blue-600">Loading profiles…</p>
+            <p className="text-xs text-blue-600">{t("publishPanel.loadingProfiles")}</p>
           ) : profiles.length === 0 ? (
-            <p className="text-xs text-blue-600">
-              No Buffer profiles found. Connect a social account in your Buffer dashboard.
-            </p>
+            <p className="text-xs text-blue-600">{t("publishPanel.noProfiles")}</p>
           ) : (
             <select
               value={selectedProfileId}
@@ -393,7 +449,7 @@ export function GeneratedPostCard({
               disabled={!selectedProfileId || loadingProfiles || profiles.length === 0}
               onClick={handlePublish}
             >
-              {publishing ? "Publishing…" : "Publish"}
+              {publishing ? t("publishPanel.publishing") : t("publishPanel.publish")}
             </Button>
             <Button
               variant="ghost"
@@ -403,7 +459,7 @@ export function GeneratedPostCard({
                 setPublishError("");
               }}
             >
-              Cancel
+              {tCommon("cancel")}
             </Button>
           </div>
         </div>
@@ -412,21 +468,36 @@ export function GeneratedPostCard({
       {/* Action bar */}
       <div className="flex flex-wrap items-center gap-2">
         {/* Image actions */}
-        {post.imagePrompt && !imageUrl && (
-          <Button variant="ghost" size="sm" loading={generatingImage} onClick={handleGenerateImage}>
-            {generatingImage ? "Generating image…" : "Generate Image"}
+        {isDraft && !imageUrl && (
+          <Button variant="ghost" size="sm" onClick={handleOpenPicker}>
+            {t("addImage")}
           </Button>
         )}
-        {imageUrl && (
+        {isDraft && imageUrl && (
+          <>
+            <Button variant="ghost" size="sm" onClick={handleOpenPicker}>
+              {t("replaceImage")}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => void handleRemoveImage()}>
+              {t("removeImage")}
+            </Button>
+          </>
+        )}
+        {!isDraft && post.imagePrompt && !imageUrl && (
           <Button variant="ghost" size="sm" loading={generatingImage} onClick={handleGenerateImage}>
-            {generatingImage ? "Generating image…" : "Regenerate Image"}
+            {generatingImage ? t("generatingImage") : t("generateImage")}
+          </Button>
+        )}
+        {!isDraft && imageUrl && (
+          <Button variant="ghost" size="sm" loading={generatingImage} onClick={handleGenerateImage}>
+            {generatingImage ? t("generatingImage") : t("regenerateImage")}
           </Button>
         )}
 
         {/* Edit — draft / pending / rejected */}
         {isEditable && (
           <Button variant="ghost" size="sm" onClick={() => setEditOpen(true)}>
-            Edit
+            {tCommon("edit")}
           </Button>
         )}
 
@@ -438,7 +509,7 @@ export function GeneratedPostCard({
             loading={submitting}
             onClick={handleSubmitForApproval}
           >
-            {submitting ? "Submitting…" : "Submit for Approval"}
+            {submitting ? t("submitting") : t("submitForApproval")}
           </Button>
         )}
 
@@ -446,10 +517,10 @@ export function GeneratedPostCard({
         {isPendingApproval && canApprove && (
           <>
             <Button variant="primary" size="sm" loading={approving} onClick={handleApprove}>
-              {approving ? "Approving…" : "Approve"}
+              {approving ? t("approving") : t("approve")}
             </Button>
             <Button variant="danger" size="sm" loading={rejecting} onClick={handleReject}>
-              {rejecting ? "Rejecting…" : "Reject"}
+              {rejecting ? t("rejecting") : t("reject")}
             </Button>
           </>
         )}
@@ -457,11 +528,11 @@ export function GeneratedPostCard({
         {/* Publish to Buffer — approved only */}
         {canPublish && bufferConnected && isApproved && !publishOpen && (
           <Button variant="secondary" size="sm" onClick={handleOpenPublish}>
-            Publish to Buffer
+            {t("publishToBuffer")}
           </Button>
         )}
         {canPublish && !bufferConnected && isApproved && (
-          <span className="text-xs text-gray-400">Connect Buffer to publish</span>
+          <span className="text-xs text-gray-400">{t("connectBufferToPublish")}</span>
         )}
 
         {/* Delete — draft only, owner/admin */}
@@ -469,12 +540,12 @@ export function GeneratedPostCard({
           isDraft &&
           (confirmDelete ? (
             <>
-              <p className="text-xs text-gray-500">Delete this draft?</p>
+              <p className="text-xs text-gray-500">{t("deleteDraft")}</p>
               <Button variant="danger" size="sm" loading={deleting} onClick={handleDelete}>
-                {deleting ? "Deleting…" : "Confirm"}
+                {deleting ? tCommon("deleting") : tCommon("confirm")}
               </Button>
               <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>
-                Cancel
+                {tCommon("cancel")}
               </Button>
             </>
           ) : (
@@ -486,7 +557,7 @@ export function GeneratedPostCard({
                 setDeleteError("");
               }}
             >
-              Delete
+              {tCommon("delete")}
             </Button>
           ))}
       </div>
@@ -497,7 +568,7 @@ export function GeneratedPostCard({
           onClick={() => setActivityOpen(true)}
           className="text-xs text-gray-400 transition-colors hover:text-gray-600"
         >
-          View activity
+          {t("viewActivity")}
         </button>
       </div>
 
@@ -517,6 +588,23 @@ export function GeneratedPostCard({
           postId={post.id}
           open={activityOpen}
           onClose={() => setActivityOpen(false)}
+        />
+      )}
+
+      {pickerOpen && (
+        <ImagePickerModal
+          postId={post.id}
+          companySlug={slug}
+          postImagePrompt={post.imagePrompt ?? null}
+          galleryItems={galleryItems}
+          galleryLoading={galleryLoading}
+          galleryError={galleryError}
+          onGalleryRetry={() => void loadGallery()}
+          onClose={() => setPickerOpen(false)}
+          onAttached={(media) => {
+            setImageUrl(media.url);
+            setPickerOpen(false);
+          }}
         />
       )}
     </Card>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
@@ -21,6 +22,8 @@ interface Props {
 }
 
 export function GeneratePostForm({ slug, onGenerated }: Props) {
+  const t = useTranslations("posts.generate");
+  const tCommon = useTranslations("common");
   const [channel, setChannel] = useState<Channel>("FACEBOOK");
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
@@ -38,7 +41,7 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Generation failed.");
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
       const json = (await res.json()) as { post: PostItem; warnings: GenerationWarnings };
       onGenerated(json.post);
@@ -46,7 +49,7 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
         setWarnings(json.warnings);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Something went wrong.");
+      setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setGenerating(false);
     }
@@ -54,7 +57,7 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
 
   return (
     <div className="rounded-xl border border-gray-200 bg-white px-5 py-5 shadow-sm">
-      <h3 className="mb-4 text-sm font-semibold text-gray-900">Generate a draft post</h3>
+      <h3 className="mb-4 text-sm font-semibold text-gray-900">{t("title")}</h3>
 
       {error && (
         <Alert variant="error" className="mb-4">
@@ -64,15 +67,13 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
 
       {warnings?.duplicate.flagged && (
         <Alert variant="warning" className="mb-3">
-          Similar post detected (score {warnings.duplicate.similarityScore?.toFixed(2)}). Review
-          before publishing.
+          {t("duplicateWarning", { score: warnings.duplicate.similarityScore?.toFixed(2) ?? "0" })}
         </Alert>
       )}
 
       {warnings?.safety.flagged && (
         <Alert variant="warning" className="mb-3">
-          Safety check flagged: {warnings.safety.matchedTerms.join(", ")}. Draft saved — please
-          review before approving.
+          {t("safetyWarning", { terms: warnings.safety.matchedTerms.join(", ") })}
         </Alert>
       )}
 
@@ -82,7 +83,7 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
             htmlFor="generate-channel"
             className="mb-1.5 block text-sm font-medium text-gray-700"
           >
-            Channel
+            {t("channel")}
           </label>
           <select
             id="generate-channel"
@@ -103,7 +104,7 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
         </div>
 
         <Button variant="primary" loading={generating} onClick={handleGenerate}>
-          {generating ? "Generating…" : "Generate Draft"}
+          {generating ? t("generating") : t("generateDraft")}
         </Button>
       </div>
     </div>

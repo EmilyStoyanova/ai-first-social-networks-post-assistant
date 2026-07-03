@@ -1,20 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import type { AuditLogItem } from "@/lib/services/audit/audit-log.service";
 
 // ─── Display maps ──────────────────────────────────────────────────────────────
-
-const ACTION_LABELS: Record<string, string> = {
-  POST_GENERATED: "Post Generated",
-  POST_SUBMITTED: "Submitted for Approval",
-  POST_APPROVED: "Post Approved",
-  POST_REJECTED: "Post Rejected",
-  POST_EDITED: "Post Edited",
-  POST_VERSION_RESTORED: "Version Restored",
-  POST_PUBLISHED: "Published to Buffer",
-  MEDIA_ATTACHED: "Media Attached",
-};
 
 const ACTION_ICONS: Record<string, string> = {
   POST_GENERATED: "✨",
@@ -38,6 +28,17 @@ const ACTION_DOT_COLORS: Record<string, string> = {
   MEDIA_ATTACHED: "border-pink-200 bg-pink-50",
 };
 
+const ALL_ACTION_KEYS = [
+  "POST_GENERATED",
+  "POST_SUBMITTED",
+  "POST_APPROVED",
+  "POST_REJECTED",
+  "POST_EDITED",
+  "POST_VERSION_RESTORED",
+  "POST_PUBLISHED",
+  "MEDIA_ATTACHED",
+] as const;
+
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatDate(iso: string): string {
@@ -50,36 +51,6 @@ function formatDate(iso: string): string {
   });
 }
 
-function summarizeMetadata(
-  action: string,
-  metadata: Record<string, unknown> | null
-): string | null {
-  if (!metadata) return null;
-  switch (action) {
-    case "POST_GENERATED": {
-      const parts = [metadata.llmProvider, metadata.llmModel].filter(Boolean);
-      return parts.length > 0 ? `via ${parts.join(" ")}` : null;
-    }
-    case "POST_EDITED": {
-      const fields = metadata.changedFields;
-      if (Array.isArray(fields) && fields.length > 0) {
-        return `Changed: ${(fields as string[]).join(", ")}`;
-      }
-      return null;
-    }
-    case "POST_VERSION_RESTORED":
-      return "Restored from version history";
-    case "POST_PUBLISHED": {
-      const id = metadata.bufferUpdateId;
-      return id ? `Buffer: ${String(id).slice(0, 14)}…` : "Published";
-    }
-    case "MEDIA_ATTACHED":
-      return "Image attached to post";
-    default:
-      return null;
-  }
-}
-
 // ─── Entries list (shared between page and modal) ──────────────────────────────
 
 interface EntriesProps {
@@ -87,12 +58,44 @@ interface EntriesProps {
 }
 
 export function AuditLogEntries({ logs }: EntriesProps) {
+  const t = useTranslations("auditLog");
+
   if (logs.length === 0) {
     return (
       <div className="py-12 text-center">
-        <p className="text-sm text-gray-400">No activity recorded yet.</p>
+        <p className="text-sm text-gray-400">{t("noActivity")}</p>
       </div>
     );
+  }
+
+  function summarizeMetadata(
+    action: string,
+    metadata: Record<string, unknown> | null
+  ): string | null {
+    if (!metadata) return null;
+    switch (action) {
+      case "POST_GENERATED": {
+        const parts = [metadata.llmProvider, metadata.llmModel].filter(Boolean);
+        return parts.length > 0 ? t("viaProvider", { provider: parts.join(" ") }) : null;
+      }
+      case "POST_EDITED": {
+        const fields = metadata.changedFields;
+        if (Array.isArray(fields) && fields.length > 0) {
+          return t("changed", { fields: (fields as string[]).join(", ") });
+        }
+        return null;
+      }
+      case "POST_VERSION_RESTORED":
+        return t("restoredFromVersion");
+      case "POST_PUBLISHED": {
+        const id = metadata.bufferUpdateId;
+        return id ? t("bufferRef", { id: String(id).slice(0, 14) }) : t("published");
+      }
+      case "MEDIA_ATTACHED":
+        return t("imageAttached");
+      default:
+        return null;
+    }
   }
 
   return (
@@ -104,9 +107,14 @@ export function AuditLogEntries({ logs }: EntriesProps) {
         {logs.map((log) => {
           const dotColor = ACTION_DOT_COLORS[log.action] ?? "border-gray-200 bg-gray-50";
           const icon = ACTION_ICONS[log.action] ?? "•";
-          const label = ACTION_LABELS[log.action] ?? log.action;
+          const actionKey = log.action as keyof typeof t;
+          const label = ALL_ACTION_KEYS.includes(log.action as (typeof ALL_ACTION_KEYS)[number])
+            ? t(`actions.${log.action as (typeof ALL_ACTION_KEYS)[number]}`)
+            : log.action;
           const meta = summarizeMetadata(log.action, log.metadata);
-          const actor = log.user ? (log.user.name ?? log.user.email) : "System";
+          const actor = log.user ? (log.user.name ?? log.user.email) : t("system");
+
+          void actionKey;
 
           return (
             <li key={log.id} className="relative flex gap-3">
@@ -128,7 +136,7 @@ export function AuditLogEntries({ logs }: EntriesProps) {
                 </p>
                 {log.entityId && (
                   <p className="font-mono text-xs text-gray-400">
-                    Post {log.entityId.slice(0, 8)}…
+                    {t("postRef", { id: log.entityId.slice(0, 8) })}
                   </p>
                 )}
                 {meta && <p className="text-xs text-gray-500 italic">{meta}</p>}
@@ -143,13 +151,12 @@ export function AuditLogEntries({ logs }: EntriesProps) {
 
 // ─── Full timeline with filters ────────────────────────────────────────────────
 
-const ALL_ACTIONS = Object.keys(ACTION_LABELS);
-
 interface TimelineProps {
   logs: AuditLogItem[];
 }
 
 export function AuditLogTimeline({ logs }: TimelineProps) {
+  const t = useTranslations("auditLog");
   const [filterAction, setFilterAction] = useState("");
   const [filterFrom, setFilterFrom] = useState("");
   const [filterTo, setFilterTo] = useState("");
@@ -174,23 +181,23 @@ export function AuditLogTimeline({ logs }: TimelineProps) {
       {/* Filter bar */}
       <div className="flex flex-wrap items-end gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-gray-500">Action</label>
+          <label className="text-xs font-medium text-gray-500">{t("filterAction")}</label>
           <select
             value={filterAction}
             onChange={(e) => setFilterAction(e.target.value)}
             className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-800 outline-none focus:border-gray-400 focus:ring-2 focus:ring-gray-100"
           >
-            <option value="">All actions</option>
-            {ALL_ACTIONS.map((a) => (
+            <option value="">{t("filterAllActions")}</option>
+            {ALL_ACTION_KEYS.map((a) => (
               <option key={a} value={a}>
-                {ACTION_LABELS[a]}
+                {t(`actions.${a}`)}
               </option>
             ))}
           </select>
         </div>
 
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-gray-500">From</label>
+          <label className="text-xs font-medium text-gray-500">{t("filterFrom")}</label>
           <input
             type="date"
             value={filterFrom}
@@ -200,7 +207,7 @@ export function AuditLogTimeline({ logs }: TimelineProps) {
         </div>
 
         <div className="flex flex-col gap-1">
-          <label className="text-xs font-medium text-gray-500">To</label>
+          <label className="text-xs font-medium text-gray-500">{t("filterTo")}</label>
           <input
             type="date"
             value={filterTo}
@@ -214,12 +221,12 @@ export function AuditLogTimeline({ logs }: TimelineProps) {
             onClick={reset}
             className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm text-gray-500 transition-colors hover:border-gray-300 hover:text-gray-700"
           >
-            Clear
+            {t("clear")}
           </button>
         )}
 
         <p className="ml-auto self-center text-xs text-gray-400">
-          {filtered.length} of {logs.length} entries
+          {t("entries", { filtered: filtered.length, total: logs.length })}
         </p>
       </div>
 

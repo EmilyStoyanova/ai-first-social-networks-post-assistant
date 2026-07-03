@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { InviteMemberForm } from "./invite-member-form";
@@ -26,6 +27,8 @@ interface Props {
 }
 
 export function CompanyMembers({ slug, initialMembers, currentUserEmail, canManage }: Props) {
+  const t = useTranslations("members");
+  const tCommon = useTranslations("common");
   const [members, setMembers] = useState<ClientMember[]>(initialMembers);
 
   function handleInvited(member: ClientMember) {
@@ -44,8 +47,8 @@ export function CompanyMembers({ slug, initialMembers, currentUserEmail, canMana
     <Card className="px-6 py-6">
       {/* Card header */}
       <div className="mb-5 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-gray-900">Members</h2>
-        {!canManage && <Badge variant="readonly">Read only</Badge>}
+        <h2 className="text-sm font-semibold text-gray-900">{t("title")}</h2>
+        {!canManage && <Badge variant="readonly">{tCommon("readOnly")}</Badge>}
       </div>
 
       {/* Invite form — owners and global admins only */}
@@ -53,7 +56,7 @@ export function CompanyMembers({ slug, initialMembers, currentUserEmail, canMana
         <>
           <div className="mb-5">
             <h3 className="mb-3 text-xs font-semibold tracking-widest text-gray-400 uppercase">
-              Invite Member
+              {t("inviteMember")}
             </h3>
             <InviteMemberForm slug={slug} onInvited={handleInvited} />
           </div>
@@ -64,24 +67,24 @@ export function CompanyMembers({ slug, initialMembers, currentUserEmail, canMana
       {/* Current members */}
       <div>
         <h3 className="mb-3 text-xs font-semibold tracking-widest text-gray-400 uppercase">
-          Current Members
+          {t("currentMembers")}
         </h3>
 
         {members.length === 0 ? (
-          <p className="py-4 text-center text-sm text-gray-400">No members yet.</p>
+          <p className="py-4 text-center text-sm text-gray-400">{t("noMembers")}</p>
         ) : (
           <div>
             {/* Table header — desktop only */}
             <div className="mb-1 hidden grid-cols-[minmax(0,1fr)_8rem_auto] gap-4 sm:grid">
               <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
-                Name &amp; Email
+                {t("nameAndEmail")}
               </span>
               <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
-                Role
+                {t("role")}
               </span>
               {canManage && (
                 <span className="min-w-[6rem] text-right text-xs font-medium tracking-wide text-gray-400 uppercase">
-                  Actions
+                  {t("actions")}
                 </span>
               )}
             </div>

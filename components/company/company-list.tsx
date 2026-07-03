@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 import type { CompanyListItem } from "@/lib/services/company/list-companies.service";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -18,11 +19,13 @@ function roleBadgeVariant(role: CompanyListItem["role"]) {
 }
 
 export function CompanyList({ companies }: Props) {
+  const t = useTranslations("companies");
+
   if (companies.length === 0) {
     return (
       <EmptyState
-        title="No companies yet."
-        action={<Button href="/companies/new">Create your first company</Button>}
+        title={t("noCompanies")}
+        action={<Button href="/companies/new">{t("createFirst")}</Button>}
       />
     );
   }

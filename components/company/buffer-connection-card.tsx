@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -37,6 +38,8 @@ function BufferIcon() {
 }
 
 export function BufferConnectionCard({ slug, initialConnection, canManage, bufferParam }: Props) {
+  const t = useTranslations("buffer");
+  const tCommon = useTranslations("common");
   const [connection, setConnection] = useState(initialConnection);
   const [uiStatus, setUiStatus] = useState<"idle" | "disconnecting" | "error">("idle");
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
@@ -65,17 +68,17 @@ export function BufferConnectionCard({ slug, initialConnection, canManage, buffe
     <Card className="px-6 py-6">
       {bufferParam === "connected" && (
         <Alert variant="success" className="mb-5">
-          Buffer account connected successfully.
+          {t("successConnected")}
         </Alert>
       )}
       {bufferParam === "error" && (
         <Alert variant="error" className="mb-5">
-          Unable to connect Buffer account. Please try again.
+          {t("connectError")}
         </Alert>
       )}
       {uiStatus === "error" && (
         <Alert variant="error" className="mb-5">
-          Failed to disconnect Buffer. Please try again.
+          {t("disconnectError")}
         </Alert>
       )}
 
@@ -84,25 +87,23 @@ export function BufferConnectionCard({ slug, initialConnection, canManage, buffe
 
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex items-center justify-between gap-4">
-            <h2 className="text-sm font-semibold text-gray-900">Buffer Integration</h2>
+            <h2 className="text-sm font-semibold text-gray-900">{t("bufferIntegration")}</h2>
             <Badge variant={connected ? "success" : "neutral"}>
-              {connected ? "Connected" : "Not Connected"}
+              {connected ? t("connected") : t("notConnected")}
             </Badge>
           </div>
 
-          <p className="mb-4 text-sm leading-relaxed text-gray-500">
-            Connect your Buffer account to publish AI-generated posts to your social media channels.
-          </p>
+          <p className="mb-4 text-sm leading-relaxed text-gray-500">{t("connectDesc")}</p>
 
           {connected && (
             <dl className="mb-4 space-y-1.5">
               <div className="flex items-center gap-2 text-sm">
-                <dt className="text-gray-500">Buffer User ID</dt>
+                <dt className="text-gray-500">{t("bufferUserId")}</dt>
                 <dd className="font-medium text-gray-900">{connection.bufferUserId}</dd>
               </div>
               {connection.connectedAt && (
                 <div className="flex items-center gap-2 text-sm">
-                  <dt className="text-gray-500">Connected</dt>
+                  <dt className="text-gray-500">{t("connectedSince")}</dt>
                   <dd className="text-gray-900">
                     {new Date(connection.connectedAt).toLocaleDateString(undefined, {
                       year: "numeric",
@@ -115,43 +116,37 @@ export function BufferConnectionCard({ slug, initialConnection, canManage, buffe
             </dl>
           )}
 
-          {!canManage && (
-            <p className="mb-3 text-xs text-gray-500">
-              Only company owners can manage Buffer integrations.
-            </p>
-          )}
+          {!canManage && <p className="mb-3 text-xs text-gray-500">{t("ownersOnly")}</p>}
 
           {canManage && !connected && (
             <Button variant="primary" onClick={handleConnect}>
-              Connect Buffer
+              {t("connectBuffer")}
             </Button>
           )}
 
           {canManage && connected && !confirmDisconnect && (
             <div className="flex flex-wrap items-center gap-3">
               <Button variant="secondary" onClick={handleConnect}>
-                Reconnect Buffer
+                {t("reconnect")}
               </Button>
               <Button variant="danger" onClick={() => setConfirmDisconnect(true)}>
-                Disconnect
+                {t("disconnect")}
               </Button>
             </div>
           )}
 
           {canManage && confirmDisconnect && (
             <div className="flex flex-wrap items-center gap-3">
-              <span className="text-sm text-gray-700">
-                Are you sure you want to disconnect Buffer?
-              </span>
+              <span className="text-sm text-gray-700">{t("areYouSure")}</span>
               <Button
                 variant="danger"
                 loading={uiStatus === "disconnecting"}
                 onClick={handleDisconnect}
               >
-                {uiStatus === "disconnecting" ? "Disconnecting…" : "Yes, disconnect"}
+                {uiStatus === "disconnecting" ? t("disconnecting") : t("yesDisconnect")}
               </Button>
               <Button variant="ghost" onClick={() => setConfirmDisconnect(false)}>
-                Cancel
+                {tCommon("cancel")}
               </Button>
             </div>
           )}

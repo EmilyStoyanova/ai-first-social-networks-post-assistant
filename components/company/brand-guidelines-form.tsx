@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -104,6 +105,8 @@ function FieldError({ id, message }: { id: string; message?: string }) {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }: Props) {
+  const t = useTranslations("brandGuidelines");
+  const tCommon = useTranslations("common");
   const canEdit = role === "OWNER" || isGlobalAdmin;
 
   const [values, setValues] = useState<FormValues>(() => toFormValues(initialValues));
@@ -148,15 +151,13 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
 
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to save brand guidelines.");
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
 
       setStatus("success");
     } catch (err) {
       setStatus("error");
-      setErrorMessage(
-        err instanceof Error ? err.message : "Something went wrong. Please try again."
-      );
+      setErrorMessage(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     }
   }
 
@@ -164,14 +165,14 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
     <Card className="px-6 py-6">
       {/* Card header */}
       <div className="mb-5 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-gray-900">Brand Guidelines</h2>
-        {!canEdit && <Badge variant="neutral">Read only</Badge>}
+        <h2 className="text-sm font-semibold text-gray-900">{t("title")}</h2>
+        {!canEdit && <Badge variant="neutral">{tCommon("readOnly")}</Badge>}
       </div>
 
       {/* Status alerts */}
       {status === "success" && (
         <Alert variant="success" className="mb-5">
-          Brand guidelines saved successfully.
+          {t("savedSuccess")}
         </Alert>
       )}
       {status === "error" && (
@@ -184,7 +185,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
         {/* Row: Logo URL + Font Family */}
         <div className="mb-4 grid gap-x-6 gap-y-4 sm:grid-cols-2">
           <div>
-            <Label htmlFor="bg-logoUrl" text="Logo URL" />
+            <Label htmlFor="bg-logoUrl" text={t("logoUrl")} />
             <input
               id="bg-logoUrl"
               name="logoUrl"
@@ -201,7 +202,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
           </div>
 
           <div>
-            <Label htmlFor="bg-fontFamily" text="Font Family" />
+            <Label htmlFor="bg-fontFamily" text={t("fontFamily")} />
             <input
               id="bg-fontFamily"
               name="fontFamily"
@@ -222,7 +223,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
         <div className="mb-4 grid gap-x-6 gap-y-4 sm:grid-cols-2">
           <ColorField
             id="bg-primaryColor"
-            label="Primary Color"
+            label={t("primaryColor")}
             value={values.primaryColor}
             onChange={(v) => set("primaryColor", v)}
             error={fieldErrors.primaryColor}
@@ -230,7 +231,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
           />
           <ColorField
             id="bg-secondaryColor"
-            label="Secondary Color"
+            label={t("secondaryColor")}
             value={values.secondaryColor}
             onChange={(v) => set("secondaryColor", v)}
             error={fieldErrors.secondaryColor}
@@ -240,7 +241,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
 
         {/* Tone of Voice */}
         <div className="mb-4">
-          <Label htmlFor="bg-toneOfVoice" text="Tone of Voice" />
+          <Label htmlFor="bg-toneOfVoice" text={t("toneOfVoice")} />
           <textarea
             id="bg-toneOfVoice"
             name="toneOfVoice"
@@ -258,7 +259,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
 
         {/* Company Description */}
         <div className="mb-4">
-          <Label htmlFor="bg-companyDescription" text="Company Description" />
+          <Label htmlFor="bg-companyDescription" text={t("companyDescription")} />
           <textarea
             id="bg-companyDescription"
             name="companyDescription"
@@ -278,7 +279,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
 
         {/* Target Audience */}
         <div className="mb-4">
-          <Label htmlFor="bg-targetAudience" text="Target Audience" />
+          <Label htmlFor="bg-targetAudience" text={t("targetAudience")} />
           <textarea
             id="bg-targetAudience"
             name="targetAudience"
@@ -301,7 +302,8 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
               htmlFor="bg-forbiddenWords"
               className="mb-1.5 block text-sm font-medium text-gray-700"
             >
-              Forbidden Words <span className="font-normal text-gray-400">(one per line)</span>
+              {t("forbiddenWords")}{" "}
+              <span className="font-normal text-gray-400">{t("forbiddenWordsHint")}</span>
             </label>
             <textarea
               id="bg-forbiddenWords"
@@ -323,7 +325,8 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
               htmlFor="bg-competitors"
               className="mb-1.5 block text-sm font-medium text-gray-700"
             >
-              Competitors <span className="font-normal text-gray-400">(one per line)</span>
+              {t("competitors")}{" "}
+              <span className="font-normal text-gray-400">{t("competitorsHint")}</span>
             </label>
             <textarea
               id="bg-competitors"
@@ -344,7 +347,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
         {/* Save button — owners and global admins only */}
         {canEdit && (
           <Button type="submit" variant="primary" disabled={isSaving}>
-            {isSaving ? "Saving…" : "Save Changes"}
+            {isSaving ? tCommon("saving") : tCommon("save")}
           </Button>
         )}
       </form>

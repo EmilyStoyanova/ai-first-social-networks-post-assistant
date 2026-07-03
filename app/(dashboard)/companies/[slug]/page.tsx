@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
+import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { getBrandGuidelines } from "@/lib/services/company/get-brand-guidelines.service";
@@ -30,28 +31,6 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   return { title: `${slug} – AI-First Post Assistant` };
 }
 
-const UPCOMING_MODULES = [
-  {
-    icon: "📡",
-    title: "Channels",
-    description:
-      "Set up and manage your social media channels across Facebook, LinkedIn, Instagram, and TikTok.",
-    href: undefined,
-  },
-  {
-    icon: "✍️",
-    title: "Posts",
-    description: "Create, schedule, and manage posts across all configured channels.",
-    href: undefined,
-  },
-  {
-    icon: "📊",
-    title: "Analytics",
-    description: "Track engagement and performance across all social media channels.",
-    href: undefined,
-  },
-] as const;
-
 export default async function CompanyPage({ params, searchParams }: Props) {
   const session = await auth();
   if (!session) redirect("/login");
@@ -60,6 +39,9 @@ export default async function CompanyPage({ params, searchParams }: Props) {
 
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
+
+  const t = await getTranslations("companyPage");
+  const tNav = await getTranslations("navigation");
 
   const [
     brandGuidelines,
@@ -98,13 +80,13 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         email: session.user.email,
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
-      breadcrumb={[{ label: "Companies", href: "/companies" }, { label: company.name }]}
+      breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
       <div className="space-y-8">
         <CompanyHeader company={company} />
         <CompanyOverview company={company} />
 
-        <Section title="Brand">
+        <Section title={t("sections.brand")}>
           <BrandGuidelinesForm
             slug={slug}
             initialValues={brandGuidelines}
@@ -113,7 +95,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
           />
         </Section>
 
-        <Section title="Members">
+        <Section title={t("sections.members")}>
           <CompanyMembers
             slug={slug}
             initialMembers={members}
@@ -122,7 +104,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
           />
         </Section>
 
-        <Section title="Integrations">
+        <Section title={t("sections.integrations")}>
           <BufferConnectionCard
             slug={slug}
             initialConnection={{
@@ -135,10 +117,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
           />
         </Section>
 
-        <Section
-          title="Channels"
-          description="Configure how each social network should be used for this company."
-        >
+        <Section title={t("sections.channels")} description={t("sections.channelsDesc")}>
           <ChannelConfigSection
             slug={slug}
             initialConfigs={channelConfigs}
@@ -148,8 +127,8 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         </Section>
 
         <Section
-          title="Content Sources"
-          description="Define the sources the AI will draw on when generating posts."
+          title={t("sections.contentSources")}
+          description={t("sections.contentSourcesDesc")}
         >
           <ContentSourcesSection
             slug={slug}
@@ -158,10 +137,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
           />
         </Section>
 
-        <Section
-          title="AI Generated Posts"
-          description="Generate and review AI-drafted posts for each social channel."
-        >
+        <Section title={t("sections.aiPosts")} description={t("sections.aiPostsDesc")}>
           <GeneratedPostsSection
             slug={slug}
             initialPosts={initialPosts}
@@ -172,34 +148,41 @@ export default async function CompanyPage({ params, searchParams }: Props) {
           />
         </Section>
 
-        <Section title="Modules">
+        <Section title={t("sections.modules")}>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <CompanySectionCard
               icon="🖼️"
-              title="Media Gallery"
-              description="Browse and reuse all AI-generated images for this company."
+              title={t("modules.mediaGallery")}
+              description={t("modules.mediaGalleryDesc")}
               href={`/companies/${slug}/media`}
             />
             <CompanySectionCard
               icon="✅"
-              title="Approval Queue"
-              description="Review and approve posts that are pending approval before publishing."
+              title={t("modules.approvalQueue")}
+              description={t("modules.approvalQueueDesc")}
               href={`/companies/${slug}/approval`}
             />
             <CompanySectionCard
               icon="📋"
-              title="Audit Log"
-              description="View a chronological record of all post actions — approvals, edits, and publishes."
+              title={t("modules.auditLog")}
+              description={t("modules.auditLogDesc")}
               href={`/companies/${slug}/audit-log`}
             />
-            {UPCOMING_MODULES.map((mod) => (
-              <CompanySectionCard
-                key={mod.title}
-                icon={mod.icon}
-                title={mod.title}
-                description={mod.description}
-              />
-            ))}
+            <CompanySectionCard
+              icon="📡"
+              title={t("modules.channels")}
+              description={t("modules.channelsDesc")}
+            />
+            <CompanySectionCard
+              icon="✍️"
+              title={t("modules.posts")}
+              description={t("modules.postsDesc")}
+            />
+            <CompanySectionCard
+              icon="📊"
+              title={t("modules.analytics")}
+              description={t("modules.analyticsDesc")}
+            />
           </div>
         </Section>
       </div>

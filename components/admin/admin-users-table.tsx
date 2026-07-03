@@ -1,3 +1,4 @@
+import { getTranslations } from "next-intl/server";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -11,24 +12,32 @@ interface Props {
   users: AdminUserItem[];
 }
 
-export function AdminUsersTable({ users }: Props) {
+export async function AdminUsersTable({ users }: Props) {
+  const t = await getTranslations("admin");
+
   if (users.length === 0) {
-    return <EmptyState icon="👤" title="No users found." />;
+    return <EmptyState icon="👤" title={t("noUsers")} />;
   }
 
   return (
     <Card className="overflow-hidden px-0 py-0">
-      {/* Desktop header: Name+Email | Role | Language | Companies | Created */}
+      {/* Desktop header */}
       <div className="hidden grid-cols-[minmax(0,1fr)_6rem_5rem_5rem_7rem] gap-4 border-b border-gray-100 bg-gray-50 px-6 py-3 sm:grid">
         <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
-          Name &amp; Email
+          {t("nameAndEmail")}
         </span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">Role</span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">Language</span>
+        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+          {t("role")}
+        </span>
+        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+          {t("language")}
+        </span>
         <span className="text-center text-xs font-medium tracking-wide text-gray-400 uppercase">
-          Companies
+          {t("companies")}
         </span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">Created</span>
+        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+          {t("created")}
+        </span>
       </div>
 
       <div className="divide-y divide-gray-100">
@@ -41,12 +50,11 @@ export function AdminUsersTable({ users }: Props) {
                 <p className="mt-0.5 truncate text-xs text-gray-500">{u.email}</p>
                 <p className="mt-1 text-xs text-gray-400">
                   {u.preferredLanguage.toUpperCase()} &middot;{" "}
-                  {u.companyCount === 1 ? "1 company" : `${u.companyCount} companies`} &middot;{" "}
-                  {fmtDate(u.createdAt)}
+                  {t("companyCount", { count: u.companyCount })} &middot; {fmtDate(u.createdAt)}
                 </p>
               </div>
               <Badge variant={u.isGlobalAdmin ? "owner" : "editor"}>
-                {u.isGlobalAdmin ? "Admin" : "User"}
+                {u.isGlobalAdmin ? t("adminBadge") : t("userBadge")}
               </Badge>
             </div>
 
@@ -58,7 +66,7 @@ export function AdminUsersTable({ users }: Props) {
               </div>
               <div>
                 <Badge variant={u.isGlobalAdmin ? "owner" : "editor"}>
-                  {u.isGlobalAdmin ? "Admin" : "User"}
+                  {u.isGlobalAdmin ? t("adminBadge") : t("userBadge")}
                 </Badge>
               </div>
               <div className="text-sm text-gray-600">{u.preferredLanguage.toUpperCase()}</div>

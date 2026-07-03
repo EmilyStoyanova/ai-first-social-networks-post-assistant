@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { GeneratedPostCard } from "./generated-post-card";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
@@ -22,11 +23,11 @@ export function ApprovalQueueSection({
   canPublish,
   bufferConnected,
 }: Props) {
+  const t = useTranslations("approval");
   const [posts, setPosts] = useState<PostItem[]>(initialPosts);
   const [channelFilter, setChannelFilter] = useState<string>("ALL");
 
   function handleStatusChange(id: string) {
-    // Remove from queue once approved or rejected — no longer pending
     setPosts((prev) => prev.filter((p) => p.id !== id));
   }
 
@@ -49,7 +50,7 @@ export function ApprovalQueueSection({
                 : "bg-gray-100 text-gray-600 hover:bg-gray-200",
             ].join(" ")}
           >
-            All ({posts.length})
+            {t("all")} ({posts.length})
           </button>
           {CHANNELS.filter((ch) => activeChannels.includes(ch)).map((ch) => {
             const count = posts.filter((p) => p.channel === ch).length;
@@ -74,12 +75,8 @@ export function ApprovalQueueSection({
       {visible.length === 0 ? (
         <EmptyState
           icon="✅"
-          title={posts.length === 0 ? "No posts pending approval" : "No posts match the filter"}
-          description={
-            posts.length === 0
-              ? "When posts are submitted for approval they will appear here."
-              : "Try selecting a different channel."
-          }
+          title={posts.length === 0 ? t("noPending") : t("noFilter")}
+          description={posts.length === 0 ? t("noPendingDesc") : t("noFilterDesc")}
         />
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">

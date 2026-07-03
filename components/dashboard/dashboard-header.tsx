@@ -3,14 +3,10 @@
 import { Fragment } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { LogoutButton } from "./logout-button";
+import { LanguageSwitcher } from "@/components/ui/LanguageSwitcher";
 import type { BreadcrumbItem } from "./dashboard-layout";
-
-const PAGE_TITLES: Record<string, string> = {
-  "/dashboard": "Dashboard",
-  "/companies": "Companies",
-  "/companies/new": "New Company",
-};
 
 interface SessionUser {
   name?: string | null;
@@ -25,10 +21,17 @@ interface Props {
 
 export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
   const pathname = usePathname();
+  const t = useTranslations();
   const displayName = user.name ?? user.email ?? "User";
 
+  const PAGE_TITLES: Record<string, string> = {
+    "/dashboard": t("navigation.dashboard"),
+    "/companies": t("navigation.companies"),
+    "/companies/new": t("createCompany.title"),
+  };
+
   const fallbackTitle =
-    PAGE_TITLES[pathname] ?? (pathname.startsWith("/companies/") ? "Company" : "");
+    PAGE_TITLES[pathname] ?? (pathname.startsWith("/companies/") ? t("navigation.companies") : "");
 
   return (
     <header className="flex h-16 shrink-0 items-center gap-4 border-b border-gray-200 bg-white px-4 sm:px-6">
@@ -36,7 +39,7 @@ export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
       <button
         type="button"
         onClick={onMenuClick}
-        aria-label="Open navigation menu"
+        aria-label={t("header.openMenu")}
         className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-900 lg:hidden"
       >
         <svg
@@ -86,6 +89,7 @@ export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
       </div>
 
       <div className="flex shrink-0 items-center gap-4">
+        <LanguageSwitcher />
         <span className="hidden text-sm text-gray-600 sm:block">{displayName}</span>
         <LogoutButton />
       </div>

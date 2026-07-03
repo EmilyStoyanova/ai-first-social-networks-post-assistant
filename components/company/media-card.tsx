@@ -3,9 +3,11 @@
 import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import { useTranslations } from "next-intl";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
+import { Modal } from "@/components/ui/Modal";
 import type { MediaItem } from "@/lib/services/company/list-media.service";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 
@@ -30,9 +32,14 @@ function formatDate(iso: string): string {
 interface Props {
   item: MediaItem;
   slug: string;
+  canDelete?: boolean;
+  onDeleted?: (id: string) => void;
 }
 
-export function MediaCard({ item, slug }: Props) {
+export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
+  const t = useTranslations("mediaCard");
+  const tCommon = useTranslations("common");
+
   const [reuseOpen, setReuseOpen] = useState(false);
   const [loadingPosts, setLoadingPosts] = useState(false);
   const [draftPosts, setDraftPosts] = useState<PostItem[]>([]);
@@ -40,6 +47,14 @@ export function MediaCard({ item, slug }: Props) {
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState("");
   const [attachedSuccess, setAttachedSuccess] = useState(false);
+
+  // Preview modal
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  // Delete
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
 
   const channelMeta = item.post
     ? (CHANNEL_META[item.post.channel] ?? {
@@ -60,7 +75,7 @@ export function MediaCard({ item, slug }: Props) {
       setDraftPosts(drafts);
       setSelectedPostId(drafts[0]?.id ?? "");
     } catch {
-      setAttachError("Failed to load posts.");
+      setAttachError(tCommon("somethingWentWrong"));
     } finally {
       setLoadingPosts(false);
     }
@@ -78,137 +93,271 @@ export function MediaCard({ item, slug }: Props) {
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to attach image.");
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
       setAttachedSuccess(true);
       setReuseOpen(false);
     } catch (err) {
-      setAttachError(err instanceof Error ? err.message : "Something went wrong.");
+      setAttachError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setAttaching(false);
     }
   }
 
+  async function handleDelete() {
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      const res = await fetch(`/api/v1/companies/${slug}/media/${item.id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const json = (await res.json()) as { error?: { message?: string } };
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+      }
+      onDeleted?.(item.id);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
+      setDeleting(false);
+      setConfirmDelete(false);
+    }
+  }
+
   return (
-    <div className="flex flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
-      {/* Image */}
-      <div className="relative aspect-video w-full overflow-hidden bg-gray-100">
-        <Image
-          src={item.url}
-          alt={item.post ? `Image for ${item.post.channel} post` : "AI-generated image"}
-          fill
-          className="object-cover"
-          unoptimized
-          loading="lazy"
-        />
+    <>
+      <div className="flex flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+        {/* Image — clickable for preview */}
+        <button
+          type="button"
+          className="relative aspect-video w-full overflow-hidden bg-gray-100"
+          onClick={() => setPreviewOpen(true)}
+          aria-label={t("preview")}
+        >
+          <Image
+            src={item.url}
+            alt={item.post ? `Image for ${item.post.channel} post` : "Media asset"}
+            fill
+            className="object-cover transition-transform duration-200 hover:scale-105"
+            unoptimized
+            loading="lazy"
+          />
+          <div className="absolute inset-0 flex items-center justify-center opacity-0 transition-opacity hover:opacity-100">
+            <div className="rounded-full bg-black/40 px-3 py-1.5">
+              <span className="text-xs font-medium text-white">{t("preview")}</span>
+            </div>
+          </div>
+        </button>
+
+        {/* Content */}
+        <div className="flex flex-1 flex-col px-4 py-4">
+          {/* Badges row */}
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            {channelMeta && <Badge variant={channelMeta.variant}>{channelMeta.label}</Badge>}
+            <Badge variant="neutral">{item.provider}</Badge>
+          </div>
+
+          {/* Metadata */}
+          <dl className="mb-4 space-y-1 text-xs text-gray-500">
+            <div className="flex items-center justify-between gap-2">
+              <dt className="font-medium text-gray-400">{t("created")}</dt>
+              <dd>{formatDate(item.createdAt)}</dd>
+            </div>
+            {item.width && item.height && (
+              <div className="flex items-center justify-between gap-2">
+                <dt className="font-medium text-gray-400">{t("dimensions")}</dt>
+                <dd>
+                  {item.width} × {item.height}
+                </dd>
+              </div>
+            )}
+            {item.post && (
+              <div className="flex items-center justify-between gap-2">
+                <dt className="font-medium text-gray-400">{t("status")}</dt>
+                <dd>{item.post.status}</dd>
+              </div>
+            )}
+          </dl>
+
+          {/* Success banner */}
+          {attachedSuccess && (
+            <Alert variant="success" className="mb-3">
+              {t("attachedSuccess")}
+            </Alert>
+          )}
+
+          {/* Delete error */}
+          {deleteError && (
+            <Alert variant="error" className="mb-3">
+              {deleteError}
+            </Alert>
+          )}
+
+          {/* Reuse panel */}
+          {reuseOpen && (
+            <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+              <p className="mb-2 text-xs font-semibold text-gray-700">{t("attachToDraft")}</p>
+              {loadingPosts ? (
+                <p className="text-xs text-gray-400">{t("loadingPosts")}</p>
+              ) : draftPosts.length === 0 ? (
+                <p className="text-xs text-gray-400">{t("noDrafts")}</p>
+              ) : (
+                <select
+                  value={selectedPostId}
+                  onChange={(e) => setSelectedPostId(e.target.value)}
+                  disabled={attaching}
+                  className="mb-2 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100"
+                >
+                  {draftPosts.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.channel} — {p.text.slice(0, 50)}
+                      {p.text.length > 50 ? "…" : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {attachError && (
+                <Alert variant="error" className="mb-2">
+                  {attachError}
+                </Alert>
+              )}
+              <div className="flex gap-2">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={attaching}
+                  disabled={!selectedPostId || loadingPosts}
+                  onClick={() => void handleAttach()}
+                >
+                  {attaching ? tCommon("attaching") : tCommon("attach")}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setReuseOpen(false);
+                    setAttachError("");
+                  }}
+                >
+                  {tCommon("cancel")}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Actions */}
+          <div className="mt-auto flex flex-wrap items-center gap-2">
+            {item.post && (
+              <Link
+                href={`/companies/${slug}`}
+                className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-100"
+              >
+                {t("openPost")}
+              </Link>
+            )}
+
+            {!reuseOpen && (
+              <Button variant="ghost" size="sm" onClick={() => void handleOpenReuse()}>
+                {t("reuseImage")}
+              </Button>
+            )}
+
+            {/* Copy URL */}
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => void navigator.clipboard.writeText(item.url)}
+            >
+              {t("copyUrl")}
+            </Button>
+
+            {/* Delete — owners only */}
+            {canDelete &&
+              (confirmDelete ? (
+                <>
+                  <p className="text-xs text-gray-500">{t("deleteImage")}</p>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    loading={deleting}
+                    onClick={() => void handleDelete()}
+                  >
+                    {deleting ? tCommon("deleting") : tCommon("confirm")}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setConfirmDelete(false);
+                      setDeleteError("");
+                    }}
+                  >
+                    {tCommon("cancel")}
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setConfirmDelete(true);
+                    setDeleteError("");
+                  }}
+                >
+                  {tCommon("delete")}
+                </Button>
+              ))}
+          </div>
+        </div>
       </div>
 
-      {/* Content */}
-      <div className="flex flex-1 flex-col px-4 py-4">
-        {/* Badges row */}
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          {channelMeta && <Badge variant={channelMeta.variant}>{channelMeta.label}</Badge>}
-          <Badge variant="neutral">{item.provider}</Badge>
-        </div>
-
-        {/* Metadata */}
-        <dl className="mb-4 space-y-1 text-xs text-gray-500">
-          <div className="flex items-center justify-between gap-2">
-            <dt className="font-medium text-gray-400">Created</dt>
-            <dd>{formatDate(item.createdAt)}</dd>
-          </div>
-          {item.width && item.height && (
-            <div className="flex items-center justify-between gap-2">
-              <dt className="font-medium text-gray-400">Dimensions</dt>
-              <dd>
-                {item.width} × {item.height}
-              </dd>
+      {/* Preview modal */}
+      {previewOpen && (
+        <Modal open onClose={() => setPreviewOpen(false)} title={t("imagePreview")} maxWidth="xl">
+          <div className="space-y-4">
+            <div className="overflow-hidden rounded-xl border border-gray-200">
+              <Image
+                src={item.url}
+                alt={t("imagePreview")}
+                width={item.width ?? 1200}
+                height={item.height ?? 630}
+                className="w-full object-contain"
+                unoptimized
+              />
             </div>
-          )}
-          {item.post && (
-            <div className="flex items-center justify-between gap-2">
-              <dt className="font-medium text-gray-400">Status</dt>
-              <dd>{item.post.status}</dd>
-            </div>
-          )}
-        </dl>
-
-        {/* Success banner */}
-        {attachedSuccess && (
-          <Alert variant="success" className="mb-3">
-            Image attached successfully.
-          </Alert>
-        )}
-
-        {/* Reuse panel */}
-        {reuseOpen && (
-          <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
-            <p className="mb-2 text-xs font-semibold text-gray-700">Attach to a draft post</p>
-            {loadingPosts ? (
-              <p className="text-xs text-gray-400">Loading posts…</p>
-            ) : draftPosts.length === 0 ? (
-              <p className="text-xs text-gray-400">No draft posts available.</p>
-            ) : (
-              <select
-                value={selectedPostId}
-                onChange={(e) => setSelectedPostId(e.target.value)}
-                disabled={attaching}
-                className="mb-2 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100"
-              >
-                {draftPosts.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.channel} — {p.text.slice(0, 50)}
-                    {p.text.length > 50 ? "…" : ""}
-                  </option>
-                ))}
-              </select>
-            )}
-            {attachError && (
-              <Alert variant="error" className="mb-2">
-                {attachError}
-              </Alert>
-            )}
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+              {item.width && item.height && (
+                <>
+                  <dt className="font-medium text-gray-400">{t("dimensions")}</dt>
+                  <dd className="text-gray-700">
+                    {item.width} × {item.height}
+                  </dd>
+                </>
+              )}
+              <dt className="font-medium text-gray-400">{t("status")}</dt>
+              <dd className="text-gray-700">{item.provider}</dd>
+              <dt className="font-medium text-gray-400">{t("created")}</dt>
+              <dd className="text-gray-700">{formatDate(item.createdAt)}</dd>
+            </dl>
             <div className="flex gap-2">
               <Button
-                variant="primary"
+                variant="secondary"
                 size="sm"
-                loading={attaching}
-                disabled={!selectedPostId || loadingPosts}
-                onClick={handleAttach}
+                onClick={() => void navigator.clipboard.writeText(item.url)}
               >
-                {attaching ? "Attaching…" : "Attach"}
+                {t("copyUrl")}
               </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => {
-                  setReuseOpen(false);
-                  setAttachError("");
-                }}
+              <a
+                href={item.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50"
               >
-                Cancel
-              </Button>
+                {t("openInNewTab")}
+              </a>
             </div>
           </div>
-        )}
-
-        {/* Actions */}
-        <div className="mt-auto flex flex-wrap items-center gap-2">
-          {item.post && (
-            <Link
-              href={`/companies/${slug}`}
-              className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-100"
-            >
-              Open Post
-            </Link>
-          )}
-          {!reuseOpen && (
-            <Button variant="ghost" size="sm" onClick={handleOpenReuse}>
-              Reuse Image
-            </Button>
-          )}
-        </div>
-      </div>
-    </div>
+        </Modal>
+      )}
+    </>
   );
 }

@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { usePathname } from "next/navigation";
+import { useTranslations } from "next-intl";
 import { Navigation } from "./navigation";
 import { LogoutButton } from "./logout-button";
 
@@ -13,9 +14,9 @@ interface Props {
 
 export function Sidebar({ isOpen, onClose, isGlobalAdmin }: Props) {
   const pathname = usePathname();
+  const t = useTranslations("sidebar");
 
   // Close the mobile sidebar whenever the route changes.
-  // onClose is memoised in DashboardLayout so this only fires on navigation.
   useEffect(() => {
     onClose();
   }, [pathname, onClose]);
@@ -31,9 +32,6 @@ export function Sidebar({ isOpen, onClose, isGlobalAdmin }: Props) {
         />
       )}
 
-      {/* Sidebar panel
-          Mobile: hidden by default, shown when isOpen.
-          Desktop (lg+): always visible via lg:flex. */}
       <aside
         className={[
           "fixed inset-y-0 left-0 z-50 w-64 flex-col border-r border-gray-200 bg-white",
@@ -47,8 +45,10 @@ export function Sidebar({ isOpen, onClose, isGlobalAdmin }: Props) {
             <span className="text-sm font-bold text-white">AI</span>
           </div>
           <div>
-            <p className="text-sm leading-tight font-bold tracking-tight text-gray-900">AI-First</p>
-            <p className="text-xs leading-tight text-gray-400">Post Assistant</p>
+            <p className="text-sm leading-tight font-bold tracking-tight text-gray-900">
+              {t("logoName")}
+            </p>
+            <p className="text-xs leading-tight text-gray-400">{t("logoTagline")}</p>
           </div>
         </div>
 

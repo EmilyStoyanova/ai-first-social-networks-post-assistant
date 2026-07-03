@@ -1,3 +1,4 @@
+import { getTranslations } from "next-intl/server";
 import type { CompanyDetails } from "@/lib/services/company/get-company.service";
 import { Badge } from "@/components/ui/Badge";
 
@@ -5,7 +6,9 @@ interface Props {
   company: CompanyDetails;
 }
 
-export function CompanyHeader({ company }: Props) {
+export async function CompanyHeader({ company }: Props) {
+  const t = await getTranslations("overview");
+
   return (
     <div className="flex items-start justify-between gap-6">
       <div className="min-w-0">
@@ -35,7 +38,7 @@ export function CompanyHeader({ company }: Props) {
               </svg>
             </a>
           ) : (
-            <span className="text-sm text-gray-400">No website configured.</span>
+            <span className="text-sm text-gray-400">{t("noWebsite")}</span>
           )}
           <span className="text-gray-200" aria-hidden="true">
             |
