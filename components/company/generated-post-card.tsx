@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Image from "next/image";
 import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -56,6 +57,7 @@ export function GeneratedPostCard({
 }: Props) {
   const t = useTranslations("posts");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
 
   // ── Approval state ────────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
@@ -138,7 +140,7 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/posts/${post.id}/submit`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       setLocalStatus("PENDING_APPROVAL");
       onStatusChange?.(post.id, "PENDING_APPROVAL");
@@ -156,7 +158,7 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/posts/${post.id}/approve`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       setLocalStatus("APPROVED");
       onStatusChange?.(post.id, "APPROVED");
@@ -174,7 +176,7 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/posts/${post.id}/reject`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       setLocalStatus("REJECTED");
       onStatusChange?.(post.id, "REJECTED");
@@ -195,7 +197,7 @@ export function GeneratedPostCard({
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       onDelete(post.id);
     } catch (err) {
@@ -213,7 +215,7 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/posts/${post.id}/generate-image`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       const json = (await res.json()) as { media: { id: string; url: string } };
       setImageUrl(json.media.url);
@@ -252,7 +254,7 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/posts/${post.id}/detach-media`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       setImageUrl(null);
     } catch (err) {
@@ -269,7 +271,7 @@ export function GeneratedPostCard({
       const res = await fetch(`/api/v1/companies/${slug}/buffer/profiles`);
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       const json = (await res.json()) as { profiles: BufferProfileItem[] };
       setProfiles(json.profiles);
@@ -293,7 +295,7 @@ export function GeneratedPostCard({
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       const json = (await res.json()) as { publishedAt: string };
       setLocalStatus("SENT_TO_BUFFER");
@@ -341,7 +343,7 @@ export function GeneratedPostCard({
         <div className="mb-4 overflow-hidden rounded-lg border border-gray-200">
           <Image
             src={imageUrl}
-            alt="AI-generated image"
+            alt={t("imageAlt")}
             width={1200}
             height={630}
             className="w-full object-cover"

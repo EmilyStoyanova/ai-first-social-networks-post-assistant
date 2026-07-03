@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import type { ClientMember } from "./company-members";
@@ -27,6 +28,7 @@ interface Props {
 export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRemoved }: Props) {
   const t = useTranslations("members");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const [isChangingRole, setIsChangingRole] = useState(false);
   const [roleError, setRoleError] = useState("");
   const [showConfirm, setShowConfirm] = useState(false);
@@ -49,7 +51,7 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
 
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to change role.");
+        throw new Error(apiError(json.error, t("roleChangeError")));
       }
 
       onRoleChanged(member.id, newRole);
@@ -71,7 +73,7 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
 
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to remove member.");
+        throw new Error(apiError(json.error, t("removeError")));
       }
 
       onRemoved(member.id);

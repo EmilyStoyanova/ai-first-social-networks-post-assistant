@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { inviteMemberSchema } from "@/lib/validators/company-member.schema";
@@ -31,6 +32,7 @@ interface Props {
 export function InviteMemberForm({ slug, onInvited }: Props) {
   const t = useTranslations("members");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"OWNER" | "EDITOR">("EDITOR");
   const [status, setStatus] = useState<"idle" | "submitting" | "success" | "error">("idle");
@@ -45,7 +47,7 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
 
     const parsed = inviteMemberSchema.safeParse({ email: email.trim(), role });
     if (!parsed.success) {
-      setEmailError(parsed.error.issues[0]?.message ?? "Invalid email address.");
+      setEmailError(t("invalidEmail"));
       return;
     }
 
@@ -65,7 +67,7 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
       };
 
       if (!res.ok) {
-        throw new Error(json.error?.message ?? "Failed to invite member.");
+        throw new Error(apiError(json.error, t("inviteError")));
       }
 
       onInvited(json.member!);

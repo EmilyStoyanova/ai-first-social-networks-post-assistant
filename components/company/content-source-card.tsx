@@ -1,4 +1,8 @@
+"use client";
+
 import { useState } from "react";
+import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -15,18 +19,8 @@ interface Props {
   onUpdate: (source: ContentSourceItem) => void;
 }
 
-const TYPE_META: Record<
-  string,
-  { label: string; variant: "warning" | "neutral" | "success" | "editor" }
-> = {
-  rss: { label: "RSS", variant: "warning" },
-  prompt: { label: "Prompt", variant: "neutral" },
-  product_page: { label: "Product Page", variant: "success" },
-  calendar_event: { label: "Calendar", variant: "editor" },
-};
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "Never";
+function formatDate(iso: string | null, never: string): string {
+  if (!iso) return never;
   return new Date(iso).toLocaleDateString(undefined, {
     year: "numeric",
     month: "short",
@@ -48,6 +42,9 @@ function sourcePreview(source: ContentSourceItem): string {
 }
 
 export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate }: Props) {
+  const t = useTranslations("contentSources");
+  const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editError, setEditError] = useState("");
@@ -62,6 +59,16 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
 
+  const TYPE_META: Record<
+    string,
+    { label: string; variant: "warning" | "neutral" | "success" | "editor" }
+  > = {
+    rss: { label: t("rss"), variant: "warning" },
+    prompt: { label: t("prompt"), variant: "neutral" },
+    product_page: { label: t("productPage"), variant: "success" },
+    calendar_event: { label: t("calendar"), variant: "editor" },
+  };
+
   const meta = TYPE_META[source.type] ?? { label: source.type, variant: "neutral" as const };
 
   async function handleSave(data: ContentSourcePayload) {
@@ -75,13 +82,13 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to save.");
+        throw new Error(apiError(json.error));
       }
       const json = (await res.json()) as { source: ContentSourceItem };
       onUpdate(json.source);
       setIsEditing(false);
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : "Something went wrong.");
+      setEditError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setSaving(false);
     }
@@ -97,12 +104,12 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Ingestion failed.");
+        throw new Error(apiError(json.error));
       }
       const json = (await res.json()) as { created: number; updated: number };
       setIngestResult(json);
     } catch (err) {
-      setIngestError(err instanceof Error ? err.message : "Something went wrong.");
+      setIngestError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setIngesting(false);
     }
@@ -117,11 +124,11 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to delete.");
+        throw new Error(apiError(json.error));
       }
       onDelete(source.id);
     } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : "Something went wrong.");
+      setDeleteError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
       setDeleting(false);
       setConfirmDelete(false);
     }
@@ -135,7 +142,7 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <Badge variant={meta.variant}>{meta.label}</Badge>
             <Badge variant={source.enabled ? "success" : "neutral"}>
-              {source.enabled ? "Active" : "Inactive"}
+              {source.enabled ? t("active") : t("inactive")}
             </Badge>
           </div>
           <h3 className="truncate text-sm font-semibold text-gray-900">{source.name}</h3>
@@ -147,13 +154,14 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
 
       {/* Last fetched */}
       <p className="mb-4 text-xs text-gray-400">
-        Last ingested: <span className="text-gray-600">{formatDate(source.lastFetchedAt)}</span>
+        {t("lastIngested")}{" "}
+        <span className="text-gray-600">{formatDate(source.lastFetchedAt, t("never"))}</span>
       </p>
 
       {/* Alerts */}
       {ingestResult && (
         <Alert variant="success" className="mb-3">
-          Ingested successfully — {ingestResult.created} created, {ingestResult.updated} updated.
+          {t("ingestSuccess", { created: ingestResult.created, updated: ingestResult.updated })}
         </Alert>
       )}
       {ingestError && (
@@ -190,21 +198,21 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
           {/* Delete confirmation */}
           {confirmDelete ? (
             <div className="flex items-center gap-3">
-              <p className="text-xs text-gray-500">Delete this source?</p>
+              <p className="text-xs text-gray-500">{t("deleteSource")}</p>
               <Button variant="danger" size="sm" loading={deleting} onClick={handleDelete}>
-                {deleting ? "Deleting…" : "Confirm"}
+                {deleting ? tCommon("deleting") : tCommon("confirm")}
               </Button>
               <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>
-                Cancel
+                {tCommon("cancel")}
               </Button>
             </div>
           ) : (
             <div className="flex flex-wrap items-center gap-2">
               <Button variant="primary" size="sm" loading={ingesting} onClick={handleIngest}>
-                {ingesting ? "Ingesting…" : "Ingest"}
+                {ingesting ? t("ingesting") : t("ingest")}
               </Button>
               <Button variant="secondary" size="sm" onClick={() => setIsEditing(true)}>
-                Edit
+                {tCommon("edit")}
               </Button>
               <Button
                 variant="ghost"
@@ -214,13 +222,13 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
                   setIngestResult(null);
                 }}
               >
-                Delete
+                {tCommon("delete")}
               </Button>
             </div>
           )}
         </>
       ) : (
-        <p className="text-xs text-gray-400">Only company owners can manage content sources.</p>
+        <p className="text-xs text-gray-400">{t("ownersOnly")}</p>
       )}
     </Card>
   );

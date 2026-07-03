@@ -4,6 +4,7 @@ import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
@@ -39,6 +40,7 @@ interface Props {
 export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
   const t = useTranslations("mediaCard");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
 
   const [reuseOpen, setReuseOpen] = useState(false);
   const [loadingPosts, setLoadingPosts] = useState(false);
@@ -93,7 +95,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       setAttachedSuccess(true);
       setReuseOpen(false);
@@ -113,7 +115,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       onDeleted?.(item.id);
     } catch (err) {
@@ -135,7 +137,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
         >
           <Image
             src={item.url}
-            alt={item.post ? `Image for ${item.post.channel} post` : "Media asset"}
+            alt={item.post ? t("imageForPost", { channel: item.post.channel }) : t("mediaAsset")}
             fill
             className="object-cover transition-transform duration-200 hover:scale-105"
             unoptimized

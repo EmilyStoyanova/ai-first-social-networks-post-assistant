@@ -9,7 +9,11 @@ export async function PUT(
   { params }: { params: Promise<{ slug: string; sourceId: string }> }
 ) {
   const session = await auth();
-  if (!session) return NextResponse.json({ error: { message: "Unauthorized" } }, { status: 401 });
+  if (!session)
+    return NextResponse.json(
+      { error: { code: "UNAUTHORIZED", message: "Unauthorized" } },
+      { status: 401 }
+    );
 
   const { slug, sourceId } = await params;
 
@@ -17,13 +21,22 @@ export async function PUT(
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: { message: "Invalid JSON" } }, { status: 400 });
+    return NextResponse.json(
+      { error: { code: "INVALID_JSON", message: "Invalid JSON" } },
+      { status: 400 }
+    );
   }
 
   const parsed = contentSourceSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json(
-      { error: { message: "Validation failed", issues: parsed.error.issues } },
+      {
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "Validation failed",
+          issues: parsed.error.issues,
+        },
+      },
       { status: 422 }
     );
   }
@@ -39,7 +52,7 @@ export async function PUT(
   if (!result.success) {
     const status = result.code === "NOT_FOUND" ? 404 : 403;
     const message = result.code === "NOT_FOUND" ? "Not found" : "Forbidden";
-    return NextResponse.json({ error: { message } }, { status });
+    return NextResponse.json({ error: { code: result.code, message } }, { status });
   }
   return NextResponse.json({ source: result.source });
 }
@@ -49,7 +62,11 @@ export async function DELETE(
   { params }: { params: Promise<{ slug: string; sourceId: string }> }
 ) {
   const session = await auth();
-  if (!session) return NextResponse.json({ error: { message: "Unauthorized" } }, { status: 401 });
+  if (!session)
+    return NextResponse.json(
+      { error: { code: "UNAUTHORIZED", message: "Unauthorized" } },
+      { status: 401 }
+    );
 
   const { slug, sourceId } = await params;
   const result = await deleteContentSource(
@@ -62,7 +79,7 @@ export async function DELETE(
   if (!result.success) {
     const status = result.code === "NOT_FOUND" ? 404 : 403;
     const message = result.code === "NOT_FOUND" ? "Not found" : "Forbidden";
-    return NextResponse.json({ error: { message } }, { status });
+    return NextResponse.json({ error: { code: result.code, message } }, { status });
   }
   return NextResponse.json({ success: true });
 }

@@ -1,4 +1,7 @@
+"use client";
+
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/Button";
 import type {
   ChannelConfigItem,
@@ -48,6 +51,8 @@ function parseWindows(text: string): PostingWindow[] {
 }
 
 export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: Props) {
+  const t = useTranslations("channels");
+  const tCommon = useTranslations("common");
   const [enabled, setEnabled] = useState(initialConfig.enabled);
   const [bufferProfileId, setBufferProfileId] = useState(initialConfig.bufferProfileId ?? "");
   const [postsPerDay, setPostsPerDay] = useState(String(initialConfig.postsPerDay));
@@ -88,13 +93,15 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
           onChange={(e) => setEnabled(e.target.checked)}
           className="h-4 w-4 rounded border-gray-300 text-green-500 focus:ring-green-500"
         />
-        <span className="text-sm font-medium text-gray-700">Enabled</span>
+        <span className="text-sm font-medium text-gray-700">{t("enabledLabel")}</span>
       </label>
 
       {/* Row: posts/day + posts/week */}
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">Posts per day</label>
+          <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            {t("postsPerDayLabel")}
+          </label>
           <input
             type="number"
             min={0}
@@ -105,7 +112,9 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
           />
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">Posts per week</label>
+          <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            {t("postsPerWeekLabel")}
+          </label>
           <input
             type="number"
             min={0}
@@ -120,26 +129,28 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
       {/* Row: language + automation override */}
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">Language</label>
+          <label className="mb-1.5 block text-sm font-medium text-gray-700">{t("language")}</label>
           <select
             value={language}
             onChange={(e) => setLanguage(e.target.value as "en" | "bg")}
             className={`${BASE} ${NORMAL}`}
           >
-            <option value="en">EN — English</option>
-            <option value="bg">BG — Bulgarian</option>
+            <option value="en">{t("languageEN")}</option>
+            <option value="bg">{t("languageBG")}</option>
           </select>
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">Automation mode</label>
+          <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            {t("automationMode")}
+          </label>
           <select
             value={automationOverride}
             onChange={(e) => setAutomationOverride(e.target.value)}
             className={`${BASE} ${NORMAL}`}
           >
-            <option value="">Company default</option>
-            <option value="semi_automated">Semi-automated</option>
-            <option value="fully_automated">Fully automated</option>
+            <option value="">{t("companyDefault")}</option>
+            <option value="semi_automated">{t("semiAutomated")}</option>
+            <option value="fully_automated">{t("fullyAutomated")}</option>
           </select>
         </div>
       </div>
@@ -152,13 +163,14 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
           onChange={(e) => setImageRequired(e.target.checked)}
           className="h-4 w-4 rounded border-gray-300 text-green-500 focus:ring-green-500"
         />
-        <span className="text-sm font-medium text-gray-700">Image required</span>
+        <span className="text-sm font-medium text-gray-700">{t("imageRequiredLabel")}</span>
       </label>
 
       {/* Buffer Profile ID */}
       <div>
         <label className="mb-1.5 block text-sm font-medium text-gray-700">
-          Buffer Profile ID <span className="font-normal text-gray-400">(optional)</span>
+          {t("bufferProfileId")}{" "}
+          <span className="font-normal text-gray-400">{t("bufferProfileIdOptional")}</span>
         </label>
         <input
           type="text"
@@ -172,8 +184,8 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
       {/* Posting windows */}
       <div>
         <label className="mb-1.5 block text-sm font-medium text-gray-700">
-          Posting windows{" "}
-          <span className="font-normal text-gray-400">(one per line: MONDAY 09:00-17:00)</span>
+          {t("postingWindows")}{" "}
+          <span className="font-normal text-gray-400">{t("postingWindowsHint")}</span>
         </label>
         <textarea
           rows={4}
@@ -187,10 +199,10 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
       {/* Actions */}
       <div className="flex items-center gap-3 pt-1">
         <Button type="submit" variant="primary" size="sm" loading={saving}>
-          {saving ? "Saving…" : "Save"}
+          {saving ? tCommon("saving") : t("save")}
         </Button>
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
-          Cancel
+          {tCommon("cancel")}
         </Button>
       </div>
     </form>

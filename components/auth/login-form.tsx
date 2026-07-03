@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { extractApiError, useApiErrorMessage } from "@/lib/i18n/api-error";
 import { loginSchema } from "@/lib/validators/login.schema";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -20,6 +21,7 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
   const router = useRouter();
   const t = useTranslations("auth.login");
   const tBrand = useTranslations("brand");
+  const apiError = useApiErrorMessage();
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
@@ -59,19 +61,9 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
       });
 
       const body: unknown = await res.json();
-      const errorMessage =
-        body !== null &&
-        typeof body === "object" &&
-        "error" in body &&
-        body.error !== null &&
-        typeof body.error === "object" &&
-        "message" in body.error &&
-        typeof body.error.message === "string"
-          ? body.error.message
-          : t("unexpectedError");
 
       if (!res.ok) {
-        setFormError(errorMessage);
+        setFormError(apiError(extractApiError(body), t("unexpectedError")));
         return;
       }
 

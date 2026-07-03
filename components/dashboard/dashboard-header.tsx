@@ -22,7 +22,7 @@ interface Props {
 export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
   const pathname = usePathname();
   const t = useTranslations();
-  const displayName = user.name ?? user.email ?? "User";
+  const displayName = user.name ?? user.email ?? t("header.userFallback");
 
   const PAGE_TITLES: Record<string, string> = {
     "/dashboard": t("navigation.dashboard"),
@@ -57,7 +57,7 @@ export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
       {/* Title / breadcrumb */}
       <div className="flex min-w-0 flex-1 items-center">
         {breadcrumb && breadcrumb.length > 0 ? (
-          <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5">
+          <nav aria-label={t("header.breadcrumb")} className="flex min-w-0 items-center gap-1.5">
             {breadcrumb.map((item, i) => (
               <Fragment key={item.label}>
                 {i > 0 && (

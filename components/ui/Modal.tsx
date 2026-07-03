@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, type ReactNode } from "react";
+import { useTranslations } from "next-intl";
 
 interface Props {
   open: boolean;
@@ -18,6 +19,7 @@ const MAX_WIDTH_CLASS: Record<string, string> = {
 };
 
 export function Modal({ open, onClose, title, children, maxWidth = "lg" }: Props) {
+  const t = useTranslations("common");
   const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -69,7 +71,7 @@ export function Modal({ open, onClose, title, children, maxWidth = "lg" }: Props
           <button
             onClick={onClose}
             className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600"
-            aria-label="Close"
+            aria-label={t("close")}
           >
             <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
               <path d="M6.293 6.293a1 1 0 0 1 1.414 0L10 8.586l2.293-2.293a1 1 0 1 1 1.414 1.414L11.414 10l2.293 2.293a1 1 0 0 1-1.414 1.414L10 11.414l-2.293 2.293a1 1 0 0 1-1.414-1.414L8.586 10 6.293 7.707a1 1 0 0 1 0-1.414z" />

@@ -12,7 +12,47 @@
     "attaching": "Attaching…",
     "backToCompany": "← Back to Company",
     "somethingWentWrong": "Something went wrong.",
-    "readOnly": "Read only"
+    "readOnly": "Read only",
+    "close": "Close"
+  },
+  "apiErrors": {
+    "UNAUTHORIZED": "You must be signed in to do this.",
+    "FORBIDDEN": "You don't have permission for this action.",
+    "NOT_FOUND": "The requested resource was not found.",
+    "INTERNAL_SERVER_ERROR": "Unexpected server error. Please try again.",
+    "VALIDATION_ERROR": "Some fields are invalid. Please review and try again.",
+    "INVALID_JSON": "Invalid request. Please refresh the page and try again.",
+    "INVALID_TRANSITION": "This action isn't allowed in the post's current status.",
+    "INVALID_STATUS": "The post is not in the right status for this action.",
+    "TOKEN_EXPIRED": "Your Buffer connection has expired. Please reconnect.",
+    "POST_LOCKED": "This post is locked and cannot be edited.",
+    "NO_CONNECTION": "Buffer is not connected for this company.",
+    "INVALID_FILE": "The file is invalid.",
+    "INVALID_CHANNEL": "Invalid channel.",
+    "BUFFER_API_ERROR": "Buffer returned an error. Please try again.",
+    "BAD_REQUEST": "Invalid request.",
+    "VERSION_NOT_FOUND": "That version no longer exists.",
+    "USER_NOT_FOUND": "No user found with that email.",
+    "UPLOAD_FAILED": "Upload failed. Please try again.",
+    "UNSUPPORTED_TYPE": "This file type is not supported.",
+    "NO_IMAGE_PROMPT": "This post has no image prompt.",
+    "NO_ACTIVE_PROVIDER": "No active LLM provider configured. Configure one in Admin → LLM Providers.",
+    "LLM_RESPONSE_PARSE_ERROR": "The AI returned an unexpected response. Please try again.",
+    "LLM_PROVIDER_ERROR": "The AI provider returned an error. Please try again.",
+    "INVALID_REQUEST": "Invalid request.",
+    "INVALID_PROFILE": "Invalid Buffer profile.",
+    "INVALID_CREDENTIALS": "Invalid email or password.",
+    "IMAGE_PROVIDER_ERROR": "Image generation failed. Please try again.",
+    "FILE_TOO_LARGE": "The file is too large.",
+    "EMAIL_ALREADY_EXISTS": "An account with this email already exists.",
+    "CONFIGURATION_ERROR": "Server configuration error. Please contact your administrator.",
+    "CANNOT_REMOVE_SELF": "You cannot remove yourself from the company.",
+    "CANNOT_REMOVE_LAST_OWNER": "You cannot remove the last owner of the company.",
+    "CANNOT_DELETE_ACTIVE": "You cannot delete the active provider.",
+    "CANNOT_CHANGE_OWN_ROLE": "You cannot change your own role.",
+    "ALREADY_MEMBER": "This user is already a member of the company.",
+    "INGEST_FAILED": "Ingestion failed. Check the source URL and try again.",
+    "UNKNOWN": "Something went wrong. Please try again."
   },
   "brand": {
     "title": "AI-First Social Networks",
@@ -51,7 +91,8 @@
     "analytics": "Analytics",
     "settings": "Settings",
     "admin": "Admin",
-    "adminPanel": "Admin Panel"
+    "adminPanel": "Admin Panel",
+    "mainNavigation": "Main navigation"
   },
   "sidebar": {
     "logoName": "AI-First",
@@ -60,7 +101,9 @@
   "header": {
     "openMenu": "Open navigation menu",
     "logout": "Logout",
-    "signOut": "Sign out of your account"
+    "signOut": "Sign out of your account",
+    "breadcrumb": "Breadcrumb",
+    "userFallback": "User"
   },
   "languageSwitcher": {
     "switchTo": "Switch language"
@@ -123,8 +166,11 @@
     "primaryColor": "Primary Color",
     "secondaryColor": "Secondary Color",
     "toneOfVoice": "Tone of Voice",
+    "toneOfVoicePlaceholder": "Professional, friendly, and concise.",
     "companyDescription": "Company Description",
+    "companyDescriptionPlaceholder": "Describe your company, its mission, and key value propositions.",
     "targetAudience": "Target Audience",
+    "targetAudiencePlaceholder": "Small business owners who need help managing their social media presence.",
     "forbiddenWords": "Forbidden Words",
     "forbiddenWordsHint": "(one per line)",
     "competitors": "Competitors",
@@ -145,7 +191,11 @@
     "inviting": "Inviting…",
     "invite": "Invite",
     "removeMember": "Remove this member?",
-    "remove": "Remove"
+    "remove": "Remove",
+    "invalidEmail": "Invalid email address.",
+    "inviteError": "Failed to invite member.",
+    "roleChangeError": "Failed to change role.",
+    "removeError": "Failed to remove member."
   },
   "buffer": {
     "connectBuffer": "Connect Buffer",
@@ -184,7 +234,77 @@
     "fullyAutomated": "Fully automated",
     "ownersOnly": "Only company owners can edit channel settings.",
     "yes": "Yes",
-    "no": "No"
+    "no": "No",
+    "automationMode": "Automation mode",
+    "languageEN": "EN — English",
+    "languageBG": "BG — Bulgarian",
+    "bufferProfileIdOptional": "Buffer Profile ID (optional)",
+    "postingWindows": "Posting windows",
+    "postingWindowsHint": "(one per line: MONDAY 09:00-17:00)",
+    "save": "Save",
+    "postsPerDayLabel": "Posts per day",
+    "postsPerWeekLabel": "Posts per week",
+    "enabledLabel": "Enabled",
+    "imageRequiredLabel": "Image required",
+    "saveError": "Failed to save."
+  },
+  "contentSources": {
+    "newSource": "New content source",
+    "noSourcesTitle": "No content sources yet",
+    "noSourcesDesc": "Add an RSS feed, manual prompt, product page, or calendar event to start building content context for AI generation.",
+    "noSourcesDescReadOnly": "No content sources have been configured for this company.",
+    "addSource": "Add source",
+    "rss": "RSS",
+    "prompt": "Prompt",
+    "productPage": "Product Page",
+    "calendar": "Calendar",
+    "active": "Active",
+    "inactive": "Inactive",
+    "never": "Never",
+    "lastIngested": "Last ingested:",
+    "ingestSuccess": "Ingested successfully — {created} created, {updated} updated.",
+    "deleteSource": "Delete this source?",
+    "ingesting": "Ingesting…",
+    "ingest": "Ingest",
+    "ownersOnly": "Only company owners can manage content sources.",
+    "sourceType": "Source type",
+    "name": "Name",
+    "namePlaceholder": "e.g. Company Blog RSS",
+    "feedUrl": "Feed URL",
+    "pageUrl": "Page URL",
+    "promptText": "Prompt text",
+    "promptTextHint": "(max 5000 chars)",
+    "promptPlaceholder": "Describe the content context you want the AI to use…",
+    "eventTitle": "Event title",
+    "eventTitlePlaceholder": "e.g. Product Launch 2026",
+    "eventDate": "Event date",
+    "description": "Description",
+    "descriptionHint": "(optional)",
+    "eventDescPlaceholder": "Additional details about the event…",
+    "rssType": "RSS / Atom Feed",
+    "promptType": "Manual Prompt",
+    "productPageType": "Product Page",
+    "calendarEventType": "Calendar Event",
+    "activeLabel": "Active"
+  },
+  "editPost": {
+    "title": "Edit Post",
+    "tabEdit": "Edit",
+    "tabHistory": "Version History",
+    "contentLabel": "Content",
+    "hashtagsLabel": "Hashtags",
+    "hashtagsHint": "(space or comma separated)",
+    "hashtagsPlaceholder": "#marketing #growth",
+    "saveChanges": "Save Changes",
+    "saving": "Saving…",
+    "loadingHistory": "Loading history…",
+    "noHistory": "No version history yet. Versions are saved each time you edit the post.",
+    "restore": "Restore",
+    "restoring": "Restoring…"
+  },
+  "postActivity": {
+    "title": "Post Activity",
+    "loading": "Loading…"
   },
   "posts": {
     "statuses": {
@@ -196,6 +316,9 @@
       "PUBLISHED": "Published",
       "FAILED": "Failed"
     },
+    "noPostsTitle": "No AI-generated posts yet",
+    "noPostsDesc": "Choose a channel above and click Generate Draft to create your first post.",
+    "imageAlt": "AI-generated image",
     "imagePrompt": "Image Prompt",
     "notes": "Notes",
     "sentToBuffer": "Sent to Buffer — {date}",
@@ -225,6 +348,9 @@
     "generate": {
       "title": "Generate a draft post",
       "channel": "Channel",
+      "contentLanguage": "Content language",
+      "contentLanguageEN": "EN — English",
+      "contentLanguageBG": "BG — Bulgarian",
       "generateDraft": "Generate Draft",
       "generating": "Generating…",
       "duplicateWarning": "Similar post detected (score {score}). Review before publishing.",
@@ -303,7 +429,9 @@
     "copyUrl": "Copy URL",
     "deleteImage": "Delete this image?",
     "imagePreview": "Image Preview",
-    "openInNewTab": "Open in new tab"
+    "openInNewTab": "Open in new tab",
+    "imageForPost": "Image for {channel} post",
+    "mediaAsset": "Media asset"
   },
   "imagePicker": {
     "title": "Choose Image",
@@ -325,7 +453,10 @@
     "uploading": "Uploading…",
     "chooseDifferent": "Choose different file",
     "dropzone": "Drag & drop an image here",
-    "dropzoneHint": "or click to browse — JPG, PNG, WebP · max 10 MB"
+    "dropzoneHint": "or click to browse — JPG, PNG, WebP · max 10 MB",
+    "galleryImageAlt": "Gallery image",
+    "generatedPreviewAlt": "AI-generated image preview",
+    "uploadPreviewAlt": "Upload preview"
   },
   "createCompany": {
     "title": "Create Company",
@@ -376,6 +507,9 @@
     "activating": "Activating…",
     "setActive": "Set Active",
     "deleteProvider": "Delete this provider?",
-    "saveShort": "Save"
+    "saveShort": "Save",
+    "saveConfigError": "Failed to save configuration.",
+    "activateError": "Failed to activate provider.",
+    "deleteError": "Failed to delete provider."
   }
 }

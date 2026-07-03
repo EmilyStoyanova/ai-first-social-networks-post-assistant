@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useTranslations } from "next-intl";
 import { Modal } from "@/components/ui/Modal";
 import { AuditLogEntries } from "./audit-log-timeline";
 import type { AuditLogItem } from "@/lib/services/audit/audit-log.service";
@@ -12,6 +13,8 @@ interface Props {
 }
 
 export function PostActivityModal({ postId, open, onClose }: Props) {
+  const t = useTranslations("postActivity");
+  const tCommon = useTranslations("common");
   const [logs, setLogs] = useState<AuditLogItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -27,11 +30,12 @@ export function PostActivityModal({ postId, open, onClose }: Props) {
       try {
         const res = await fetch(`/api/v1/posts/${postId}/audit-logs`);
         if (cancelled) return;
-        if (!res.ok) throw new Error("Failed to load activity.");
+        if (!res.ok) throw new Error(tCommon("somethingWentWrong"));
         const json = (await res.json()) as { logs: AuditLogItem[] };
         if (!cancelled) setLogs(json.logs ?? []);
       } catch (err: unknown) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load activity.");
+        if (!cancelled)
+          setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -42,12 +46,12 @@ export function PostActivityModal({ postId, open, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [open, postId]);
+  }, [open, postId, tCommon]);
 
   return (
-    <Modal open={open} onClose={onClose} title="Post Activity" maxWidth="md">
+    <Modal open={open} onClose={onClose} title={t("title")} maxWidth="md">
       {loading ? (
-        <p className="py-8 text-center text-sm text-gray-400">Loading…</p>
+        <p className="py-8 text-center text-sm text-gray-400">{t("loading")}</p>
       ) : error ? (
         <p className="py-8 text-center text-sm text-red-500">{error}</p>
       ) : (

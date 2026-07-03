@@ -19,3 +19,10 @@ out
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code / OpenWolf
+.claude/
+.wolf/
+
+# TypeScript incremental build
+tsconfig.tsbuildinfo

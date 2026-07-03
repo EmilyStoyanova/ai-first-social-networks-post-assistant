@@ -7,7 +7,11 @@ export async function POST(
   { params }: { params: Promise<{ slug: string; sourceId: string }> }
 ) {
   const session = await auth();
-  if (!session) return NextResponse.json({ error: { message: "Unauthorized" } }, { status: 401 });
+  if (!session)
+    return NextResponse.json(
+      { error: { code: "UNAUTHORIZED", message: "Unauthorized" } },
+      { status: 401 }
+    );
 
   const { slug, sourceId } = await params;
   const result = await ingestContentSource(
@@ -19,11 +23,17 @@ export async function POST(
 
   if (!result.success) {
     if (result.code === "NOT_FOUND")
-      return NextResponse.json({ error: { message: "Not found" } }, { status: 404 });
+      return NextResponse.json(
+        { error: { code: "NOT_FOUND", message: "Not found" } },
+        { status: 404 }
+      );
     if (result.code === "FORBIDDEN")
-      return NextResponse.json({ error: { message: "Forbidden" } }, { status: 403 });
+      return NextResponse.json(
+        { error: { code: "FORBIDDEN", message: "Forbidden" } },
+        { status: 403 }
+      );
     return NextResponse.json(
-      { error: { message: result.message ?? "Ingestion failed" } },
+      { error: { code: "INGEST_FAILED", message: result.message ?? "Ingestion failed" } },
       { status: 502 }
     );
   }

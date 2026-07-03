@@ -60,10 +60,10 @@ function lines(...parts: string[]): string {
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 
-function buildSystemPrompt(ctx: GenerationContext): string {
+function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): string {
   const { company, brand, channel } = ctx;
   const channelLabel = CHANNEL_LABELS[channel.channel] ?? channel.channel;
-  const lang = channel.postingLanguage.toUpperCase();
+  const lang = (contentLanguage ?? channel.postingLanguage).toUpperCase();
   const automationMode = channel.automationModeOverride ?? company.automationMode;
 
   const companySection = section(
@@ -106,9 +106,15 @@ function buildSystemPrompt(ctx: GenerationContext): string {
       : "Semi-automated — a human editor will review before publishing. You may be slightly more creative."
   );
 
+  const languageInstruction =
+    lang === "BG"
+      ? "Generate the post in Bulgarian using natural Bulgarian business language."
+      : "Generate the post in English.";
+
   const writingRules = section(
     "Writing Rules",
     lines(
+      `- ${languageInstruction}`,
       `- Write entirely in ${lang}.`,
       "- Stay within the brand voice described above.",
       "- Never include URLs unless specifically requested.",
@@ -145,14 +151,15 @@ const JSON_FORMAT_INSTRUCTION = `Return ONLY a JSON object in this exact format 
   "notes": "brief creative rationale (optional)"
 }`;
 
-function buildUserPrompt(ctx: GenerationContext): string {
+function buildUserPrompt(ctx: GenerationContext, contentLanguage?: string): string {
   const { channel, feedItems } = ctx;
   const channelLabel = CHANNEL_LABELS[channel.channel] ?? channel.channel;
+  const lang = (contentLanguage ?? channel.postingLanguage).toUpperCase();
 
   if (feedItems.length === 0) {
     return [
       `Create an original ${channelLabel} post for ${ctx.company.name}.`,
-      `Write in ${channel.postingLanguage.toUpperCase()}.`,
+      `Write in ${lang}.`,
       JSON_FORMAT_INSTRUCTION,
     ].join("\n\n");
   }
@@ -195,9 +202,9 @@ function buildUserPrompt(ctx: GenerationContext): string {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-export function buildPrompts(ctx: GenerationContext): BuiltPrompts {
+export function buildPrompts(ctx: GenerationContext, contentLanguage?: string): BuiltPrompts {
   return {
-    systemPrompt: buildSystemPrompt(ctx),
-    userPrompt: buildUserPrompt(ctx),
+    systemPrompt: buildSystemPrompt(ctx, contentLanguage),
+    userPrompt: buildUserPrompt(ctx, contentLanguage),
   };
 }

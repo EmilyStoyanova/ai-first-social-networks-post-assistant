@@ -1,4 +1,7 @@
+"use client";
+
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/Button";
 import type { ContentSourceItem } from "@/lib/services/company/list-content-sources.service";
 
@@ -16,18 +19,21 @@ interface Props {
   onCancel: () => void;
 }
 
-const SOURCE_TYPES = [
-  { value: "rss", label: "RSS / Atom Feed" },
-  { value: "prompt", label: "Manual Prompt" },
-  { value: "product_page", label: "Product Page" },
-  { value: "calendar_event", label: "Calendar Event" },
-] as const;
-
 const BASE =
   "w-full rounded-lg border px-3.5 py-2.5 text-sm outline-none transition-all duration-200 focus:ring-2 focus:ring-offset-0";
 const NORMAL = "border-gray-300 bg-white focus:border-green-500 focus:ring-green-100";
 
 export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Props) {
+  const t = useTranslations("contentSources");
+  const tCommon = useTranslations("common");
+
+  const SOURCE_TYPES = [
+    { value: "rss", label: t("rssType") },
+    { value: "prompt", label: t("promptType") },
+    { value: "product_page", label: t("productPageType") },
+    { value: "calendar_event", label: t("calendarEventType") },
+  ] as const;
+
   const [type, setType] = useState(initialData?.type ?? "rss");
   const [name, setName] = useState(initialData?.name ?? "");
   const [url, setUrl] = useState(initialData?.config.url ?? "");
@@ -62,10 +68,10 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
     <form onSubmit={handleSubmit} noValidate className="space-y-4">
       {/* Type — only visible when adding, locked when editing */}
       <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700">Source type</label>
+        <label className="mb-1.5 block text-sm font-medium text-gray-700">{t("sourceType")}</label>
         {isEdit ? (
           <p className="text-sm text-gray-600">
-            {SOURCE_TYPES.find((t) => t.value === type)?.label ?? type}
+            {SOURCE_TYPES.find((s) => s.value === type)?.label ?? type}
           </p>
         ) : (
           <select
@@ -73,9 +79,9 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
             onChange={(e) => setType(e.target.value)}
             className={`${BASE} ${NORMAL}`}
           >
-            {SOURCE_TYPES.map((t) => (
-              <option key={t.value} value={t.value}>
-                {t.label}
+            {SOURCE_TYPES.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
               </option>
             ))}
           </select>
@@ -84,12 +90,12 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
 
       {/* Name */}
       <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700">Name</label>
+        <label className="mb-1.5 block text-sm font-medium text-gray-700">{t("name")}</label>
         <input
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. Company Blog RSS"
+          placeholder={t("namePlaceholder")}
           className={`${BASE} ${NORMAL}`}
           required
         />
@@ -99,7 +105,7 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
       {(type === "rss" || type === "product_page") && (
         <div>
           <label className="mb-1.5 block text-sm font-medium text-gray-700">
-            {type === "rss" ? "Feed URL" : "Page URL"}
+            {type === "rss" ? t("feedUrl") : t("pageUrl")}
           </label>
           <input
             type="url"
@@ -116,13 +122,14 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
       {type === "prompt" && (
         <div>
           <label className="mb-1.5 block text-sm font-medium text-gray-700">
-            Prompt text <span className="font-normal text-gray-400">(max 5000 chars)</span>
+            {t("promptText")}{" "}
+            <span className="font-normal text-gray-400">{t("promptTextHint")}</span>
           </label>
           <textarea
             rows={5}
             value={promptText}
             onChange={(e) => setPromptText(e.target.value)}
-            placeholder="Describe the content context you want the AI to use…"
+            placeholder={t("promptPlaceholder")}
             className={`${BASE} ${NORMAL} resize-none`}
             maxLength={5000}
             required
@@ -135,18 +142,22 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
       {type === "calendar_event" && (
         <>
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">Event title</label>
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">
+              {t("eventTitle")}
+            </label>
             <input
               type="text"
               value={eventTitle}
               onChange={(e) => setEventTitle(e.target.value)}
-              placeholder="e.g. Product Launch 2026"
+              placeholder={t("eventTitlePlaceholder")}
               className={`${BASE} ${NORMAL}`}
               required
             />
           </div>
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">Event date</label>
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">
+              {t("eventDate")}
+            </label>
             <input
               type="date"
               value={eventDate}
@@ -157,13 +168,14 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
           </div>
           <div>
             <label className="mb-1.5 block text-sm font-medium text-gray-700">
-              Description <span className="font-normal text-gray-400">(optional)</span>
+              {t("description")}{" "}
+              <span className="font-normal text-gray-400">{t("descriptionHint")}</span>
             </label>
             <textarea
               rows={3}
               value={eventDescription}
               onChange={(e) => setEventDescription(e.target.value)}
-              placeholder="Additional details about the event…"
+              placeholder={t("eventDescPlaceholder")}
               className={`${BASE} ${NORMAL} resize-none`}
             />
           </div>
@@ -178,15 +190,15 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
           onChange={(e) => setEnabled(e.target.checked)}
           className="h-4 w-4 rounded border-gray-300 text-green-500 focus:ring-green-500"
         />
-        <span className="text-sm font-medium text-gray-700">Active</span>
+        <span className="text-sm font-medium text-gray-700">{t("activeLabel")}</span>
       </label>
 
       <div className="flex items-center gap-3 pt-1">
         <Button type="submit" variant="primary" size="sm" loading={saving}>
-          {saving ? "Saving…" : isEdit ? "Save changes" : "Add source"}
+          {saving ? tCommon("saving") : isEdit ? tCommon("save") : t("addSource")}
         </Button>
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
-          Cancel
+          {tCommon("cancel")}
         </Button>
       </div>
     </form>

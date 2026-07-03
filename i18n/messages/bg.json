@@ -12,7 +12,47 @@
     "attaching": "Прикачване…",
     "backToCompany": "← Обратно към компанията",
     "somethingWentWrong": "Нещо се обърка.",
-    "readOnly": "Само за четене"
+    "readOnly": "Само за четене",
+    "close": "Затвори"
+  },
+  "apiErrors": {
+    "UNAUTHORIZED": "Трябва да си влязъл в акаунта си, за да направиш това.",
+    "FORBIDDEN": "Нямаш права за това действие.",
+    "NOT_FOUND": "Търсеният ресурс не е намерен.",
+    "INTERNAL_SERVER_ERROR": "Неочаквана сървърна грешка. Моля, опитай отново.",
+    "VALIDATION_ERROR": "Някои полета са невалидни. Прегледай ги и опитай отново.",
+    "INVALID_JSON": "Невалидна заявка. Презареди страницата и опитай отново.",
+    "INVALID_TRANSITION": "Действието не е позволено в текущия статус на публикацията.",
+    "INVALID_STATUS": "Публикацията не е в подходящ статус за това действие.",
+    "TOKEN_EXPIRED": "Връзката с Buffer е изтекла. Моля, свържи отново.",
+    "POST_LOCKED": "Публикацията е заключена и не може да се редактира.",
+    "NO_CONNECTION": "Buffer не е свързан за тази компания.",
+    "INVALID_FILE": "Файлът е невалиден.",
+    "INVALID_CHANNEL": "Невалиден канал.",
+    "BUFFER_API_ERROR": "Buffer върна грешка. Моля, опитай отново.",
+    "BAD_REQUEST": "Невалидна заявка.",
+    "VERSION_NOT_FOUND": "Тази версия вече не съществува.",
+    "USER_NOT_FOUND": "Няма потребител с този имейл.",
+    "UPLOAD_FAILED": "Качването е неуспешно. Моля, опитай отново.",
+    "UNSUPPORTED_TYPE": "Този тип файл не се поддържа.",
+    "NO_IMAGE_PROMPT": "Публикацията няма промпт за изображение.",
+    "NO_ACTIVE_PROVIDER": "Няма активен LLM доставчик. Конфигурирай в Администратор → LLM доставчици.",
+    "LLM_RESPONSE_PARSE_ERROR": "AI върна неочакван отговор. Моля, опитай отново.",
+    "LLM_PROVIDER_ERROR": "AI доставчикът върна грешка. Моля, опитай отново.",
+    "INVALID_REQUEST": "Невалидна заявка.",
+    "INVALID_PROFILE": "Невалиден Buffer профил.",
+    "INVALID_CREDENTIALS": "Невалиден имейл или парола.",
+    "IMAGE_PROVIDER_ERROR": "Генерирането на изображение е неуспешно. Моля, опитай отново.",
+    "FILE_TOO_LARGE": "Файлът е твърде голям.",
+    "EMAIL_ALREADY_EXISTS": "Акаунт с този имейл вече съществува.",
+    "CONFIGURATION_ERROR": "Грешка в конфигурацията на сървъра. Свържи се с администратор.",
+    "CANNOT_REMOVE_SELF": "Не можеш да премахнеш себе си от компанията.",
+    "CANNOT_REMOVE_LAST_OWNER": "Не можеш да премахнеш последния собственик на компанията.",
+    "CANNOT_DELETE_ACTIVE": "Не можеш да изтриеш активния доставчик.",
+    "CANNOT_CHANGE_OWN_ROLE": "Не можеш да промениш собствената си роля.",
+    "ALREADY_MEMBER": "Този потребител вече е член на компанията.",
+    "INGEST_FAILED": "Извличането е неуспешно. Провери URL адреса на източника и опитай отново.",
+    "UNKNOWN": "Нещо се обърка. Моля, опитай отново."
   },
   "brand": {
     "title": "AI-First Social Networks",
@@ -32,7 +72,7 @@
     },
     "register": {
       "title": "Създай акаунт",
-      "name": "Ime",
+      "name": "Име",
       "email": "Имейл",
       "password": "Парола",
       "createAccount": "Създай акаунт",
@@ -51,7 +91,8 @@
     "analytics": "Анализи",
     "settings": "Настройки",
     "admin": "Администратор",
-    "adminPanel": "Администраторски панел"
+    "adminPanel": "Администраторски панел",
+    "mainNavigation": "Основна навигация"
   },
   "sidebar": {
     "logoName": "AI-First",
@@ -60,13 +101,15 @@
   "header": {
     "openMenu": "Отвори навигационното меню",
     "logout": "Изход",
-    "signOut": "Излез от акаунта си"
+    "signOut": "Излез от акаунта си",
+    "breadcrumb": "Навигационна пътека",
+    "userFallback": "Потребител"
   },
   "languageSwitcher": {
     "switchTo": "Смени езика"
   },
   "dashboard": {
-    "welcome": "Добре дошъл обратно{greeting}!",
+    "welcome": "Здравей отново{greeting}!",
     "tagline": "Управлявай присъствието си в социалните мрежи от едно място.",
     "goToCompanies": "Към компаниите",
     "comingSoon": "Очаквайте скоро"
@@ -123,8 +166,11 @@
     "primaryColor": "Основен цвят",
     "secondaryColor": "Вторичен цвят",
     "toneOfVoice": "Тон на комуникацията",
+    "toneOfVoicePlaceholder": "Професионален, приятелски и стегнат.",
     "companyDescription": "Описание на компанията",
+    "companyDescriptionPlaceholder": "Опиши компанията, нейната мисия и основните ѝ предимства.",
     "targetAudience": "Целева аудитория",
+    "targetAudiencePlaceholder": "Собственици на малък бизнес, които се нуждаят от помощ с присъствието си в социалните мрежи.",
     "forbiddenWords": "Забранени думи",
     "forbiddenWordsHint": "(по едно на ред)",
     "competitors": "Конкуренти",
@@ -135,7 +181,7 @@
     "inviteMember": "Покани член",
     "currentMembers": "Текущи членове",
     "noMembers": "Все още няма членове.",
-    "nameAndEmail": "Ime и имейл",
+    "nameAndEmail": "Име и имейл",
     "role": "Роля",
     "actions": "Действия",
     "inviteSuccess": "Членът е поканен успешно.",
@@ -145,7 +191,11 @@
     "inviting": "Покана…",
     "invite": "Покани",
     "removeMember": "Премахни този член?",
-    "remove": "Премахни"
+    "remove": "Премахни",
+    "invalidEmail": "Невалиден имейл адрес.",
+    "inviteError": "Неуспешна покана на член.",
+    "roleChangeError": "Неуспешна промяна на ролята.",
+    "removeError": "Неуспешно премахване на члена."
   },
   "buffer": {
     "connectBuffer": "Свържи Buffer",
@@ -184,7 +234,77 @@
     "fullyAutomated": "Напълно автоматичен",
     "ownersOnly": "Само собственици могат да редактират настройките на каналите.",
     "yes": "Да",
-    "no": "Не"
+    "no": "Не",
+    "automationMode": "Режим на автоматизация",
+    "languageEN": "EN — Английски",
+    "languageBG": "BG — Български",
+    "bufferProfileIdOptional": "Buffer Profile ID (по избор)",
+    "postingWindows": "Прозорци за публикуване",
+    "postingWindowsHint": "(по един на ред: MONDAY 09:00-17:00)",
+    "save": "Запази",
+    "postsPerDayLabel": "Публикации на ден",
+    "postsPerWeekLabel": "Публикации на седмица",
+    "enabledLabel": "Активен",
+    "imageRequiredLabel": "Изображение задължително",
+    "saveError": "Неуспешно запазване."
+  },
+  "contentSources": {
+    "newSource": "Нов източник на съдържание",
+    "noSourcesTitle": "Все още няма източници на съдържание",
+    "noSourcesDesc": "Добави RSS фийд, ръчен промпт, продуктова страница или календарно събитие, за да изградиш контекст за AI генерирането.",
+    "noSourcesDescReadOnly": "За тази компания не са конфигурирани източници на съдържание.",
+    "addSource": "Добави източник",
+    "rss": "RSS",
+    "prompt": "Промпт",
+    "productPage": "Продуктова страница",
+    "calendar": "Календар",
+    "active": "Активен",
+    "inactive": "Неактивен",
+    "never": "Никога",
+    "lastIngested": "Последно извлечено:",
+    "ingestSuccess": "Извлечено успешно — {created} създадени, {updated} обновени.",
+    "deleteSource": "Изтрий този източник?",
+    "ingesting": "Извличане…",
+    "ingest": "Извлечи",
+    "ownersOnly": "Само собственици могат да управляват източници на съдържание.",
+    "sourceType": "Тип на източника",
+    "name": "Наименование",
+    "namePlaceholder": "напр. Blog RSS на компанията",
+    "feedUrl": "URL на фийда",
+    "pageUrl": "URL на страницата",
+    "promptText": "Текст на промпта",
+    "promptTextHint": "(макс. 5000 символа)",
+    "promptPlaceholder": "Опиши контекста на съдържанието, който AI трябва да използва…",
+    "eventTitle": "Заглавие на събитието",
+    "eventTitlePlaceholder": "напр. Представяне на продукт 2026",
+    "eventDate": "Дата на събитието",
+    "description": "Описание",
+    "descriptionHint": "(по избор)",
+    "eventDescPlaceholder": "Допълнителни детайли за събитието…",
+    "rssType": "RSS / Atom Фийд",
+    "promptType": "Ръчен промпт",
+    "productPageType": "Продуктова страница",
+    "calendarEventType": "Календарно събитие",
+    "activeLabel": "Активен"
+  },
+  "editPost": {
+    "title": "Редактирай публикация",
+    "tabEdit": "Редактиране",
+    "tabHistory": "История на версиите",
+    "contentLabel": "Съдържание",
+    "hashtagsLabel": "Хаштагове",
+    "hashtagsHint": "(разделени с интервал или запетая)",
+    "hashtagsPlaceholder": "#маркетинг #растеж",
+    "saveChanges": "Запази промените",
+    "saving": "Запазване…",
+    "loadingHistory": "Зареждане на историята…",
+    "noHistory": "Все още няма история на версиите. Версиите се запазват при всяко редактиране.",
+    "restore": "Възстанови",
+    "restoring": "Възстановяване…"
+  },
+  "postActivity": {
+    "title": "Активност на публикацията",
+    "loading": "Зареждане…"
   },
   "posts": {
     "statuses": {
@@ -196,6 +316,9 @@
       "PUBLISHED": "Публикувана",
       "FAILED": "Неуспешна"
     },
+    "noPostsTitle": "Все още няма AI-генерирани публикации",
+    "noPostsDesc": "Избери канал по-горе и натисни „Генерирай чернова“, за да създадеш първата си публикация.",
+    "imageAlt": "AI-генерирано изображение",
     "imagePrompt": "Промпт за изображение",
     "notes": "Бележки",
     "sentToBuffer": "Изпратена в Buffer — {date}",
@@ -225,6 +348,9 @@
     "generate": {
       "title": "Генерирай чернова",
       "channel": "Канал",
+      "contentLanguage": "Език на съдържанието",
+      "contentLanguageEN": "EN — Английски",
+      "contentLanguageBG": "BG — Български",
       "generateDraft": "Генерирай чернова",
       "generating": "Генериране…",
       "duplicateWarning": "Открита е подобна публикация (сходство {score}). Прегледай преди публикуване.",
@@ -301,9 +427,11 @@
     "openPost": "Отвори публикацията",
     "reuseImage": "Повторно използвай",
     "copyUrl": "Копирай URL",
-    "deleteImage": "Изтрий ли това изображение?",
+    "deleteImage": "Изтрий това изображение?",
     "imagePreview": "Преглед на изображението",
-    "openInNewTab": "Отвори в нов раздел"
+    "openInNewTab": "Отвори в нов раздел",
+    "imageForPost": "Изображение за публикация в {channel}",
+    "mediaAsset": "Медиен файл"
   },
   "imagePicker": {
     "title": "Избери изображение",
@@ -325,7 +453,10 @@
     "uploading": "Качване…",
     "chooseDifferent": "Избери друг файл",
     "dropzone": "Пусни изображение тук",
-    "dropzoneHint": "или кликни за избор — JPG, PNG, WebP · макс 10 МБ"
+    "dropzoneHint": "или кликни за избор — JPG, PNG, WebP · макс 10 МБ",
+    "galleryImageAlt": "Изображение от галерията",
+    "generatedPreviewAlt": "Преглед на AI-генерирано изображение",
+    "uploadPreviewAlt": "Преглед на качения файл"
   },
   "createCompany": {
     "title": "Създай компания",
@@ -349,7 +480,7 @@
     "globalAdmins": "Глобални администратори",
     "noUsers": "Няма намерени потребители.",
     "noCompanies": "Няма намерени компании.",
-    "nameAndEmail": "Ime и имейл",
+    "nameAndEmail": "Име и имейл",
     "role": "Роля",
     "language": "Език",
     "created": "Създаден",
@@ -376,6 +507,9 @@
     "activating": "Активиране…",
     "setActive": "Задай за активен",
     "deleteProvider": "Изтрий този доставчик?",
-    "saveShort": "Запази"
+    "saveShort": "Запази",
+    "saveConfigError": "Неуспешно запазване на конфигурацията.",
+    "activateError": "Неуспешно активиране на доставчика.",
+    "deleteError": "Неуспешно изтриване на доставчика."
   }
 }

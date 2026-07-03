@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -107,6 +108,7 @@ function FieldError({ id, message }: { id: string; message?: string }) {
 export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }: Props) {
   const t = useTranslations("brandGuidelines");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const canEdit = role === "OWNER" || isGlobalAdmin;
 
   const [values, setValues] = useState<FormValues>(() => toFormValues(initialValues));
@@ -151,7 +153,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
 
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
 
       setStatus("success");
@@ -246,7 +248,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
             id="bg-toneOfVoice"
             name="toneOfVoice"
             rows={2}
-            placeholder="Professional, friendly, and concise."
+            placeholder={t("toneOfVoicePlaceholder")}
             value={values.toneOfVoice}
             onChange={(e) => set("toneOfVoice", e.target.value)}
             disabled={disabled}
@@ -264,7 +266,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
             id="bg-companyDescription"
             name="companyDescription"
             rows={4}
-            placeholder="Describe your company, its mission, and key value propositions."
+            placeholder={t("companyDescriptionPlaceholder")}
             value={values.companyDescription}
             onChange={(e) => set("companyDescription", e.target.value)}
             disabled={disabled}
@@ -284,7 +286,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
             id="bg-targetAudience"
             name="targetAudience"
             rows={3}
-            placeholder="Small business owners who need help managing their social media presence."
+            placeholder={t("targetAudiencePlaceholder")}
             value={values.targetAudience}
             onChange={(e) => set("targetAudience", e.target.value)}
             disabled={disabled}

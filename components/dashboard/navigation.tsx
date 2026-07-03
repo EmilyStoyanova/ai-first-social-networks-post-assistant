@@ -20,7 +20,7 @@ export function Navigation({ isGlobalAdmin }: Props) {
   ];
 
   return (
-    <nav aria-label="Main navigation" className="space-y-4">
+    <nav aria-label={t("mainNavigation")} className="space-y-4">
       <ul role="list" className="space-y-1">
         {NAV_ITEMS.map((item) => (
           <li key={item.href}>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { GeneratePostForm } from "./generate-post-form";
 import { GeneratedPostCard } from "./generated-post-card";
@@ -23,6 +24,7 @@ export function GeneratedPostsSection({
   canApprove,
   bufferConnected,
 }: Props) {
+  const t = useTranslations("posts");
   const [posts, setPosts] = useState<PostItem[]>(initialPosts);
 
   function handleGenerated(post: PostItem) {
@@ -38,11 +40,7 @@ export function GeneratedPostsSection({
       <GeneratePostForm slug={slug} onGenerated={handleGenerated} />
 
       {posts.length === 0 ? (
-        <EmptyState
-          icon="✨"
-          title="No AI-generated posts yet"
-          description="Choose a channel above and click Generate Draft to create your first post."
-        />
+        <EmptyState icon="✨" title={t("noPostsTitle")} description={t("noPostsDesc")} />
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
           {posts.map((post) => (

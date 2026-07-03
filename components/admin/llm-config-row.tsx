@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -27,6 +28,7 @@ interface Props {
 export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
   const t = useTranslations("admin");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const [isEditing, setIsEditing] = useState(false);
   const [isActivating, setIsActivating] = useState(false);
   const [activateError, setActivateError] = useState("");
@@ -49,7 +51,7 @@ export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
         config?: ClientLlmConfig;
         error?: { message?: string };
       };
-      if (!res.ok) throw new Error(json.error?.message ?? "Failed to activate provider.");
+      if (!res.ok) throw new Error(apiError(json.error, t("activateError")));
       onUpdated(json.config!);
     } catch (err) {
       setActivateError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
@@ -68,7 +70,7 @@ export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
         return;
       }
       const json = (await res.json()) as { error?: { message?: string } };
-      throw new Error(json.error?.message ?? "Failed to delete provider.");
+      throw new Error(apiError(json.error, t("deleteError")));
     } catch (err) {
       setIsDeleting(false);
       setShowDeleteConfirm(false);

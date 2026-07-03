@@ -8,6 +8,7 @@ const bodySchema = z.object({
     .string()
     .transform((v) => v.toLowerCase())
     .pipe(z.enum(["facebook", "linkedin", "instagram", "tiktok"])),
+  contentLanguage: z.enum(["en", "bg"]).optional().default("en"),
 });
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -49,7 +50,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     slug,
     parsed.data.channel,
     session.user.id,
-    session.user.isGlobalAdmin
+    session.user.isGlobalAdmin,
+    parsed.data.contentLanguage
   );
 
   if (!result.success) {

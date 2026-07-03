@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -69,6 +70,7 @@ const CHANNEL_META: Record<string, ChannelMeta> = {
 export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
   const t = useTranslations("channels");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const [config, setConfig] = useState(initialConfig);
   const [isEditing, setIsEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -107,7 +109,7 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
 
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to save.");
+        throw new Error(apiError(json.error, t("saveError")));
       }
 
       const json = (await res.json()) as { channel: ChannelConfigItem };

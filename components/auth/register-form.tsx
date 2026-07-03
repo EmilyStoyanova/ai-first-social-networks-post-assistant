@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { extractApiError, useApiErrorMessage } from "@/lib/i18n/api-error";
 import { registerSchema } from "@/lib/validators/register.schema";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -15,6 +16,7 @@ export function RegisterForm() {
   const router = useRouter();
   const t = useTranslations("auth.register");
   const tBrand = useTranslations("brand");
+  const apiError = useApiErrorMessage();
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
@@ -62,17 +64,7 @@ export function RegisterForm() {
 
       if (!res.ok) {
         const body: unknown = await res.json().catch(() => null);
-        const message =
-          body !== null &&
-          typeof body === "object" &&
-          "error" in body &&
-          body.error !== null &&
-          typeof body.error === "object" &&
-          "message" in body.error &&
-          typeof body.error.message === "string"
-            ? body.error.message
-            : t("error");
-        setFormError(message);
+        setFormError(apiError(extractApiError(body), t("error")));
         return;
       }
 

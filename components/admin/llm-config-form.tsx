@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import type { ClientLlmConfig } from "./llm-config-section";
@@ -40,6 +41,7 @@ interface Props {
 export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
   const t = useTranslations("admin");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const isEdit = config !== undefined;
 
   const [provider, setProvider] = useState<"CLAUDE" | "OPENAI" | "GROK">(
@@ -97,7 +99,7 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
         error?: { code?: string; message?: string };
       };
 
-      if (!res.ok) throw new Error(json.error?.message ?? "Failed to save configuration.");
+      if (!res.ok) throw new Error(apiError(json.error, t("saveConfigError")));
 
       onSaved(json.config!);
 

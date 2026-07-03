@@ -1,0 +1,86 @@
+"use client";
+
+import { useCallback } from "react";
+import { useTranslations } from "next-intl";
+
+/**
+ * Every error code the API can return. Kept in sync with the `apiErrors`
+ * namespace in i18n/messages/{en,bg}.json — each code has a translation there.
+ */
+export const API_ERROR_CODES = [
+  "UNAUTHORIZED",
+  "FORBIDDEN",
+  "NOT_FOUND",
+  "INTERNAL_SERVER_ERROR",
+  "VALIDATION_ERROR",
+  "INVALID_JSON",
+  "INVALID_TRANSITION",
+  "INVALID_STATUS",
+  "TOKEN_EXPIRED",
+  "POST_LOCKED",
+  "NO_CONNECTION",
+  "INVALID_FILE",
+  "INVALID_CHANNEL",
+  "BUFFER_API_ERROR",
+  "BAD_REQUEST",
+  "VERSION_NOT_FOUND",
+  "USER_NOT_FOUND",
+  "UPLOAD_FAILED",
+  "UNSUPPORTED_TYPE",
+  "NO_IMAGE_PROMPT",
+  "NO_ACTIVE_PROVIDER",
+  "LLM_RESPONSE_PARSE_ERROR",
+  "LLM_PROVIDER_ERROR",
+  "INVALID_REQUEST",
+  "INVALID_PROFILE",
+  "INVALID_CREDENTIALS",
+  "IMAGE_PROVIDER_ERROR",
+  "FILE_TOO_LARGE",
+  "EMAIL_ALREADY_EXISTS",
+  "CONFIGURATION_ERROR",
+  "CANNOT_REMOVE_SELF",
+  "CANNOT_REMOVE_LAST_OWNER",
+  "CANNOT_DELETE_ACTIVE",
+  "CANNOT_CHANGE_OWN_ROLE",
+  "ALREADY_MEMBER",
+  "INGEST_FAILED",
+] as const;
+
+export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
+
+const KNOWN_CODES: ReadonlySet<string> = new Set(API_ERROR_CODES);
+
+export interface ApiErrorShape {
+  code?: string;
+  message?: string;
+}
+
+/** Extracts `{ code, message }` from an unknown API response body, if present. */
+export function extractApiError(body: unknown): ApiErrorShape | null {
+  if (body === null || typeof body !== "object" || !("error" in body)) return null;
+  const error = (body as { error: unknown }).error;
+  if (error === null || typeof error !== "object") return null;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  return {
+    code: typeof code === "string" ? code : undefined,
+    message: typeof message === "string" ? message : undefined,
+  };
+}
+
+/**
+ * Returns a function that resolves an API error to a translated, user-facing
+ * message. Known codes map to the `apiErrors` namespace; unknown or missing
+ * codes fall back to the provided fallback, or the generic translated error.
+ */
+export function useApiErrorMessage() {
+  const t = useTranslations("apiErrors");
+
+  return useCallback(
+    (error?: ApiErrorShape | null, fallback?: string): string => {
+      const code = error?.code;
+      if (code && KNOWN_CODES.has(code)) return t(code);
+      return fallback ?? t("UNKNOWN");
+    },
+    [t]
+  );
+}

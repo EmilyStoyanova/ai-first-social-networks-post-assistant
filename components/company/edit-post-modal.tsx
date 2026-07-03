@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
@@ -43,6 +45,9 @@ export function EditPostModal({
   onClose,
   onSaved,
 }: Props) {
+  const t = useTranslations("editPost");
+  const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const [tab, setTab] = useState<Tab>("edit");
 
   // Edit form
@@ -65,12 +70,12 @@ export function EditPostModal({
       const res = await fetch(`/api/v1/posts/${postId}/versions`);
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to load history.");
+        throw new Error(apiError(json.error));
       }
       const json = (await res.json()) as { versions: PostVersionItem[] };
       setVersions(json.versions);
     } catch (err) {
-      setVersionsError(err instanceof Error ? err.message : "Failed to load history.");
+      setVersionsError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setLoadingVersions(false);
     }
@@ -99,12 +104,12 @@ export function EditPostModal({
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to save changes.");
+        throw new Error(apiError(json.error));
       }
       onSaved(text, hashtags);
       onClose();
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Something went wrong.");
+      setSaveError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setSaving(false);
     }
@@ -117,33 +122,33 @@ export function EditPostModal({
       const res = await fetch(`/api/v1/posts/${postId}/restore/${versionId}`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to restore version.");
+        throw new Error(apiError(json.error));
       }
       onSaved(versionContent, initialHashtags);
       onClose();
     } catch (err) {
-      setRestoreError(err instanceof Error ? err.message : "Something went wrong.");
+      setRestoreError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setRestoringId(null);
     }
   }
 
   return (
-    <Modal open onClose={onClose} title="Edit Post" maxWidth="lg">
+    <Modal open onClose={onClose} title={t("title")} maxWidth="lg">
       {/* Tabs */}
       <div className="-mx-6 mb-5 flex border-b border-gray-100 px-6">
-        {(["edit", "history"] as const).map((t) => (
+        {(["edit", "history"] as const).map((tabKey) => (
           <button
-            key={t}
-            onClick={() => handleTabChange(t)}
+            key={tabKey}
+            onClick={() => handleTabChange(tabKey)}
             className={[
               "mr-4 border-b-2 pb-3 text-sm font-medium transition-colors",
-              tab === t
+              tab === tabKey
                 ? "border-green-500 text-green-700"
                 : "border-transparent text-gray-500 hover:text-gray-800",
             ].join(" ")}
           >
-            {t === "edit" ? "Edit" : "Version History"}
+            {tabKey === "edit" ? t("tabEdit") : t("tabHistory")}
           </button>
         ))}
       </div>
@@ -152,7 +157,9 @@ export function EditPostModal({
       {tab === "edit" && (
         <div className="space-y-4">
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">Content</label>
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">
+              {t("contentLabel")}
+            </label>
             <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -163,13 +170,14 @@ export function EditPostModal({
           </div>
           <div>
             <label className="mb-1.5 block text-sm font-medium text-gray-700">
-              Hashtags <span className="font-normal text-gray-400">(space or comma separated)</span>
+              {t("hashtagsLabel")}{" "}
+              <span className="font-normal text-gray-400">{t("hashtagsHint")}</span>
             </label>
             <input
               type="text"
               value={hashtagsRaw}
               onChange={(e) => setHashtagsRaw(e.target.value)}
-              placeholder="#marketing #growth"
+              placeholder={t("hashtagsPlaceholder")}
               disabled={saving}
               className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm transition-colors outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100 disabled:opacity-50"
             />
@@ -179,10 +187,10 @@ export function EditPostModal({
 
           <div className="flex justify-end gap-2 pt-1">
             <Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>
-              Cancel
+              {tCommon("cancel")}
             </Button>
             <Button variant="primary" size="sm" loading={saving} onClick={handleSave}>
-              {saving ? "Saving…" : "Save Changes"}
+              {saving ? t("saving") : t("saveChanges")}
             </Button>
           </div>
         </div>
@@ -192,13 +200,11 @@ export function EditPostModal({
       {tab === "history" && (
         <div>
           {loadingVersions ? (
-            <p className="py-8 text-center text-sm text-gray-400">Loading history…</p>
+            <p className="py-8 text-center text-sm text-gray-400">{t("loadingHistory")}</p>
           ) : versionsError ? (
             <Alert variant="error">{versionsError}</Alert>
           ) : versions.length === 0 ? (
-            <p className="py-8 text-center text-sm text-gray-400">
-              No version history yet. Versions are saved each time you edit the post.
-            </p>
+            <p className="py-8 text-center text-sm text-gray-400">{t("noHistory")}</p>
           ) : (
             <div className="space-y-3">
               {restoreError && <Alert variant="error">{restoreError}</Alert>}
@@ -231,7 +237,7 @@ export function EditPostModal({
                       disabled={restoringId !== null}
                       onClick={() => handleRestore(v.id, v.content)}
                     >
-                      Restore
+                      {restoringId === v.id ? t("restoring") : t("restore")}
                     </Button>
                   )}
                 </div>

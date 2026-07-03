@@ -3,6 +3,7 @@
 import { useState, useRef } from "react";
 import Image from "next/image";
 import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
@@ -97,6 +98,7 @@ function GalleryTab({
 }) {
   const t = useTranslations("imagePicker");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const [attachingId, setAttachingId] = useState<string | null>(null);
   const [attachError, setAttachError] = useState("");
   const [search, setSearch] = useState("");
@@ -112,7 +114,7 @@ function GalleryTab({
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       onAttached({ id: item.id, url: item.url });
     } catch (err) {
@@ -171,7 +173,7 @@ function GalleryTab({
               <div className="relative aspect-square w-full overflow-hidden bg-gray-100">
                 <Image
                   src={item.url}
-                  alt="Gallery image"
+                  alt={t("galleryImageAlt")}
                   fill
                   className="object-cover"
                   unoptimized
@@ -215,6 +217,7 @@ function AiGenerateTab({
 }) {
   const t = useTranslations("imagePicker");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [preview, setPreview] = useState<AttachedMedia | null>(null);
@@ -227,7 +230,7 @@ function AiGenerateTab({
       const res = await fetch(`/api/v1/posts/${postId}/generate-image`, { method: "POST" });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       const json = (await res.json()) as { media: { id: string; url: string } };
       setPreview(json.media);
@@ -258,7 +261,7 @@ function AiGenerateTab({
           <div className="overflow-hidden rounded-xl border border-gray-200">
             <Image
               src={preview.url}
-              alt="AI-generated image preview"
+              alt={t("generatedPreviewAlt")}
               width={800}
               height={450}
               className="w-full object-cover"
@@ -308,6 +311,7 @@ function UploadTab({
 }) {
   const t = useTranslations("imagePicker");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -345,7 +349,7 @@ function UploadTab({
       const uploadRes = await fetch("/api/v1/media/upload", { method: "POST", body: form });
       if (!uploadRes.ok) {
         const json = (await uploadRes.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
       const { media } = (await uploadRes.json()) as { media: { id: string; url: string } };
 
@@ -356,7 +360,7 @@ function UploadTab({
       });
       if (!attachRes.ok) {
         const json = (await attachRes.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+        throw new Error(apiError(json.error));
       }
 
       onAttached(media);
@@ -422,7 +426,7 @@ function UploadTab({
             <div className="overflow-hidden rounded-xl border border-gray-200">
               {/* next/image cannot be used with blob: URLs — <img> is intentional for local preview */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={previewUrl} alt="Upload preview" className="w-full object-cover" />
+              <img src={previewUrl} alt={t("uploadPreviewAlt")} className="w-full object-cover" />
             </div>
           )}
           <p className="text-xs text-gray-500">

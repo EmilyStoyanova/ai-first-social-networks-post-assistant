@@ -66,7 +66,8 @@ export async function generateDraftPost(
   slug: string,
   rawChannel: string,
   userId: string,
-  isGlobalAdmin: boolean
+  isGlobalAdmin: boolean,
+  contentLanguage?: string
 ): Promise<GenerateDraftPostResult> {
   // Build context (also validates auth/access)
   const contextResult = await buildGenerationContext(slug, rawChannel, userId, isGlobalAdmin);
@@ -75,7 +76,7 @@ export async function generateDraftPost(
   }
 
   const { context, companyId } = contextResult;
-  const { systemPrompt, userPrompt } = buildPrompts(context);
+  const { systemPrompt, userPrompt } = buildPrompts(context, contentLanguage);
 
   // ── LLM call ─────────────────────────────────────────────────────────────
   // Provider name and model come from context (set by getLlmProviderInfo() during context build)

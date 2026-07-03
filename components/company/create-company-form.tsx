@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
+import { extractApiError, useApiErrorMessage } from "@/lib/i18n/api-error";
 import { createCompanySchema } from "@/lib/validators/company.schema";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -14,6 +15,7 @@ type FieldErrors = { name?: string; website?: string };
 export function CreateCompanyForm() {
   const t = useTranslations("createCompany");
   const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const router = useRouter();
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -56,17 +58,7 @@ export function CreateCompanyForm() {
 
       const body: unknown = await res.json();
       if (!res.ok) {
-        const message =
-          body !== null &&
-          typeof body === "object" &&
-          "error" in body &&
-          body.error !== null &&
-          typeof body.error === "object" &&
-          "message" in body.error &&
-          typeof body.error.message === "string"
-            ? body.error.message
-            : tCommon("somethingWentWrong");
-        setFormError(message);
+        setFormError(apiError(extractApiError(body)));
         return;
       }
 

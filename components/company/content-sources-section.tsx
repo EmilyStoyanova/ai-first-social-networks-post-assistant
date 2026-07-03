@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { useTranslations } from "next-intl";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -16,6 +18,9 @@ interface Props {
 }
 
 export function ContentSourcesSection({ slug, initialSources, canManage }: Props) {
+  const t = useTranslations("contentSources");
+  const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const [sources, setSources] = useState(initialSources);
   const [showAddForm, setShowAddForm] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -32,13 +37,13 @@ export function ContentSourcesSection({ slug, initialSources, canManage }: Props
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(json.error?.message ?? "Failed to add source.");
+        throw new Error(apiError(json.error));
       }
       const json = (await res.json()) as { source: ContentSourceItem };
       setSources((prev) => [...prev, json.source]);
       setShowAddForm(false);
     } catch (err) {
-      setAddError(err instanceof Error ? err.message : "Something went wrong.");
+      setAddError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setAdding(false);
     }
@@ -57,7 +62,7 @@ export function ContentSourcesSection({ slug, initialSources, canManage }: Props
       {/* Add source form */}
       {showAddForm && canManage && (
         <div className="rounded-xl border border-gray-200 bg-white px-5 py-5 shadow-sm">
-          <h3 className="mb-4 text-sm font-semibold text-gray-900">New content source</h3>
+          <h3 className="mb-4 text-sm font-semibold text-gray-900">{t("newSource")}</h3>
           {addError && (
             <Alert variant="error" className="mb-4">
               {addError}
@@ -77,16 +82,12 @@ export function ContentSourcesSection({ slug, initialSources, canManage }: Props
       {/* Source list */}
       {sources.length === 0 && !showAddForm ? (
         <EmptyState
-          title="No content sources yet"
-          description={
-            canManage
-              ? "Add an RSS feed, manual prompt, product page, or calendar event to start building content context for AI generation."
-              : "No content sources have been configured for this company."
-          }
+          title={t("noSourcesTitle")}
+          description={canManage ? t("noSourcesDesc") : t("noSourcesDescReadOnly")}
           action={
             canManage ? (
               <Button variant="primary" size="sm" onClick={() => setShowAddForm(true)}>
-                Add source
+                {t("addSource")}
               </Button>
             ) : undefined
           }
@@ -108,7 +109,7 @@ export function ContentSourcesSection({ slug, initialSources, canManage }: Props
 
           {canManage && !showAddForm && (
             <Button variant="secondary" size="sm" onClick={() => setShowAddForm(true)}>
-              Add source
+              {t("addSource")}
             </Button>
           )}
         </>
