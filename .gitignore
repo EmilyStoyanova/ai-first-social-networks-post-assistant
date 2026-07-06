@@ -26,3 +26,5 @@ Thumbs.db
 
 # TypeScript incremental build
 tsconfig.tsbuildinfo
+
+*.tsbuildinfo
