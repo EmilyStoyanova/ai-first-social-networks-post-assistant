@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { ingestCompanySources } from "./ingest-company-sources.service";
 import { generateWeeklySchedule } from "./generate-weekly-schedule.service";
 import { autoApprovePosts } from "./auto-approve-posts.service";
+import { publishScheduledPosts } from "./publish-scheduled-posts.service";
+import { retryFailedPosts } from "./retry-failed-posts.service";
 
 export interface CronRunSummary {
   runId: string;
@@ -59,8 +61,11 @@ export async function runCron(): Promise<CronRunSummary> {
     // Step 4 — auto-approve for fully automated channels
     actions.autoApprove = await autoApprovePosts(company.id, company.automationMode);
 
-    // Steps 5–6 are appended by the next milestone:
-    // send to Buffer, retry failed.
+    // Step 5 — send approved posts due within 48h to Buffer
+    actions.publish = await publishScheduledPosts(company.id);
+
+    // Step 6 — retry failed posts with remaining budget
+    actions.retry = await retryFailedPosts(company.id);
 
     await completeRun(run.id, actions);
     return {

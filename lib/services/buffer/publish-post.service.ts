@@ -10,7 +10,8 @@ import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.se
 
 const MOCK_BUFFER_POST_ID = "mock-buffer-post";
 
-function buildPostText(content: string, hashtags: string[]): string {
+/** Shared with the cron publisher so scheduled and manual posts render identically. */
+export function buildPostText(content: string, hashtags: string[]): string {
   if (hashtags.length === 0) return content;
   const tags = hashtags.map((t) => `#${t}`).join(" ");
   return `${content}\n\n${tags}`;
