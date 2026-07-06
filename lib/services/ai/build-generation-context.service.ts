@@ -22,6 +22,29 @@ export type BuildGenerationContextResult =
       code: "NOT_FOUND" | "FORBIDDEN" | "INVALID_CHANNEL" | "NO_ACTIVE_PROVIDER";
     };
 
+/**
+ * System-level context builder — no RBAC. Used by the cron dispatcher, where
+ * there is no acting user; user-facing callers go through
+ * buildGenerationContext below.
+ */
+export async function buildGenerationContextForCompany(
+  companyId: string,
+  rawChannel: string
+): Promise<BuildGenerationContextResult> {
+  const channel = rawChannel.toLowerCase() as ValidChannel;
+  if (!VALID_CHANNELS.includes(channel)) {
+    return { success: false, code: "INVALID_CHANNEL" };
+  }
+
+  const companyRow = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { id: true, name: true, website: true, automationMode: true, defaultLang: true },
+  });
+  if (!companyRow) return { success: false, code: "NOT_FOUND" };
+
+  return loadContext(companyId, channel, companyRow);
+}
+
 export async function buildGenerationContext(
   slug: string,
   rawChannel: string,
@@ -72,6 +95,19 @@ export async function buildGenerationContext(
     companyRow = membership.company;
   }
 
+  return loadContext(companyId, channel, companyRow);
+}
+
+async function loadContext(
+  companyId: string,
+  channel: ValidChannel,
+  companyRow: {
+    name: string;
+    website: string | null;
+    automationMode: string;
+    defaultLang: string;
+  }
+): Promise<BuildGenerationContextResult> {
   // ── Parallel data load ────────────────────────────────────────────────────
   const [brand, channelConfig, feedItems] = await Promise.allSettled([
     prisma.brandGuidelines.findUnique({

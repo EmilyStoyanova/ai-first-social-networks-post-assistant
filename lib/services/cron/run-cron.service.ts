@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import { Prisma } from "@prisma/client";
 import { ingestCompanySources } from "./ingest-company-sources.service";
+import { generateWeeklySchedule } from "./generate-weekly-schedule.service";
 
 export interface CronRunSummary {
   runId: string;
@@ -51,8 +52,11 @@ export async function runCron(): Promise<CronRunSummary> {
     // Step 2 — fetch feeds
     actions.ingest = await ingestCompanySources(company.id);
 
-    // Steps 3–6 are appended by subsequent milestones:
-    // generate weekly schedule, auto-approve, send to Buffer, retry failed.
+    // Step 3 — generate next week's schedule (budgeted; resumes across runs)
+    actions.weeklySchedule = await generateWeeklySchedule(company.id);
+
+    // Steps 4–6 are appended by subsequent milestones:
+    // auto-approve, send to Buffer, retry failed.
 
     await completeRun(run.id, actions);
     return {

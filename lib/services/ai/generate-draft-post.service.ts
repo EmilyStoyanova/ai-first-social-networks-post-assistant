@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import { type SocialChannel } from "@prisma/client";
 import { buildGenerationContext } from "./build-generation-context.service";
+import type { GenerationContext } from "@/lib/ai/types";
 import { buildPrompts } from "@/lib/ai/prompt-builder";
 import { getLlmProvider, NoActiveLlmProviderError } from "@/lib/ai/llm/llm-provider-factory";
 import { parseLlmPost } from "@/lib/ai/parse-llm-post";
@@ -62,6 +63,17 @@ export type GenerateDraftPostResult =
 
 // ─── Service ───────────────────────────────────────────────────────────────────
 
+export interface GeneratePostOptions {
+  contentLanguage?: string;
+  /** Acting user; omitted for system-generated (cron) posts. */
+  generatedById?: string;
+  /** Weekly schedule this post belongs to (cron generation only). */
+  scheduleId?: string;
+  scheduledFor?: Date;
+  /** Defaults to "draft" (user flow). Cron generation uses "pending_approval". */
+  initialStatus?: "draft" | "pending_approval";
+}
+
 export async function generateDraftPost(
   slug: string,
   rawChannel: string,
@@ -75,7 +87,24 @@ export async function generateDraftPost(
     return { success: false, code: contextResult.code };
   }
 
-  const { context, companyId } = contextResult;
+  return generatePostFromContext(contextResult.context, contextResult.companyId, {
+    contentLanguage,
+    generatedById: userId,
+  });
+}
+
+/**
+ * Generation core shared by the user flow above and the cron dispatcher.
+ * Access control must already have happened; this function only generates,
+ * runs the quality guards, and persists the post.
+ */
+export async function generatePostFromContext(
+  context: GenerationContext,
+  companyId: string,
+  options: GeneratePostOptions = {}
+): Promise<GenerateDraftPostResult> {
+  const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
+  const initialStatus = options.initialStatus ?? "draft";
   const { systemPrompt, userPrompt } = buildPrompts(context, contentLanguage);
 
   // ── LLM call ─────────────────────────────────────────────────────────────
@@ -163,14 +192,16 @@ export async function generateDraftPost(
     data: {
       companyId,
       channel: context.channel.channel as SocialChannel,
-      status: "draft",
+      status: initialStatus,
       content: parsed.text,
       hashtags: parsed.hashtags,
       imagePrompt: parsed.imagePrompt ?? null,
       notes: parsed.notes ?? null,
       llmProvider: llmProviderStr,
       llmModel: llmModelStr,
-      generatedById: userId,
+      generatedById: generatedById ?? null,
+      scheduleId: scheduleId ?? null,
+      scheduledFor: scheduledFor ?? null,
       safetyFlagged: safetyResult.flagged,
       safetyFlagReason: safetyResult.flagged
         ? `Flagged terms: ${safetyResult.matchedTerms.join(", ")}`
@@ -202,7 +233,7 @@ export async function generateDraftPost(
 
   await createAuditLog({
     companyId,
-    userId,
+    userId: generatedById,
     action: AUDIT_ACTIONS.POST_GENERATED,
     entityType: "post",
     entityId: post.id,
@@ -210,6 +241,7 @@ export async function generateDraftPost(
       channel: post.channel,
       llmProvider: post.llmProvider ?? undefined,
       llmModel: post.llmModel ?? undefined,
+      ...(generatedById ? {} : { automated: true }),
     },
   });
 
