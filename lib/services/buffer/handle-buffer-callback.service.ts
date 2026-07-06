@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db/client";
-import { exchangeCodeForTokens, getBufferUserId } from "@/lib/integrations/buffer/client";
+import { exchangeCodeForTokens, getBufferAccountId } from "@/lib/integrations/buffer/client";
 import { verifyOAuthState } from "@/lib/integrations/buffer/state";
 import { encrypt } from "@/lib/security/encryption";
 import { checkBufferAccess } from "./_access";
@@ -23,10 +23,13 @@ export type HandleBufferCallbackResult =
 export async function handleBufferCallback(
   code: string | null,
   state: string | null,
+  codeVerifier: string | null,
   currentUserId: string,
   isGlobalAdmin: boolean
 ): Promise<HandleBufferCallbackResult> {
-  if (!code || !state) return { success: false, slug: null, code: "INVALID_STATE" };
+  if (!code || !state || !codeVerifier) {
+    return { success: false, slug: null, code: "INVALID_STATE" };
+  }
 
   const payload = verifyOAuthState(state);
   if (!payload) return { success: false, slug: null, code: "INVALID_STATE" };
@@ -44,29 +47,37 @@ export async function handleBufferCallback(
   const access = await checkBufferAccess(slug, currentUserId, isGlobalAdmin);
   if (!access.ok) return { success: false, slug, code: access.error };
 
-  let accessToken: string;
+  let tokens: Awaited<ReturnType<typeof exchangeCodeForTokens>>;
   let bufferUserId: string;
 
   try {
-    const tokens = await exchangeCodeForTokens(
+    tokens = await exchangeCodeForTokens(
       code,
       config.clientId,
       config.clientSecret,
-      config.redirectUri
+      config.redirectUri,
+      codeVerifier
     );
-    accessToken = tokens.accessToken;
-    bufferUserId = await getBufferUserId(accessToken);
+    bufferUserId = await getBufferAccountId(tokens.accessToken);
   } catch {
     return { success: false, slug, code: "EXCHANGE_FAILED" };
   }
 
-  // Token encrypted before storage — never stored in plain text.
-  const accessTokenEnc = encrypt(accessToken);
+  // Tokens encrypted before storage — never stored in plain text.
+  const accessTokenEnc = encrypt(tokens.accessToken);
+  const refreshTokenEnc = tokens.refreshToken ? encrypt(tokens.refreshToken) : null;
+  const tokenExpiresAt = tokens.expiresAt;
 
   await prisma.bufferConnection.upsert({
     where: { companyId: access.companyId },
-    create: { companyId: access.companyId, bufferUserId, accessTokenEnc },
-    update: { bufferUserId, accessTokenEnc },
+    create: {
+      companyId: access.companyId,
+      bufferUserId,
+      accessTokenEnc,
+      refreshTokenEnc,
+      tokenExpiresAt,
+    },
+    update: { bufferUserId, accessTokenEnc, refreshTokenEnc, tokenExpiresAt },
   });
 
   return { success: true, slug };

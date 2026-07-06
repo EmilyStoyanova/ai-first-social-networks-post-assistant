@@ -1,4 +1,5 @@
 import { getBufferAuthUrl } from "@/lib/integrations/buffer/client";
+import { createPkcePair } from "@/lib/integrations/buffer/pkce";
 import { createOAuthState } from "@/lib/integrations/buffer/state";
 import { checkBufferAccess } from "./_access";
 
@@ -11,7 +12,7 @@ function getBufferConfig(): { clientId: string; clientSecret: string; redirectUr
 }
 
 export type CreateBufferOAuthUrlResult =
-  | { success: true; url: string }
+  | { success: true; url: string; codeVerifier: string }
   | { success: false; code: "NOT_FOUND" | "FORBIDDEN" | "MISSING_CONFIG" };
 
 export async function createBufferOAuthUrl(
@@ -26,6 +27,7 @@ export async function createBufferOAuthUrl(
   if (!access.ok) return { success: false, code: access.error };
 
   const state = createOAuthState(slug, userId);
-  const url = getBufferAuthUrl(config.clientId, config.redirectUri, state);
-  return { success: true, url };
+  const pkce = createPkcePair();
+  const url = getBufferAuthUrl(config.clientId, config.redirectUri, state, pkce.challenge);
+  return { success: true, url, codeVerifier: pkce.verifier };
 }

@@ -1,4 +1,10 @@
+import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import {
+  PKCE_COOKIE_MAX_AGE,
+  PKCE_COOKIE_NAME,
+  PKCE_COOKIE_PATH,
+} from "@/lib/integrations/buffer/pkce";
 import { createBufferOAuthUrl } from "@/lib/services/buffer/create-buffer-oauth-url.service";
 
 interface Context {
@@ -43,5 +49,15 @@ export async function GET(_req: Request, context: Context) {
     }
   }
 
-  return Response.redirect(result.url, 302);
+  // The PKCE verifier must survive the round-trip to Buffer without appearing
+  // in any URL, so it travels in an HttpOnly cookie scoped to the callback.
+  const response = NextResponse.redirect(result.url, 302);
+  response.cookies.set(PKCE_COOKIE_NAME, result.codeVerifier, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: PKCE_COOKIE_PATH,
+    maxAge: PKCE_COOKIE_MAX_AGE,
+  });
+  return response;
 }
