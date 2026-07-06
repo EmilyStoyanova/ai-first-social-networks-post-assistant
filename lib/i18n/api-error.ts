@@ -50,6 +50,13 @@ export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 
 const KNOWN_CODES: ReadonlySet<string> = new Set(API_ERROR_CODES);
 
+/**
+ * Codes whose server message carries provider-specific detail (e.g. the exact
+ * validation error Buffer returned) that a generic translation would hide.
+ * For these, the detail is appended after the translated label.
+ */
+const DETAIL_CODES: ReadonlySet<string> = new Set(["BUFFER_API_ERROR"]);
+
 export interface ApiErrorShape {
   code?: string;
   message?: string;
@@ -78,7 +85,10 @@ export function useApiErrorMessage() {
   return useCallback(
     (error?: ApiErrorShape | null, fallback?: string): string => {
       const code = error?.code;
-      if (code && KNOWN_CODES.has(code)) return t(code);
+      if (code && KNOWN_CODES.has(code)) {
+        if (DETAIL_CODES.has(code) && error?.message) return `${t(code)}: ${error.message}`;
+        return t(code);
+      }
       return fallback ?? t("UNKNOWN");
     },
     [t]

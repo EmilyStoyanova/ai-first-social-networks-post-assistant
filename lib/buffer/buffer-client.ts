@@ -1,8 +1,14 @@
-import { BufferApiError, BufferTokenExpiredError } from "./buffer-errors";
+import {
+  BufferApiError,
+  BufferTokenExpiredError,
+  BufferInvalidProfileError,
+} from "./buffer-errors";
 
 // Buffer's current GraphQL API (the legacy api.bufferapp.com/1 REST API does not
 // accept tokens issued by auth.buffer.com).
 const API_URL = "https://api.buffer.com";
+
+const LOG_LIMIT = 500;
 
 export interface BufferProfile {
   id: string;
@@ -25,9 +31,26 @@ interface RawChannel {
 
 interface RawCreatePostPayload {
   createPost?: {
-    post?: { id: string } | null;
+    __typename?: string;
+    post?: { id: string; status?: string | null } | null;
     message?: string;
   } | null;
+}
+
+/**
+ * Buffer rejects posts without a channel-specific type in `metadata`
+ * (verified via live API: "Facebook posts require a type (post, story, or reel)").
+ * Services not listed here are sent without metadata.
+ */
+function buildMetadataArg(service: string): string {
+  switch (service) {
+    case "facebook":
+      return ", metadata: { facebook: { type: post } }";
+    case "instagram":
+      return ", metadata: { instagram: { type: post, shouldShareToFeed: true } }";
+    default:
+      return "";
+  }
 }
 
 export class BufferClient {
@@ -49,12 +72,16 @@ export class BufferClient {
     }
     if (!res.ok) {
       const body = await res.text().catch(() => res.statusText);
-      throw new BufferApiError(`Buffer API error ${res.status}: ${body}`, res.status);
+      // Response bodies never contain tokens — safe to log truncated.
+      console.error(`[buffer] API HTTP ${res.status}: ${body.slice(0, LOG_LIMIT)}`);
+      throw new BufferApiError(`Buffer API error ${res.status}: ${body.slice(0, 200)}`, res.status);
     }
 
     const json = (await res.json()) as { data?: T; errors?: Array<{ message: string }> };
     if (json.errors?.length) {
-      throw new BufferApiError(json.errors.map((e) => e.message).join("; "));
+      const message = json.errors.map((e) => e.message).join("; ");
+      console.error(`[buffer] GraphQL errors: ${message.slice(0, LOG_LIMIT)}`);
+      throw new BufferApiError(message);
     }
     if (!json.data) throw new BufferApiError("Buffer returned an empty response.");
     return json.data;
@@ -90,9 +117,21 @@ export class BufferClient {
     text: string,
     options?: { mediaUrl?: string }
   ): Promise<BufferPublishResult> {
+    // The createPost metadata is service-specific, so resolve each channel's service first.
+    const profiles = await this.getProfiles();
     let first: BufferPublishResult | null = null;
 
     for (const channelId of profileIds) {
+      const profile = profiles.find((p) => p.id === channelId);
+      if (!profile) throw new BufferInvalidProfileError();
+      const service = profile.service.toLowerCase();
+
+      if (service === "instagram" && !options?.mediaUrl) {
+        throw new BufferApiError(
+          "Instagram posts require at least one image or video. Attach an image to the post before publishing."
+        );
+      }
+
       // Arguments are inlined as JSON-escaped literals (valid GraphQL string syntax)
       // to avoid depending on unpublished input type names for variables.
       const assets = options?.mediaUrl
@@ -103,19 +142,27 @@ export class BufferClient {
           text: ${JSON.stringify(text)},
           channelId: ${JSON.stringify(channelId)},
           schedulingType: automatic,
-          mode: shareNow${assets}
+          mode: shareNow${buildMetadataArg(service)}${assets}
         }) {
-          ... on PostActionSuccess { post { id } }
+          __typename
+          ... on PostActionSuccess { post { id status } }
           ... on MutationError { message }
         }
       }`;
 
       const data = await this.query<RawCreatePostPayload>(mutation);
       const payload = data.createPost;
+
       if (!payload?.post?.id) {
-        throw new BufferApiError(payload?.message ?? "Buffer did not return a post ID.");
+        const typename = payload?.__typename ?? "UnknownError";
+        const message = payload?.message ?? "Buffer did not return a post ID.";
+        console.error(`[buffer] createPost ${typename} for channel ${channelId}: ${message}`);
+        if (typename === "UnauthorizedError") throw new BufferTokenExpiredError();
+        if (typename === "NotFoundError") throw new BufferInvalidProfileError();
+        throw new BufferApiError(message);
       }
-      first ??= { updateId: payload.post.id, status: "sent" };
+
+      first ??= { updateId: payload.post.id, status: payload.post.status ?? "sent" };
     }
 
     if (!first) throw new BufferApiError("No Buffer channel was selected.");
