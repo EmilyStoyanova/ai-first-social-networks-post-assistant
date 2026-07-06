@@ -7,22 +7,24 @@ interface Props {
   className?: string;
 }
 
+// Generic badge — role/meta labels. Post/run statuses use StatusBadge (§6.2),
+// which owns the canonical status→color map.
 const VARIANT_CLASSES: Record<Variant, string> = {
-  owner: "bg-green-100 text-green-700 font-semibold",
-  editor: "bg-gray-100 text-gray-600 font-semibold",
-  comingSoon: "bg-gray-100 text-gray-500 font-medium",
-  success: "bg-green-100 text-green-700 font-semibold",
-  warning: "bg-yellow-100 text-yellow-700 font-semibold",
-  danger: "bg-red-100 text-red-700 font-semibold",
-  neutral: "bg-gray-100 text-gray-600 font-semibold",
-  readonly: "bg-gray-100 text-gray-500 font-medium",
+  owner: "bg-status-success-bg text-status-success-fg",
+  editor: "bg-surface-subtle text-fg-muted",
+  comingSoon: "bg-surface-subtle text-fg-faint",
+  success: "bg-status-success-bg text-status-success-fg",
+  warning: "bg-status-warning-bg text-status-warning-fg",
+  danger: "bg-status-danger-bg text-status-danger-fg",
+  neutral: "bg-status-neutral-bg text-status-neutral-fg",
+  readonly: "bg-surface-subtle text-fg-faint",
 };
 
 export function Badge({ variant, children, className }: Props) {
   return (
     <span
       className={[
-        "inline-block rounded-full px-2.5 py-0.5 text-xs",
+        "text-micro inline-flex h-[22px] items-center rounded-full px-2.5",
         VARIANT_CLASSES[variant],
         className ?? "",
       ]

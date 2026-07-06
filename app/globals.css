@@ -1,26 +1,219 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/*
+ * Design tokens — Direction A "The Reading Room" (UI_REDESIGN_SPEC.md §6).
+ * Components consume tokens only; no ad-hoc hex/px in component code.
+ */
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+@theme {
+  /* ---------- 6.1 Typography — faces ---------- */
+  --font-serif: var(--font-literata), Georgia, serif;
+  --font-sans: var(--font-source-sans), "Helvetica Neue", Arial, sans-serif;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  /* ---------- 6.2 Color — neutrals ---------- */
+  --color-bg: #fbfaf9; /* app background */
+  --color-surface: #ffffff; /* cards, panels, modals, inputs */
+  --color-surface-subtle: #f5f4f2; /* hovers, wells, table header band */
+  --color-border: #e9e7e4; /* hairlines — the default 1px border */
+  --color-border-strong: #d6d3cf; /* interactive-card hover, visible dividers */
+  --color-fg: #211e1b; /* ink — primary text and the primary button */
+  --color-fg-muted: #6e6a64; /* secondary text, the data role */
+  --color-fg-faint: #9b968f; /* placeholders and disabled only */
+  --color-accent: #3e5c76; /* links, focus ring, active nav — never buttons */
+
+  /* ---------- 6.2 Color — canonical status map ---------- */
+  --color-status-neutral-bg: #efedea; /* draft */
+  --color-status-neutral-fg: #57534e;
+  --color-status-neutral-dot: #78716c;
+  --color-status-warning-bg: #fbefdc; /* pending_approval, reconnect */
+  --color-status-warning-fg: #92400e;
+  --color-status-warning-dot: #d97706;
+  --color-status-success-bg: #dff0e4; /* published */
+  --color-status-success-fg: #166534; /* approved, connected */
+  --color-status-success-fg-deep: #14532d; /* published tint text */
+  --color-status-success-dot: #16a34a;
+  --color-status-info-bg: #e8eef9; /* sent_to_buffer */
+  --color-status-info-fg: #1e40af;
+  --color-status-info-dot: #2563eb;
+  --color-status-danger-bg: #fae8e8; /* failed, rejected, disconnected */
+  --color-status-danger-fg: #991b1b;
+  --color-status-danger-dot: #dc2626;
+  --color-danger: #b91c1c; /* danger button + danger zone only */
+
+  /* ---------- 6.3 Spacing — semantic rhythm ---------- */
+  --spacing-page-x: 2.5rem; /* 40 desktop; pages reduce at breakpoints */
+  --spacing-page-x-tablet: 1.5rem; /* 24 */
+  --spacing-page-x-mobile: 1rem; /* 16 */
+  --spacing-page-top: 2.5rem; /* above the page title */
+  --spacing-after-display: 1.5rem; /* page title → first content */
+  --spacing-section: 2.5rem; /* between page sections */
+  --spacing-after-title: 0.75rem; /* section/card title → content */
+  --spacing-card-gap: 1rem; /* between cards in a list/grid */
+  --spacing-field: 1rem; /* between form fields */
+  --spacing-label: 0.375rem; /* label → input */
+  --spacing-inline: 0.5rem; /* icon ↔ text, badge ↔ title */
+
+  /* ---------- 6.4 Radius ---------- */
+  --radius-control: 0.25rem; /* 4px — controls & badges */
+  --radius-card: 0.375rem; /* 6px — cards */
+  --radius-panel: 0.625rem; /* 10px — modals / panels */
+
+  /* ---------- 6.4 Elevation — floating layers only ---------- */
+  --shadow-sm: 0 1px 2px 0 rgb(33 30 27 / 0.06); /* interactive-card hover */
+  --shadow-md: 0 4px 12px -2px rgb(33 30 27 / 0.1); /* dropdown / popover */
+  --shadow-lg: 0 12px 32px -8px rgb(33 30 27 / 0.18); /* modal / side panel */
+
+  /* ---------- 6.9 Motion ---------- */
+  --duration-fast: 120ms; /* hovers, fades */
+  --duration-panel: 200ms; /* modal/panel: fade + 4px rise */
+  --duration-leave: 150ms; /* queue item collapse */
+
+  /* Panel entry: fade + 4px rise */
+  --animate-panel-in: panel-in var(--duration-panel) ease-out;
+  --animate-fade-in: fade-in var(--duration-fast) ease-out;
+
+  @keyframes panel-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
 }
 
+/* ---------- 6.1 Type roles — the only text styles permitted ---------- */
+
+@utility text-display {
+  /* Page title — exactly one per page */
+  font-family: var(--font-serif);
+  font-size: 1.75rem; /* 28 */
+  line-height: 2.25rem; /* 36 */
+  font-weight: 600;
+}
+
+@utility text-title {
+  /* Section and card titles */
+  font-family: var(--font-serif);
+  font-size: 1.25rem; /* 20 */
+  line-height: 1.75rem; /* 28 */
+  font-weight: 600;
+}
+
+@utility text-reading {
+  /* Post text in review/edit contexts — largest body-class text on screen */
+  font-family: var(--font-serif);
+  font-size: 1.0625rem; /* 17 */
+  line-height: 1.75rem; /* 28 */
+  font-weight: 400;
+  max-width: 68ch;
+}
+
+@utility text-body {
+  /* Default UI text */
+  font-family: var(--font-sans);
+  font-size: 0.9375rem; /* 15 */
+  line-height: 1.5rem; /* 24 */
+  font-weight: 400;
+}
+
+@utility text-body-strong {
+  /* Emphasis, active states */
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  line-height: 1.5rem;
+  font-weight: 600;
+}
+
+@utility text-small {
+  /* Metadata, labels, help text */
+  font-family: var(--font-sans);
+  font-size: 0.8125rem; /* 13 */
+  line-height: 1.25rem; /* 20 */
+  font-weight: 400;
+}
+
+@utility text-data {
+  /* Timestamps, counts, IDs, schedules — quiet, exact */
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-fg-muted);
+}
+
+@utility text-micro {
+  /* Overlines and badge text — the only tracked (uppercase) role */
+  font-family: var(--font-sans);
+  font-size: 0.75rem; /* 12 */
+  line-height: 1rem; /* 16 */
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+/* ---------- Focus token — 2px accent ring, 2px offset ---------- */
+
+@utility focus-ring {
+  &:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+@utility focus-ring-inside {
+  /* For inputs — ring hugs the control */
+  &:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 0px;
+  }
+}
+
+/* ---------- Base ---------- */
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 0.9375rem;
+  line-height: 1.5rem;
+}
+
+/* Never synthesize italic/bold — Literata's true italic is the only italic. */
+.font-serif {
+  font-synthesis: none;
+}
+
+/* ---------- 6.10 Density: compact mode ----------
+ * One switch on a region remaps rhythm tokens; components never restyle
+ * themselves individually. Type roles, status colors, and focus rings
+ * never change with density. */
+
+[data-density="compact"] {
+  --spacing-section: 1.5rem; /* 24 */
+  --spacing-card-gap: 0.75rem; /* 12 */
+}
+
+/* ---------- 6.9 Reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

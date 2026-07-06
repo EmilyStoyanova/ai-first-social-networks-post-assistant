@@ -316,13 +316,11 @@ export function GeneratedPostCard({
           <Badge variant={channelMeta.variant}>{channelMeta.label}</Badge>
           <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
         </div>
-        <span className="text-xs text-gray-400">{formatDate(post.createdAt)}</span>
+        <span className="text-fg-faint text-xs">{formatDate(post.createdAt)}</span>
       </div>
 
       {/* Post text */}
-      <p className="mb-4 flex-1 text-sm leading-relaxed whitespace-pre-line text-gray-800">
-        {localText}
-      </p>
+      <p className="text-fg mb-4 flex-1 text-sm leading-relaxed whitespace-pre-line">{localText}</p>
 
       {/* Hashtags */}
       {localHashtags.length > 0 && (
@@ -330,7 +328,7 @@ export function GeneratedPostCard({
           {localHashtags.map((tag) => (
             <span
               key={tag}
-              className="rounded-full bg-green-50 px-2.5 py-0.5 text-xs font-medium text-green-700"
+              className="bg-status-success-bg text-status-success-fg rounded-full px-2.5 py-0.5 text-xs font-medium"
             >
               #{tag}
             </span>
@@ -340,7 +338,7 @@ export function GeneratedPostCard({
 
       {/* Generated image preview */}
       {imageUrl && (
-        <div className="mb-4 overflow-hidden rounded-lg border border-gray-200">
+        <div className="rounded-control border-border mb-4 overflow-hidden border">
           <Image
             src={imageUrl}
             alt={t("imageAlt")}
@@ -354,28 +352,28 @@ export function GeneratedPostCard({
 
       {/* Image prompt — shown only when there's no image yet */}
       {post.imagePrompt && !imageUrl && (
-        <div className="mb-3 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
-          <p className="mb-1 text-xs font-semibold tracking-wide text-gray-400 uppercase">
+        <div className="rounded-control border-border bg-surface-subtle mb-3 border px-4 py-3">
+          <p className="text-fg-faint mb-1 text-xs font-semibold tracking-wide uppercase">
             {t("imagePrompt")}
           </p>
-          <p className="text-xs leading-relaxed text-gray-600">{post.imagePrompt}</p>
+          <p className="text-fg-muted text-xs leading-relaxed">{post.imagePrompt}</p>
         </div>
       )}
 
       {/* Notes */}
       {post.notes && (
-        <div className="mb-3 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
-          <p className="mb-1 text-xs font-semibold tracking-wide text-gray-400 uppercase">
+        <div className="rounded-control border-border bg-surface-subtle mb-3 border px-4 py-3">
+          <p className="text-fg-faint mb-1 text-xs font-semibold tracking-wide uppercase">
             {t("notes")}
           </p>
-          <p className="text-xs leading-relaxed text-gray-600">{post.notes}</p>
+          <p className="text-fg-muted text-xs leading-relaxed">{post.notes}</p>
         </div>
       )}
 
       {/* Published info */}
       {publishedAt && (
-        <div className="mb-3 rounded-lg border border-green-100 bg-green-50 px-4 py-3">
-          <p className="text-xs font-semibold text-green-700">
+        <div className="rounded-control bg-status-success-bg mb-3 border border-green-100 px-4 py-3">
+          <p className="text-status-success-fg text-xs font-semibold">
             {t("sentToBuffer", { date: formatDate(publishedAt) })}
           </p>
         </div>
@@ -383,7 +381,7 @@ export function GeneratedPostCard({
 
       {/* LLM info */}
       {(post.llmProvider || post.llmModel) && (
-        <p className="mb-4 text-xs text-gray-400">
+        <p className="text-fg-faint mb-4 text-xs">
           {[post.llmProvider, post.llmModel].filter(Boolean).join(" · ")}
         </p>
       )}
@@ -418,18 +416,20 @@ export function GeneratedPostCard({
 
       {/* Publish panel */}
       {publishOpen && isApproved && (
-        <div className="mb-3 rounded-lg border border-blue-100 bg-blue-50 px-4 py-3">
-          <p className="mb-2 text-xs font-semibold text-blue-800">{t("publishPanel.title")}</p>
+        <div className="rounded-control border-status-info-dot/30 bg-status-info-bg mb-3 border px-4 py-3">
+          <p className="text-status-info-fg mb-2 text-xs font-semibold">
+            {t("publishPanel.title")}
+          </p>
           {loadingProfiles ? (
-            <p className="text-xs text-blue-600">{t("publishPanel.loadingProfiles")}</p>
+            <p className="text-status-info-fg text-xs">{t("publishPanel.loadingProfiles")}</p>
           ) : profiles.length === 0 ? (
-            <p className="text-xs text-blue-600">{t("publishPanel.noProfiles")}</p>
+            <p className="text-status-info-fg text-xs">{t("publishPanel.noProfiles")}</p>
           ) : (
             <select
               value={selectedProfileId}
               onChange={(e) => setSelectedProfileId(e.target.value)}
               disabled={publishing}
-              className="mb-2 w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+              className="rounded-control border-status-info-dot/40 bg-surface focus:border-status-info-dot focus:ring-status-info-dot/30 mb-2 w-full border px-3 py-2 text-xs outline-none focus:ring-2"
             >
               {profiles.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -534,7 +534,7 @@ export function GeneratedPostCard({
           </Button>
         )}
         {canPublish && !bufferConnected && isApproved && (
-          <span className="text-xs text-gray-400">{t("connectBufferToPublish")}</span>
+          <span className="text-fg-faint text-xs">{t("connectBufferToPublish")}</span>
         )}
 
         {/* Delete — draft only, owner/admin */}
@@ -542,7 +542,7 @@ export function GeneratedPostCard({
           isDraft &&
           (confirmDelete ? (
             <>
-              <p className="text-xs text-gray-500">{t("deleteDraft")}</p>
+              <p className="text-fg-muted text-xs">{t("deleteDraft")}</p>
               <Button variant="danger" size="sm" loading={deleting} onClick={handleDelete}>
                 {deleting ? tCommon("deleting") : tCommon("confirm")}
               </Button>
@@ -565,10 +565,10 @@ export function GeneratedPostCard({
       </div>
 
       {/* View Activity — always available */}
-      <div className="mt-3 border-t border-gray-100 pt-3">
+      <div className="border-border mt-3 border-t pt-3">
         <button
           onClick={() => setActivityOpen(true)}
-          className="text-xs text-gray-400 transition-colors hover:text-gray-600"
+          className="text-fg-faint hover:text-fg text-xs transition-colors"
         >
           {t("viewActivity")}
         </button>

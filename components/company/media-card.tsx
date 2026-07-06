@@ -127,11 +127,11 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
 
   return (
     <>
-      <div className="flex flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+      <div className="rounded-card border-border bg-surface flex flex-col overflow-hidden border shadow-sm">
         {/* Image — clickable for preview */}
         <button
           type="button"
-          className="relative aspect-video w-full overflow-hidden bg-gray-100"
+          className="bg-surface-subtle relative aspect-video w-full overflow-hidden"
           onClick={() => setPreviewOpen(true)}
           aria-label={t("preview")}
         >
@@ -139,7 +139,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
             src={item.url}
             alt={item.post ? t("imageForPost", { channel: item.post.channel }) : t("mediaAsset")}
             fill
-            className="object-cover transition-transform duration-200 hover:scale-105"
+            className="duration-fast object-cover transition-transform hover:scale-105"
             unoptimized
             loading="lazy"
           />
@@ -159,14 +159,14 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
           </div>
 
           {/* Metadata */}
-          <dl className="mb-4 space-y-1 text-xs text-gray-500">
+          <dl className="text-fg-muted mb-4 space-y-1 text-xs">
             <div className="flex items-center justify-between gap-2">
-              <dt className="font-medium text-gray-400">{t("created")}</dt>
+              <dt className="text-fg-faint font-medium">{t("created")}</dt>
               <dd>{formatDate(item.createdAt)}</dd>
             </div>
             {item.width && item.height && (
               <div className="flex items-center justify-between gap-2">
-                <dt className="font-medium text-gray-400">{t("dimensions")}</dt>
+                <dt className="text-fg-faint font-medium">{t("dimensions")}</dt>
                 <dd>
                   {item.width} × {item.height}
                 </dd>
@@ -174,7 +174,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
             )}
             {item.post && (
               <div className="flex items-center justify-between gap-2">
-                <dt className="font-medium text-gray-400">{t("status")}</dt>
+                <dt className="text-fg-faint font-medium">{t("status")}</dt>
                 <dd>{item.post.status}</dd>
               </div>
             )}
@@ -196,18 +196,18 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
 
           {/* Reuse panel */}
           {reuseOpen && (
-            <div className="mb-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
-              <p className="mb-2 text-xs font-semibold text-gray-700">{t("attachToDraft")}</p>
+            <div className="rounded-control border-border bg-surface-subtle mb-3 border px-3 py-3">
+              <p className="text-fg-muted mb-2 text-xs font-semibold">{t("attachToDraft")}</p>
               {loadingPosts ? (
-                <p className="text-xs text-gray-400">{t("loadingPosts")}</p>
+                <p className="text-fg-faint text-xs">{t("loadingPosts")}</p>
               ) : draftPosts.length === 0 ? (
-                <p className="text-xs text-gray-400">{t("noDrafts")}</p>
+                <p className="text-fg-faint text-xs">{t("noDrafts")}</p>
               ) : (
                 <select
                   value={selectedPostId}
                   onChange={(e) => setSelectedPostId(e.target.value)}
                   disabled={attaching}
-                  className="mb-2 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100"
+                  className="rounded-control border-border-strong bg-surface focus:border-accent focus:ring-accent/20 mb-2 w-full border px-3 py-2 text-xs outline-none focus:ring-2"
                 >
                   {draftPosts.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -251,7 +251,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
             {item.post && (
               <Link
                 href={`/companies/${slug}`}
-                className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-100"
+                className="rounded-control text-fg-muted hover:bg-surface-subtle inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold transition-colors"
               >
                 {t("openPost")}
               </Link>
@@ -276,7 +276,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
             {canDelete &&
               (confirmDelete ? (
                 <>
-                  <p className="text-xs text-gray-500">{t("deleteImage")}</p>
+                  <p className="text-fg-muted text-xs">{t("deleteImage")}</p>
                   <Button
                     variant="danger"
                     size="sm"
@@ -316,7 +316,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
       {previewOpen && (
         <Modal open onClose={() => setPreviewOpen(false)} title={t("imagePreview")} maxWidth="xl">
           <div className="space-y-4">
-            <div className="overflow-hidden rounded-xl border border-gray-200">
+            <div className="rounded-card border-border overflow-hidden border">
               <Image
                 src={item.url}
                 alt={t("imagePreview")}
@@ -329,16 +329,16 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
             <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
               {item.width && item.height && (
                 <>
-                  <dt className="font-medium text-gray-400">{t("dimensions")}</dt>
-                  <dd className="text-gray-700">
+                  <dt className="text-fg-faint font-medium">{t("dimensions")}</dt>
+                  <dd className="text-fg-muted">
                     {item.width} × {item.height}
                   </dd>
                 </>
               )}
-              <dt className="font-medium text-gray-400">{t("status")}</dt>
-              <dd className="text-gray-700">{item.provider}</dd>
-              <dt className="font-medium text-gray-400">{t("created")}</dt>
-              <dd className="text-gray-700">{formatDate(item.createdAt)}</dd>
+              <dt className="text-fg-faint font-medium">{t("status")}</dt>
+              <dd className="text-fg-muted">{item.provider}</dd>
+              <dt className="text-fg-faint font-medium">{t("created")}</dt>
+              <dd className="text-fg-muted">{formatDate(item.createdAt)}</dd>
             </dl>
             <div className="flex gap-2">
               <Button
@@ -352,7 +352,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
                 href={item.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-semibold text-gray-700 transition-colors hover:bg-gray-50"
+                className="rounded-control border-border-strong text-fg-muted hover:bg-surface-subtle inline-flex items-center gap-1.5 border px-3 py-1.5 text-xs font-semibold transition-colors"
               >
                 {t("openInNewTab")}
               </a>

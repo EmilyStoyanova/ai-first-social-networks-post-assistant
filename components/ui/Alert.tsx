@@ -1,3 +1,5 @@
+import { AlertTriangle, CheckCircle2, Info, XCircle } from "lucide-react";
+
 type Variant = "success" | "error" | "warning" | "info";
 
 interface Props {
@@ -7,26 +9,27 @@ interface Props {
   className?: string;
 }
 
+// §6.6: status tint background + hairline border in the dot color.
 const STYLES: Record<Variant, { wrapper: string; text: string; iconColor: string }> = {
   success: {
-    wrapper: "border-green-200 bg-green-50",
-    text: "text-green-700",
-    iconColor: "text-green-600",
+    wrapper: "border-status-success-dot/40 bg-status-success-bg",
+    text: "text-status-success-fg",
+    iconColor: "text-status-success-dot",
   },
   error: {
-    wrapper: "border-red-200 bg-red-50",
-    text: "text-red-700",
-    iconColor: "text-red-500",
+    wrapper: "border-status-danger-dot/40 bg-status-danger-bg",
+    text: "text-status-danger-fg",
+    iconColor: "text-status-danger-dot",
   },
   warning: {
-    wrapper: "border-yellow-200 bg-yellow-50",
-    text: "text-yellow-700",
-    iconColor: "text-yellow-500",
+    wrapper: "border-status-warning-dot/40 bg-status-warning-bg",
+    text: "text-status-warning-fg",
+    iconColor: "text-status-warning-dot",
   },
   info: {
-    wrapper: "border-blue-200 bg-blue-50",
-    text: "text-blue-700",
-    iconColor: "text-blue-500",
+    wrapper: "border-status-info-dot/40 bg-status-info-bg",
+    text: "text-status-info-fg",
+    iconColor: "text-status-info-dot",
   },
 };
 
@@ -37,72 +40,24 @@ const DEFAULT_ROLE: Record<Variant, "alert" | "status"> = {
   info: "alert",
 };
 
-function CheckIcon() {
-  return (
-    <svg
-      className="mt-0.5 h-4 w-4 shrink-0"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={2.5}
-      aria-hidden="true"
-    >
-      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-    </svg>
-  );
-}
-
-function TriangleIcon() {
-  return (
-    <svg
-      className="mt-0.5 h-4 w-4 shrink-0"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={2.5}
-      aria-hidden="true"
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z"
-      />
-    </svg>
-  );
-}
-
-function InfoIcon() {
-  return (
-    <svg
-      className="mt-0.5 h-4 w-4 shrink-0"
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={2.5}
-      aria-hidden="true"
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-      />
-    </svg>
-  );
-}
-
-function AlertIcon({ variant }: { variant: Variant }) {
-  if (variant === "success") return <CheckIcon />;
-  if (variant === "info") return <InfoIcon />;
-  return <TriangleIcon />;
-}
+const ICONS: Record<
+  Variant,
+  React.ComponentType<{ className?: string; "aria-hidden"?: boolean }>
+> = {
+  success: CheckCircle2,
+  error: XCircle,
+  warning: AlertTriangle,
+  info: Info,
+};
 
 export function Alert({ variant, children, role, className }: Props) {
   const styles = STYLES[variant];
+  const Icon = ICONS[variant];
   return (
     <div
       role={role ?? DEFAULT_ROLE[variant]}
       className={[
-        "flex items-start gap-3 rounded-xl border px-4 py-3",
+        "rounded-card flex items-start gap-3 border px-4 py-3",
         styles.wrapper,
         className ?? "",
       ]
@@ -110,9 +65,9 @@ export function Alert({ variant, children, role, className }: Props) {
         .join(" ")}
     >
       <span className={styles.iconColor}>
-        <AlertIcon variant={variant} />
+        <Icon className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
       </span>
-      <p className={["text-sm", styles.text].join(" ")}>{children}</p>
+      <p className={["text-small", styles.text].join(" ")}>{children}</p>
     </div>
   );
 }

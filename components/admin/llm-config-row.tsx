@@ -11,10 +11,11 @@ import type { ClientLlmConfig } from "./llm-config-section";
 
 // ─── Provider metadata ────────────────────────────────────────────────────────
 
-const PROVIDER_META: Record<string, { icon: string; label: string }> = {
-  CLAUDE: { icon: "🤖", label: "Claude" },
-  OPENAI: { icon: "🟢", label: "OpenAI" },
-  GROK: { icon: "⚡", label: "Grok" },
+// Icons removed per §6.8 — no brand icons in Lucide; label carries meaning.
+const PROVIDER_META: Record<string, { label: string }> = {
+  CLAUDE: { label: "Claude" },
+  OPENAI: { label: "OpenAI" },
+  GROK: { label: "Grok" },
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -36,7 +37,7 @@ export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
 
-  const meta = PROVIDER_META[config.provider] ?? { icon: "⚙️", label: config.provider };
+  const meta = PROVIDER_META[config.provider] ?? { label: config.provider };
 
   async function handleActivate() {
     setIsActivating(true);
@@ -84,8 +85,7 @@ export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
     return (
       <div className="py-4">
         <div className="mb-3 flex items-center gap-2">
-          <span aria-hidden="true">{meta.icon}</span>
-          <span className="text-sm font-semibold text-gray-900">{meta.label}</span>
+          <span className="text-fg text-sm font-semibold">{meta.label}</span>
         </div>
         <LlmConfigForm
           config={config}
@@ -106,12 +106,9 @@ export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         {/* Provider info */}
         <div className="flex min-w-0 items-center gap-3">
-          <span className="text-xl" aria-hidden="true">
-            {meta.icon}
-          </span>
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-gray-900">{meta.label}</p>
-            <p className="mt-0.5 truncate text-xs text-gray-500">{config.model}</p>
+            <p className="text-fg text-sm font-semibold">{meta.label}</p>
+            <p className="text-fg-muted mt-0.5 truncate text-xs">{config.model}</p>
           </div>
         </div>
 
@@ -136,7 +133,7 @@ export function LlmConfigRow({ config, onUpdated, onDeleted }: Props) {
           {!config.isActive &&
             (showDeleteConfirm ? (
               <>
-                <span className="text-xs text-gray-500">{t("deleteProvider")}</span>
+                <span className="text-fg-muted text-xs">{t("deleteProvider")}</span>
                 <Button size="sm" variant="danger" onClick={handleDelete} disabled={isDeleting}>
                   {isDeleting ? tCommon("deleting") : tCommon("confirm")}
                 </Button>

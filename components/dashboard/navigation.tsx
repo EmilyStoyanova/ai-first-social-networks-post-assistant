@@ -30,8 +30,8 @@ export function Navigation({ isGlobalAdmin }: Props) {
       </ul>
 
       {isGlobalAdmin && (
-        <div className="border-t border-gray-100 pt-4">
-          <p className="mb-1 px-3 text-xs font-semibold tracking-widest text-gray-400 uppercase">
+        <div className="border-border border-t pt-4">
+          <p className="text-fg-faint mb-1 px-3 text-xs font-semibold tracking-widest uppercase">
             {t("admin")}
           </p>
           <ul role="list" className="space-y-1">

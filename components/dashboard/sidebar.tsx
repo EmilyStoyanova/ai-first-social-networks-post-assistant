@@ -34,21 +34,21 @@ export function Sidebar({ isOpen, onClose, isGlobalAdmin }: Props) {
 
       <aside
         className={[
-          "fixed inset-y-0 left-0 z-50 w-64 flex-col border-r border-gray-200 bg-white",
+          "border-border bg-surface fixed inset-y-0 left-0 z-50 w-64 flex-col border-r",
           isOpen ? "flex" : "hidden",
           "lg:flex",
         ].join(" ")}
       >
         {/* Logo */}
-        <div className="flex h-16 shrink-0 items-center gap-3 border-b border-gray-100 px-5">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-green-500">
+        <div className="border-border flex h-16 shrink-0 items-center gap-3 border-b px-5">
+          <div className="rounded-control bg-fg flex h-8 w-8 shrink-0 items-center justify-center">
             <span className="text-sm font-bold text-white">AI</span>
           </div>
           <div>
-            <p className="text-sm leading-tight font-bold tracking-tight text-gray-900">
+            <p className="text-fg text-sm leading-tight font-bold tracking-tight">
               {t("logoName")}
             </p>
-            <p className="text-xs leading-tight text-gray-400">{t("logoTagline")}</p>
+            <p className="text-fg-faint text-xs leading-tight">{t("logoTagline")}</p>
           </div>
         </div>
 
@@ -58,7 +58,7 @@ export function Sidebar({ isOpen, onClose, isGlobalAdmin }: Props) {
         </div>
 
         {/* Logout */}
-        <div className="shrink-0 border-t border-gray-100 px-4 py-4">
+        <div className="border-border shrink-0 border-t px-4 py-4">
           <LogoutButton />
         </div>
       </aside>

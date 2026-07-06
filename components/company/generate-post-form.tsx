@@ -59,8 +59,8 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
   }
 
   return (
-    <div className="rounded-xl border border-gray-200 bg-white px-5 py-5 shadow-sm">
-      <h3 className="mb-4 text-sm font-semibold text-gray-900">{t("title")}</h3>
+    <div className="rounded-card border-border bg-surface border px-5 py-5 shadow-sm">
+      <h3 className="text-fg mb-4 text-sm font-semibold">{t("title")}</h3>
 
       {error && (
         <Alert variant="error" className="mb-4">
@@ -84,7 +84,7 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
         <div className="min-w-[160px] flex-1">
           <label
             htmlFor="generate-channel"
-            className="mb-1.5 block text-sm font-medium text-gray-700"
+            className="text-fg-muted mb-1.5 block text-sm font-medium"
           >
             {t("channel")}
           </label>
@@ -96,7 +96,7 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
               setWarnings(null);
             }}
             disabled={generating}
-            className="w-full rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm transition-all duration-200 outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
+            className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {CHANNELS.map((c) => (
               <option key={c.value} value={c.value}>
@@ -109,7 +109,7 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
         <div className="min-w-[140px]">
           <label
             htmlFor="generate-content-language"
-            className="mb-1.5 block text-sm font-medium text-gray-700"
+            className="text-fg-muted mb-1.5 block text-sm font-medium"
           >
             {t("contentLanguage")}
           </label>
@@ -118,7 +118,7 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
             value={contentLanguage}
             onChange={(e) => setContentLanguage(e.target.value as "en" | "bg")}
             disabled={generating}
-            className="w-full rounded-lg border border-gray-300 bg-white px-3.5 py-2.5 text-sm transition-all duration-200 outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
+            className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <option value="en">{t("contentLanguageEN")}</option>
             <option value="bg">{t("contentLanguageBG")}</option>

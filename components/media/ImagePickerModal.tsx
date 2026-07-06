@@ -59,7 +59,7 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
     { value: "upload", label: t("uploadTab") },
   ];
   return (
-    <div className="-mx-6 mb-5 flex border-b border-gray-100 px-6">
+    <div className="border-border -mx-6 mb-5 flex border-b px-6">
       {tabs.map((tab) => (
         <button
           key={tab.value}
@@ -68,8 +68,8 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
           className={[
             "mr-5 border-b-2 pb-3 text-sm font-medium transition-colors",
             active === tab.value
-              ? "border-green-500 text-green-700"
-              : "border-transparent text-gray-500 hover:text-gray-800",
+              ? "border-status-success-dot text-status-success-fg"
+              : "text-fg-muted hover:text-fg border-transparent",
           ].join(" ")}
         >
           {tab.label}
@@ -133,7 +133,7 @@ function GalleryTab({
     : items;
 
   if (loading) {
-    return <p className="py-12 text-center text-sm text-gray-400">{t("loadingGallery")}</p>;
+    return <p className="text-fg-faint py-12 text-center text-sm">{t("loadingGallery")}</p>;
   }
 
   if (error) {
@@ -156,11 +156,11 @@ function GalleryTab({
         placeholder={t("searchPlaceholder")}
         value={search}
         onChange={(e) => setSearch(e.target.value)}
-        className="w-full rounded-lg border border-gray-300 px-3.5 py-2 text-sm outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100"
+        className="rounded-control border-border-strong focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2 text-sm outline-none focus:ring-2"
       />
 
       {filtered.length === 0 ? (
-        <p className="py-8 text-center text-sm text-gray-400">
+        <p className="text-fg-faint py-8 text-center text-sm">
           {items.length === 0 ? t("noImages") : t("noResults")}
         </p>
       ) : (
@@ -168,9 +168,9 @@ function GalleryTab({
           {filtered.map((item) => (
             <div
               key={item.id}
-              className="overflow-hidden rounded-xl border border-gray-200 bg-gray-50"
+              className="rounded-card border-border bg-surface-subtle overflow-hidden border"
             >
-              <div className="relative aspect-square w-full overflow-hidden bg-gray-100">
+              <div className="bg-surface-subtle relative aspect-square w-full overflow-hidden">
                 <Image
                   src={item.url}
                   alt={t("galleryImageAlt")}
@@ -181,8 +181,8 @@ function GalleryTab({
                 />
               </div>
               <div className="px-2 pt-2 pb-1">
-                <p className="truncate text-xs text-gray-400">{formatDate(item.createdAt)}</p>
-                <p className="truncate text-xs font-medium text-gray-600">{item.provider}</p>
+                <p className="text-fg-faint truncate text-xs">{formatDate(item.createdAt)}</p>
+                <p className="text-fg-muted truncate text-xs font-medium">{item.provider}</p>
               </div>
               <div className="px-2 pb-2">
                 <Button
@@ -246,11 +246,11 @@ function AiGenerateTab({
       {!postImagePrompt ? (
         <Alert variant="warning">{t("noPrompt")}</Alert>
       ) : (
-        <div className="rounded-lg border border-gray-100 bg-gray-50 px-4 py-3">
-          <p className="mb-1 text-xs font-semibold tracking-wide text-gray-400 uppercase">
+        <div className="rounded-control border-border bg-surface-subtle border px-4 py-3">
+          <p className="text-fg-faint mb-1 text-xs font-semibold tracking-wide uppercase">
             {t("imagePrompt")}
           </p>
-          <p className="text-sm leading-relaxed text-gray-700">{postImagePrompt}</p>
+          <p className="text-fg-muted text-sm leading-relaxed">{postImagePrompt}</p>
         </div>
       )}
 
@@ -258,7 +258,7 @@ function AiGenerateTab({
 
       {preview ? (
         <div className="space-y-3">
-          <div className="overflow-hidden rounded-xl border border-gray-200">
+          <div className="rounded-card border-border overflow-hidden border">
             <Image
               src={preview.url}
               alt={t("generatedPreviewAlt")}
@@ -388,14 +388,14 @@ function UploadTab({
           tabIndex={0}
           onKeyDown={(e) => e.key === "Enter" && inputRef.current?.click()}
           className={[
-            "flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-12 transition-colors",
+            "rounded-card flex cursor-pointer flex-col items-center justify-center gap-3 border-2 border-dashed px-6 py-12 transition-colors",
             dragging
-              ? "border-green-400 bg-green-50"
-              : "border-gray-300 bg-gray-50 hover:border-green-400 hover:bg-green-50",
+              ? "border-status-success-dot bg-status-success-bg"
+              : "border-border-strong bg-surface-subtle hover:border-status-success-dot hover:bg-status-success-bg",
           ].join(" ")}
         >
           <svg
-            className="h-10 w-10 text-gray-400"
+            className="text-fg-faint h-10 w-10"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -409,8 +409,8 @@ function UploadTab({
             />
           </svg>
           <div className="text-center">
-            <p className="text-sm font-medium text-gray-700">{t("dropzone")}</p>
-            <p className="mt-1 text-xs text-gray-400">{t("dropzoneHint")}</p>
+            <p className="text-fg-muted text-sm font-medium">{t("dropzone")}</p>
+            <p className="text-fg-faint mt-1 text-xs">{t("dropzoneHint")}</p>
           </div>
           <input
             ref={inputRef}
@@ -423,13 +423,13 @@ function UploadTab({
       ) : (
         <div className="space-y-3">
           {previewUrl && (
-            <div className="overflow-hidden rounded-xl border border-gray-200">
+            <div className="rounded-card border-border overflow-hidden border">
               {/* next/image cannot be used with blob: URLs — <img> is intentional for local preview */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={previewUrl} alt={t("uploadPreviewAlt")} className="w-full object-cover" />
             </div>
           )}
-          <p className="text-xs text-gray-500">
+          <p className="text-fg-muted text-xs">
             {file.name} &mdash; {(file.size / 1024 / 1024).toFixed(2)} MB
           </p>
           <div className="flex gap-2">

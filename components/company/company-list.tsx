@@ -39,24 +39,24 @@ export function CompanyList({ companies }: Props) {
             {/* Stretched link — makes the whole card navigate to the detail page. */}
             <Link
               href={`/companies/${company.slug}`}
-              className="absolute inset-0 rounded-2xl focus:outline-none focus-visible:ring-2 focus-visible:ring-green-500 focus-visible:ring-offset-2"
+              className="rounded-card focus-visible:ring-accent absolute inset-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
               aria-label={`Open ${company.name}`}
             />
             <Card variant="hover" className="px-6 py-5 hover:border-green-300">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <p className="truncate text-base font-semibold text-gray-900">{company.name}</p>
+                  <p className="text-fg truncate text-base font-semibold">{company.name}</p>
                   {company.website && (
                     <a
                       href={company.website}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="relative z-10 mt-0.5 block truncate text-sm text-green-600 hover:underline"
+                      className="text-status-success-fg relative z-10 mt-0.5 block truncate text-sm hover:underline"
                     >
                       {company.website}
                     </a>
                   )}
-                  <p className="mt-1 font-mono text-xs text-gray-400">{company.slug}</p>
+                  <p className="text-fg-faint mt-1 font-mono text-xs">{company.slug}</p>
                 </div>
                 {badge && (
                   <div className="relative z-10 shrink-0 pt-0.5">

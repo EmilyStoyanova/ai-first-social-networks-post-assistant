@@ -51,9 +51,9 @@ export function PostActivityModal({ postId, open, onClose }: Props) {
   return (
     <Modal open={open} onClose={onClose} title={t("title")} maxWidth="md">
       {loading ? (
-        <p className="py-8 text-center text-sm text-gray-400">{t("loading")}</p>
+        <p className="text-fg-faint py-8 text-center text-sm">{t("loading")}</p>
       ) : error ? (
-        <p className="py-8 text-center text-sm text-red-500">{error}</p>
+        <p className="text-status-danger-dot py-8 text-center text-sm">{error}</p>
       ) : (
         <AuditLogEntries logs={logs} />
       )}

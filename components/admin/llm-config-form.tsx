@@ -10,9 +10,10 @@ import type { ClientLlmConfig } from "./llm-config-section";
 // ─── Styling ──────────────────────────────────────────────────────────────────
 
 const BASE_INPUT =
-  "w-full rounded-lg border px-3.5 py-2.5 text-sm outline-none transition-all duration-200 focus:ring-2 focus:ring-offset-0";
-const NORMAL_INPUT = "border-gray-300 bg-white focus:border-green-500 focus:ring-green-100";
-const ERROR_INPUT = "border-red-400 bg-red-50 focus:border-red-500 focus:ring-red-200";
+  "w-full rounded-control border px-3.5 py-2.5 text-sm outline-none transition-all duration-fast focus:ring-2 focus:ring-offset-0";
+const NORMAL_INPUT = "border-border-strong bg-surface focus:border-accent focus:ring-accent/20";
+const ERROR_INPUT =
+  "border-status-danger-dot bg-status-danger-bg focus:border-status-danger-dot focus:ring-status-danger-dot/30";
 const DISABLED_INPUT = "cursor-not-allowed opacity-60";
 
 function fieldCls(hasError: boolean, isDisabled: boolean) {
@@ -130,7 +131,7 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
         {/* Provider selector — create mode only */}
         {!isEdit && (
           <div className="w-40 shrink-0">
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            <label className="text-fg-muted mb-1.5 block text-sm font-medium">
               {t("provider")}
             </label>
             <select
@@ -139,16 +140,16 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
               disabled={isSubmitting}
               className={fieldCls(false, isSubmitting)}
             >
-              <option value="CLAUDE">🤖 Claude</option>
-              <option value="OPENAI">🟢 OpenAI</option>
-              <option value="GROK">⚡ Grok</option>
+              <option value="CLAUDE">Claude</option>
+              <option value="OPENAI">OpenAI</option>
+              <option value="GROK">Grok</option>
             </select>
           </div>
         )}
 
         {/* Model */}
         <div className="min-w-[10rem] flex-1">
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">{t("model")}</label>
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">{t("model")}</label>
           <input
             type="text"
             placeholder={MODEL_PLACEHOLDER[provider] ?? "model-name"}
@@ -161,12 +162,12 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
             disabled={isSubmitting}
             className={fieldCls(!!modelError, isSubmitting)}
           />
-          {modelError && <p className="mt-1 text-xs text-red-600">{modelError}</p>}
+          {modelError && <p className="text-status-danger-fg mt-1 text-xs">{modelError}</p>}
         </div>
 
         {/* API Key */}
         <div className="min-w-[12rem] flex-1">
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">{t("apiKey")}</label>
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">{t("apiKey")}</label>
           <input
             type="password"
             placeholder={isEdit ? t("apiKeyHint") : "sk-…"}
@@ -180,18 +181,18 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
             autoComplete="new-password"
             className={fieldCls(!!apiKeyError, isSubmitting)}
           />
-          {apiKeyError && <p className="mt-1 text-xs text-red-600">{apiKeyError}</p>}
+          {apiKeyError && <p className="text-status-danger-fg mt-1 text-xs">{apiKeyError}</p>}
         </div>
 
         {/* Active checkbox */}
         <div className="shrink-0 pb-3">
-          <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-gray-700">
+          <label className="text-fg-muted flex cursor-pointer items-center gap-2 text-sm font-medium">
             <input
               type="checkbox"
               checked={isActive}
               onChange={(e) => setIsActive(e.target.checked)}
               disabled={isSubmitting}
-              className="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-500"
+              className="border-border-strong text-status-success-fg focus:ring-accent h-4 w-4 rounded"
             />
             {t("active")}
           </label>

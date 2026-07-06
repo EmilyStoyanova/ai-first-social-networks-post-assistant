@@ -87,24 +87,24 @@ export function BufferConnectionCard({ slug, initialConnection, canManage, buffe
 
         <div className="min-w-0 flex-1">
           <div className="mb-1 flex items-center justify-between gap-4">
-            <h2 className="text-sm font-semibold text-gray-900">{t("bufferIntegration")}</h2>
+            <h2 className="text-fg text-sm font-semibold">{t("bufferIntegration")}</h2>
             <Badge variant={connected ? "success" : "neutral"}>
               {connected ? t("connected") : t("notConnected")}
             </Badge>
           </div>
 
-          <p className="mb-4 text-sm leading-relaxed text-gray-500">{t("connectDesc")}</p>
+          <p className="text-fg-muted mb-4 text-sm leading-relaxed">{t("connectDesc")}</p>
 
           {connected && (
             <dl className="mb-4 space-y-1.5">
               <div className="flex items-center gap-2 text-sm">
-                <dt className="text-gray-500">{t("bufferUserId")}</dt>
-                <dd className="font-medium text-gray-900">{connection.bufferUserId}</dd>
+                <dt className="text-fg-muted">{t("bufferUserId")}</dt>
+                <dd className="text-fg font-medium">{connection.bufferUserId}</dd>
               </div>
               {connection.connectedAt && (
                 <div className="flex items-center gap-2 text-sm">
-                  <dt className="text-gray-500">{t("connectedSince")}</dt>
-                  <dd className="text-gray-900">
+                  <dt className="text-fg-muted">{t("connectedSince")}</dt>
+                  <dd className="text-fg">
                     {new Date(connection.connectedAt).toLocaleDateString(undefined, {
                       year: "numeric",
                       month: "short",
@@ -116,7 +116,7 @@ export function BufferConnectionCard({ slug, initialConnection, canManage, buffe
             </dl>
           )}
 
-          {!canManage && <p className="mb-3 text-xs text-gray-500">{t("ownersOnly")}</p>}
+          {!canManage && <p className="text-fg-muted mb-3 text-xs">{t("ownersOnly")}</p>}
 
           {canManage && !connected && (
             <Button variant="primary" onClick={handleConnect}>
@@ -137,7 +137,7 @@ export function BufferConnectionCard({ slug, initialConnection, canManage, buffe
 
           {canManage && confirmDisconnect && (
             <div className="flex flex-wrap items-center gap-3">
-              <span className="text-sm text-gray-700">{t("areYouSure")}</span>
+              <span className="text-fg-muted text-sm">{t("areYouSure")}</span>
               <Button
                 variant="danger"
                 loading={uiStatus === "disconnecting"}

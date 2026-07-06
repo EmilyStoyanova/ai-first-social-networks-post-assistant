@@ -61,8 +61,8 @@ export function ContentSourcesSection({ slug, initialSources, canManage }: Props
     <div className="space-y-4">
       {/* Add source form */}
       {showAddForm && canManage && (
-        <div className="rounded-xl border border-gray-200 bg-white px-5 py-5 shadow-sm">
-          <h3 className="mb-4 text-sm font-semibold text-gray-900">{t("newSource")}</h3>
+        <div className="rounded-card border-border bg-surface border px-5 py-5 shadow-sm">
+          <h3 className="text-fg mb-4 text-sm font-semibold">{t("newSource")}</h3>
           {addError && (
             <Alert variant="error" className="mb-4">
               {addError}

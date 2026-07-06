@@ -26,7 +26,7 @@ export function DashboardLayout({ user, children, breadcrumb }: Props) {
   const closeSidebar = useCallback(() => setIsSidebarOpen(false), []);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-50">
+    <div className="bg-surface-subtle flex h-screen overflow-hidden">
       <Sidebar
         isOpen={isSidebarOpen}
         onClose={closeSidebar}

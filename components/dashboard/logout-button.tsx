@@ -11,7 +11,7 @@ export function LogoutButton() {
       <button
         type="submit"
         aria-label={t("signOut")}
-        className="rounded-md border border-gray-200 px-3 py-1.5 text-sm font-medium text-gray-600 transition-colors hover:border-gray-300 hover:bg-gray-100 hover:text-gray-900"
+        className="border-border text-fg-muted hover:border-border-strong hover:bg-surface-subtle hover:text-fg rounded-md border px-3 py-1.5 text-sm font-medium transition-colors"
       >
         {t("logout")}
       </button>

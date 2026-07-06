@@ -73,9 +73,10 @@ function toApiPayload(values: FormValues) {
 // ─── Styling helpers ─────────────────────────────────────────────────────────
 
 const BASE_FIELD =
-  "w-full rounded-lg border px-3.5 py-2.5 text-sm outline-none transition-all duration-200 focus:ring-2 focus:ring-offset-0";
-const NORMAL_FIELD = "border-gray-300 bg-white focus:border-green-500 focus:ring-green-100";
-const ERROR_FIELD = "border-red-400 bg-red-50 focus:border-red-500 focus:ring-red-200";
+  "w-full rounded-control border px-3.5 py-2.5 text-sm outline-none transition-all duration-fast focus:ring-2 focus:ring-offset-0";
+const NORMAL_FIELD = "border-border-strong bg-surface focus:border-accent focus:ring-accent/20";
+const ERROR_FIELD =
+  "border-status-danger-dot bg-status-danger-bg focus:border-status-danger-dot focus:ring-status-danger-dot/30";
 const DISABLED_FIELD = "cursor-not-allowed opacity-60";
 
 function fieldCls(hasError: boolean, isDisabled: boolean): string {
@@ -88,7 +89,7 @@ function fieldCls(hasError: boolean, isDisabled: boolean): string {
 
 function Label({ htmlFor, text }: { htmlFor: string; text: string }) {
   return (
-    <label htmlFor={htmlFor} className="mb-1.5 block text-sm font-medium text-gray-700">
+    <label htmlFor={htmlFor} className="text-fg-muted mb-1.5 block text-sm font-medium">
       {text}
     </label>
   );
@@ -97,7 +98,7 @@ function Label({ htmlFor, text }: { htmlFor: string; text: string }) {
 function FieldError({ id, message }: { id: string; message?: string }) {
   if (!message) return null;
   return (
-    <p id={id} className="mt-1.5 text-xs text-red-600">
+    <p id={id} className="text-status-danger-fg mt-1.5 text-xs">
       {message}
     </p>
   );
@@ -167,7 +168,7 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
     <Card className="px-6 py-6">
       {/* Card header */}
       <div className="mb-5 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-gray-900">{t("title")}</h2>
+        <h2 className="text-fg text-sm font-semibold">{t("title")}</h2>
         {!canEdit && <Badge variant="neutral">{tCommon("readOnly")}</Badge>}
       </div>
 
@@ -302,10 +303,10 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
           <div>
             <label
               htmlFor="bg-forbiddenWords"
-              className="mb-1.5 block text-sm font-medium text-gray-700"
+              className="text-fg-muted mb-1.5 block text-sm font-medium"
             >
               {t("forbiddenWords")}{" "}
-              <span className="font-normal text-gray-400">{t("forbiddenWordsHint")}</span>
+              <span className="text-fg-faint font-normal">{t("forbiddenWordsHint")}</span>
             </label>
             <textarea
               id="bg-forbiddenWords"
@@ -325,10 +326,10 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
           <div>
             <label
               htmlFor="bg-competitors"
-              className="mb-1.5 block text-sm font-medium text-gray-700"
+              className="text-fg-muted mb-1.5 block text-sm font-medium"
             >
               {t("competitors")}{" "}
-              <span className="font-normal text-gray-400">{t("competitorsHint")}</span>
+              <span className="text-fg-faint font-normal">{t("competitorsHint")}</span>
             </label>
             <textarea
               id="bg-competitors"

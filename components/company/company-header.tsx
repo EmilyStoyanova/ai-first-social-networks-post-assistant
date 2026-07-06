@@ -12,14 +12,14 @@ export async function CompanyHeader({ company }: Props) {
   return (
     <div className="flex items-start justify-between gap-6">
       <div className="min-w-0">
-        <h1 className="text-3xl font-bold tracking-tight text-gray-900">{company.name}</h1>
+        <h1 className="text-fg text-3xl font-bold tracking-tight">{company.name}</h1>
         <div className="mt-2 flex flex-wrap items-center gap-3">
           {company.website ? (
             <a
               href={company.website}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-sm text-green-600 transition-colors hover:text-green-700 hover:underline"
+              className="text-status-success-fg hover:text-status-success-fg inline-flex items-center gap-1 text-sm transition-colors hover:underline"
             >
               {company.website}
               <svg
@@ -38,12 +38,12 @@ export async function CompanyHeader({ company }: Props) {
               </svg>
             </a>
           ) : (
-            <span className="text-sm text-gray-400">{t("noWebsite")}</span>
+            <span className="text-fg-faint text-sm">{t("noWebsite")}</span>
           )}
-          <span className="text-gray-200" aria-hidden="true">
+          <span className="text-border" aria-hidden="true">
             |
           </span>
-          <span className="font-mono text-xs text-gray-400">{company.slug}</span>
+          <span className="text-fg-faint font-mono text-xs">{company.slug}</span>
         </div>
       </div>
 

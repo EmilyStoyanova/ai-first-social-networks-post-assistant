@@ -77,20 +77,20 @@ export function RegisterForm() {
   }
 
   return (
-    <div className="flex min-h-screen flex-1 items-center justify-center bg-gray-50 px-4 py-12">
-      <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white px-8 py-10 shadow-sm">
+    <div className="bg-surface-subtle flex min-h-screen flex-1 items-center justify-center px-4 py-12">
+      <div className="rounded-card border-border bg-surface w-full max-w-md border px-8 py-10 shadow-sm">
         {/* Brand */}
         <div className="mb-8 flex flex-col items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-green-500 shadow-sm">
+          <div className="rounded-card bg-fg flex h-11 w-11 items-center justify-center shadow-sm">
             <span className="text-base font-bold text-white">AI</span>
           </div>
           <div className="text-center">
-            <p className="text-base font-bold tracking-tight text-gray-900">{tBrand("title")}</p>
-            <p className="text-sm text-gray-400">{tBrand("tagline")}</p>
+            <p className="text-fg text-base font-bold tracking-tight">{tBrand("title")}</p>
+            <p className="text-fg-faint text-sm">{tBrand("tagline")}</p>
           </div>
         </div>
 
-        <h1 className="mb-6 text-center text-lg font-semibold text-gray-800">{t("title")}</h1>
+        <h1 className="text-fg mb-6 text-center text-lg font-semibold">{t("title")}</h1>
 
         <form onSubmit={handleSubmit} noValidate>
           {formError && (
@@ -135,9 +135,9 @@ export function RegisterForm() {
           </Button>
         </form>
 
-        <div className="mt-6 border-t border-gray-100 pt-6 text-center text-sm text-gray-500">
+        <div className="border-border text-fg-muted mt-6 border-t pt-6 text-center text-sm">
           {t("hasAccount")}{" "}
-          <Link href="/login" className="font-medium text-green-600 hover:underline">
+          <Link href="/login" className="text-status-success-fg font-medium hover:underline">
             {t("signIn")}
           </Link>
         </div>

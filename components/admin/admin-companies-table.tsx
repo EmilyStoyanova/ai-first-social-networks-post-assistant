@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getTranslations } from "next-intl/server";
+import { Building2 } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import type { AdminCompanyItem } from "@/lib/services/admin/list-companies.service";
@@ -16,51 +17,51 @@ export async function AdminCompaniesTable({ companies }: Props) {
   const t = await getTranslations("admin");
 
   if (companies.length === 0) {
-    return <EmptyState icon="🏢" title={t("noCompanies")} />;
+    return <EmptyState icon={<Building2 className="h-5 w-5" />} title={t("noCompanies")} />;
   }
 
   return (
     <Card className="overflow-hidden px-0 py-0">
       {/* Desktop header */}
-      <div className="hidden grid-cols-[minmax(0,1fr)_8rem_minmax(0,1fr)_4rem_minmax(0,1fr)_7rem] gap-4 border-b border-gray-100 bg-gray-50 px-6 py-3 sm:grid">
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+      <div className="border-border bg-surface-subtle hidden grid-cols-[minmax(0,1fr)_8rem_minmax(0,1fr)_4rem_minmax(0,1fr)_7rem] gap-4 border-b px-6 py-3 sm:grid">
+        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
           {t("companies")}
         </span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
           {t("slug")}
         </span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
           {t("website")}
         </span>
-        <span className="text-center text-xs font-medium tracking-wide text-gray-400 uppercase">
+        <span className="text-fg-faint text-center text-xs font-medium tracking-wide uppercase">
           {t("membersCol")}
         </span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
           {t("owners")}
         </span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
           {t("created")}
         </span>
       </div>
 
-      <div className="divide-y divide-gray-100">
+      <div className="divide-border divide-y">
         {companies.map((c) => (
           <div key={c.id} className="px-6 py-4">
             {/* Mobile: stacked */}
             <div className="sm:hidden">
               <Link
                 href={`/companies/${c.slug}`}
-                className="text-sm font-semibold text-green-700 hover:underline"
+                className="text-status-success-fg text-sm font-semibold hover:underline"
               >
                 {c.name}
               </Link>
-              <p className="mt-0.5 text-xs text-gray-400">{c.slug}</p>
-              {c.website && <p className="mt-0.5 truncate text-xs text-gray-400">{c.website}</p>}
-              <p className="mt-1 text-xs text-gray-400">
+              <p className="text-fg-faint mt-0.5 text-xs">{c.slug}</p>
+              {c.website && <p className="text-fg-faint mt-0.5 truncate text-xs">{c.website}</p>}
+              <p className="text-fg-faint mt-1 text-xs">
                 {t("memberCount", { count: c.memberCount })} &middot; {fmtDate(c.createdAt)}
               </p>
               {c.ownerEmails.length > 0 && (
-                <p className="mt-0.5 text-xs text-gray-400">
+                <p className="text-fg-faint mt-0.5 text-xs">
                   {t("owners")}: {c.ownerEmails.join(", ")}
                 </p>
               )}
@@ -71,30 +72,30 @@ export async function AdminCompaniesTable({ companies }: Props) {
               <div className="min-w-0">
                 <Link
                   href={`/companies/${c.slug}`}
-                  className="block truncate text-sm font-semibold text-green-700 hover:underline"
+                  className="text-status-success-fg block truncate text-sm font-semibold hover:underline"
                 >
                   {c.name}
                 </Link>
               </div>
               <div className="min-w-0">
-                <p className="truncate text-xs text-gray-500">{c.slug}</p>
+                <p className="text-fg-muted truncate text-xs">{c.slug}</p>
               </div>
               <div className="min-w-0">
                 {c.website ? (
-                  <p className="truncate text-xs text-gray-500">{c.website}</p>
+                  <p className="text-fg-muted truncate text-xs">{c.website}</p>
                 ) : (
-                  <span className="text-xs text-gray-300">—</span>
+                  <span className="text-fg-faint text-xs">—</span>
                 )}
               </div>
-              <div className="text-center text-sm text-gray-600">{c.memberCount}</div>
+              <div className="text-fg-muted text-center text-sm">{c.memberCount}</div>
               <div className="min-w-0">
                 {c.ownerEmails.length > 0 ? (
-                  <p className="truncate text-xs text-gray-500">{c.ownerEmails.join(", ")}</p>
+                  <p className="text-fg-muted truncate text-xs">{c.ownerEmails.join(", ")}</p>
                 ) : (
-                  <span className="text-xs text-gray-300">—</span>
+                  <span className="text-fg-faint text-xs">—</span>
                 )}
               </div>
-              <div className="text-xs text-gray-500">{fmtDate(c.createdAt)}</div>
+              <div className="text-fg-muted text-xs">{fmtDate(c.createdAt)}</div>
             </div>
           </div>
         ))}

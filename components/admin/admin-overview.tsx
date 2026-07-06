@@ -20,8 +20,8 @@ export async function AdminOverview({ userCount, companyCount, adminCount }: Pro
     <div className="grid gap-4 sm:grid-cols-3">
       {stats.map((s) => (
         <Card key={s.label} className="px-6 py-5">
-          <p className="text-xs font-semibold tracking-widest text-gray-400 uppercase">{s.label}</p>
-          <p className="mt-2 text-3xl font-bold tracking-tight text-gray-900">{s.value}</p>
+          <p className="text-fg-faint text-xs font-semibold tracking-widest uppercase">{s.label}</p>
+          <p className="text-fg mt-2 text-3xl font-bold tracking-tight">{s.value}</p>
         </Card>
       ))}
     </div>

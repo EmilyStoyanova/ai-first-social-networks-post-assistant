@@ -51,29 +51,29 @@ export function LlmConfigSection({ initialConfigs }: Props) {
     <Card className="px-6 py-6">
       {/* Header */}
       <div className="mb-5">
-        <h2 className="text-sm font-semibold text-gray-900">{t("llmProviders")}</h2>
+        <h2 className="text-fg text-sm font-semibold">{t("llmProviders")}</h2>
       </div>
 
       {/* Add Provider */}
       <div className="mb-5">
-        <h3 className="mb-3 text-xs font-semibold tracking-widest text-gray-400 uppercase">
+        <h3 className="text-fg-faint mb-3 text-xs font-semibold tracking-widest uppercase">
           {t("addProvider")}
         </h3>
         <LlmConfigForm onSaved={handleCreated} />
       </div>
 
-      <hr className="mb-5 border-gray-100" />
+      <hr className="border-border mb-5" />
 
       {/* Configured Providers */}
       <div>
-        <h3 className="mb-3 text-xs font-semibold tracking-widest text-gray-400 uppercase">
+        <h3 className="text-fg-faint mb-3 text-xs font-semibold tracking-widest uppercase">
           {t("configuredProviders")}
         </h3>
 
         {configs.length === 0 ? (
-          <p className="py-4 text-center text-sm text-gray-400">{t("noProviders")}</p>
+          <p className="text-fg-faint py-4 text-center text-sm">{t("noProviders")}</p>
         ) : (
-          <div className="divide-y divide-gray-100">
+          <div className="divide-border divide-y">
             {configs.map((config) => (
               <LlmConfigRow
                 key={config.id}

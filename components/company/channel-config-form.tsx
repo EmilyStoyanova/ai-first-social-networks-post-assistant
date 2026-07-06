@@ -27,8 +27,8 @@ interface Props {
 }
 
 const BASE =
-  "w-full rounded-lg border px-3.5 py-2.5 text-sm outline-none transition-all duration-200 focus:ring-2 focus:ring-offset-0";
-const NORMAL = "border-gray-300 bg-white focus:border-green-500 focus:ring-green-100";
+  "w-full rounded-control border px-3.5 py-2.5 text-sm outline-none transition-all duration-fast focus:ring-2 focus:ring-offset-0";
+const NORMAL = "border-border-strong bg-surface focus:border-accent focus:ring-accent/20";
 
 function formatWindows(windows: PostingWindow[]): string {
   return windows.map((w) => `${w.day} ${w.start}-${w.end}`).join("\n");
@@ -91,15 +91,15 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
           type="checkbox"
           checked={enabled}
           onChange={(e) => setEnabled(e.target.checked)}
-          className="h-4 w-4 rounded border-gray-300 text-green-500 focus:ring-green-500"
+          className="border-border-strong text-status-success-dot focus:ring-accent h-4 w-4 rounded"
         />
-        <span className="text-sm font-medium text-gray-700">{t("enabledLabel")}</span>
+        <span className="text-fg-muted text-sm font-medium">{t("enabledLabel")}</span>
       </label>
 
       {/* Row: posts/day + posts/week */}
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">
             {t("postsPerDayLabel")}
           </label>
           <input
@@ -112,7 +112,7 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
           />
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">
             {t("postsPerWeekLabel")}
           </label>
           <input
@@ -129,7 +129,7 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
       {/* Row: language + automation override */}
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">{t("language")}</label>
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">{t("language")}</label>
           <select
             value={language}
             onChange={(e) => setLanguage(e.target.value as "en" | "bg")}
@@ -140,7 +140,7 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
           </select>
         </div>
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">
             {t("automationMode")}
           </label>
           <select
@@ -161,16 +161,16 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
           type="checkbox"
           checked={imageRequired}
           onChange={(e) => setImageRequired(e.target.checked)}
-          className="h-4 w-4 rounded border-gray-300 text-green-500 focus:ring-green-500"
+          className="border-border-strong text-status-success-dot focus:ring-accent h-4 w-4 rounded"
         />
-        <span className="text-sm font-medium text-gray-700">{t("imageRequiredLabel")}</span>
+        <span className="text-fg-muted text-sm font-medium">{t("imageRequiredLabel")}</span>
       </label>
 
       {/* Buffer Profile ID */}
       <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700">
+        <label className="text-fg-muted mb-1.5 block text-sm font-medium">
           {t("bufferProfileId")}{" "}
-          <span className="font-normal text-gray-400">{t("bufferProfileIdOptional")}</span>
+          <span className="text-fg-faint font-normal">{t("bufferProfileIdOptional")}</span>
         </label>
         <input
           type="text"
@@ -183,9 +183,9 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
 
       {/* Posting windows */}
       <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700">
+        <label className="text-fg-muted mb-1.5 block text-sm font-medium">
           {t("postingWindows")}{" "}
-          <span className="font-normal text-gray-400">{t("postingWindowsHint")}</span>
+          <span className="text-fg-faint font-normal">{t("postingWindowsHint")}</span>
         </label>
         <textarea
           rows={4}

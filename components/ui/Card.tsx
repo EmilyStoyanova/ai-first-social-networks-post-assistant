@@ -6,16 +6,18 @@ interface Props {
   children: React.ReactNode;
 }
 
+// §6.4: surface + hairline border, radius 6, no shadow at rest.
+// Interactive cards get border-strong + shadow-sm on hover.
 const VARIANT_CLASSES: Record<Variant, string> = {
   default: "",
-  hover: "transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md",
+  hover: "transition-all duration-fast hover:border-border-strong hover:shadow-sm",
 };
 
 export function Card({ variant = "default", className, children }: Props) {
   return (
     <div
       className={[
-        "rounded-2xl border border-gray-200 bg-white shadow-sm",
+        "rounded-card border-border bg-surface border",
         VARIANT_CLASSES[variant],
         className ?? "",
       ]

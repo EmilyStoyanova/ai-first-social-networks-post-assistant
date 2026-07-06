@@ -21,11 +21,12 @@ export function LanguageSwitcher() {
           type="button"
           onClick={() => setPendingLocale(l)}
           className={[
-            "rounded px-2 py-0.5 text-xs font-semibold uppercase transition-colors",
+            "text-micro rounded-control focus-ring duration-fast px-2 py-0.5 transition-colors",
             l === locale
-              ? "bg-green-500 text-white"
-              : "text-gray-400 hover:bg-gray-100 hover:text-gray-700",
+              ? "bg-surface-subtle text-fg"
+              : "text-fg-faint hover:bg-surface-subtle hover:text-fg",
           ].join(" ")}
+          aria-pressed={l === locale}
         >
           {l}
         </button>

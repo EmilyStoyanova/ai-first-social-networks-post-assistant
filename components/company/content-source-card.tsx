@@ -145,17 +145,17 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
               {source.enabled ? t("active") : t("inactive")}
             </Badge>
           </div>
-          <h3 className="truncate text-sm font-semibold text-gray-900">{source.name}</h3>
+          <h3 className="text-fg truncate text-sm font-semibold">{source.name}</h3>
         </div>
       </div>
 
       {/* Preview */}
-      <p className="mb-3 truncate text-xs text-gray-400">{sourcePreview(source)}</p>
+      <p className="text-fg-faint mb-3 truncate text-xs">{sourcePreview(source)}</p>
 
       {/* Last fetched */}
-      <p className="mb-4 text-xs text-gray-400">
+      <p className="text-fg-faint mb-4 text-xs">
         {t("lastIngested")}{" "}
-        <span className="text-gray-600">{formatDate(source.lastFetchedAt, t("never"))}</span>
+        <span className="text-fg-muted">{formatDate(source.lastFetchedAt, t("never"))}</span>
       </p>
 
       {/* Alerts */}
@@ -198,7 +198,7 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
           {/* Delete confirmation */}
           {confirmDelete ? (
             <div className="flex items-center gap-3">
-              <p className="text-xs text-gray-500">{t("deleteSource")}</p>
+              <p className="text-fg-muted text-xs">{t("deleteSource")}</p>
               <Button variant="danger" size="sm" loading={deleting} onClick={handleDelete}>
                 {deleting ? tCommon("deleting") : tCommon("confirm")}
               </Button>
@@ -228,7 +228,7 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
           )}
         </>
       ) : (
-        <p className="text-xs text-gray-400">{t("ownersOnly")}</p>
+        <p className="text-fg-faint text-xs">{t("ownersOnly")}</p>
       )}
     </Card>
   );

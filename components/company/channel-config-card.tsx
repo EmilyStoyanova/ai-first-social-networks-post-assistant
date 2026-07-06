@@ -83,7 +83,7 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
 
   const meta = CHANNEL_META[config.channel] ?? {
     label: config.channel,
-    containerClass: "bg-gray-400 text-white",
+    containerClass: "bg-fg-muted text-bg",
     icon: <span className="text-xs font-bold">?</span>,
   };
 
@@ -127,14 +127,14 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
       {/* Header — always visible */}
       <div className="mb-4 flex items-center gap-3">
         <span
-          className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${meta.containerClass}`}
+          className={`rounded-control flex h-8 w-8 shrink-0 items-center justify-center ${meta.containerClass}`}
           style={meta.containerStyle}
           aria-hidden="true"
         >
           {meta.icon}
         </span>
         <div className="flex flex-1 items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold text-gray-900">{meta.label}</h3>
+          <h3 className="text-fg text-sm font-semibold">{meta.label}</h3>
           <Badge variant={config.enabled ? "success" : "neutral"}>
             {config.enabled ? t("enabled") : t("disabled")}
           </Badge>
@@ -162,26 +162,24 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
           {/* Summary */}
           <dl className="mb-4 space-y-1.5 text-sm">
             <div className="flex items-center justify-between">
-              <dt className="text-gray-500">{t("language")}</dt>
-              <dd className="font-medium text-gray-900">{config.postingLanguage.toUpperCase()}</dd>
+              <dt className="text-fg-muted">{t("language")}</dt>
+              <dd className="text-fg font-medium">{config.postingLanguage.toUpperCase()}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-gray-500">{t("postsPerDay")}</dt>
-              <dd className="font-medium text-gray-900">{config.postsPerDay}</dd>
+              <dt className="text-fg-muted">{t("postsPerDay")}</dt>
+              <dd className="text-fg font-medium">{config.postsPerDay}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-gray-500">{t("postsPerWeek")}</dt>
-              <dd className="font-medium text-gray-900">{config.postsPerWeek}</dd>
+              <dt className="text-fg-muted">{t("postsPerWeek")}</dt>
+              <dd className="text-fg font-medium">{config.postsPerWeek}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-gray-500">{t("imageRequired")}</dt>
-              <dd className="font-medium text-gray-900">
-                {config.imageRequired ? t("yes") : t("no")}
-              </dd>
+              <dt className="text-fg-muted">{t("imageRequired")}</dt>
+              <dd className="text-fg font-medium">{config.imageRequired ? t("yes") : t("no")}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-gray-500">{t("automation")}</dt>
-              <dd className="font-medium text-gray-900">
+              <dt className="text-fg-muted">{t("automation")}</dt>
+              <dd className="text-fg font-medium">
                 {config.automationModeOverride
                   ? (AUTOMATION_LABELS[config.automationModeOverride] ??
                     config.automationModeOverride)
@@ -190,8 +188,8 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
             </div>
             {config.bufferProfileId && (
               <div className="flex items-center justify-between">
-                <dt className="text-gray-500">{t("bufferProfileId")}</dt>
-                <dd className="truncate font-medium text-gray-900">{config.bufferProfileId}</dd>
+                <dt className="text-fg-muted">{t("bufferProfileId")}</dt>
+                <dd className="text-fg truncate font-medium">{config.bufferProfileId}</dd>
               </div>
             )}
           </dl>
@@ -201,7 +199,7 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
               {tCommon("edit")}
             </Button>
           ) : (
-            <p className="text-xs text-gray-400">{t("ownersOnly")}</p>
+            <p className="text-fg-faint text-xs">{t("ownersOnly")}</p>
           )}
         </>
       )}

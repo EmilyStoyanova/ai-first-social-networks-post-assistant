@@ -20,6 +20,7 @@ import { ChannelConfigSection } from "@/components/company/channel-config-sectio
 import { ContentSourcesSection } from "@/components/company/content-sources-section";
 import { GeneratedPostsSection } from "@/components/company/generated-posts-section";
 import { Section } from "@/components/ui/Section";
+import { BarChart2, CheckSquare2, ClipboardList, Image, Pencil, Radio } from "lucide-react";
 
 interface Props {
   params: Promise<{ slug: string }>;
@@ -151,35 +152,35 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         <Section title={t("sections.modules")}>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <CompanySectionCard
-              icon="🖼️"
+              icon={Image}
               title={t("modules.mediaGallery")}
               description={t("modules.mediaGalleryDesc")}
               href={`/companies/${slug}/media`}
             />
             <CompanySectionCard
-              icon="✅"
+              icon={CheckSquare2}
               title={t("modules.approvalQueue")}
               description={t("modules.approvalQueueDesc")}
               href={`/companies/${slug}/approval`}
             />
             <CompanySectionCard
-              icon="📋"
+              icon={ClipboardList}
               title={t("modules.auditLog")}
               description={t("modules.auditLogDesc")}
               href={`/companies/${slug}/audit-log`}
             />
             <CompanySectionCard
-              icon="📡"
+              icon={Radio}
               title={t("modules.channels")}
               description={t("modules.channelsDesc")}
             />
             <CompanySectionCard
-              icon="✍️"
+              icon={Pencil}
               title={t("modules.posts")}
               description={t("modules.postsDesc")}
             />
             <CompanySectionCard
-              icon="📊"
+              icon={BarChart2}
               title={t("modules.analytics")}
               description={t("modules.analyticsDesc")}
             />

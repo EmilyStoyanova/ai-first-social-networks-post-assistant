@@ -20,8 +20,8 @@ interface Props {
 }
 
 const BASE =
-  "w-full rounded-lg border px-3.5 py-2.5 text-sm outline-none transition-all duration-200 focus:ring-2 focus:ring-offset-0";
-const NORMAL = "border-gray-300 bg-white focus:border-green-500 focus:ring-green-100";
+  "w-full rounded-control border px-3.5 py-2.5 text-sm outline-none transition-all duration-fast focus:ring-2 focus:ring-offset-0";
+const NORMAL = "border-border-strong bg-surface focus:border-accent focus:ring-accent/20";
 
 export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Props) {
   const t = useTranslations("contentSources");
@@ -68,9 +68,9 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
     <form onSubmit={handleSubmit} noValidate className="space-y-4">
       {/* Type — only visible when adding, locked when editing */}
       <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700">{t("sourceType")}</label>
+        <label className="text-fg-muted mb-1.5 block text-sm font-medium">{t("sourceType")}</label>
         {isEdit ? (
-          <p className="text-sm text-gray-600">
+          <p className="text-fg-muted text-sm">
             {SOURCE_TYPES.find((s) => s.value === type)?.label ?? type}
           </p>
         ) : (
@@ -90,7 +90,7 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
 
       {/* Name */}
       <div>
-        <label className="mb-1.5 block text-sm font-medium text-gray-700">{t("name")}</label>
+        <label className="text-fg-muted mb-1.5 block text-sm font-medium">{t("name")}</label>
         <input
           type="text"
           value={name}
@@ -104,7 +104,7 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
       {/* RSS / Product Page — URL */}
       {(type === "rss" || type === "product_page") && (
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">
             {type === "rss" ? t("feedUrl") : t("pageUrl")}
           </label>
           <input
@@ -121,9 +121,9 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
       {/* Prompt */}
       {type === "prompt" && (
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-gray-700">
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">
             {t("promptText")}{" "}
-            <span className="font-normal text-gray-400">{t("promptTextHint")}</span>
+            <span className="text-fg-faint font-normal">{t("promptTextHint")}</span>
           </label>
           <textarea
             rows={5}
@@ -134,7 +134,7 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
             maxLength={5000}
             required
           />
-          <p className="mt-1 text-right text-xs text-gray-400">{promptText.length} / 5000</p>
+          <p className="text-fg-faint mt-1 text-right text-xs">{promptText.length} / 5000</p>
         </div>
       )}
 
@@ -142,7 +142,7 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
       {type === "calendar_event" && (
         <>
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            <label className="text-fg-muted mb-1.5 block text-sm font-medium">
               {t("eventTitle")}
             </label>
             <input
@@ -155,7 +155,7 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
             />
           </div>
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            <label className="text-fg-muted mb-1.5 block text-sm font-medium">
               {t("eventDate")}
             </label>
             <input
@@ -167,9 +167,9 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
             />
           </div>
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            <label className="text-fg-muted mb-1.5 block text-sm font-medium">
               {t("description")}{" "}
-              <span className="font-normal text-gray-400">{t("descriptionHint")}</span>
+              <span className="text-fg-faint font-normal">{t("descriptionHint")}</span>
             </label>
             <textarea
               rows={3}
@@ -188,9 +188,9 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
           type="checkbox"
           checked={enabled}
           onChange={(e) => setEnabled(e.target.checked)}
-          className="h-4 w-4 rounded border-gray-300 text-green-500 focus:ring-green-500"
+          className="border-border-strong text-status-success-dot focus:ring-accent h-4 w-4 rounded"
         />
-        <span className="text-sm font-medium text-gray-700">{t("activeLabel")}</span>
+        <span className="text-fg-muted text-sm font-medium">{t("activeLabel")}</span>
       </label>
 
       <div className="flex items-center gap-3 pt-1">

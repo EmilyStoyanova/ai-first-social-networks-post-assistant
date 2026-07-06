@@ -1,4 +1,5 @@
 import { getTranslations } from "next-intl/server";
+import { User } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -16,39 +17,39 @@ export async function AdminUsersTable({ users }: Props) {
   const t = await getTranslations("admin");
 
   if (users.length === 0) {
-    return <EmptyState icon="👤" title={t("noUsers")} />;
+    return <EmptyState icon={<User className="h-5 w-5" />} title={t("noUsers")} />;
   }
 
   return (
     <Card className="overflow-hidden px-0 py-0">
       {/* Desktop header */}
-      <div className="hidden grid-cols-[minmax(0,1fr)_6rem_5rem_5rem_7rem] gap-4 border-b border-gray-100 bg-gray-50 px-6 py-3 sm:grid">
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+      <div className="border-border bg-surface-subtle hidden grid-cols-[minmax(0,1fr)_6rem_5rem_5rem_7rem] gap-4 border-b px-6 py-3 sm:grid">
+        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
           {t("nameAndEmail")}
         </span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
           {t("role")}
         </span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
           {t("language")}
         </span>
-        <span className="text-center text-xs font-medium tracking-wide text-gray-400 uppercase">
+        <span className="text-fg-faint text-center text-xs font-medium tracking-wide uppercase">
           {t("companies")}
         </span>
-        <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
           {t("created")}
         </span>
       </div>
 
-      <div className="divide-y divide-gray-100">
+      <div className="divide-border divide-y">
         {users.map((u) => (
           <div key={u.id} className="px-6 py-4">
             {/* Mobile: stacked */}
             <div className="flex items-start justify-between gap-3 sm:hidden">
               <div className="min-w-0">
-                <p className="text-sm font-semibold text-gray-900">{u.name ?? "—"}</p>
-                <p className="mt-0.5 truncate text-xs text-gray-500">{u.email}</p>
-                <p className="mt-1 text-xs text-gray-400">
+                <p className="text-fg text-sm font-semibold">{u.name ?? "—"}</p>
+                <p className="text-fg-muted mt-0.5 truncate text-xs">{u.email}</p>
+                <p className="text-fg-faint mt-1 text-xs">
                   {u.preferredLanguage.toUpperCase()} &middot;{" "}
                   {t("companyCount", { count: u.companyCount })} &middot; {fmtDate(u.createdAt)}
                 </p>
@@ -61,17 +62,17 @@ export async function AdminUsersTable({ users }: Props) {
             {/* Desktop: grid */}
             <div className="hidden grid-cols-[minmax(0,1fr)_6rem_5rem_5rem_7rem] items-center gap-4 sm:grid">
               <div className="min-w-0">
-                <p className="truncate text-sm font-semibold text-gray-900">{u.name ?? "—"}</p>
-                <p className="mt-0.5 truncate text-xs text-gray-500">{u.email}</p>
+                <p className="text-fg truncate text-sm font-semibold">{u.name ?? "—"}</p>
+                <p className="text-fg-muted mt-0.5 truncate text-xs">{u.email}</p>
               </div>
               <div>
                 <Badge variant={u.isGlobalAdmin ? "owner" : "editor"}>
                   {u.isGlobalAdmin ? t("adminBadge") : t("userBadge")}
                 </Badge>
               </div>
-              <div className="text-sm text-gray-600">{u.preferredLanguage.toUpperCase()}</div>
-              <div className="text-center text-sm text-gray-600">{u.companyCount}</div>
-              <div className="text-xs text-gray-500">{fmtDate(u.createdAt)}</div>
+              <div className="text-fg-muted text-sm">{u.preferredLanguage.toUpperCase()}</div>
+              <div className="text-fg-muted text-center text-sm">{u.companyCount}</div>
+              <div className="text-fg-muted text-xs">{fmtDate(u.createdAt)}</div>
             </div>
           </div>
         ))}

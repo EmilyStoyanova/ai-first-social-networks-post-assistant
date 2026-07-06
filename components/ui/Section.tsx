@@ -1,3 +1,5 @@
+import { SectionHeader } from "./SectionHeader";
+
 interface Props {
   title: string;
   description?: string;
@@ -8,13 +10,7 @@ interface Props {
 export function Section({ title, description, action, children }: Props) {
   return (
     <section>
-      <div className="mb-4 flex items-center justify-between gap-4">
-        <div>
-          <h2 className="text-xs font-semibold tracking-widest text-gray-400 uppercase">{title}</h2>
-          {description && <p className="mt-0.5 text-sm text-gray-500">{description}</p>}
-        </div>
-        {action && <div className="shrink-0">{action}</div>}
-      </div>
+      <SectionHeader title={title} description={description} action={action} className="mb-4" />
       {children}
     </section>
   );

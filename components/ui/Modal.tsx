@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
+import { X } from "lucide-react";
 
 interface Props {
   open: boolean;
@@ -51,31 +52,29 @@ export function Modal({ open, onClose, title, children, maxWidth = "lg" }: Props
     >
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+        className="animate-fade-in bg-fg/40 absolute inset-0"
         onClick={onClose}
         aria-hidden="true"
       />
 
-      {/* Panel */}
+      {/* Panel — §6.4: radius 10, shadow-lg; §6.9: fade + 4px rise */}
       <div
         ref={panelRef}
         tabIndex={-1}
         className={[
-          "relative z-10 w-full rounded-xl border border-gray-200 bg-white shadow-xl outline-none",
+          "rounded-panel animate-panel-in border-border bg-surface relative z-10 w-full border shadow-lg outline-none",
           MAX_WIDTH_CLASS[maxWidth] ?? MAX_WIDTH_CLASS.lg,
         ].join(" ")}
       >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-gray-100 px-6 py-4">
-          <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+        <div className="border-border flex items-center justify-between border-b px-6 py-4">
+          <h2 className="text-title text-fg">{title}</h2>
           <button
             onClick={onClose}
-            className="rounded-md p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600"
+            className="rounded-control focus-ring text-fg-faint duration-fast hover:bg-surface-subtle hover:text-fg p-1 transition-colors"
             aria-label={t("close")}
           >
-            <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path d="M6.293 6.293a1 1 0 0 1 1.414 0L10 8.586l2.293-2.293a1 1 0 1 1 1.414 1.414L11.414 10l2.293 2.293a1 1 0 0 1-1.414 1.414L10 11.414l-2.293 2.293a1 1 0 0 1-1.414-1.414L8.586 10 6.293 7.707a1 1 0 0 1 0-1.414z" />
-            </svg>
+            <X className="h-5 w-5" aria-hidden />
           </button>
         </div>
 

@@ -34,13 +34,13 @@ export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
     PAGE_TITLES[pathname] ?? (pathname.startsWith("/companies/") ? t("navigation.companies") : "");
 
   return (
-    <header className="flex h-16 shrink-0 items-center gap-4 border-b border-gray-200 bg-white px-4 sm:px-6">
+    <header className="border-border bg-surface flex h-16 shrink-0 items-center gap-4 border-b px-4 sm:px-6">
       {/* Hamburger — mobile only */}
       <button
         type="button"
         onClick={onMenuClick}
         aria-label={t("header.openMenu")}
-        className="rounded-md p-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-900 lg:hidden"
+        className="text-fg-muted hover:bg-surface-subtle hover:text-fg rounded-md p-1.5 lg:hidden"
       >
         <svg
           className="h-5 w-5"
@@ -61,22 +61,19 @@ export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
             {breadcrumb.map((item, i) => (
               <Fragment key={item.label}>
                 {i > 0 && (
-                  <span className="shrink-0 text-sm text-gray-300" aria-hidden="true">
+                  <span className="text-fg-faint shrink-0 text-sm" aria-hidden="true">
                     /
                   </span>
                 )}
                 {item.href ? (
                   <Link
                     href={item.href}
-                    className="shrink-0 text-sm text-gray-500 transition-colors hover:text-gray-900"
+                    className="text-fg-muted hover:text-fg shrink-0 text-sm transition-colors"
                   >
                     {item.label}
                   </Link>
                 ) : (
-                  <span
-                    className="truncate text-sm font-semibold text-gray-900"
-                    aria-current="page"
-                  >
+                  <span className="text-fg truncate text-sm font-semibold" aria-current="page">
                     {item.label}
                   </span>
                 )}
@@ -84,13 +81,13 @@ export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
             ))}
           </nav>
         ) : (
-          <h1 className="text-lg font-semibold text-gray-900">{fallbackTitle}</h1>
+          <h1 className="text-fg text-lg font-semibold">{fallbackTitle}</h1>
         )}
       </div>
 
       <div className="flex shrink-0 items-center gap-4">
         <LanguageSwitcher />
-        <span className="hidden text-sm text-gray-600 sm:block">{displayName}</span>
+        <span className="text-fg-muted hidden text-sm sm:block">{displayName}</span>
         <LogoutButton />
       </div>
     </header>

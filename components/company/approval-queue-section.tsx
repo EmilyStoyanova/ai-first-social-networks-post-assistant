@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
+import { CheckSquare2 } from "lucide-react";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { GeneratedPostCard } from "./generated-post-card";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
@@ -46,8 +47,8 @@ export function ApprovalQueueSection({
             className={[
               "rounded-full px-3 py-1 text-xs font-semibold transition-colors",
               channelFilter === "ALL"
-                ? "bg-green-500 text-white"
-                : "bg-gray-100 text-gray-600 hover:bg-gray-200",
+                ? "bg-fg text-white"
+                : "bg-surface-subtle text-fg-muted hover:bg-surface-subtle",
             ].join(" ")}
           >
             {t("all")} ({posts.length})
@@ -61,8 +62,8 @@ export function ApprovalQueueSection({
                 className={[
                   "rounded-full px-3 py-1 text-xs font-semibold transition-colors",
                   channelFilter === ch
-                    ? "bg-green-500 text-white"
-                    : "bg-gray-100 text-gray-600 hover:bg-gray-200",
+                    ? "bg-fg text-white"
+                    : "bg-surface-subtle text-fg-muted hover:bg-surface-subtle",
                 ].join(" ")}
               >
                 {ch.charAt(0) + ch.slice(1).toLowerCase()} ({count})
@@ -74,7 +75,7 @@ export function ApprovalQueueSection({
 
       {visible.length === 0 ? (
         <EmptyState
-          icon="✅"
+          icon={<CheckSquare2 className="h-5 w-5" />}
           title={posts.length === 0 ? t("noPending") : t("noFilter")}
           description={posts.length === 0 ? t("noPendingDesc") : t("noFilterDesc")}
         />

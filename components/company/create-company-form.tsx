@@ -72,7 +72,7 @@ export function CreateCompanyForm() {
 
   return (
     <Card className="mx-auto max-w-lg px-8 py-10">
-      <h1 className="mb-8 text-xl font-bold tracking-tight text-gray-900">{t("heading")}</h1>
+      <h1 className="text-fg mb-8 text-xl font-bold tracking-tight">{t("heading")}</h1>
 
       <form onSubmit={handleSubmit} noValidate>
         {formError && (

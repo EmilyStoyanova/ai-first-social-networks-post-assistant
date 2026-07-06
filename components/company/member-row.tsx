@@ -10,8 +10,8 @@ import type { ClientMember } from "./company-members";
 // ─── Select styling ───────────────────────────────────────────────────────────
 
 const SELECT_CLS =
-  "rounded-lg border border-gray-300 bg-white px-2.5 py-1.5 text-sm outline-none " +
-  "transition-colors duration-200 focus:border-green-500 focus:ring-2 focus:ring-green-100 " +
+  "rounded-control border border-border-strong bg-surface px-2.5 py-1.5 text-sm outline-none " +
+  "transition-colors duration-fast focus:border-accent focus:ring-2 focus:ring-accent/20 " +
   "disabled:cursor-not-allowed disabled:opacity-60";
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -91,8 +91,8 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
       {/* Mobile: stacked flex */}
       <div className="flex items-start gap-3 sm:hidden">
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-gray-900">{member.name ?? "—"}</p>
-          <p className="mt-0.5 truncate text-xs text-gray-500">{member.email}</p>
+          <p className="text-fg text-sm font-semibold">{member.name ?? "—"}</p>
+          <p className="text-fg-muted mt-0.5 truncate text-xs">{member.email}</p>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
           {canManage && !isSelf ? (
@@ -115,8 +115,8 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
       {/* Desktop: 3-column grid — [name+email | role | actions] */}
       <div className="hidden sm:grid sm:grid-cols-[minmax(0,1fr)_8rem_auto] sm:items-center sm:gap-4">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-gray-900">{member.name ?? "—"}</p>
-          <p className="mt-0.5 truncate text-xs text-gray-500">{member.email}</p>
+          <p className="text-fg truncate text-sm font-semibold">{member.name ?? "—"}</p>
+          <p className="text-fg-muted mt-0.5 truncate text-xs">{member.email}</p>
         </div>
 
         {/* Role */}
@@ -142,7 +142,7 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
           {showActions &&
             (showConfirm ? (
               <>
-                <span className="text-xs text-gray-500">{t("removeMember")}</span>
+                <span className="text-fg-muted text-xs">{t("removeMember")}</span>
                 <Button
                   size="sm"
                   variant="danger"
@@ -170,15 +170,15 @@ export function MemberRow({ member, slug, isSelf, canManage, onRoleChanged, onRe
       </div>
 
       {/* Inline errors */}
-      {roleError && <p className="mt-1 text-xs text-red-600">{roleError}</p>}
-      {removeError && <p className="mt-1 text-xs text-red-600">{removeError}</p>}
+      {roleError && <p className="text-status-danger-fg mt-1 text-xs">{roleError}</p>}
+      {removeError && <p className="text-status-danger-fg mt-1 text-xs">{removeError}</p>}
 
       {/* Mobile remove actions */}
       {showActions && (
         <div className="mt-2 sm:hidden">
           {showConfirm ? (
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-gray-500">{t("removeMember")}</span>
+              <span className="text-fg-muted text-xs">{t("removeMember")}</span>
               <Button
                 size="sm"
                 variant="danger"

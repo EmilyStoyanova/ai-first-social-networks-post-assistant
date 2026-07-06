@@ -4,6 +4,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { useTransition, useState } from "react";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
+import { Image as ImageIcon } from "lucide-react";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Button } from "@/components/ui/Button";
 import { MediaCard } from "./media-card";
@@ -35,8 +36,8 @@ function FilterPill({
       type="button"
       onClick={onClick}
       className={[
-        "rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors duration-150",
-        active ? "bg-green-500 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200",
+        "duration-fast rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors",
+        active ? "bg-fg text-white" : "bg-surface-subtle text-fg-muted hover:bg-surface-subtle",
       ].join(" ")}
     >
       {children}
@@ -46,15 +47,15 @@ function FilterPill({
 
 function SkeletonCard() {
   return (
-    <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
-      <div className="aspect-video w-full animate-pulse bg-gray-200" />
+    <div className="rounded-card border-border bg-surface overflow-hidden border shadow-sm">
+      <div className="bg-surface-subtle aspect-video w-full animate-pulse" />
       <div className="space-y-3 px-4 py-4">
         <div className="flex gap-2">
-          <div className="h-5 w-20 animate-pulse rounded-full bg-gray-200" />
-          <div className="h-5 w-16 animate-pulse rounded-full bg-gray-200" />
+          <div className="bg-surface-subtle h-5 w-20 animate-pulse rounded-full" />
+          <div className="bg-surface-subtle h-5 w-16 animate-pulse rounded-full" />
         </div>
-        <div className="h-3 w-24 animate-pulse rounded bg-gray-200" />
-        <div className="h-3 w-32 animate-pulse rounded bg-gray-200" />
+        <div className="bg-surface-subtle h-3 w-24 animate-pulse rounded" />
+        <div className="bg-surface-subtle h-3 w-32 animate-pulse rounded" />
       </div>
     </div>
   );
@@ -128,10 +129,10 @@ export function MediaGallery({
   return (
     <div className="space-y-6">
       {/* Filter bar */}
-      <div className="flex flex-wrap items-center gap-4 rounded-xl border border-gray-200 bg-white px-5 py-4 shadow-sm">
+      <div className="rounded-card border-border bg-surface flex flex-wrap items-center gap-4 border px-5 py-4 shadow-sm">
         {/* Channel pills */}
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="mr-1 text-xs font-semibold tracking-wider text-gray-400 uppercase">
+          <span className="text-fg-faint mr-1 text-xs font-semibold tracking-wider uppercase">
             {t("channelLabel")}
           </span>
           {CHANNEL_FILTERS.map((f) => (
@@ -147,7 +148,7 @@ export function MediaGallery({
 
         {/* Provider pills */}
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="mr-1 text-xs font-semibold tracking-wider text-gray-400 uppercase">
+          <span className="text-fg-faint mr-1 text-xs font-semibold tracking-wider uppercase">
             {t("providerLabel")}
           </span>
           {PROVIDER_FILTERS.map((f) => (
@@ -163,13 +164,13 @@ export function MediaGallery({
 
         {/* Sort */}
         <div className="ml-auto flex items-center gap-2">
-          <span className="text-xs font-semibold tracking-wider text-gray-400 uppercase">
+          <span className="text-fg-faint text-xs font-semibold tracking-wider uppercase">
             {t("sortLabel")}
           </span>
           <select
             value={sort || "newest"}
             onChange={(e) => navigate({ sort: e.target.value })}
-            className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100"
+            className="rounded-control border-border-strong bg-surface focus:border-accent focus:ring-accent/20 border px-3 py-1.5 text-xs font-medium outline-none focus:ring-2"
           >
             {SORT_OPTIONS.map((o) => (
               <option key={o.value} value={o.value}>
@@ -182,7 +183,7 @@ export function MediaGallery({
 
       {/* Count */}
       {total > 0 && (
-        <p className="text-sm text-gray-500">
+        <p className="text-fg-muted text-sm">
           {t("imageCount", { count: total })}
           {channel || provider ? t("matchingFilters") : ""}
         </p>
@@ -196,14 +197,14 @@ export function MediaGallery({
       >
         {items.length === 0 ? (
           <EmptyState
-            icon="🖼️"
+            icon={<ImageIcon className="h-5 w-5" />}
             title={t("noImages")}
             description={channel || provider ? t("noImagesFilter") : t("noImagesDesc")}
             action={
               !channel && !provider ? (
                 <Link
                   href={`/companies/${slug}`}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-green-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-green-600"
+                  className="rounded-control bg-fg hover:bg-fg/90 inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white transition-colors"
                 >
                   {t("generateFirst")}
                 </Link>
@@ -238,7 +239,7 @@ export function MediaGallery({
           >
             {t("previousPage")}
           </Button>
-          <span className="text-sm text-gray-500">{t("page", { page, total: totalPages })}</span>
+          <span className="text-fg-muted text-sm">{t("page", { page, total: totalPages })}</span>
           <Button
             variant="secondary"
             size="sm"

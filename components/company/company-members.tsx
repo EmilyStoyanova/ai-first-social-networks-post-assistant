@@ -47,7 +47,7 @@ export function CompanyMembers({ slug, initialMembers, currentUserEmail, canMana
     <Card className="px-6 py-6">
       {/* Card header */}
       <div className="mb-5 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-gray-900">{t("title")}</h2>
+        <h2 className="text-fg text-sm font-semibold">{t("title")}</h2>
         {!canManage && <Badge variant="readonly">{tCommon("readOnly")}</Badge>}
       </div>
 
@@ -55,41 +55,41 @@ export function CompanyMembers({ slug, initialMembers, currentUserEmail, canMana
       {canManage && (
         <>
           <div className="mb-5">
-            <h3 className="mb-3 text-xs font-semibold tracking-widest text-gray-400 uppercase">
+            <h3 className="text-fg-faint mb-3 text-xs font-semibold tracking-widest uppercase">
               {t("inviteMember")}
             </h3>
             <InviteMemberForm slug={slug} onInvited={handleInvited} />
           </div>
-          <hr className="mb-5 border-gray-100" />
+          <hr className="border-border mb-5" />
         </>
       )}
 
       {/* Current members */}
       <div>
-        <h3 className="mb-3 text-xs font-semibold tracking-widest text-gray-400 uppercase">
+        <h3 className="text-fg-faint mb-3 text-xs font-semibold tracking-widest uppercase">
           {t("currentMembers")}
         </h3>
 
         {members.length === 0 ? (
-          <p className="py-4 text-center text-sm text-gray-400">{t("noMembers")}</p>
+          <p className="text-fg-faint py-4 text-center text-sm">{t("noMembers")}</p>
         ) : (
           <div>
             {/* Table header — desktop only */}
             <div className="mb-1 hidden grid-cols-[minmax(0,1fr)_8rem_auto] gap-4 sm:grid">
-              <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+              <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
                 {t("nameAndEmail")}
               </span>
-              <span className="text-xs font-medium tracking-wide text-gray-400 uppercase">
+              <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
                 {t("role")}
               </span>
               {canManage && (
-                <span className="min-w-[6rem] text-right text-xs font-medium tracking-wide text-gray-400 uppercase">
+                <span className="text-fg-faint min-w-[6rem] text-right text-xs font-medium tracking-wide uppercase">
                   {t("actions")}
                 </span>
               )}
             </div>
 
-            <div className="divide-y divide-gray-100">
+            <div className="divide-border divide-y">
               {members.map((member) => (
                 <MemberRow
                   key={member.id}

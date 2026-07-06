@@ -11,9 +11,10 @@ import type { ClientMember } from "./company-members";
 // ─── Styling helpers ──────────────────────────────────────────────────────────
 
 const BASE_INPUT =
-  "w-full rounded-lg border px-3.5 py-2.5 text-sm outline-none transition-all duration-200 focus:ring-2 focus:ring-offset-0";
-const NORMAL_INPUT = "border-gray-300 bg-white focus:border-green-500 focus:ring-green-100";
-const ERROR_INPUT = "border-red-400 bg-red-50 focus:border-red-500 focus:ring-red-200";
+  "w-full rounded-control border px-3.5 py-2.5 text-sm outline-none transition-all duration-fast focus:ring-2 focus:ring-offset-0";
+const NORMAL_INPUT = "border-border-strong bg-surface focus:border-accent focus:ring-accent/20";
+const ERROR_INPUT =
+  "border-status-danger-dot bg-status-danger-bg focus:border-status-danger-dot focus:ring-status-danger-dot/30";
 const DISABLED_INPUT = "cursor-not-allowed opacity-60";
 
 function fieldCls(hasError: boolean, isDisabled: boolean) {
@@ -97,7 +98,7 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
       <div className="flex flex-wrap items-end gap-3">
         {/* Email */}
         <div className="min-w-[14rem] flex-1">
-          <label htmlFor="invite-email" className="mb-1.5 block text-sm font-medium text-gray-700">
+          <label htmlFor="invite-email" className="text-fg-muted mb-1.5 block text-sm font-medium">
             {t("email")}
           </label>
           <input
@@ -118,7 +119,7 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
             className={fieldCls(!!emailError, isSubmitting)}
           />
           {emailError && (
-            <p id="invite-email-error" className="mt-1.5 text-xs text-red-600">
+            <p id="invite-email-error" className="text-status-danger-fg mt-1.5 text-xs">
               {emailError}
             </p>
           )}
@@ -126,7 +127,7 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
 
         {/* Role */}
         <div className="w-36 shrink-0">
-          <label htmlFor="invite-role" className="mb-1.5 block text-sm font-medium text-gray-700">
+          <label htmlFor="invite-role" className="text-fg-muted mb-1.5 block text-sm font-medium">
             {t("role")}
           </label>
           <select

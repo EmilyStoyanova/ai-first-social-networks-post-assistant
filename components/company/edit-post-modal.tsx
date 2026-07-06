@@ -136,7 +136,7 @@ export function EditPostModal({
   return (
     <Modal open onClose={onClose} title={t("title")} maxWidth="lg">
       {/* Tabs */}
-      <div className="-mx-6 mb-5 flex border-b border-gray-100 px-6">
+      <div className="border-border -mx-6 mb-5 flex border-b px-6">
         {(["edit", "history"] as const).map((tabKey) => (
           <button
             key={tabKey}
@@ -144,8 +144,8 @@ export function EditPostModal({
             className={[
               "mr-4 border-b-2 pb-3 text-sm font-medium transition-colors",
               tab === tabKey
-                ? "border-green-500 text-green-700"
-                : "border-transparent text-gray-500 hover:text-gray-800",
+                ? "border-status-success-dot text-status-success-fg"
+                : "text-fg-muted hover:text-fg border-transparent",
             ].join(" ")}
           >
             {tabKey === "edit" ? t("tabEdit") : t("tabHistory")}
@@ -157,7 +157,7 @@ export function EditPostModal({
       {tab === "edit" && (
         <div className="space-y-4">
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            <label className="text-fg-muted mb-1.5 block text-sm font-medium">
               {t("contentLabel")}
             </label>
             <textarea
@@ -165,13 +165,13 @@ export function EditPostModal({
               onChange={(e) => setText(e.target.value)}
               rows={8}
               disabled={saving}
-              className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm leading-relaxed transition-colors outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100 disabled:opacity-50"
+              className="rounded-control border-border-strong focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm leading-relaxed transition-colors outline-none focus:ring-2 disabled:opacity-50"
             />
           </div>
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">
+            <label className="text-fg-muted mb-1.5 block text-sm font-medium">
               {t("hashtagsLabel")}{" "}
-              <span className="font-normal text-gray-400">{t("hashtagsHint")}</span>
+              <span className="text-fg-faint font-normal">{t("hashtagsHint")}</span>
             </label>
             <input
               type="text"
@@ -179,7 +179,7 @@ export function EditPostModal({
               onChange={(e) => setHashtagsRaw(e.target.value)}
               placeholder={t("hashtagsPlaceholder")}
               disabled={saving}
-              className="w-full rounded-lg border border-gray-300 px-3.5 py-2.5 text-sm transition-colors outline-none focus:border-green-500 focus:ring-2 focus:ring-green-100 disabled:opacity-50"
+              className="rounded-control border-border-strong focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-colors outline-none focus:ring-2 disabled:opacity-50"
             />
           </div>
 
@@ -200,32 +200,32 @@ export function EditPostModal({
       {tab === "history" && (
         <div>
           {loadingVersions ? (
-            <p className="py-8 text-center text-sm text-gray-400">{t("loadingHistory")}</p>
+            <p className="text-fg-faint py-8 text-center text-sm">{t("loadingHistory")}</p>
           ) : versionsError ? (
             <Alert variant="error">{versionsError}</Alert>
           ) : versions.length === 0 ? (
-            <p className="py-8 text-center text-sm text-gray-400">{t("noHistory")}</p>
+            <p className="text-fg-faint py-8 text-center text-sm">{t("noHistory")}</p>
           ) : (
             <div className="space-y-3">
               {restoreError && <Alert variant="error">{restoreError}</Alert>}
               {versions.map((v) => (
                 <div
                   key={v.id}
-                  className="flex items-start justify-between gap-4 rounded-lg border border-gray-100 bg-gray-50 px-4 py-3"
+                  className="rounded-control border-border bg-surface-subtle flex items-start justify-between gap-4 border px-4 py-3"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-                      <span className="text-xs font-semibold text-gray-700">v{v.version}</span>
-                      <span className="text-xs text-gray-300">·</span>
-                      <span className="text-xs text-gray-400">{formatDate(v.createdAt)}</span>
+                      <span className="text-fg-muted text-xs font-semibold">v{v.version}</span>
+                      <span className="text-fg-faint text-xs">·</span>
+                      <span className="text-fg-faint text-xs">{formatDate(v.createdAt)}</span>
                       {v.changedByName && (
                         <>
-                          <span className="text-xs text-gray-300">·</span>
-                          <span className="text-xs text-gray-500">{v.changedByName}</span>
+                          <span className="text-fg-faint text-xs">·</span>
+                          <span className="text-fg-muted text-xs">{v.changedByName}</span>
                         </>
                       )}
                     </div>
-                    <p className="text-xs leading-relaxed text-gray-600">
+                    <p className="text-fg-muted text-xs leading-relaxed">
                       {v.content.length > 120 ? v.content.slice(0, 120) + "…" : v.content}
                     </p>
                   </div>
