@@ -98,15 +98,16 @@ model User {
 }
 
 model Company {
-  id             String         @id @default(uuid())
-  name           String
-  slug           String         @unique
-  website        String?
-  automationMode AutomationMode @default(semi_automated) @map("automation_mode")
-  defaultLang    String         @default("en") @map("default_language")
-  createdBy      String         @map("created_by")
-  createdAt      DateTime       @default(now()) @map("created_at")
-  updatedAt      DateTime       @updatedAt @map("updated_at")
+  id                   String         @id @default(uuid())
+  name                 String
+  slug                 String         @unique
+  website              String?
+  automationMode       AutomationMode @default(semi_automated) @map("automation_mode")
+  defaultLang          String         @default("en") @map("default_language")
+  createdBy            String         @map("created_by")
+  lastCronProcessedAt  DateTime?      @map("last_cron_processed_at")
+  createdAt            DateTime       @default(now()) @map("created_at")
+  updatedAt            DateTime       @updatedAt @map("updated_at")
 
   creator          User              @relation("CompanyCreator", fields: [createdBy], references: [id])
   members          CompanyMember[]
