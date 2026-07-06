@@ -3,7 +3,7 @@
 > **Status:** v1.0 · 2026-07-06 · Official UI/UX blueprint for the redesign
 > **Audience:** Frontend engineers and designers. This document is the single source of truth for every UX decision. Engineers implementing from this spec should not need to make UX decisions on their own.
 > **Scope:** Reorganization and redesign of the existing functionality only. No feature additions, no business-logic changes, no removals.
-> **Design direction:** Calm, minimal, information-first B2B SaaS — in the spirit of Linear, Vercel, Notion, GitHub, Clerk, Supabase.
+> **Design direction:** An original design language derived from first principles — see _Design Philosophy_ below. No reference product is imitated; every decision must survive the five questions in that section. Approved visual identity: **Direction A — The Reading Room** (rationale in _Visual Identity_, concrete tokens in §6).
 
 **Existing functionality this spec reorganizes (unchanged):** company CRUD & membership, brand guidelines, Buffer OAuth & channel configs, content sources & ingestion, AI post generation (manual + weekly cron), approval workflow (approve / reject / submit / edit / restore versions), publishing to Buffer with retry, media gallery (upload + AI generation + attach/detach), audit log, global admin (users, companies, LLM configs), EN/BG i18n.
 
@@ -26,9 +26,295 @@
 
 ---
 
+## Design Philosophy
+
+_This section governs everything below it. The numbered principles (§1) operationalize it; the design system (§6) implements it in the concrete form of the approved visual identity — Direction A, *The Reading Room* (see the Visual Identity section). It deliberately commits to **no** specific typeface, palette, or component styling — those are implementation choices that must merely pass the tests here. Where any earlier framing referenced other products as aspiration, this section supersedes it: resemblance to another product is never a justification — and neither is deliberate difference. Only the tests below are._
+
+### The five questions
+
+Every design decision — token, component, layout, interaction — must answer **yes** to at least one of these, and conflict with none:
+
+1. Does it make the product easier to use?
+2. Does it reduce cognitive load?
+3. Does it make information easier to scan?
+4. Does it make users trust the AI?
+5. Does it help users accomplish their work faster?
+
+"Product X does it this way" is not an answer to any of them. A familiar pattern may still be _chosen_ when familiarity itself reduces cognitive load (question 2) — but that argument must be made explicitly, per decision, and it never extends to visual styling.
+
+### Three emotions, with mechanisms
+
+The interface communicates exactly three things. Each is produced by concrete, checkable mechanisms — not by mood:
+
+**1. Calm — the interface never overwhelms.**
+
+- Generous whitespace is the primary grouping tool; density is added only where scanning demands it (tables, queues).
+- Every screen has an unambiguous "look here first": one title, one primary action, content ordered by urgency with the most important above the fold.
+- Nothing moves, blinks, or appears unrequested; there are no notifications — there are queues and badges the user visits on their own terms.
+- Neutral surfaces dominate; color appears only where it carries meaning (the §6.2 status map).
+
+**2. Confidence — users are trusting an AI to publish for their business; the interface must earn that.**
+
+- **Transparency:** every automated action is visible after the fact in plain language (Dashboard automation activity, Activity timeline). The system never does anything the user cannot find a record of.
+- **Predictability:** statuses form a visible, legible lifecycle; the same state always looks the same everywhere; upcoming automated actions (the next 48h of publishes) are shown _before_ they happen.
+- **Reliability made visible:** failures surface immediately with their cause and a recovery action — never hidden, never euphemized. A system that is honest about its failures is the one users trust with automation.
+- **Precision cues:** exact timestamps, exact counts, unambiguous wording. Vagueness erodes trust in an automated system.
+
+**3. Focus — every page has one obvious purpose.**
+
+- One primary action per screen; secondary actions are visually subordinate or foldered into overflow menus.
+- Hierarchy comes from spacing, typography, grouping, and proportion — **not** from additional colors, borders, or effects.
+- Setup and daily work never share a surface, so the working user is never distracted by configuration.
+
+### Timelessness over fashion
+
+- No trends, no fashionable UI, no decorative effects. No gradients unless one demonstrably serves a purpose — none currently does, so none exist.
+- Animation only where it explains a state change (an item leaving a queue, a panel opening); ≤250ms; never decoration. If removing an animation loses no information, remove it.
+- The test for any styling choice: _could this plausibly look dated in five years?_ If yes, it doesn't ship.
+
+### Identity from structure, not decoration
+
+If the logo were removed, the product should remain recognizable by:
+
+- **Layout:** the two-level model (small global sidebar → tabbed company workspace), consistent reading columns, urgency-ordered pages.
+- **Typography:** a strict division of roles — titles, working text, and data are always visually distinguishable, and each role does the same job on every screen (whatever typefaces are eventually chosen).
+- **Spacing:** one consistent spacing rhythm, with deliberate air around titles and between sections.
+- **Navigation:** tabs that never lie (no disabled placeholders), exactly one count badge (Approvals), counts that agree everywhere they appear.
+- **Component system:** one shared component vocabulary with a single canonical status language — the same element never looks or behaves two different ways anywhere in the product.
+- **Interaction patterns:** optimistic queue actions with plain-language feedback, dirty-form save bars, keyboard-first review.
+
+That combination — not any single element, and not any particular styling — is the design language. The approved visual identity — Direction A, _The Reading Room_ — gives these structures their concrete form through the §6 tokens.
+
+### Designed for habitual use
+
+The target user spends hours per week here; the interface must become _more_ comfortable with use, not merely tolerable:
+
+- **Spatial stability:** actions, filters, and statuses live in the same place on every page; nothing repositions between visits beyond the documented responsive reflow (§10).
+- **Muscle memory:** keyboard shortcuts on the highest-frequency loop (Approvals), consistent button order (destructive left, primary right), consistent Esc/Enter semantics in every dialog.
+- **Progressive quieting:** onboarding scaffolds (setup checklist, explanatory empty states) disappear permanently once outgrown — the experienced user's screen is quieter than the novice's.
+- **No relearning:** components behave identically everywhere they appear; a pattern learned once is learned for the whole product.
+
+---
+
+## Visual Identity
+
+> **Status: Direction A — The Reading Room — approved (2026-07-06).** This section records the exploration that led to that decision; it is kept as the rationale of record. The approved direction's concrete form (typefaces, palette, spacing, surfaces, motion, density and preview modes) is defined in §6, which supersedes the earlier placeholder tokens and `VISUAL_DIRECTION.md`. No code has been implemented from this document.
+
+### How these directions were derived
+
+No direction below is taken from, or measured against, any existing product. Each is derived from the product itself. The product does one thing: **it lets a small team delegate content creation to an AI, judge the results, and trust the machine to publish for their company.** That sentence contains four distinct centers of gravity, and each one, taken as the organizing truth of the interface, produces a different visual identity:
+
+| Center of gravity                     | Organizing truth                                     | Direction                |
+| ------------------------------------- | ---------------------------------------------------- | ------------------------ |
+| The **text being judged**             | The work is reading and deciding                     | A — The Reading Room     |
+| The **pipeline doing the publishing** | The work is supervising an automated system          | B — The Instrument Panel |
+| The **person delegating their voice** | The work is an act of trust that must feel safe      | C — The Soft Studio      |
+| The **published artifact**            | The work is judging what the world will actually see | D — The Proof Table      |
+
+All four directions honor the Design Philosophy's non-negotiables — these are invariants, not differentiators:
+
+- One canonical status→color language; color appears only where it carries meaning.
+- One primary action per screen; hierarchy from spacing, typography, grouping, proportion.
+- No gradients, no decorative motion; functional animation ≤250ms.
+- Full first-class legibility in **both English and Bulgarian** — whatever typography a direction implies must have complete, well-drawn Cyrillic.
+
+Where the directions genuinely differ: contrast strategy, default density, shape language, typographic temperature, and **where visual richness is spent**.
+
+---
+
+### Direction A — The Reading Room
+
+**Organizing truth:** the user's most frequent and highest-stakes act is reading AI-drafted text and deciding whether it may speak for their company. The interface is built for sustained, comfortable reading and fast typographic judgment; everything that is not the text steps back.
+
+**Visual character (principle level, not tokens):**
+
+- Typography does almost all the work: a deliberate, wide type scale; generous line-height and a bounded reading measure wherever post text appears; hierarchy expressed through size, weight, and spacing — rarely through color or boxes.
+- A near-monochrome surface world: background and text tones in close, quiet steps; borders hairline or absent; whitespace is the container.
+- The color budget is spent almost entirely on the status language. A status badge is often the only chromatic element in view — which makes state impossible to miss.
+- Minimal shape language: small radii, essentially no elevation except a single subtle level for overlays.
+- Low density by default; tables and queues tighten rhythm but keep the same typographic roles.
+
+**Emotions it creates:** quiet concentration, seriousness, editorial care — the sense that the product respects both the text and the reader's judgment.
+
+**Users it serves best:** the habitual weekly reviewer reading 10–30 drafts in one sitting; owners who care about their brand's voice; anyone running the 15-minute approval loop.
+
+**Advantages:**
+
+- Best reading ergonomics of the four → fastest judging on the hottest path.
+- Ages best: typographic order does not date; there is almost nothing fashionable to expire.
+- Fewest visual variables → cheapest to govern, hardest to erode PR by PR, easiest to hold consistent in a token system.
+- Status colors gain maximum signal against a quiet ground — the Confidence mechanisms get louder, not quieter.
+- Recognizability comes from typographic structure, exactly matching "identity from structure, not decoration."
+
+**Disadvantages:**
+
+- Demands excellent typographic execution; with mediocre type it reads plain rather than refined. Typeface selection (including Cyrillic) becomes the single most consequential decision.
+- Data-heavy screens (admin tables, Activity, cron history) need a deliberately specified compact mode, or "airy" becomes "endless scrolling."
+- Low visual excitement in isolation — it photographs quietly.
+- Whitespace discipline is easy to erode without token-level enforcement.
+
+**The five questions:** Q1 (easier to use) — strong: reading _is_ the use. Q2 (cognitive load) — strong: the fewest simultaneous visual variables. Q3 (scanability) — strong for text; moderate for dense data until the compact table mode is specified. Q4 (trust the AI) — strong, indirectly: a serious frame makes the AI's words feel considered, and status salience powers the transparency mechanisms. Q5 (work faster) — strong on the highest-frequency loop.
+
+**Calm · Confidence · Focus:** Calm — strongest of the four: a quiet ground where nothing competes. Confidence — strong, earned soberly through precision and status salience rather than display. Focus — strong: one column, one action, text first.
+
+---
+
+### Direction B — The Instrument Panel
+
+**Organizing truth:** the product is an automated system operating on the user's behalf, and the interface is its control surface. Making the machinery visible and exact is what earns trust.
+
+**Visual character:**
+
+- State-first composition: statuses, timestamps, counts, and schedules receive first-class visual treatment — system facts are rendered in a distinct "readout" style, always distinguishable from prose.
+- Higher default density: aligned columns, compact rows, a perceivable underlying grid.
+- Grouping carried by structural lines (rules, separators) more than by whitespace.
+- A restrained, cooler, more technical neutral range; status color used more frequently because every row states itself.
+- Compact, uniform controls; strictly systematic iconography.
+
+**Emotions it creates:** mastery, oversight, exactness — "I can see everything the machine is doing."
+
+**Users it serves best:** the supervisor persona — owners of fully-automated companies who mostly monitor; global admins; power users who live in the Posts and Activity tables.
+
+**Advantages:**
+
+- The most direct expression of trust-through-transparency: the Confidence mechanisms _are_ the identity, not an overlay.
+- Excellent scanability of state; dashboards, queues, and cron history feel native.
+- Dense admin surfaces need no special accommodation — density is the default.
+- Precision cues (exact timestamps, exact counts) have a natural, dignified home.
+
+**Disadvantages:**
+
+- The hottest loop is the one it serves least: reading long drafts inside a dense readout world is measurably worse.
+- Calm is at structural risk: lines + density + frequent color produce a busier ground that must be actively fought.
+- Reads as demanding to non-technical users; the small-business owner delegating their voice may feel they've been handed a cockpit.
+- The most visual variables to govern — highest long-term consistency cost.
+
+**The five questions:** Q1 — moderate: excellent for monitoring, worse for reading. Q2 — moderate: density externalizes load onto the eye. Q3 — strong for state, weak for prose. Q4 — strongest of the four. Q5 — strong for supervision, moderate for review.
+
+**Calm · Confidence · Focus:** Calm — weakest of the four. Confidence — strongest. Focus — moderate: many simultaneous readouts legitimately compete for attention.
+
+---
+
+### Direction C — The Soft Studio
+
+**Organizing truth:** handing your public voice to a machine is an act of anxiety; the interface should feel like a friendly workroom that lowers the threshold to trying, judging, and shipping.
+
+**Visual character:**
+
+- Soft contrast: warm neutrals, gentle elevation (subtle shadows) instead of lines; larger radii; roomy, forgiving controls.
+- The mid-density card as the universal container; forms feel conversational.
+- Status colors slightly warmed and desaturated — stating without alarming; success given friendly weight.
+- Typography chosen for friendliness and legibility over character; hierarchy in comfortable, unthreatening steps.
+
+**Emotions it creates:** welcome, safety, low stakes — "this is easy; nothing here will bite."
+
+**Users it serves best:** first-time and non-technical users; the onboarding journey; occasional (less-than-weekly) users who never build muscle memory.
+
+**Advantages:**
+
+- Lowest intimidation for a product that asks for real trust before showing value.
+- Onboarding scaffolds, checklists, and teaching empty states feel native rather than bolted on.
+- Forgiving: imperfect content density or uneven data looks acceptable on soft surfaces.
+
+**Disadvantages:**
+
+- Soft contrast works _against_ the philosophy's precision mechanism: "exact timestamps, exact counts, unambiguous wording" reads mushier in a soft world. This is the only direction whose character conflicts with a stated Confidence mechanism.
+- Elevated cards multiply visual layers, straining Principle 11 (whitespace over boxes).
+- Ages fastest: roundness and shadow conventions are fashion, and fashion cycles — it fails the five-year test soonest.
+- Least distinctive: strip the logo and the structural identity must do all the work, because the styling is, by design, unassertive.
+- Comfort is not confidence. A reassuring surface without visible machinery risks "pleasant" where the product needs "trustworthy."
+
+**The five questions:** Q1 — strong for novices, neutral for the habitual user the product is designed for. Q2 — moderate: the tone soothes but the layered surfaces add noise. Q3 — weakest: low contrast is the enemy of scanning. Q4 — mixed: approachable, but approachability is not authority. Q5 — weakest on the hot loop.
+
+**Calm · Confidence · Focus:** Calm — strong, but sedative rather than structural: calm from softness, not from order. Confidence — weakest. Focus — moderate.
+
+---
+
+### Direction D — The Proof Table
+
+**Organizing truth:** an approval is a judgment about how the post will appear in the world; therefore show the work exactly as the world will see it, and make everything else disappear.
+
+**Visual character:**
+
+- A hard figure–ground split, enforced by rule: **the work** (post text + media rendered channel-faithfully — character limits, crop, hashtag placement as each network will show them) is the only rich object on screen; **the tools** (chrome, actions, filters) are maximally recessive, flat, and uniform.
+- Two visual registers, never mixed: the artifact may carry the channel's shapes; the surrounding UI is quiet to the point of plainness.
+- Near-monochrome chrome; even status color sits small and precise in the tool register.
+- The artifact is centered; actions orbit it in a fixed position, building muscle memory around the object of judgment.
+
+**Emotions it creates:** consequence, finality, editorial responsibility — "this is exactly what will go out under our name."
+
+**Users it serves best:** careful approvers; brand-sensitive owners; multichannel teams where the same draft renders differently on Facebook, LinkedIn, Instagram, and TikTok and the difference matters.
+
+**Advantages:**
+
+- The strongest possible trust mechanism _at the moment of judgment_: users trust what they can see verbatim. Approve-then-surprised regret disappears.
+- Makes channel constraints tangible instead of abstract (a truncation is _seen_, not warned about).
+- The figure–ground register split is a genuinely distinctive identity mechanism.
+
+**Disadvantages:**
+
+- The identity collapses on artifact-less surfaces. Dashboard, Settings, Sources, Team, and all of Admin have no proof to show — roughly half the product's screens fall back to "very plain UI" with no identity of their own.
+- Channel-faithful rendering is a permanent maintenance liability: networks change their presentation, and the previews must chase them. Rendering another platform's look also sits uneasily beside a philosophy that imitates nothing.
+- Heavier per-card rendering slows the rapid keyboard queue that §3.8 promises.
+- On inspection, "show the artifact faithfully" is a **component behavior** (a preview mode of `PostCard`), not a whole-product identity.
+
+**The five questions:** Q1 — strong at approval, weak everywhere else. Q2 — strong: seeing the final form removes mental simulation. Q3 — moderate. Q4 — strongest at the moment of judgment, silent elsewhere. Q5 — mixed: fewer downstream rejects, slower queue throughput now.
+
+**Calm · Confidence · Focus:** Calm — strong. Confidence — strong at approval, absent on non-artifact surfaces. Focus — strongest of the four at approval: literally one object on screen.
+
+---
+
+### Objective comparison
+
+Ratings: ●●● strong · ●● adequate · ● weak. Judged against the philosophy's own tests, across the _whole_ product (all twelve page types in §4), for the habitual user it is designed for.
+
+| Criterion                                         | A — Reading Room | B — Instrument Panel | C — Soft Studio | D — Proof Table |
+| ------------------------------------------------- | :--------------: | :------------------: | :-------------: | :-------------: |
+| Q1 Easier to use                                  |       ●●●        |          ●●          |       ●●        |       ●●        |
+| Q2 Reduces cognitive load                         |       ●●●        |          ●●          |       ●●        |       ●●●       |
+| Q3 Easier to scan                                 |       ●●●        |          ●●          |        ●        |       ●●        |
+| Q4 Builds trust in the AI                         |        ●●        |         ●●●          |        ●        |       ●●●       |
+| Q5 Faster work                                    |       ●●●        |          ●●          |        ●        |       ●●        |
+| Calm                                              |       ●●●        |          ●           |       ●●        |       ●●●       |
+| Confidence                                        |        ●●        |         ●●●          |        ●        |       ●●        |
+| Focus                                             |       ●●●        |          ●●          |       ●●        |       ●●●       |
+| Timelessness (five-year test)                     |       ●●●        |          ●●          |        ●        |       ●●        |
+| Whole-product coverage (identity on every screen) |       ●●●        |         ●●●          |       ●●●       |        ●        |
+| Habitual-use fit (hours/week user)                |       ●●●        |          ●●          |        ●        |       ●●        |
+| Governance cost (keeping it consistent for years) |       ●●●        |          ●           |       ●●        |       ●●        |
+
+**What the comparison shows:**
+
+1. **A and B are mirror images.** A optimizes the _judging_ act; B optimizes the _supervising_ act. The product's own usage math breaks the tie: judging text is where the user's attention-minutes go (the <15-minute weekly review is the product's core promise), while supervision is glance-based — a dashboard visit, a badge check. An identity should be built for where attention dwells, and here attention dwells in reading.
+2. **C is the only direction that conflicts with the philosophy** rather than merely emphasizing part of it: soft contrast structurally undermines the stated precision mechanism of Confidence. Its calm is decorative — produced by softness — where the philosophy demands calm produced by order.
+3. **D's core insight is correct but mis-sized.** "Judge the artifact as it will appear" is a component behavior, not an identity: it can (and should) live inside any winning direction as `PostCard`'s channel-preview mode. As a whole-product identity it covers only the screens that have an artifact.
+4. **Only A and B style every screen with equal conviction** — and between them, A carries the lower long-term governance cost and the stronger Calm and Focus, at the price of a weaker (but recoverable) Confidence score.
+
+---
+
+### Recommendation — Direction A: The Reading Room
+
+**Direction A is the strongest long-term choice**, for five reasons:
+
+1. **It aims where attention actually goes.** The majority of user attention-minutes are spent reading AI-drafted text and deciding. A direction that makes reading effortless wins Q2, Q3, and Q5 on the exact loop the product promises to make fast.
+2. **It is the most timeless.** Typographic order does not date; density fashions, softness fashions, and readout aesthetics all do. A is the only direction with essentially nothing that could fail the five-year test.
+3. **It makes the philosophy's mechanisms load-bearing.** On a quiet, near-monochrome ground, the canonical status colors become the loudest thing on screen (Confidence), whitespace grouping is native rather than imposed (Calm), and one-column-one-action is the natural composition (Focus). The other directions implement the philosophy; A _is_ the philosophy given form.
+4. **It is the cheapest identity to keep.** Fewest visual variables, lowest governance cost, hardest to erode. For a product maintained for years by small teams, consistency-by-construction beats consistency-by-vigilance.
+5. **It absorbs the rivals' truths without their costs.** B's contribution — precise, distinguishable rendering of system facts — becomes a defined _data role_ in A's typographic system (the philosophy already mandates precision cues). D's contribution — artifact fidelity — becomes `PostCard`'s channel-preview mode in §7, available wherever a post is judged. C's contribution — a gentle first hour — is delivered by Principles 8 and 9 (teaching empty states, setup checklist, progressive quieting) rather than by softening every surface for the veteran.
+
+**Named risks, with mitigations:**
+
+- _Typography must be excellent, in two alphabets._ Typeface selection becomes the single most consequential token decision; candidates are evaluated in English and Bulgarian side by side before anything else is chosen.
+- _Dense data screens must be specified, not improvised._ A compact table/queue mode (tightened rhythm, same typographic roles) is defined in §6 tokens so Admin, Activity, and cron history are first-class citizens of the identity.
+- _Whitespace discipline erodes by default._ Spacing is enforced through tokens and the PR checks in §12 — never through taste.
+
+**Direction A was approved on 2026-07-06.** Its concrete form — typefaces with full Cyrillic coverage, palette, status colors, spacing, surfaces, controls, motion, the compact density mode, and the artifact preview mode — is defined in §6. `VISUAL_DIRECTION.md` is formally superseded. Implementation has not begun; it starts, when instructed, with Phase 1 (design tokens) of §12.
+
+---
+
 ## 1. Product Design Principles
 
-Every screen, present and future, must satisfy all of these. Reviewers should reject PRs that violate them.
+Every screen, present and future, must satisfy all of these — they are the operational form of the Design Philosophy above. Reviewers should reject PRs that violate them.
 
 1. **Every page has exactly one job.** A page answers one question or completes one task. The current company page (brand + members + Buffer + channels + sources + posts on one scroll) violates this; the redesign splits it. If a page needs a second job, it needs a second page or a tab.
 2. **One primary action per screen.** Exactly one solid/primary button visible at a time. Everything else is secondary (outline), tertiary (ghost/text), or in an overflow menu.
@@ -558,84 +844,182 @@ Centered 400px card on a plain background, product wordmark above, no shell. Sin
 
 ## 6. Design System
 
-Implemented as Tailwind 4 `@theme` tokens in `app/globals.css`. Values below are the canonical tokens; components consume tokens only — no ad-hoc hex/px in component code.
+**This section is the concrete form of the approved visual identity — Direction A, _The Reading Room_.** Implemented as Tailwind 4 `@theme` tokens in `app/globals.css`. Values below are the canonical tokens; components consume tokens only — no ad-hoc hex/px in component code.
+
+**The loudness order** (governs every screen): **status colors** are the loudest visual elements, then the single ink primary action, then the accent (links, focus, active nav), then everything else. Nothing may outshout a status badge. This is why the primary button is ink rather than accent-colored, and why no other element may borrow the status hues.
 
 ### 6.1 Typography
 
-Font: Geist Sans (already loaded); Geist Mono for IDs/timestamps/code.
+The identity is typography-led: two faces, both chosen for editorial quality **and** first-class Cyrillic (complete `cyrillic` + `cyrillic-ext` coverage, real italics, Bulgarian `locl` letterforms).
 
-| Token         | Size/line | Weight | Use                                                 |
-| ------------- | --------- | ------ | --------------------------------------------------- |
-| `display`     | 24/32     | 600    | Page titles (one per page)                          |
-| `title`       | 18/28     | 600    | Section & card titles                               |
-| `body`        | 14/22     | 400    | Default UI text, post content                       |
-| `body-strong` | 14/22     | 500    | Emphasis, table headers, buttons                    |
-| `small`       | 13/20     | 400    | Metadata, help text                                 |
-| `micro`       | 12/16     | 500    | Badges, uppercase section labels (tracking +0.04em) |
+| Role family                    | Face                                  | Why                                                                                                  |
+| ------------------------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Reading — titles and post text | **Literata** (variable, optical size) | Designed for sustained screen reading; genuine italics; excellent Cyrillic including Bulgarian forms |
+| Working — all UI text          | **Source Sans 3** (variable)          | Quiet humanist sans; complete Cyrillic; tabular figures for the data role                            |
 
-Rules: max two weights per surface; no font size above 24px anywhere in-app; body text color `fg` on `bg`, metadata `fg-muted`.
+- Loaded via `next/font/google` with `subsets: ["latin", "cyrillic", "cyrillic-ext"]`, `display: "swap"`. Fallback stacks carry Cyrillic: `Georgia, serif` and `"Helvetica Neue", Arial, sans-serif`.
+- **Geist is retired.** Its Cyrillic coverage is not first-class, and the identity requires equal quality in English and Bulgarian.
+- **No third face.** The `data` role is Source Sans 3 with `font-variant-numeric: tabular-nums` — precise, quiet readouts without a terminal aesthetic.
+
+**Type roles** — the only text styles permitted anywhere in the app:
+
+| Token         | Face          | Size/line | Weight | Use                                                                                  |
+| ------------- | ------------- | --------- | ------ | ------------------------------------------------------------------------------------ |
+| `display`     | Literata      | 28/36     | 600    | Page title — exactly one per page                                                    |
+| `title`       | Literata      | 20/28     | 600    | Section and card titles                                                              |
+| `reading`     | Literata      | 17/28     | 400    | Post text in review/edit contexts — always the largest body-class text on its screen |
+| `body`        | Source Sans 3 | 15/24     | 400    | Default UI text                                                                      |
+| `body-strong` | Source Sans 3 | 15/24     | 600    | Emphasis, active states                                                              |
+| `small`       | Source Sans 3 | 13/20     | 400    | Metadata, labels, help text                                                          |
+| `data`        | Source Sans 3 | 13/20     | 500    | Timestamps, counts, IDs, schedules — `tabular-nums`, default color `fg-muted`        |
+| `micro`       | Source Sans 3 | 12/16     | 600    | Overlines and badge text — uppercase, tracking +0.06em                               |
+
+**Rules:**
+
+- The serif never appears below 17px; the sans never above 15px (button labels 14px). This division of roles — serif for what is read and judged, sans for what is operated — is the recognizable core of the identity.
+- **The post is the visual center.** Wherever a post is judged (Approvals, Posts, edit preview), its text renders in `reading` and everything around it in `small`/`data`. Dense operational information (timestamps, counts, run states) always uses the `data` role — quiet, muted, exact. This is token-enforced, not layout-improvised.
+- Reading measure: `reading` blocks are capped at 68ch.
+- No letter-spacing on lowercase text — tracking damages Cyrillic legibility. Tracking exists only in the uppercase `micro` role.
+- Never synthesize italic or bold. Synthetic Cyrillic obliques are illegible; Literata's true italic is the only italic in the product.
+- `<html lang="bg">` must be set for the Bulgarian locale so `locl` Bulgarian glyph variants activate.
+- Every component tolerates Bulgarian strings running ~20% longer than English: truncate with full text on hover/focus, never overflow. Both locales are reviewed side by side for every new surface.
 
 ### 6.2 Color
 
-Neutral-first: gray does 90% of the work; color = meaning only.
+A warm, near-monochrome world: ink on paper-toned neutrals. The chroma budget is spent almost entirely on the status language — a status badge is often the only saturated element in view, which is precisely what makes state impossible to miss.
 
-| Token            | Light value          | Use                                       |
-| ---------------- | -------------------- | ----------------------------------------- |
-| `bg`             | #FAFAFA              | App background                            |
-| `surface`        | #FFFFFF              | Cards, panels, modals                     |
-| `surface-subtle` | #F4F4F5              | Hovers, table stripes, wells              |
-| `border`         | #E4E4E7              | Default 1px borders                       |
-| `fg`             | #18181B              | Primary text                              |
-| `fg-muted`       | #71717A              | Secondary text                            |
-| `accent`         | #4F46E5 (indigo-600) | Primary buttons, links, focus, active nav |
-| `success`        | #16A34A              | published, connected, approved            |
-| `warning`        | #D97706              | pending, flagged, reconnect               |
-| `danger`         | #DC2626              | failed, rejected, destructive             |
-| `info`           | #2563EB              | sent_to_buffer, informational             |
+| Token            | Light value | Use                                                                        |
+| ---------------- | ----------- | -------------------------------------------------------------------------- |
+| `bg`             | #FBFAF9     | App background — barely warm off-white                                     |
+| `surface`        | #FFFFFF     | Cards, panels, modals, inputs                                              |
+| `surface-subtle` | #F5F4F2     | Hovers, wells, table header band                                           |
+| `border`         | #E9E7E4     | Hairlines — the default 1px border                                         |
+| `border-strong`  | #D6D3CF     | Interactive-card hover, dividers that must be visible                      |
+| `fg`             | #211E1B     | Ink — primary text and the primary button                                  |
+| `fg-muted`       | #6E6A64     | Secondary text, the `data` role                                            |
+| `fg-faint`       | #9B968F     | Placeholders and disabled states only — never for information              |
+| `accent`         | #3E5C76     | Links, focus ring, active-nav indicator — never buttons, never backgrounds |
 
-Status→color map (canonical, app-wide): draft=gray · pending_approval=warning · approved=success-outline · sent_to_buffer=info · published=success-solid-tint · failed=danger · rejected=danger-outline. Color is never the only signal (badge always carries text).
+**Status palette** — the canonical status→color map, app-wide. Each status has a tint background, deep text (all pairs ≥ 4.5:1), and a dot color; `StatusBadge` resolves these internally — callers never pass colors:
 
-### 6.3 Spacing, grid, containers
+| Status / state     | Variant | Tint bg | Text    | Dot     |
+| ------------------ | ------- | ------- | ------- | ------- |
+| `draft`            | tint    | #EFEDEA | #57534E | #78716C |
+| `pending_approval` | tint    | #FBEFDC | #92400E | #D97706 |
+| `approved`         | outline | surface | #166534 | #16A34A |
+| `sent_to_buffer`   | tint    | #E8EEF9 | #1E40AF | #2563EB |
+| `published`        | tint    | #DFF0E4 | #14532D | #16A34A |
+| `failed`           | tint    | #FAE8E8 | #991B1B | #DC2626 |
+| `rejected`         | outline | surface | #991B1B | #DC2626 |
+| connected          | dot     | —       | #166534 | #16A34A |
+| reconnect needed   | dot     | —       | #92400E | #D97706 |
+| disconnected       | dot     | —       | #991B1B | #DC2626 |
 
-- Base unit 4px; allowed steps: 4, 8, 12, 16, 24, 32, 48, 64.
-- Vertical rhythm: 32px between page sections, 16px between cards in a list, 12px between form fields, 8px label→input.
-- Shell: sidebar fixed 240px; content area max-width 1200px, padding 32px (16px mobile). Reading/forms max-width 640px; queues 720px; tables/grids full content width.
-- Grid: CSS grid with 24px gutters; card grids 3/2/1 columns at ≥1024 / ≥640 / below.
+**Rules:** color is never the only signal — a badge always carries text. The status hues belong to status exclusively: no green success buttons, no red headings, no amber decorations anywhere else. The `danger` button (§6.5) and danger `Alert` reuse the failed/rejected red because they are the same semantic family.
 
-### 6.4 Surfaces & depth
+### 6.3 Spacing
 
-- **Cards:** `surface` + 1px `border`, radius 8px, **no shadow at rest**; interactive cards gain `border-fg/20` + shadow-sm on hover.
-- **Radius scale:** 6px inputs/buttons/badges · 8px cards · 12px modals/panels · full for pills/avatars.
-- **Shadows:** only on floating layers — sm (hover), md (dropdown/popover), lg (modal/side panel). Never on static content.
+Base unit 4px; raw steps 4, 8, 12, 16, 24, 32, 40, 48, 64 — allowed **only inside `components/ui`**. Pages and feature components compose with the semantic rhythm tokens below. This is how the generous whitespace stays consistent instead of eroding PR by PR:
+
+| Token                 | Value                                    | Meaning                          |
+| --------------------- | ---------------------------------------- | -------------------------------- |
+| `space-page-x`        | 40 (desktop) / 24 (tablet) / 16 (mobile) | Content horizontal padding       |
+| `space-page-top`      | 40                                       | Above the page title             |
+| `space-after-display` | 24                                       | Page title → first content       |
+| `space-section`       | 40                                       | Between page sections            |
+| `space-after-title`   | 12                                       | Section/card title → its content |
+| `space-card-gap`      | 16                                       | Between cards in a list/grid     |
+| `space-field`         | 16                                       | Between form fields              |
+| `space-label`         | 6                                        | Label → input                    |
+| `space-inline`        | 8                                        | Icon ↔ text, badge ↔ title       |
+
+Containers: sidebar fixed 240px; content max-width 1200px centered; reading and forms 640px; approval queue 720px; tables/grids full content width. Card grids: 24px gutters, 3/2/1 columns at ≥1024 / ≥640 / below.
+
+**PR rule:** a margin or padding not expressible in these tokens is a design change and requires a spec edit — reviewers reject it.
+
+### 6.4 Surfaces & cards
+
+- The page is quiet paper: most content sits directly on `bg`, grouped by whitespace. A card is used only when something must read as _an object_ — a post, a company, an integration — never as general decoration.
+- **Card:** `surface` + 1px `border` hairline, radius 6, **no shadow at rest**. Interactive cards (CompanyCard, MediaCard): hover = `border-strong` + `shadow-sm`.
+- **List mode:** rows separated by hairline rules and whitespace, no boxes — the default for settings summaries, Activity, and tables. Max one level of card nesting (Principle 11).
+- **Radius scale:** 4px controls & badges · 6px cards · 10px modals/panels · full for pills, dots, avatars.
+- **Elevation:** shadows exist only on floating layers — `shadow-sm` (interactive hover), `shadow-md` (dropdown/popover), `shadow-lg` (modal/side panel). Static content never casts a shadow.
+- Dark mode is out of scope for v1; the semantic token names above are theme-ready so one can be added later without touching components.
 
 ### 6.5 Controls
 
-- **Buttons:** heights 36px (default) / 32px (compact, tables) / 40px (auth pages). Variants: `primary` (accent solid, white text) · `secondary` (surface, border) · `ghost` (transparent, hover surface-subtle) · `danger` (danger solid — destructive confirm only). Loading = spinner replaces label, width locked. One primary per view (Principle 2).
-- **Inputs / selects / textarea:** 36px, `surface`, 1px border, radius 6; focus = 2px accent ring; error = danger border + 13px message below linked by `aria-describedby`. Label above, 500 weight; help text below label in `fg-muted`. Native `<select>` styled; no custom dropdown for v1 forms.
-- **Toggles:** 36×20 switch, accent when on, always with visible label.
-- **Tag input** (forbidden words, competitors): chips with × inside an input-styled container; Enter/comma commits.
+- **Buttons** — label 14/20 weight 600, radius 4, heights 36 (default) / 32 (compact) / 40 (auth):
+  - `primary` — **ink**: `fg` background, `bg` text. Exactly one per screen (Principle 2). Deliberately not accent-colored: the strongest _neutral_ on the page, so status colors keep the chroma spotlight.
+  - `secondary` — `surface` + hairline border, `fg` text; hover `surface-subtle`.
+  - `ghost` — transparent, `fg-muted` text; hover `surface-subtle`.
+  - `danger` — #B91C1C solid, white text — only inside `ConfirmDialog` and the danger zone.
+  - Loading: spinner replaces label, width locked. Disabled: 45% opacity.
+- **Inputs / selects / textarea:** 36px, `surface`, hairline border, radius 4, `body` text; focus = 2px `accent` ring, 2px offset; error = danger border + 13px danger message linked via `aria-describedby`. Label above in `small` 600; help text in `small` `fg-muted`. Native `<select>` styled — no custom dropdown in v1. **Post-content textareas render in `reading` (17/28)** — while editing, the text stays the visual center.
+- **Toggles:** 36×20 switch; on = `fg` ink, off = `border-strong`; always with a visible label.
+- **Tag input** (forbidden words, competitors): full-radius chips (`surface-subtle`, `small` text, × to remove) inside an input-styled container; Enter/comma commits.
+- **Form layout:** groups are separated by whitespace and `micro` overline labels — no fieldset boxes. Max ~7 visible fields per group (Principle 6); forms max-width 640px; dirty state → `SaveBar`.
 
 ### 6.6 Data display
 
-- **Tables:** header row `micro` uppercase `fg-muted`, 44px body rows, row hover `surface-subtle`, borders horizontal-only. Right-align numerics. Sticky header on scroll.
-- **Badges:** 20px pill, `micro` text, tinted background (10% of semantic color) + solid-color text; dot-prefix variant for connection states.
-- **Alerts:** full-width rounded 8, tinted bg, icon + title + optional body + optional action; variants info/success/warning/danger.
-- **Empty states:** centered in content region — 24px icon (muted), one `title` line, one `body` line max, one button. Never more.
-- **Loading:** skeletons mirror final layout (shimmer, `prefers-reduced-motion` → static); button/inline spinners 16px. Full-page spinners banned (Principle 13).
+- **Tables** (comfortable default): header `micro` uppercase `fg-muted` above a hairline; rows 48px, horizontal hairlines only; hover `surface-subtle`; numerics and timestamps in `data`, right-aligned; sticky header on scroll. Dense surfaces use compact mode (§6.10).
+- **Badges (`StatusBadge`):** 22px pill, `micro` text, resolved from the §6.2 status table. Variants: `tint` (default), `outline` (approved, rejected), `dot` (dot + `small` text — connection states and inline mentions). Never color alone.
+- **Alerts:** radius 6, status tint background + hairline border in the dot color, icon + `body-strong` title + optional `body` + optional action. Variants map to the §6.2 families.
+- **Empty states:** centered — 20px muted icon, one `title` line, one `body` line, one button. Never more (Principle 8).
+- **Loading:** skeletons mirror the final layout (shimmer; `prefers-reduced-motion` → static); inline spinners 16px. Full-page spinners banned (Principle 13).
 
 ### 6.7 Navigation components
 
-- **Sidebar item:** 32px row, radius 6, `fg-muted`; active = `surface-subtle` bg + `fg` text + 2px accent left indicator.
-- **TabBar:** text tabs, 2px bottom border indicator (accent), count badge inline ("Approvals · 4"); scrollable with fade hint on overflow.
-- **Breadcrumb:** small, `fg-muted`, "/" separators, current page `fg`, no link on current.
+- **Sidebar item:** 32px row, radius 4, `small` `fg-muted`; active = `surface-subtle` bg + `fg` text + 2px `accent` left indicator; hover = `fg` text.
+- **TabBar:** text tabs in `body` `fg-muted`; active = `fg` `body-strong` + 2px `accent` underline; count inline in `data` ("Approvals · 4"); horizontal scroll with fade hint on overflow.
+- **Breadcrumb:** `small` `fg-muted`, "/" separators, current page `fg`, no link on current.
 
 ### 6.8 Icons
 
-Lucide (outline, 1.5px stroke), 16px inline / 20px navigation & empty states. Replaces current emoji icons (🖼️ ✅ 📋) everywhere — emojis read as unfinished. Icons decorative by default (`aria-hidden`) since text always accompanies them (Principle 12).
+Lucide (outline, 1.5px stroke), 16px inline / 20px navigation and empty states. Replaces current emoji icons (🖼️ ✅ 📋) everywhere — emojis read as unfinished. Icons are decorative by default (`aria-hidden`) since text always accompanies them (Principle 12). Icon use stays sparse: in this identity typography carries meaning, not pictographs.
 
 ### 6.9 Motion
 
-Purposeful and short: 120ms ease-out for hovers/fades, 200ms for panels/modals (fade+4px rise), list item removal 150ms collapse. No decorative animation, no bounces, nothing over 250ms. All motion behind `prefers-reduced-motion` (reduce to opacity-only or none).
+Tokens: `motion-fast` 120ms ease-out (hovers, fades) · `motion-panel` 200ms (modal/panel: fade + 4px rise) · `motion-leave` 150ms (queue item collapse on approve/reject). Hard cap 250ms. No decorative animation, no bounces. All motion behind `prefers-reduced-motion` (reduce to opacity-only or none).
+
+### 6.10 Density: compact mode
+
+Dense operational screens exist — as **quiet secondary readouts**, not as a different design. One switch, `data-density="compact"` on a region, remaps tokens; components never restyle themselves individually.
+
+| Property                | Comfortable (default) | Compact |
+| ----------------------- | --------------------- | ------- |
+| Table row height        | 48px                  | 36px    |
+| Table cell text         | `body`                | `small` |
+| Cell horizontal padding | 16px                  | 12px    |
+| `space-section`         | 40px                  | 24px    |
+| `space-card-gap`        | 16px                  | 12px    |
+| Default button height   | 36px                  | 32px    |
+
+**Never changes in compact mode:** type roles and faces, status colors and badge size (status stays loudest at any density), focus rings, minimum 32px keyboard/touch targets.
+
+**Applies to:** Admin users/companies tables, Activity (full timeline), cron run history, Team table, Buffer profile list.
+**Never applies to:** Dashboard, Approvals, Posts cards, Overview, or any form.
+
+### 6.11 Artifact mode: channel-faithful post preview
+
+Direction D's truth, absorbed as a component _mode_ (surfaced by `PostCard`, `ApprovalCard`, and `EditPostModal` — §7):
+
+- **Two registers, never mixed.** The artifact is the only rich object on screen; the chrome around it uses ghost buttons, `data` metadata, and hairlines.
+- **Artifact frame:** `surface`, hairline border, radius 6; header row = `ChannelChip` + profile name + scheduled time in `data`.
+- **Preview register type:** inside the frame, post text renders in a native sans stack (`-apple-system, "Segoe UI", Roboto, Arial, sans-serif`) at 15/21 — deliberately **not** Literata. `reading` is our voice; the preview register approximates the network's. The visible switch between registers is itself the message: _this is how it will look out there._
+- **Fold marker:** a hairline + `micro` label ("Folds here on LinkedIn") at the channel's visible-truncation threshold; character counter in `data` ("212 / 3,000"), turning danger past the limit.
+- **Image** cropped to the channel's primary aspect; hashtags placed per the channel config (inline vs. trailing block).
+- Channel constants (character limit, fold threshold, aspect) are **facts about external networks, not design tokens** — they live in one maintained constants module and are expected to change:
+
+| Channel   | Char limit | Fold (approx.) | Primary aspect          |
+| --------- | ---------- | -------------- | ----------------------- |
+| Facebook  | 63,206     | ~477           | 1.91:1 link / 4:5 photo |
+| LinkedIn  | 3,000      | ~210           | 1.91:1                  |
+| Instagram | 2,200      | ~125           | 4:5                     |
+| TikTok    | 2,200      | verify         | 9:16                    |
+
+_(values as of 2026-07 — verify against each network at implementation time)_
+
+- **Defaults:** Approvals shows `reading` mode with a "Preview as {channel}" toggle per card; `EditPostModal` shows a live preview pane at ≥1024px.
 
 ---
 
