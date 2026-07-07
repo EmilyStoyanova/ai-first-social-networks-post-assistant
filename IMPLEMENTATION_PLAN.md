@@ -17,18 +17,18 @@ An AI-powered tool that automates social media post creation, scheduling, and pu
 
 ## Technology Stack
 
-| Layer | Technology |
-|---|---|
-| **Frontend** | Next.js 16 (App Router), React (RSC + Client Components), Tailwind CSS, ShadCN/UI, TanStack Query, next-intl (i18n: EN / BG) |
-| **Backend** | Next.js Route Handlers, TypeScript (strict), Zod (validation), Prisma ORM |
-| **Database** | PostgreSQL — Neon (serverless, free tier) |
-| **Authentication** | Auth.js v5 (Credentials provider), JWT sessions, bcrypt |
-| **AI — Text** | Multi-LLM with runtime switching: Claude (Anthropic), OpenAI GPT-4o, Grok (xAI). Grok recommended for local development (free tier). Active provider configured by global admin and stored in DB. |
-| **AI — Images** | Leonardo.ai API |
-| **Storage** | Cloudinary (media assets, CDN, free tier) — required in v1 for logo uploads, user gallery, and AI-generated images; no persistent file system on Vercel serverless |
-| **Deployment** | Vercel (Hobby plan) |
-| **External APIs** | Buffer API (publishing, analytics), Cloudinary API, Leonardo.ai API |
-| **Dev tooling** | ESLint, Prettier, Husky, lint-staged, Sentry (error tracking) |
+| Layer              | Technology                                                                                                                                                                                        |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Frontend**       | Next.js 16 (App Router), React (RSC + Client Components), Tailwind CSS, ShadCN/UI, TanStack Query, next-intl (i18n: EN / BG)                                                                      |
+| **Backend**        | Next.js Route Handlers, TypeScript (strict), Zod (validation), Prisma ORM                                                                                                                         |
+| **Database**       | PostgreSQL — Neon (serverless, free tier)                                                                                                                                                         |
+| **Authentication** | Auth.js v5 (Credentials provider), JWT sessions, bcrypt                                                                                                                                           |
+| **AI — Text**      | Multi-LLM with runtime switching: Claude (Anthropic), OpenAI GPT-4o, Grok (xAI). Grok recommended for local development (free tier). Active provider configured by global admin and stored in DB. |
+| **AI — Images**    | Leonardo.ai API                                                                                                                                                                                   |
+| **Storage**        | Cloudinary (media assets, CDN, free tier) — required in v1 for logo uploads, user gallery, and AI-generated images; no persistent file system on Vercel serverless                                |
+| **Deployment**     | Vercel (Hobby plan)                                                                                                                                                                               |
+| **External APIs**  | Buffer API (publishing, analytics), Cloudinary API, Leonardo.ai API                                                                                                                               |
+| **Dev tooling**    | ESLint, Prettier, Husky, lint-staged, Sentry (error tracking)                                                                                                                                     |
 
 ---
 
@@ -47,11 +47,11 @@ An AI-powered tool that automates social media post creation, scheduling, and pu
 - Semi-automated and fully automated approval modes (per company)
 - Post lifecycle management and version history
 - Audit log for all significant actions
-- Basic analytics via Buffer API
 - Vercel Cron as the automation backbone
 
 ### Excluded from v1
 
+- **Analytics** — deferred to v2; requires a personal Buffer API key (see [Future Improvements](#future-improvements-v2))
 - Post preview rendered as it will appear on each network
 - Per-channel tone customization (all channels share the company tone in v1)
 - Learning from existing or high-performing posts
@@ -105,7 +105,7 @@ The following capabilities are explicitly **not** part of v1 and should not be d
 - **Approval workflow** — semi-automated (user approves before publish) or fully automated (posts sent to Buffer automatically); configurable per company
 - **Post lifecycle** — `draft → pending_approval → approved / rejected → sent_to_buffer → published / failed`
 - **Audit log** — every generate, edit, approve, reject, and publish action is recorded
-- **Analytics** — basic post performance data fetched from Buffer API
+- **Analytics** — v2 optional feature; requires a personal Buffer API key (see Future Improvements)
 
 ---
 
@@ -130,6 +130,7 @@ Next.js Server (Vercel)
 ```
 
 **Key decisions:**
+
 - Single Next.js project for frontend and backend — reduced operational overhead on Vercel Hobby
 - All API routes under `/api/v1/` from day one — consumable externally without restructuring
 - M2M access via `X-API-Key` header for future two-way integration with an external project
@@ -140,14 +141,14 @@ Next.js Server (Vercel)
 
 ## Project Dependencies
 
-| Dependency | Purpose | If Unavailable |
-|---|---|---|
-| **Buffer API** | Social network OAuth, post scheduling, publishing, and analytics | Core publishing is non-functional; no viable v1 fallback — must monitor Buffer's status page |
+| Dependency                                | Purpose                                                                                                                        | If Unavailable                                                                                                                                            |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Buffer API**                            | Social network OAuth, post scheduling, publishing, and analytics                                                               | Core publishing is non-functional; no viable v1 fallback — must monitor Buffer's status page                                                              |
 | **LLM Provider (Claude / OpenAI / Grok)** | Text generation for posts, hashtags, safety checks. Active provider is stored in DB and switchable by global admin at runtime. | If the active provider is unavailable, the admin switches to another in the admin panel — no code change required; all providers share a common interface |
-| **Leonardo.ai API** | AI image generation | Users fall back to manual gallery uploads; generation feature is disabled gracefully in UI |
-| **Cloudinary** | Media asset storage and CDN delivery | Image uploads and delivery are blocked; no local file storage on Vercel serverless |
-| **Neon PostgreSQL** | Primary data store for all application data | Entire application is non-functional; Neon provides automatic failover within its free tier |
-| **Vercel** | Hosting, serverless function execution, and cron scheduling | Application is offline; the codebase can be deployed to any Node.js-compatible platform with minimal changes |
+| **Leonardo.ai API**                       | AI image generation                                                                                                            | Users fall back to manual gallery uploads; generation feature is disabled gracefully in UI                                                                |
+| **Cloudinary**                            | Media asset storage and CDN delivery                                                                                           | Image uploads and delivery are blocked; no local file storage on Vercel serverless                                                                        |
+| **Neon PostgreSQL**                       | Primary data store for all application data                                                                                    | Entire application is non-functional; Neon provides automatic failover within its free tier                                                               |
+| **Vercel**                                | Hosting, serverless function execution, and cron scheduling                                                                    | Application is offline; the codebase can be deployed to any Node.js-compatible platform with minimal changes                                              |
 
 ---
 
@@ -361,24 +362,25 @@ users ──< company_members >── companies
 
 ## Implementation Phases
 
-| Phase | Focus | Weeks | Complexity |
-|---|---|---|---|
-| 1 | **Project Initialization** — Next.js 16 setup, Prisma + Neon, Auth.js, EN/BG i18n, CI pipeline, Vercel deploy | 1–2 | Medium |
-| 2 | **Company & Brand Management** — multi-company CRUD, team invitations, brand guidelines, global admin, LLM config UI | 3–4 | Medium |
-| 3 | **Buffer Integration & Channel Configuration** — OAuth flow, AES-256 token storage, per-channel settings (schedule, windows, language, image rules, automation override) | 5–6 | High |
-| 4 | **Content Sources & Feed Ingestion** — RSS parser, product URL crawler, manual prompts, calendar events, per-source deduplication | 7–8 | Medium |
-| 5 | **AI Content Generation Engine** — LLM router (Claude/GPT-4o/Grok), weekly schedule generation, channel-specific prompt builder, duplicate detection, content safety check | 9–10 | Very High |
-| 6 | **Media Gallery & Image Generation** — Cloudinary signed uploads, Leonardo.ai integration, image picker (gallery + generate tabs), brand-aware generation prompts | 11–12 | Medium |
-| 7 | **Post Approval Workflow** — approval queue driven by company/channel automation mode, post editor with inline image picker, version history, rejection with notes, audit log page, weekly calendar view | 13–14 | Medium |
-| 8 | **Scheduling, Automation & Reliability** — Vercel Cron dispatcher, Buffer send with retry logic, health endpoint | 15 | Medium |
-| 9 | **Analytics Integration** — Buffer analytics fetch, per-post metrics, analytics page, dashboard summary cards | 16 | Low–Medium |
-| 10 | **Security Hardening & Production Readiness** — Sentry, rate limiting on auth, full security audit, mobile layout, performance review | 17–18 | Medium |
+| Phase | Focus                                                                                                                                                                                                                        | Weeks | Complexity |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- | ---------- |
+| 1     | **Project Initialization** — Next.js 16 setup, Prisma + Neon, Auth.js, EN/BG i18n, CI pipeline, Vercel deploy                                                                                                                | 1–2   | Medium     |
+| 2     | **Company & Brand Management** — multi-company CRUD, team invitations, brand guidelines, global admin, LLM config UI                                                                                                         | 3–4   | Medium     |
+| 3     | **Buffer Integration & Channel Configuration** — OAuth flow, AES-256 token storage, per-channel settings (schedule, windows, language, image rules, automation override)                                                     | 5–6   | High       |
+| 4     | **Content Sources & Feed Ingestion** — RSS parser, product URL crawler, manual prompts, calendar events, per-source deduplication                                                                                            | 7–8   | Medium     |
+| 5     | **AI Content Generation Engine** — LLM router (Claude/GPT-4o/Grok), weekly schedule generation, channel-specific prompt builder, duplicate detection, content safety check                                                   | 9–10  | Very High  |
+| 6     | **Media Gallery & Image Generation** — Cloudinary signed uploads, Leonardo.ai integration, image picker (gallery + generate tabs), brand-aware generation prompts                                                            | 11–12 | Medium     |
+| 7     | **Post Approval Workflow** — approval queue driven by company/channel automation mode, post editor with inline image picker, version history, rejection with notes, audit log page, weekly calendar view                     | 13–14 | Medium     |
+| 8     | **Scheduling, Automation & Reliability** — Vercel Cron dispatcher, Buffer send with retry logic, health endpoint                                                                                                             | 15    | Medium     |
+| 9     | **Analytics Integration** — _(deferred to v2)_ Buffer analytics fetch, per-post metrics, analytics page, dashboard summary cards. Requires a personal Buffer API key; the rest of the application works normally without it. | —     | —          |
+| 10    | **Security Hardening & Production Readiness** — Sentry, rate limiting on auth, full security audit, mobile layout, performance review                                                                                        | 17–18 | Medium     |
 
 ### Phase 5 — AI Content Generation Engine (detail)
 
 The LLM router reads the active provider from `llm_configs` at request time and delegates to the corresponding client (`claude.ts`, `openai.ts`, `grok.ts`). All providers implement the same interface so switching is a DB change with no code deployment.
 
 The prompt builder assembles context in layers:
+
 1. **System prompt** — role definition, output format rules, channel character limits
 2. **Brand context** — tone, forbidden words, target audience, competitors from `brand_guidelines`
 3. **Channel rules** — hashtag style, emoji policy, image requirement, language for this channel
@@ -403,10 +405,10 @@ The approval path for each post is determined in this order:
 1. **Channel override** (`channel_configs.automation_mode_override`) — takes priority if set
 2. **Company default** (`companies.automation_mode`)
 
-| Effective mode | Post status after generation | Next step |
-|---|---|---|
-| `semi_automated` | `pending_approval` | Appears in approval queue; owner or editor must act |
-| `fully_automated` | `approved` (immediately) | Cron picks it up and sends to Buffer without human interaction |
+| Effective mode    | Post status after generation | Next step                                                      |
+| ----------------- | ---------------------------- | -------------------------------------------------------------- |
+| `semi_automated`  | `pending_approval`           | Appears in approval queue; owner or editor must act            |
+| `fully_automated` | `approved` (immediately)     | Cron picks it up and sends to Buffer without human interaction |
 
 The approval queue page supports filtering by channel, status, and date. Inline editing saves a new `post_versions` row before updating `posts.content`. Rejection moves the post back to `draft` with optional notes visible to whoever regenerates it.
 
@@ -430,43 +432,43 @@ If a step throws, the run is marked `failed` and the error is stored; the next r
 
 ## Initial Milestones
 
-| Milestone | Scope | Phases |
-|---|---|---|
-| **M1 — Project Bootstrap** | Repository initialized, CI pipeline running, Vercel deployment live, authentication working | 1 |
-| **M2 — Company Foundation** | Multi-company management, brand guidelines, team roles, and global admin fully operational | 2 |
-| **M3 — Buffer Integration** | Buffer OAuth connected, social channels configured, test post successfully sent to Buffer | 3 |
-| **M4 — Content Pipeline** | Content sources ingesting, AI generation producing weekly post schedules with safety checks | 4–5 |
-| **M5 — Publishing Workflow** | Media gallery live, full approval workflow operational in both semi-automated and fully automated modes | 6–7 |
-| **M6 — Automation & Observability** | Cron dispatcher running in production, Buffer send with retry working, analytics displayed | 8–9 |
-| **M7 — Production Release** | Security hardened, Sentry active, all Definition of Done criteria met, performance reviewed | 10 |
+| Milestone                           | Scope                                                                                                   | Phases |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------- | ------ |
+| **M1 — Project Bootstrap**          | Repository initialized, CI pipeline running, Vercel deployment live, authentication working             | 1      |
+| **M2 — Company Foundation**         | Multi-company management, brand guidelines, team roles, and global admin fully operational              | 2      |
+| **M3 — Buffer Integration**         | Buffer OAuth connected, social channels configured, test post successfully sent to Buffer               | 3      |
+| **M4 — Content Pipeline**           | Content sources ingesting, AI generation producing weekly post schedules with safety checks             | 4–5    |
+| **M5 — Publishing Workflow**        | Media gallery live, full approval workflow operational in both semi-automated and fully automated modes | 6–7    |
+| **M6 — Automation & Observability** | Cron dispatcher running in production, Buffer send with retry working, health endpoint live             | 8      |
+| **M7 — Production Release**         | Security hardened, Sentry active, all Definition of Done criteria met, performance reviewed             | 10     |
 
 ---
 
 ## Risks
 
-| Risk | Impact | Mitigation |
-|---|---|---|
-| Vercel Hobby: 1 cron job, 60s timeout | High | Cron as lightweight coordinator; process one company per run; escape hatch via GitHub Actions cron |
-| Buffer API rate limits or plan restrictions | High | Abstract behind service layer; idempotent retries; pin to stable API version |
-| LLM token costs | Medium | Track usage per company; soft cap with user notification; don't regenerate on minor edits |
-| LLM output quality | Medium | Semi-automated mode is the default; iterate on system prompts; safety check before approval queue |
-| Cross-company data access | Critical | RBAC middleware validates company membership server-side on every request; cover in integration tests |
-| Cloudinary free tier bandwidth | Low–Medium | Per-company gallery limit (50 assets v1); serve thumbnails in grid; document limits in UI |
+| Risk                                        | Impact     | Mitigation                                                                                            |
+| ------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------- |
+| Vercel Hobby: 1 cron job, 60s timeout       | High       | Cron as lightweight coordinator; process one company per run; escape hatch via GitHub Actions cron    |
+| Buffer API rate limits or plan restrictions | High       | Abstract behind service layer; idempotent retries; pin to stable API version                          |
+| LLM token costs                             | Medium     | Track usage per company; soft cap with user notification; don't regenerate on minor edits             |
+| LLM output quality                          | Medium     | Semi-automated mode is the default; iterate on system prompts; safety check before approval queue     |
+| Cross-company data access                   | Critical   | RBAC middleware validates company membership server-side on every request; cover in integration tests |
+| Cloudinary free tier bandwidth              | Low–Medium | Per-company gallery limit (50 assets v1); serve thumbnails in grid; document limits in UI             |
 
 ---
 
 ## Success Metrics
 
-| Metric | Target |
-|---|---|
-| **Company onboarding time** | < 10 minutes from registration to first Buffer channel connected |
-| **Weekly generation success rate** | ≥ 95% of scheduled cron runs complete without error |
-| **Buffer publish success rate** | ≥ 98% of approved posts successfully sent to Buffer within one retry cycle |
-| **API response time** | p95 < 500ms for standard CRUD endpoints; < 2s for generation trigger |
-| **Post approval time** | Median < 5 minutes from generation to approval in semi-automated mode |
-| **Availability** | ≥ 99.5% uptime measured over any 30-day window |
-| **Security** | Zero critical vulnerabilities in production; all secrets rotatable within 24 hours of a suspected compromise |
-| **Error rate** | < 1% of API requests returning 5xx within one week of production launch |
+| Metric                             | Target                                                                                                       |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| **Company onboarding time**        | < 10 minutes from registration to first Buffer channel connected                                             |
+| **Weekly generation success rate** | ≥ 95% of scheduled cron runs complete without error                                                          |
+| **Buffer publish success rate**    | ≥ 98% of approved posts successfully sent to Buffer within one retry cycle                                   |
+| **API response time**              | p95 < 500ms for standard CRUD endpoints; < 2s for generation trigger                                         |
+| **Post approval time**             | Median < 5 minutes from generation to approval in semi-automated mode                                        |
+| **Availability**                   | ≥ 99.5% uptime measured over any 30-day window                                                               |
+| **Security**                       | Zero critical vulnerabilities in production; all secrets rotatable within 24 hours of a suspected compromise |
+| **Error rate**                     | < 1% of API requests returning 5xx within one week of production launch                                      |
 
 ---
 
@@ -478,7 +480,7 @@ If a step throws, the run is marked `failed` and the error is stored; the next r
 - [ ] Fully-automated: approved posts sent to Buffer without user action
 - [ ] Media gallery: upload and AI-generate images; attach to posts
 - [ ] Global admin views users and companies; audit log is populated
-- [ ] Analytics data from Buffer displayed per post
+- [ ] _(v2)_ Analytics data from Buffer displayed per post — requires personal Buffer API key; out of scope for v1
 - [ ] TypeScript strict mode; no `any` in production code
 - [ ] All API routes protected by auth + RBAC (code-audited)
 - [ ] Buffer tokens encrypted at rest; no secrets in client bundle
@@ -490,6 +492,7 @@ If a step throws, the run is marked `failed` and the error is stored; the next r
 
 ## Future Improvements (v2+)
 
+- **Analytics** _(optional, v2)_ — per-post metrics and engagement data fetched from the Buffer API. Analytics is an opt-in feature: users who supply their own personal Buffer API key unlock the analytics pages. Users without a personal API key continue to use the application normally; no analytics UI or data is shown to them. The rest of the application (post generation, approval, scheduling, and publishing) is fully independent of analytics and works without it.
 - Post preview rendered as it will appear on each network
 - Per-channel tone settings (different voice for LinkedIn vs TikTok)
 - Learning from existing / high-performing posts

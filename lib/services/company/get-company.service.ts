@@ -5,6 +5,7 @@ export type CompanyDetails = {
   name: string;
   slug: string;
   website: string | null;
+  automationMode: "semi_automated" | "fully_automated";
   createdAt: Date;
   role: "OWNER" | "EDITOR" | null;
 };
@@ -22,6 +23,7 @@ export async function getCompany(
         name: true,
         slug: true,
         website: true,
+        automationMode: true,
         createdAt: true,
         members: {
           where: { userId },
@@ -39,6 +41,7 @@ export async function getCompany(
       name: company.name,
       slug: company.slug,
       website: company.website,
+      automationMode: company.automationMode,
       createdAt: company.createdAt,
       role:
         membership?.role === "owner" ? "OWNER" : membership?.role === "editor" ? "EDITOR" : null,
@@ -58,6 +61,7 @@ export async function getCompany(
           name: true,
           slug: true,
           website: true,
+          automationMode: true,
           createdAt: true,
         },
       },
@@ -71,6 +75,7 @@ export async function getCompany(
     name: membership.company.name,
     slug: membership.company.slug,
     website: membership.company.website,
+    automationMode: membership.company.automationMode,
     createdAt: membership.company.createdAt,
     role: membership.role === "owner" ? "OWNER" : "EDITOR",
   };

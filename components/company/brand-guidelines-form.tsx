@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { ColorField } from "@/components/ui/ColorField";
+import { Select } from "@/components/ui/Select";
 import { updateBrandGuidelinesSchema } from "@/lib/validators/brand-guidelines.schema";
 import type { BrandGuidelinesData } from "@/lib/services/company/update-brand-guidelines.service";
 
@@ -16,11 +17,13 @@ import type { BrandGuidelinesData } from "@/lib/services/company/update-brand-gu
 interface Props {
   slug: string;
   initialValues: BrandGuidelinesData | null;
+  initialAutomationMode: "semi_automated" | "fully_automated";
   role: "OWNER" | "EDITOR" | null;
   isGlobalAdmin: boolean;
 }
 
 type FormValues = {
+  automationMode: "semi_automated" | "fully_automated";
   logoUrl: string;
   primaryColor: string;
   secondaryColor: string;
@@ -36,8 +39,12 @@ type FieldErrors = Partial<Record<keyof FormValues, string>>;
 
 // ─── Converters ───────────────────────────────────────────────────────────────
 
-function toFormValues(data: BrandGuidelinesData | null): FormValues {
+function toFormValues(
+  data: BrandGuidelinesData | null,
+  automationMode: "semi_automated" | "fully_automated"
+): FormValues {
   return {
+    automationMode,
     logoUrl: data?.logoUrl ?? "",
     primaryColor: data?.primaryColor ?? "",
     secondaryColor: data?.secondaryColor ?? "",
@@ -58,6 +65,7 @@ function toApiPayload(values: FormValues) {
       .filter(Boolean);
 
   return {
+    automationMode: values.automationMode,
     logoUrl: values.logoUrl.trim() || undefined,
     primaryColor: values.primaryColor.trim() || undefined,
     secondaryColor: values.secondaryColor.trim() || undefined,
@@ -106,13 +114,21 @@ function FieldError({ id, message }: { id: string; message?: string }) {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }: Props) {
+export function BrandGuidelinesForm({
+  slug,
+  initialValues,
+  initialAutomationMode,
+  role,
+  isGlobalAdmin,
+}: Props) {
   const t = useTranslations("brandGuidelines");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
   const canEdit = role === "OWNER" || isGlobalAdmin;
 
-  const [values, setValues] = useState<FormValues>(() => toFormValues(initialValues));
+  const [values, setValues] = useState<FormValues>(() =>
+    toFormValues(initialValues, initialAutomationMode)
+  );
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [status, setStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState("");
@@ -185,6 +201,21 @@ export function BrandGuidelinesForm({ slug, initialValues, role, isGlobalAdmin }
       )}
 
       <form onSubmit={handleSubmit} noValidate>
+        {/* Automation Mode */}
+        <div className="mb-4">
+          <Select
+            id="bg-automationMode"
+            name="automationMode"
+            label={t("automationMode")}
+            value={values.automationMode}
+            onChange={(e) => set("automationMode", e.target.value as FormValues["automationMode"])}
+            disabled={disabled}
+          >
+            <option value="semi_automated">{t("semiAutomated")}</option>
+            <option value="fully_automated">{t("fullyAutomated")}</option>
+          </Select>
+        </div>
+
         {/* Row: Logo URL + Font Family */}
         <div className="mb-4 grid gap-x-6 gap-y-4 sm:grid-cols-2">
           <div>

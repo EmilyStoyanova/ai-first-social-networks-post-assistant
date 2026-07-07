@@ -41,32 +41,40 @@ async function upsert(
   companyId: string,
   data: UpdateBrandGuidelinesInput
 ): Promise<BrandGuidelinesData> {
-  return prisma.brandGuidelines.upsert({
-    where: { companyId },
-    create: {
-      companyId,
-      logoUrl: data.logoUrl,
-      primaryColor: data.primaryColor,
-      secondaryColor: data.secondaryColor,
-      fontFamily: data.fontFamily,
-      toneOfVoice: data.toneOfVoice,
-      companyDescription: data.companyDescription,
-      targetAudience: data.targetAudience,
-      forbiddenWords: data.forbiddenWords ?? [],
-      competitors: data.competitors ?? [],
-    },
-    update: {
-      logoUrl: data.logoUrl,
-      primaryColor: data.primaryColor,
-      secondaryColor: data.secondaryColor,
-      fontFamily: data.fontFamily,
-      toneOfVoice: data.toneOfVoice,
-      companyDescription: data.companyDescription,
-      targetAudience: data.targetAudience,
-      forbiddenWords: data.forbiddenWords,
-      competitors: data.competitors,
-    },
-    select: SELECT,
+  return prisma.$transaction(async (tx) => {
+    if (data.automationMode) {
+      await tx.company.update({
+        where: { id: companyId },
+        data: { automationMode: data.automationMode },
+      });
+    }
+    return tx.brandGuidelines.upsert({
+      where: { companyId },
+      create: {
+        companyId,
+        logoUrl: data.logoUrl,
+        primaryColor: data.primaryColor,
+        secondaryColor: data.secondaryColor,
+        fontFamily: data.fontFamily,
+        toneOfVoice: data.toneOfVoice,
+        companyDescription: data.companyDescription,
+        targetAudience: data.targetAudience,
+        forbiddenWords: data.forbiddenWords ?? [],
+        competitors: data.competitors ?? [],
+      },
+      update: {
+        logoUrl: data.logoUrl,
+        primaryColor: data.primaryColor,
+        secondaryColor: data.secondaryColor,
+        fontFamily: data.fontFamily,
+        toneOfVoice: data.toneOfVoice,
+        companyDescription: data.companyDescription,
+        targetAudience: data.targetAudience,
+        forbiddenWords: data.forbiddenWords,
+        competitors: data.competitors,
+      },
+      select: SELECT,
+    });
   });
 }
 

@@ -222,6 +222,9 @@
   "brandGuidelines": {
     "title": "Насоки за марката",
     "savedSuccess": "Насоките за марката са запазени успешно.",
+    "automationMode": "Режим на автоматизация",
+    "semiAutomated": "Полуавтоматичен",
+    "fullyAutomated": "Напълно автоматичен",
     "logoUrl": "URL на логото",
     "fontFamily": "Шрифт",
     "primaryColor": "Основен цвят",

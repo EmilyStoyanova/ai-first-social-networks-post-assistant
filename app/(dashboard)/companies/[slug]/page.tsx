@@ -349,6 +349,7 @@ async function SettingsTab({
         <BrandGuidelinesForm
           slug={slug}
           initialValues={brandGuidelines}
+          initialAutomationMode={company?.automationMode ?? "semi_automated"}
           role={company?.role ?? null}
           isGlobalAdmin={false}
         />

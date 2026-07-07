@@ -6,6 +6,7 @@ const hexColor = z
   .optional();
 
 export const updateBrandGuidelinesSchema = z.object({
+  automationMode: z.enum(["semi_automated", "fully_automated"]).optional(),
   logoUrl: z.string().url("Must be a valid URL.").optional(),
   primaryColor: hexColor,
   secondaryColor: hexColor,

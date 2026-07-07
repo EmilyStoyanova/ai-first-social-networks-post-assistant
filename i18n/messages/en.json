@@ -222,6 +222,9 @@
   "brandGuidelines": {
     "title": "Brand Guidelines",
     "savedSuccess": "Brand guidelines saved successfully.",
+    "automationMode": "Automation Mode",
+    "semiAutomated": "Semi-automated",
+    "fullyAutomated": "Fully automated",
     "logoUrl": "Logo URL",
     "fontFamily": "Font Family",
     "primaryColor": "Primary Color",
