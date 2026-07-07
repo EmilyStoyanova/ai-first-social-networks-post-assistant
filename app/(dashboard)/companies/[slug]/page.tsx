@@ -185,6 +185,7 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
   if (!company) return null;
   const t = await getTranslations("overview");
   const tPage = await getTranslations("companyPage");
+  const tWs = await getTranslations("workspace");
 
   const formattedDate = company.createdAt.toLocaleDateString("en-GB", {
     day: "numeric",
@@ -195,13 +196,13 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
   const PRIMARY_CARDS = [
     {
       icon: Pencil,
-      label: "Posts",
+      label: tWs("tabs.posts"),
       desc: tPage("modules.postsDesc"),
       href: `/companies/${slug}?tab=posts`,
     },
     {
       icon: CheckSquare2,
-      label: "Approval",
+      label: tWs("tabs.approval"),
       desc: tPage("modules.approvalQueueDesc"),
       href: `/companies/${slug}/approval`,
     },
@@ -210,25 +211,25 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
   const SECONDARY_CARDS = [
     {
       icon: ImageIcon,
-      label: "Media",
+      label: tWs("tabs.media"),
       desc: tPage("modules.mediaGalleryDesc"),
       href: `/companies/${slug}/media`,
     },
     {
       icon: Radio,
-      label: "Sources",
-      desc: tPage("modules.contentSourcesDesc"),
+      label: tWs("tabs.sources"),
+      desc: tPage("sections.contentSourcesDesc"),
       href: `/companies/${slug}?tab=sources`,
     },
     {
       icon: ClipboardList,
-      label: "Activity",
+      label: tWs("tabs.activity"),
       desc: tPage("modules.auditLogDesc"),
       href: `/companies/${slug}/audit-log`,
     },
     {
       icon: Settings2,
-      label: "Settings",
+      label: tWs("tabs.settings"),
       desc: tPage("modules.channelsDesc"),
       href: `/companies/${slug}?tab=settings`,
     },
