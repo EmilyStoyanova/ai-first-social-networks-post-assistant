@@ -225,6 +225,7 @@
     "automationMode": "Automation Mode",
     "semiAutomated": "Semi-automated",
     "fullyAutomated": "Fully automated",
+    "automationModeHelp": "This is the default automation mode for all social channels. Individual channels can override this setting if needed.",
     "logoUrl": "Logo URL",
     "fontFamily": "Font Family",
     "primaryColor": "Primary Color",
@@ -311,7 +312,9 @@
     "postsPerWeekLabel": "Posts per week",
     "enabledLabel": "Enabled",
     "imageRequiredLabel": "Image required",
-    "saveError": "Failed to save."
+    "saveError": "Failed to save.",
+    "companyDefaultHelp": "This channel uses the automation mode configured for the company.",
+    "effectiveMode": "Current effective mode: {mode}"
   },
   "contentSources": {
     "newSource": "New content source",

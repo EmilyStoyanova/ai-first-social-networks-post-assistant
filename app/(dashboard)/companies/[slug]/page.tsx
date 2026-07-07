@@ -374,6 +374,7 @@ async function SettingsTab({
           initialConfigs={channelConfigs}
           canManage={canManage}
           bufferConnected={bufferConnection.connected}
+          companyAutomationMode={company?.automationMode ?? "semi_automated"}
         />
       </Section>
     </div>

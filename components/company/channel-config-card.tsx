@@ -15,6 +15,7 @@ interface Props {
   slug: string;
   initialConfig: ChannelConfigItem;
   canManage: boolean;
+  companyAutomationMode: "semi_automated" | "fully_automated";
 }
 
 interface ChannelMeta {
@@ -67,7 +68,12 @@ const CHANNEL_META: Record<string, ChannelMeta> = {
   },
 };
 
-export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
+export function ChannelConfigCard({
+  slug,
+  initialConfig,
+  canManage,
+  companyAutomationMode,
+}: Props) {
   const t = useTranslations("channels");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
@@ -156,6 +162,7 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
             setIsEditing(false);
             setErrorMessage("");
           }}
+          companyAutomationMode={companyAutomationMode}
         />
       ) : (
         <>
@@ -177,13 +184,20 @@ export function ChannelConfigCard({ slug, initialConfig, canManage }: Props) {
               <dt className="text-fg-muted">{t("imageRequired")}</dt>
               <dd className="text-fg font-medium">{config.imageRequired ? t("yes") : t("no")}</dd>
             </div>
-            <div className="flex items-center justify-between">
+            <div className="flex items-start justify-between">
               <dt className="text-fg-muted">{t("automation")}</dt>
-              <dd className="text-fg font-medium">
-                {config.automationModeOverride
-                  ? (AUTOMATION_LABELS[config.automationModeOverride] ??
-                    config.automationModeOverride)
-                  : t("companyDefault")}
+              <dd className="text-fg text-right font-medium">
+                {config.automationModeOverride ? (
+                  (AUTOMATION_LABELS[config.automationModeOverride] ??
+                  config.automationModeOverride)
+                ) : (
+                  <>
+                    {t("companyDefault")}
+                    <span className="text-fg-faint mt-0.5 block text-xs font-normal">
+                      {AUTOMATION_LABELS[companyAutomationMode]}
+                    </span>
+                  </>
+                )}
               </dd>
             </div>
             {config.bufferProfileId && (

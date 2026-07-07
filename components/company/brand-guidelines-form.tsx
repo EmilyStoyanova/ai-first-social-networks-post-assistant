@@ -210,6 +210,7 @@ export function BrandGuidelinesForm({
             value={values.automationMode}
             onChange={(e) => set("automationMode", e.target.value as FormValues["automationMode"])}
             disabled={disabled}
+            helperText={t("automationModeHelp")}
           >
             <option value="semi_automated">{t("semiAutomated")}</option>
             <option value="fully_automated">{t("fullyAutomated")}</option>

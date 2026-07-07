@@ -24,6 +24,7 @@ interface Props {
   saving: boolean;
   onSave: (data: ChannelFormPayload) => void;
   onCancel: () => void;
+  companyAutomationMode: "semi_automated" | "fully_automated";
 }
 
 const BASE =
@@ -50,7 +51,13 @@ function parseWindows(text: string): PostingWindow[] {
     });
 }
 
-export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: Props) {
+export function ChannelConfigForm({
+  initialConfig,
+  saving,
+  onSave,
+  onCancel,
+  companyAutomationMode,
+}: Props) {
   const t = useTranslations("channels");
   const tCommon = useTranslations("common");
   const [enabled, setEnabled] = useState(initialConfig.enabled);
@@ -152,6 +159,18 @@ export function ChannelConfigForm({ initialConfig, saving, onSave, onCancel }: P
             <option value="semi_automated">{t("semiAutomated")}</option>
             <option value="fully_automated">{t("fullyAutomated")}</option>
           </select>
+          {automationOverride === "" && (
+            <div className="mt-1.5 space-y-0.5">
+              <p className="text-fg-faint text-xs">{t("companyDefaultHelp")}</p>
+              <p className="text-fg-faint text-xs">
+                {t("effectiveMode", {
+                  mode: t(
+                    companyAutomationMode === "fully_automated" ? "fullyAutomated" : "semiAutomated"
+                  ),
+                })}
+              </p>
+            </div>
+          )}
         </div>
       </div>
 

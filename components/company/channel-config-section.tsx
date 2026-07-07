@@ -8,9 +8,16 @@ interface Props {
   initialConfigs: ChannelConfigItem[];
   canManage: boolean;
   bufferConnected: boolean;
+  companyAutomationMode: "semi_automated" | "fully_automated";
 }
 
-export function ChannelConfigSection({ slug, initialConfigs, canManage, bufferConnected }: Props) {
+export function ChannelConfigSection({
+  slug,
+  initialConfigs,
+  canManage,
+  bufferConnected,
+  companyAutomationMode,
+}: Props) {
   const t = useTranslations("channels");
   return (
     <div className="space-y-4">
@@ -22,6 +29,7 @@ export function ChannelConfigSection({ slug, initialConfigs, canManage, bufferCo
             slug={slug}
             initialConfig={config}
             canManage={canManage}
+            companyAutomationMode={companyAutomationMode}
           />
         ))}
       </div>
