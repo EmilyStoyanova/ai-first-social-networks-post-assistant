@@ -1,14 +1,6 @@
 "use client";
 
-import {
-  LayoutDashboard,
-  Building2,
-  FileText,
-  Images,
-  BarChart2,
-  Settings2,
-  ShieldCheck,
-} from "lucide-react";
+import { LayoutDashboard, Building2, ShieldCheck } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { NavigationItem } from "./navigation-item";
 
@@ -22,10 +14,6 @@ export function Navigation({ isGlobalAdmin }: Props) {
   const NAV_ITEMS = [
     { label: t("dashboard"), href: "/dashboard", icon: LayoutDashboard },
     { label: t("companies"), href: "/companies", icon: Building2 },
-    { label: t("posts"), href: "/posts", icon: FileText, disabled: true },
-    { label: t("mediaGallery"), href: "/media", icon: Images, disabled: true },
-    { label: t("analytics"), href: "/analytics", icon: BarChart2, disabled: true },
-    { label: t("settings"), href: "/settings", icon: Settings2, disabled: true },
   ];
 
   return (
@@ -33,12 +21,7 @@ export function Navigation({ isGlobalAdmin }: Props) {
       <ul role="list" className="space-y-0.5">
         {NAV_ITEMS.map((item) => (
           <li key={item.href}>
-            <NavigationItem
-              href={item.href}
-              label={item.label}
-              icon={item.icon}
-              disabled={item.disabled}
-            />
+            <NavigationItem href={item.href} label={item.label} icon={item.icon} />
           </li>
         ))}
       </ul>
