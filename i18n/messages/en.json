@@ -32,7 +32,7 @@
     "BUFFER_API_ERROR": "Buffer returned an error. Please try again.",
     "BAD_REQUEST": "Invalid request.",
     "VERSION_NOT_FOUND": "That version no longer exists.",
-    "USER_NOT_FOUND": "No user found with that email.",
+    "USER_NOT_FOUND": "No account found with that email. The person must register first.",
     "UPLOAD_FAILED": "Upload failed. Please try again.",
     "UNSUPPORTED_TYPE": "This file type is not supported.",
     "NO_IMAGE_PROMPT": "This post has no image prompt.",
@@ -255,6 +255,7 @@
     "remove": "Remove",
     "invalidEmail": "Invalid email address.",
     "inviteError": "Failed to invite member.",
+    "inviteHint": "The person must have a registered account before they can be invited to the team.",
     "roleChangeError": "Failed to change role.",
     "removeError": "Failed to remove member."
   },

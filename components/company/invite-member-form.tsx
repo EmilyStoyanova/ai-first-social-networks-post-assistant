@@ -118,10 +118,12 @@ export function InviteMemberForm({ slug, onInvited }: Props) {
             aria-describedby={emailError ? "invite-email-error" : undefined}
             className={fieldCls(!!emailError, isSubmitting)}
           />
-          {emailError && (
+          {emailError ? (
             <p id="invite-email-error" className="text-status-danger-fg mt-1.5 text-xs">
               {emailError}
             </p>
+          ) : (
+            <p className="text-fg-faint mt-1.5 text-xs">{t("inviteHint")}</p>
           )}
         </div>
 
