@@ -47,7 +47,11 @@ export default async function ApprovalQueuePage({ params }: Props) {
       breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
       <div>
-        <CompanyWorkspaceHeader company={company} activeTab="approval" />
+        <CompanyWorkspaceHeader
+          company={company}
+          activeTab="approval"
+          stats={{ pendingApprovals: pendingPosts.length }}
+        />
 
         <div className="mt-8">
           <ApprovalQueueSection

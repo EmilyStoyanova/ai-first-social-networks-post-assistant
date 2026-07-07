@@ -40,25 +40,25 @@ export function Sidebar({ isOpen, onClose, isGlobalAdmin }: Props) {
         ].join(" ")}
       >
         {/* Logo */}
-        <div className="border-border flex h-16 shrink-0 items-center gap-3 border-b px-5">
-          <div className="rounded-control bg-fg flex h-8 w-8 shrink-0 items-center justify-center">
-            <span className="text-sm font-bold text-white">AI</span>
+        <div className="border-border flex h-14 shrink-0 items-center gap-3 border-b px-4">
+          <div className="rounded-control bg-fg flex h-7 w-7 shrink-0 items-center justify-center">
+            <span className="text-xs font-bold text-white">AI</span>
           </div>
           <div>
             <p className="text-fg text-sm leading-tight font-bold tracking-tight">
               {t("logoName")}
             </p>
-            <p className="text-fg-faint text-xs leading-tight">{t("logoTagline")}</p>
+            <p className="text-fg-faint text-[11px] leading-tight">{t("logoTagline")}</p>
           </div>
         </div>
 
         {/* Navigation */}
-        <div className="flex-1 overflow-y-auto px-3 py-5">
+        <div className="flex-1 overflow-y-auto px-3 py-4">
           <Navigation isGlobalAdmin={isGlobalAdmin} />
         </div>
 
         {/* Logout */}
-        <div className="border-border shrink-0 border-t px-4 py-4">
+        <div className="border-border shrink-0 border-t px-3 py-3">
           <LogoutButton />
         </div>
       </aside>

@@ -1,7 +1,14 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
-import { CheckSquare2, ClipboardList, Image, Pencil, Radio, BarChart2 } from "lucide-react";
+import {
+  CheckSquare2,
+  ClipboardList,
+  Image as ImageIcon,
+  Pencil,
+  Radio,
+  Settings2,
+} from "lucide-react";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { getBrandGuidelines } from "@/lib/services/company/get-brand-guidelines.service";
@@ -185,7 +192,7 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
     year: "numeric",
   });
 
-  const QUICK_ACCESS = [
+  const PRIMARY_CARDS = [
     {
       icon: Pencil,
       label: "Posts",
@@ -198,8 +205,11 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
       desc: tPage("modules.approvalQueueDesc"),
       href: `/companies/${slug}/approval`,
     },
+  ];
+
+  const SECONDARY_CARDS = [
     {
-      icon: Image,
+      icon: ImageIcon,
       label: "Media",
       desc: tPage("modules.mediaGalleryDesc"),
       href: `/companies/${slug}/media`,
@@ -217,9 +227,9 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
       href: `/companies/${slug}/audit-log`,
     },
     {
-      icon: BarChart2,
+      icon: Settings2,
       label: "Settings",
-      desc: tPage("modules.analyticsDesc"),
+      desc: tPage("modules.channelsDesc"),
       href: `/companies/${slug}?tab=settings`,
     },
   ];
@@ -273,16 +283,32 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
 
       {/* Quick access */}
       <Section title={tPage("sections.modules")}>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {QUICK_ACCESS.map(({ icon: Icon, label, desc, href }) => (
-            <Link key={href} href={href}>
-              <Card variant="hover" className="px-6 py-5">
-                <Icon className="text-fg-faint mb-3 h-5 w-5" aria-hidden />
-                <h3 className="text-fg text-sm font-semibold">{label}</h3>
-                <p className="text-fg-muted mt-1 text-sm leading-relaxed">{desc}</p>
-              </Card>
-            </Link>
-          ))}
+        <div className="space-y-3">
+          {/* Primary: Posts + Approval */}
+          <div className="grid gap-3 sm:grid-cols-2">
+            {PRIMARY_CARDS.map(({ icon: Icon, label, desc, href }) => (
+              <Link key={href} href={href}>
+                <Card variant="hover" className="px-6 py-6">
+                  <Icon className="text-fg-muted mb-4 h-6 w-6" aria-hidden />
+                  <h3 className="text-fg text-sm font-semibold">{label}</h3>
+                  <p className="text-fg-muted mt-1 text-sm leading-relaxed">{desc}</p>
+                </Card>
+              </Link>
+            ))}
+          </div>
+
+          {/* Secondary: Media, Sources, Activity, Settings */}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {SECONDARY_CARDS.map(({ icon: Icon, label, desc, href }) => (
+              <Link key={href} href={href}>
+                <Card variant="hover" className="px-5 py-4">
+                  <Icon className="text-fg-faint mb-2.5 h-6 w-6" aria-hidden />
+                  <h3 className="text-fg-muted text-sm font-medium">{label}</h3>
+                  <p className="text-fg-faint mt-0.5 text-xs leading-snug">{desc}</p>
+                </Card>
+              </Link>
+            ))}
+          </div>
         </div>
       </Section>
     </div>

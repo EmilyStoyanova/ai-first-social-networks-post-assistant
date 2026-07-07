@@ -1,14 +1,27 @@
+import { Fragment } from "react";
 import { getTranslations } from "next-intl/server";
 import type { CompanyDetails } from "@/lib/services/company/get-company.service";
-import { Badge } from "@/components/ui/Badge";
 import { CompanyWorkspaceNav } from "./company-workspace-nav";
+
+interface Stats {
+  pendingApprovals?: number;
+}
 
 interface Props {
   company: CompanyDetails;
   activeTab: string;
+  stats?: Stats;
 }
 
-export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
+function cleanUrl(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+export async function CompanyWorkspaceHeader({ company, activeTab, stats }: Props) {
   const t = await getTranslations("workspace");
   const { slug } = company;
 
@@ -23,33 +36,55 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
     { key: "activity", label: t("tabs.activity"), href: `/companies/${slug}/audit-log` },
   ];
 
+  type MetaItem = { key: string; node: React.ReactNode };
+  const metaItems: MetaItem[] = [];
+
+  if (company.website) {
+    metaItems.push({
+      key: "website",
+      node: (
+        <a
+          href={company.website}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-fg-muted hover:text-fg transition-colors hover:underline"
+        >
+          {cleanUrl(company.website)}
+        </a>
+      ),
+    });
+  }
+
+  if (company.role) {
+    metaItems.push({
+      key: "role",
+      node: <span className="capitalize">{company.role.toLowerCase()}</span>,
+    });
+  }
+
+  if (stats?.pendingApprovals != null && stats.pendingApprovals > 0) {
+    metaItems.push({
+      key: "pending",
+      node: <span>{stats.pendingApprovals} pending</span>,
+    });
+  }
+
   return (
     <div>
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="text-display text-fg">{company.name}</h1>
-          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1">
-            {company.website && (
-              <>
-                <a
-                  href={company.website}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-accent hover:text-fg text-sm transition-colors hover:underline"
-                >
-                  {company.website}
-                </a>
-                <span className="text-border" aria-hidden="true">
-                  |
-                </span>
-              </>
-            )}
-            <span className="text-fg-faint font-mono text-xs">{company.slug}</span>
-          </div>
-        </div>
-        {company.role && (
-          <div className="shrink-0 pt-1">
-            <Badge variant={company.role === "OWNER" ? "owner" : "editor"}>{company.role}</Badge>
+      <div className="min-w-0">
+        <h1 className="text-display text-fg">{company.name}</h1>
+        {metaItems.length > 0 && (
+          <div className="text-fg-faint mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            {metaItems.map((item, i) => (
+              <Fragment key={item.key}>
+                {i > 0 && (
+                  <span className="text-border select-none" aria-hidden="true">
+                    ·
+                  </span>
+                )}
+                {item.node}
+              </Fragment>
+            ))}
           </div>
         )}
       </div>
