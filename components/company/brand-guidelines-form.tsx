@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
@@ -124,6 +125,7 @@ export function BrandGuidelinesForm({
   const t = useTranslations("brandGuidelines");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
+  const router = useRouter();
   const canEdit = role === "OWNER" || isGlobalAdmin;
 
   const [values, setValues] = useState<FormValues>(() =>
@@ -174,6 +176,7 @@ export function BrandGuidelinesForm({
       }
 
       setStatus("success");
+      router.refresh();
     } catch (err) {
       setStatus("error");
       setErrorMessage(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
