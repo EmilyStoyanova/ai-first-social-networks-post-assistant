@@ -88,6 +88,14 @@
       "signIn": "Sign in",
       "emailExists": "An account with this email already exists.",
       "error": "Something went wrong. Please try again."
+    },
+    "verifyEmail": {
+      "description": "Click the button below to confirm your email address and activate your account.",
+      "confirm": "Confirm email",
+      "confirming": "Confirming…",
+      "invalidToken": "This verification link is invalid or has already been used.",
+      "tokenExpired": "This verification link has expired. Please return to the sign-in page and request a new one.",
+      "backToLogin": "Back to sign in"
     }
   },
   "navigation": {

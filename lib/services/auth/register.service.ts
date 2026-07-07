@@ -46,10 +46,13 @@ export async function registerUser(data: RegisterInput): Promise<RegisterResult>
     },
   });
 
-  // Fire-and-forget: email send failure must not block registration
-  sendVerificationEmail(user.id, user.email, user.preferredLang).catch((err) => {
+  // Await the send so the serverless function stays alive until the email is dispatched.
+  // Failure is non-fatal: registration still succeeds and the user can resend from the login page.
+  try {
+    await sendVerificationEmail(user.id, user.email, user.preferredLang);
+  } catch (err) {
     console.error("[register] Failed to send verification email:", err);
-  });
+  }
 
   return {
     success: true,
