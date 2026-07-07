@@ -27,9 +27,7 @@ export async function AdminUsersTable({ users }: Props) {
         <span className="text-micro text-fg-faint">{t("nameAndEmail")}</span>
         <span className="text-micro text-fg-faint">{t("role")}</span>
         <span className="text-micro text-fg-faint">{t("language")}</span>
-        <span className="text-fg-faint text-center text-xs font-medium tracking-wide uppercase">
-          {t("companies")}
-        </span>
+        <span className="text-micro text-fg-faint text-center">{t("companies")}</span>
         <span className="text-micro text-fg-faint">{t("created")}</span>
       </div>
 
