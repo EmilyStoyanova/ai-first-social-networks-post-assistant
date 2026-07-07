@@ -6,6 +6,7 @@ import { useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
+import { StatusBadge, type PostStatusValue } from "@/components/ui/StatusBadge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
@@ -102,21 +103,6 @@ export function GeneratedPostCard({
 
   const channelMeta = CHANNEL_META[post.channel] ?? {
     label: post.channel,
-    variant: "neutral" as BadgeVariant,
-  };
-
-  const STATUS_META: Record<string, { label: string; variant: BadgeVariant }> = {
-    DRAFT: { label: t("statuses.DRAFT"), variant: "neutral" },
-    PENDING_APPROVAL: { label: t("statuses.PENDING_APPROVAL"), variant: "warning" },
-    APPROVED: { label: t("statuses.APPROVED"), variant: "success" },
-    REJECTED: { label: t("statuses.REJECTED"), variant: "danger" },
-    SENT_TO_BUFFER: { label: t("statuses.SENT_TO_BUFFER"), variant: "success" },
-    PUBLISHED: { label: t("statuses.PUBLISHED"), variant: "success" },
-    FAILED: { label: t("statuses.FAILED"), variant: "danger" },
-  };
-
-  const statusMeta = STATUS_META[localStatus] ?? {
-    label: localStatus,
     variant: "neutral" as BadgeVariant,
   };
 
@@ -314,7 +300,7 @@ export function GeneratedPostCard({
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant={channelMeta.variant}>{channelMeta.label}</Badge>
-          <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
+          <StatusBadge status={localStatus.toLowerCase() as PostStatusValue} />
         </div>
         <span className="text-fg-faint text-xs">{formatDate(post.createdAt)}</span>
       </div>
@@ -328,7 +314,7 @@ export function GeneratedPostCard({
           {localHashtags.map((tag) => (
             <span
               key={tag}
-              className="bg-status-success-bg text-status-success-fg rounded-full px-2.5 py-0.5 text-xs font-medium"
+              className="bg-surface-subtle text-fg-muted rounded-full px-2.5 py-0.5 text-xs font-medium"
             >
               #{tag}
             </span>

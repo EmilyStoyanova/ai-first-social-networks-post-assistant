@@ -68,7 +68,7 @@ function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void 
           className={[
             "mr-5 border-b-2 pb-3 text-sm font-medium transition-colors",
             active === tab.value
-              ? "border-status-success-dot text-status-success-fg"
+              ? "border-accent text-accent"
               : "text-fg-muted hover:text-fg border-transparent",
           ].join(" ")}
         >

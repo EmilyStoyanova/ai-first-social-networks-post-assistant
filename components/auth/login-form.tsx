@@ -76,7 +76,7 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
   }
 
   return (
-    <div className="bg-surface-subtle flex min-h-screen flex-1 items-center justify-center px-4 py-12">
+    <div className="bg-bg flex min-h-screen flex-1 items-center justify-center px-4 py-12">
       <div className="rounded-card border-border bg-surface w-full max-w-md border px-8 py-10 shadow-sm">
         {/* Brand */}
         <div className="mb-8 flex flex-col items-center gap-3">
@@ -126,17 +126,11 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
           <Button type="submit" size="lg" fullWidth loading={isPending}>
             {isPending ? t("signingIn") : t("signIn")}
           </Button>
-
-          <div className="mt-4 text-center">
-            <button type="button" disabled className="text-fg-faint cursor-not-allowed text-sm">
-              {t("forgotPassword")}
-            </button>
-          </div>
         </form>
 
         <div className="border-border text-fg-muted mt-6 border-t pt-6 text-center text-sm">
           {t("noAccount")}{" "}
-          <Link href="/register" className="text-status-success-fg font-medium hover:underline">
+          <Link href="/register" className="text-accent font-medium hover:underline">
             {t("register")}
           </Link>
         </div>

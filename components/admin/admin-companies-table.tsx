@@ -51,7 +51,7 @@ export async function AdminCompaniesTable({ companies }: Props) {
             <div className="sm:hidden">
               <Link
                 href={`/companies/${c.slug}`}
-                className="text-status-success-fg text-sm font-semibold hover:underline"
+                className="text-accent text-sm font-semibold hover:underline"
               >
                 {c.name}
               </Link>
@@ -72,7 +72,7 @@ export async function AdminCompaniesTable({ companies }: Props) {
               <div className="min-w-0">
                 <Link
                   href={`/companies/${c.slug}`}
-                  className="text-status-success-fg block truncate text-sm font-semibold hover:underline"
+                  className="text-accent block truncate text-sm font-semibold hover:underline"
                 >
                   {c.name}
                 </Link>

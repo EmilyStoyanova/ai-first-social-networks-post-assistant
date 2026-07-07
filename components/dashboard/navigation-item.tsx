@@ -34,7 +34,7 @@ export function NavigationItem({ href, label, disabled = false }: Props) {
       className={[
         "group rounded-control duration-fast flex items-center gap-2.5 px-3 py-2.5 text-sm font-medium transition-all",
         isActive
-          ? "bg-status-success-bg text-status-success-fg"
+          ? "bg-surface-subtle text-fg"
           : "text-fg-muted hover:bg-surface-subtle hover:text-fg",
       ].join(" ")}
     >
@@ -42,7 +42,7 @@ export function NavigationItem({ href, label, disabled = false }: Props) {
       <span
         className={[
           "duration-fast h-1.5 w-1.5 shrink-0 rounded-full transition-colors",
-          isActive ? "bg-fg" : "group-hover:bg-border-strong bg-transparent",
+          isActive ? "bg-accent" : "group-hover:bg-border-strong bg-transparent",
         ].join(" ")}
         aria-hidden="true"
       />
