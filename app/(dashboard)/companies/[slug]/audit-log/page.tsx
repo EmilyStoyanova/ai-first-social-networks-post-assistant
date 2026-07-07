@@ -5,8 +5,7 @@ import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { listCompanyAuditLogs } from "@/lib/services/audit/audit-log.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { Button } from "@/components/ui/Button";
+import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
 import { AuditLogTimeline } from "@/components/company/audit-log-timeline";
 
 interface Props {
@@ -15,7 +14,7 @@ interface Props {
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
-  return { title: `Audit Log – ${slug} – AI-First Post Assistant` };
+  return { title: `Activity – ${slug} – AI-First Post Assistant` };
 }
 
 export default async function AuditLogPage({ params }: Props) {
@@ -27,9 +26,7 @@ export default async function AuditLogPage({ params }: Props) {
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
-  const t = await getTranslations("auditLog");
   const tNav = await getTranslations("navigation");
-  const tCommon = await getTranslations("common");
 
   const logs = await listCompanyAuditLogs(company.id, { limit: 50 });
 
@@ -40,24 +37,14 @@ export default async function AuditLogPage({ params }: Props) {
         email: session.user.email,
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
-      breadcrumb={[
-        { label: tNav("companies"), href: "/companies" },
-        { label: company.name, href: `/companies/${slug}` },
-        { label: t("title") },
-      ]}
+      breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
-      <div className="space-y-6">
-        <PageHeader
-          title={t("title")}
-          description={t("description")}
-          actions={
-            <Button href={`/companies/${slug}`} variant="secondary" size="sm">
-              {tCommon("backToCompany")}
-            </Button>
-          }
-        />
+      <div>
+        <CompanyWorkspaceHeader company={company} activeTab="activity" />
 
-        <AuditLogTimeline logs={logs} />
+        <div className="mt-8">
+          <AuditLogTimeline logs={logs} />
+        </div>
       </div>
     </DashboardLayout>
   );

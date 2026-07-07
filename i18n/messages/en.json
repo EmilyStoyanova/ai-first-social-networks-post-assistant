@@ -154,6 +154,18 @@
     "drafts": "{count, plural, one {# draft} other {# drafts}}",
     "noResults": "No companies match your search."
   },
+  "workspace": {
+    "tabs": {
+      "overview": "Overview",
+      "posts": "Posts",
+      "approval": "Approval",
+      "media": "Media",
+      "sources": "Sources",
+      "team": "Team",
+      "settings": "Settings",
+      "activity": "Activity"
+    }
+  },
   "companyPage": {
     "sections": {
       "brand": "Brand",

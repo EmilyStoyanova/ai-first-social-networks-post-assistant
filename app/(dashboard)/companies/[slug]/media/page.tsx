@@ -5,8 +5,7 @@ import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { listMedia } from "@/lib/services/company/list-media.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { Button } from "@/components/ui/Button";
+import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
 import { MediaGallery } from "@/components/company/media-gallery";
 
 interface Props {
@@ -16,7 +15,7 @@ interface Props {
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
-  return { title: `Media Gallery – ${slug} – AI-First Post Assistant` };
+  return { title: `Media – ${slug} – AI-First Post Assistant` };
 }
 
 function str(v: string | string[] | undefined): string | undefined {
@@ -39,9 +38,7 @@ export default async function MediaGalleryPage({ params, searchParams }: Props) 
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
-  const t = await getTranslations("mediaGallery");
   const tNav = await getTranslations("navigation");
-  const tCommon = await getTranslations("common");
 
   const channel = str(sp.channel);
   const provider = str(sp.provider);
@@ -67,34 +64,24 @@ export default async function MediaGalleryPage({ params, searchParams }: Props) 
         email: session.user.email,
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
-      breadcrumb={[
-        { label: tNav("companies"), href: "/companies" },
-        { label: company.name, href: `/companies/${slug}` },
-        { label: t("title") },
-      ]}
+      breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
-      <div className="space-y-6">
-        <PageHeader
-          title={t("title")}
-          description={t("description", { company: company.name })}
-          actions={
-            <Button href={`/companies/${slug}`} variant="secondary" size="sm">
-              {tCommon("backToCompany")}
-            </Button>
-          }
-        />
+      <div>
+        <CompanyWorkspaceHeader company={company} activeTab="media" />
 
-        <MediaGallery
-          slug={slug}
-          items={items}
-          total={total}
-          page={page}
-          pageSize={pageSize}
-          channel={channel ?? ""}
-          provider={provider ?? ""}
-          sort={sort}
-          canDelete={company.role === "OWNER" || session.user.isGlobalAdmin}
-        />
+        <div className="mt-8">
+          <MediaGallery
+            slug={slug}
+            items={items}
+            total={total}
+            page={page}
+            pageSize={pageSize}
+            channel={channel ?? ""}
+            provider={provider ?? ""}
+            sort={sort}
+            canDelete={company.role === "OWNER" || session.user.isGlobalAdmin}
+          />
+        </div>
       </div>
     </DashboardLayout>
   );

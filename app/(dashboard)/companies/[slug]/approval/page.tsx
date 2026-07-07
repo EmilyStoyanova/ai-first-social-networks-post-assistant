@@ -6,8 +6,7 @@ import { getCompany } from "@/lib/services/company/get-company.service";
 import { listPosts } from "@/lib/services/company/list-posts.service";
 import { getBufferConnection } from "@/lib/services/buffer/get-buffer-connection.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { Button } from "@/components/ui/Button";
+import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
 import { ApprovalQueueSection } from "@/components/company/approval-queue-section";
 
 interface Props {
@@ -16,7 +15,7 @@ interface Props {
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
-  return { title: `Approval Queue – ${slug} – AI-First Post Assistant` };
+  return { title: `Approval – ${slug} – AI-First Post Assistant` };
 }
 
 export default async function ApprovalQueuePage({ params }: Props) {
@@ -28,9 +27,8 @@ export default async function ApprovalQueuePage({ params }: Props) {
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
-  const t = await getTranslations("approval");
   const tNav = await getTranslations("navigation");
-  const tCommon = await getTranslations("common");
+  const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
 
   const [postsResult, bufferConnection] = await Promise.all([
     listPosts(slug, session.user.id, session.user.isGlobalAdmin, "pending_approval"),
@@ -38,7 +36,6 @@ export default async function ApprovalQueuePage({ params }: Props) {
   ]);
 
   const pendingPosts = postsResult.success ? postsResult.posts : [];
-  const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
 
   return (
     <DashboardLayout
@@ -47,30 +44,20 @@ export default async function ApprovalQueuePage({ params }: Props) {
         email: session.user.email,
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
-      breadcrumb={[
-        { label: tNav("companies"), href: "/companies" },
-        { label: company.name, href: `/companies/${slug}` },
-        { label: t("title") },
-      ]}
+      breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
-      <div className="space-y-6">
-        <PageHeader
-          title={t("title")}
-          description={t("description", { count: pendingPosts.length })}
-          actions={
-            <Button href={`/companies/${slug}`} variant="secondary" size="sm">
-              {tCommon("backToCompany")}
-            </Button>
-          }
-        />
+      <div>
+        <CompanyWorkspaceHeader company={company} activeTab="approval" />
 
-        <ApprovalQueueSection
-          slug={slug}
-          initialPosts={pendingPosts}
-          canApprove={canManage}
-          canPublish={canManage}
-          bufferConnected={bufferConnection.connected}
-        />
+        <div className="mt-8">
+          <ApprovalQueueSection
+            slug={slug}
+            initialPosts={pendingPosts}
+            canApprove={canManage}
+            canPublish={canManage}
+            bufferConnected={bufferConnection.connected}
+          />
+        </div>
       </div>
     </DashboardLayout>
   );

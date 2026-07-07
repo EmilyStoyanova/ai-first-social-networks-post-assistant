@@ -154,6 +154,18 @@
     "drafts": "{count, plural, one {# чернова} other {# чернови}}",
     "noResults": "Няма компании, съответстващи на търсенето."
   },
+  "workspace": {
+    "tabs": {
+      "overview": "Преглед",
+      "posts": "Публикации",
+      "approval": "Одобрение",
+      "media": "Медия",
+      "sources": "Източници",
+      "team": "Екип",
+      "settings": "Настройки",
+      "activity": "Активност"
+    }
+  },
   "companyPage": {
     "sections": {
       "brand": "Марка",
