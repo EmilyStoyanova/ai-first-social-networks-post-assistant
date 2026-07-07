@@ -28,6 +28,7 @@ import { BufferConnectionCard } from "@/components/company/buffer-connection-car
 import { ChannelConfigSection } from "@/components/company/channel-config-section";
 import { ContentSourcesSection } from "@/components/company/content-sources-section";
 import { GeneratedPostsSection } from "@/components/company/generated-posts-section";
+import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { Section } from "@/components/ui/Section";
@@ -156,7 +157,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
           )}
 
           {/* ── Settings ───────────────────────────────────────────────── */}
-          {activeTab === "settings" && brandGuidelines !== null && bufferConnection && (
+          {activeTab === "settings" && bufferConnection !== null && (
             <SettingsTab
               slug={slug}
               brandGuidelines={brandGuidelines}
@@ -338,9 +339,12 @@ async function SettingsTab({
   bufferParam,
 }: SettingsTabProps) {
   const t = await getTranslations("companyPage");
+  const tWs = await getTranslations("workspace");
 
   return (
     <div className="space-y-10">
+      {!brandGuidelines && <Alert variant="info">{tWs("setupHint")}</Alert>}
+
       <Section title={t("sections.brand")}>
         <BrandGuidelinesForm
           slug={slug}

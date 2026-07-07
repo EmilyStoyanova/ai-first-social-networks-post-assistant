@@ -177,9 +177,10 @@
       "media": "Media",
       "sources": "Sources",
       "team": "Team",
-      "settings": "Settings",
+      "settings": "Brand Setup",
       "activity": "Activity"
-    }
+    },
+    "setupHint": "Start here — fill in your brand identity, then connect Buffer and configure your channels. The AI uses this information when generating posts."
   },
   "companyPage": {
     "sections": {
