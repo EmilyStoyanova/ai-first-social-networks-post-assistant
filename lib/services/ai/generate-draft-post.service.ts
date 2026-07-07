@@ -185,6 +185,16 @@ export async function generatePostFromContext(
     },
   };
 
+  // ── Resolve final status ──────────────────────────────────────────────────
+  // For manual generation (draft) on a fully_automated channel, skip the
+  // approval queue so the post is immediately publishable. Safety-flagged
+  // posts are always held for human review regardless of mode.
+  const effectiveMode = context.channel.automationModeOverride ?? context.company.automationMode;
+  const autoApproved =
+    initialStatus === "draft" && effectiveMode === "fully_automated" && !safetyResult.flagged;
+  const resolvedStatus = autoApproved ? ("approved" as const) : initialStatus;
+  const approvedAt = autoApproved ? new Date() : null;
+
   // ── Save post ─────────────────────────────────────────────────────────────
   const feedItemIds = context.feedItems.map((f) => f.id);
 
@@ -192,7 +202,8 @@ export async function generatePostFromContext(
     data: {
       companyId,
       channel: context.channel.channel as SocialChannel,
-      status: initialStatus,
+      status: resolvedStatus,
+      approvedAt,
       content: parsed.text,
       hashtags: parsed.hashtags,
       imagePrompt: parsed.imagePrompt ?? null,
@@ -242,6 +253,7 @@ export async function generatePostFromContext(
       llmProvider: post.llmProvider ?? undefined,
       llmModel: post.llmModel ?? undefined,
       ...(generatedById ? {} : { automated: true }),
+      ...(autoApproved ? { autoApproved: true } : {}),
     },
   });
 
