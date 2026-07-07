@@ -240,15 +240,15 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
       <Card className="px-6 py-6">
         <dl className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
           <div>
-            <dt className="text-micro text-fg-faint tracking-widest uppercase">{t("name")}</dt>
+            <dt className="text-micro text-fg-faint">{t("name")}</dt>
             <dd className="text-fg mt-1.5 text-sm font-semibold">{company.name}</dd>
           </div>
           <div>
-            <dt className="text-micro text-fg-faint tracking-widest uppercase">{t("slug")}</dt>
+            <dt className="text-micro text-fg-faint">{t("slug")}</dt>
             <dd className="text-fg-muted mt-1.5 font-mono text-sm">{company.slug}</dd>
           </div>
           <div>
-            <dt className="text-micro text-fg-faint tracking-widest uppercase">{t("website")}</dt>
+            <dt className="text-micro text-fg-faint">{t("website")}</dt>
             <dd className="mt-1.5">
               {company.website ? (
                 <a
@@ -265,7 +265,7 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
             </dd>
           </div>
           <div>
-            <dt className="text-micro text-fg-faint tracking-widest uppercase">{t("role")}</dt>
+            <dt className="text-micro text-fg-faint">{t("role")}</dt>
             <dd className="mt-1.5">
               {company.role && (
                 <Badge variant={company.role === "OWNER" ? "owner" : "editor"}>
@@ -275,7 +275,7 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
             </dd>
           </div>
           <div>
-            <dt className="text-micro text-fg-faint tracking-widest uppercase">{t("created")}</dt>
+            <dt className="text-micro text-fg-faint">{t("created")}</dt>
             <dd className="text-fg-muted mt-1.5 text-sm">{formattedDate}</dd>
           </div>
         </dl>

@@ -56,9 +56,7 @@ export function LlmConfigSection({ initialConfigs }: Props) {
 
       {/* Add Provider */}
       <div className="mb-5">
-        <h3 className="text-fg-faint mb-3 text-xs font-semibold tracking-widest uppercase">
-          {t("addProvider")}
-        </h3>
+        <h3 className="text-micro text-fg-faint mb-3">{t("addProvider")}</h3>
         <LlmConfigForm onSaved={handleCreated} />
       </div>
 
@@ -66,9 +64,7 @@ export function LlmConfigSection({ initialConfigs }: Props) {
 
       {/* Configured Providers */}
       <div>
-        <h3 className="text-fg-faint mb-3 text-xs font-semibold tracking-widest uppercase">
-          {t("configuredProviders")}
-        </h3>
+        <h3 className="text-micro text-fg-faint mb-3">{t("configuredProviders")}</h3>
 
         {configs.length === 0 ? (
           <p className="text-fg-faint py-4 text-center text-sm">{t("noProviders")}</p>

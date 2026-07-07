@@ -55,9 +55,7 @@ export function CompanyMembers({ slug, initialMembers, currentUserEmail, canMana
       {canManage && (
         <>
           <div className="mb-5">
-            <h3 className="text-fg-faint mb-3 text-xs font-semibold tracking-widest uppercase">
-              {t("inviteMember")}
-            </h3>
+            <h3 className="text-micro text-fg-faint mb-3">{t("inviteMember")}</h3>
             <InviteMemberForm slug={slug} onInvited={handleInvited} />
           </div>
           <hr className="border-border mb-5" />
@@ -76,14 +74,10 @@ export function CompanyMembers({ slug, initialMembers, currentUserEmail, canMana
           <div>
             {/* Table header — desktop only */}
             <div className="mb-1 hidden grid-cols-[minmax(0,1fr)_8rem_auto] gap-4 sm:grid">
-              <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
-                {t("nameAndEmail")}
-              </span>
-              <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
-                {t("role")}
-              </span>
+              <span className="text-micro text-fg-faint">{t("nameAndEmail")}</span>
+              <span className="text-micro text-fg-faint">{t("role")}</span>
               {canManage && (
-                <span className="text-fg-faint min-w-[6rem] text-right text-xs font-medium tracking-wide uppercase">
+                <span className="text-micro text-fg-faint min-w-[6rem] text-right">
                   {t("actions")}
                 </span>
               )}

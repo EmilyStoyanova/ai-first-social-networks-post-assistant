@@ -34,7 +34,7 @@ export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
     PAGE_TITLES[pathname] ?? (pathname.startsWith("/companies/") ? t("navigation.companies") : "");
 
   return (
-    <header className="border-border bg-surface flex h-16 shrink-0 items-center gap-4 border-b px-4 sm:px-6">
+    <header className="border-border bg-surface flex h-14 shrink-0 items-center gap-4 border-b px-4 sm:px-6">
       {/* Hamburger — mobile only */}
       <button
         type="button"
@@ -81,7 +81,7 @@ export function DashboardHeader({ user, onMenuClick, breadcrumb }: Props) {
             ))}
           </nav>
         ) : (
-          <h1 className="text-fg text-lg font-semibold">{fallbackTitle}</h1>
+          <h1 className="text-fg text-sm font-semibold">{fallbackTitle}</h1>
         )}
       </div>
 

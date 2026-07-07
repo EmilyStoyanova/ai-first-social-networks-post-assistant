@@ -78,7 +78,7 @@ export default async function DashboardPage() {
           ].map(({ value, label }) => (
             <Card key={label} className="px-5 py-4">
               <p className="text-fg text-2xl font-bold tabular-nums">{value}</p>
-              <p className="text-small text-fg-muted mt-0.5">{label}</p>
+              <p className="text-micro text-fg-faint mt-1">{label}</p>
             </Card>
           ))}
         </div>

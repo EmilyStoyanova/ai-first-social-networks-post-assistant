@@ -24,24 +24,14 @@ export async function AdminCompaniesTable({ companies }: Props) {
     <Card className="overflow-hidden px-0 py-0">
       {/* Desktop header */}
       <div className="border-border bg-surface-subtle hidden grid-cols-[minmax(0,1fr)_8rem_minmax(0,1fr)_4rem_minmax(0,1fr)_7rem] gap-4 border-b px-6 py-3 sm:grid">
-        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
-          {t("companies")}
-        </span>
-        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
-          {t("slug")}
-        </span>
-        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
-          {t("website")}
-        </span>
+        <span className="text-micro text-fg-faint">{t("companies")}</span>
+        <span className="text-micro text-fg-faint">{t("slug")}</span>
+        <span className="text-micro text-fg-faint">{t("website")}</span>
         <span className="text-fg-faint text-center text-xs font-medium tracking-wide uppercase">
           {t("membersCol")}
         </span>
-        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
-          {t("owners")}
-        </span>
-        <span className="text-fg-faint text-xs font-medium tracking-wide uppercase">
-          {t("created")}
-        </span>
+        <span className="text-micro text-fg-faint">{t("owners")}</span>
+        <span className="text-micro text-fg-faint">{t("created")}</span>
       </div>
 
       <div className="divide-border divide-y">

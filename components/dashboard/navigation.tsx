@@ -45,9 +45,7 @@ export function Navigation({ isGlobalAdmin }: Props) {
 
       {isGlobalAdmin && (
         <div className="border-border border-t pt-3">
-          <p className="text-fg-faint mb-1 px-3 text-xs font-semibold tracking-widest uppercase">
-            {t("admin")}
-          </p>
+          <p className="text-micro text-fg-faint mb-1 px-3">{t("admin")}</p>
           <ul role="list" className="space-y-0.5">
             <li>
               <NavigationItem href="/admin" label={t("adminPanel")} icon={ShieldCheck} />

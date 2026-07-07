@@ -71,7 +71,7 @@ export async function CompanyWorkspaceHeader({ company, activeTab, stats }: Prop
 
   return (
     <div>
-      <div className="min-w-0">
+      <div>
         <h1 className="text-display text-fg">{company.name}</h1>
         {metaItems.length > 0 && (
           <div className="text-fg-faint mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">

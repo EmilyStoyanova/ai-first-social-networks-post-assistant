@@ -77,7 +77,7 @@ export function RegisterForm() {
   }
 
   return (
-    <div className="bg-surface-subtle flex min-h-screen flex-1 items-center justify-center px-4 py-12">
+    <div className="bg-bg flex min-h-screen flex-1 items-center justify-center px-4 py-12">
       <div className="rounded-card border-border bg-surface w-full max-w-md border px-8 py-10 shadow-sm">
         {/* Brand */}
         <div className="mb-8 flex flex-col items-center gap-3">
@@ -90,7 +90,7 @@ export function RegisterForm() {
           </div>
         </div>
 
-        <h1 className="text-fg mb-6 text-center text-lg font-semibold">{t("title")}</h1>
+        <h1 className="text-title text-fg mb-6 text-center">{t("title")}</h1>
 
         <form onSubmit={handleSubmit} noValidate>
           {formError && (
@@ -137,7 +137,7 @@ export function RegisterForm() {
 
         <div className="border-border text-fg-muted mt-6 border-t pt-6 text-center text-sm">
           {t("hasAccount")}{" "}
-          <Link href="/login" className="text-status-success-fg font-medium hover:underline">
+          <Link href="/login" className="text-accent font-medium hover:underline">
             {t("signIn")}
           </Link>
         </div>
