@@ -149,3 +149,16 @@ Internal cron routes (`/api/v1/internal/`) are protected by API key, not session
 ### i18n
 
 `next-intl` with locale files in `i18n/messages/en.json` and `i18n/messages/bg.json`. Locale detection in `middleware.ts`.
+
+## Project Workflow
+
+UI_REDESIGN_SPEC.md is the authoritative source for all UI/UX decisions.
+
+When implementing redesign phases:
+
+- Read UI_REDESIGN_SPEC.md first.
+- Follow the specification exactly.
+- Do not improvise UX decisions.
+- Preserve existing functionality unless explicitly instructed.
+- Run lint, typecheck and build before committing.
+- Create one logical commit per completed phase.

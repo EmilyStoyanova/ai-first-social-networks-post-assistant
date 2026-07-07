@@ -65,6 +65,9 @@ export function GeneratedPostCard({
   const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [approvalError, setApprovalError] = useState("");
+  // Tracks if the current user manually approved in this session, so the
+  // auto-approved banner doesn't appear after a same-session approval.
+  const [approvedByUser, setApprovedByUser] = useState(false);
 
   // ── Delete state ──────────────────────────────────────────────────────────
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -147,6 +150,7 @@ export function GeneratedPostCard({
         throw new Error(apiError(json.error));
       }
       setLocalStatus("APPROVED");
+      setApprovedByUser(true);
       onStatusChange?.(post.id, "APPROVED");
     } catch (err) {
       setApprovalError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
@@ -397,6 +401,13 @@ export function GeneratedPostCard({
       {approvalError && (
         <Alert variant="error" className="mb-3">
           {approvalError}
+        </Alert>
+      )}
+
+      {/* Auto-approved info — shown when the post was approved automatically (no human approver) */}
+      {isApproved && post.approvedById === null && !approvedByUser && (
+        <Alert variant="info" role="status" className="mb-3">
+          {t("autoApprovedInfo")}
         </Alert>
       )}
 

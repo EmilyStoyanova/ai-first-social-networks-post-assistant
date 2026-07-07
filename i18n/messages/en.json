@@ -399,6 +399,7 @@
     "publishToBuffer": "Publish to Buffer",
     "connectBufferToPublish": "Connect Buffer to publish",
     "deleteDraft": "Delete this draft?",
+    "autoApprovedInfo": "This post was automatically approved because the channel is using Fully Automated mode. You can edit it or publish it to Buffer immediately.",
     "viewActivity": "View activity",
     "publishPanel": {
       "title": "Publish to Buffer",

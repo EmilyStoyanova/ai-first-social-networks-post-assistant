@@ -399,6 +399,7 @@
     "publishToBuffer": "Публикувай в Buffer",
     "connectBufferToPublish": "Свържи Buffer за публикуване",
     "deleteDraft": "Изтрий тази чернова?",
+    "autoApprovedInfo": "Тази публикация е автоматично одобрена, защото каналът е в режим „Напълно автоматичен“. Можеш да я редактираш или да я публикуваш в Buffer веднага.",
     "viewActivity": "Виж активността",
     "publishPanel": {
       "title": "Публикувай в Buffer",
