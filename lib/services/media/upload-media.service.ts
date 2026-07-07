@@ -118,9 +118,16 @@ export async function uploadMedia(
     uploadRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
       method: "POST",
       body: form,
+      signal: AbortSignal.timeout(25_000),
     });
-  } catch {
-    return { success: false, code: "UPLOAD_FAILED", message: "Upload request failed." };
+  } catch (err) {
+    const isTimeout =
+      err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+    return {
+      success: false,
+      code: "UPLOAD_FAILED",
+      message: isTimeout ? "Image upload timed out. Please try again." : "Upload request failed.",
+    };
   }
 
   let data: CloudinaryUploadResponse;

@@ -56,7 +56,7 @@ const KNOWN_CODES: ReadonlySet<string> = new Set(API_ERROR_CODES);
  * validation error Buffer returned) that a generic translation would hide.
  * For these, the detail is appended after the translated label.
  */
-const DETAIL_CODES: ReadonlySet<string> = new Set(["BUFFER_API_ERROR"]);
+const DETAIL_CODES: ReadonlySet<string> = new Set(["BUFFER_API_ERROR", "UPLOAD_FAILED"]);
 
 export interface ApiErrorShape {
   code?: string;
