@@ -4,7 +4,7 @@ import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { listCompanies } from "@/lib/services/company/list-companies.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
-import { CompanyList } from "@/components/company/company-list";
+import { CompanyCards } from "@/components/company/company-cards";
 import { Button } from "@/components/ui/Button";
 import { PageHeader } from "@/components/ui/PageHeader";
 
@@ -40,7 +40,7 @@ export default async function CompaniesPage() {
           }
         />
 
-        <CompanyList companies={companies} />
+        <CompanyCards companies={companies} />
       </div>
     </DashboardLayout>
   );

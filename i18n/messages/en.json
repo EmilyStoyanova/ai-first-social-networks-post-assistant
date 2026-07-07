@@ -112,14 +112,47 @@
     "welcome": "Welcome back{greeting}!",
     "tagline": "Manage your social media presence from one place.",
     "goToCompanies": "Go to Companies",
-    "comingSoon": "Coming soon"
+    "comingSoon": "Coming soon",
+    "stats": {
+      "companies": "Companies",
+      "pendingApprovals": "Pending Approvals",
+      "drafts": "Drafts"
+    },
+    "pendingWork": {
+      "title": "Pending Work",
+      "reviewQueue": "Review queue",
+      "posts": "{count, plural, one {# post pending approval} other {# posts pending approval}}",
+      "noPending": "All clear.",
+      "noPendingDesc": "No posts are waiting for approval."
+    },
+    "recentActivity": {
+      "title": "Recent Activity",
+      "noActivity": "No activity yet.",
+      "noActivityDesc": "Actions taken on posts will appear here.",
+      "system": "System"
+    },
+    "quickActions": {
+      "newCompany": "New Company",
+      "viewCompanies": "View all companies"
+    },
+    "noCompanies": "No companies yet.",
+    "noCompaniesDesc": "Create your first company to get started.",
+    "createCompany": "Create Company",
+    "companiesCount": "{count, plural, one {# company} other {# companies}}"
   },
   "companies": {
     "title": "Companies",
     "createCompany": "+ Create Company",
     "noCompanies": "No companies yet.",
     "createFirst": "Create your first company",
-    "count": "{count} {count, plural, one {company} other {companies}}"
+    "count": "{count} {count, plural, one {company} other {companies}}",
+    "searchPlaceholder": "Search companies…",
+    "allRoles": "All",
+    "owner": "Owner",
+    "editor": "Editor",
+    "pendingApprovals": "{count, plural, one {# pending} other {# pending}}",
+    "drafts": "{count, plural, one {# draft} other {# drafts}}",
+    "noResults": "No companies match your search."
   },
   "companyPage": {
     "sections": {

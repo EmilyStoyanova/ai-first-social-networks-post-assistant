@@ -6,12 +6,22 @@ export type CompanyListItem = {
   slug: string;
   website: string | null;
   role: "OWNER" | "EDITOR" | null;
+  pendingCount: number;
+  draftCount: number;
 };
 
 export async function listCompanies(
   userId: string,
   isGlobalAdmin: boolean
 ): Promise<CompanyListItem[]> {
+  let baseItems: Array<{
+    id: string;
+    name: string;
+    slug: string;
+    website: string | null;
+    role: "OWNER" | "EDITOR" | null;
+  }>;
+
   if (isGlobalAdmin) {
     const companies = await prisma.company.findMany({
       orderBy: { name: "asc" },
@@ -28,7 +38,7 @@ export async function listCompanies(
       },
     });
 
-    return companies.map((c) => ({
+    baseItems = companies.map((c) => ({
       id: c.id,
       name: c.name,
       slug: c.slug,
@@ -40,24 +50,50 @@ export async function listCompanies(
             ? "EDITOR"
             : null,
     }));
+  } else {
+    const memberships = await prisma.companyMember.findMany({
+      where: { userId },
+      orderBy: { company: { name: "asc" } },
+      select: {
+        role: true,
+        company: {
+          select: { id: true, name: true, slug: true, website: true },
+        },
+      },
+    });
+
+    baseItems = memberships.map((m) => ({
+      id: m.company.id,
+      name: m.company.name,
+      slug: m.company.slug,
+      website: m.company.website,
+      role: m.role === "owner" ? "OWNER" : "EDITOR",
+    }));
   }
 
-  const memberships = await prisma.companyMember.findMany({
-    where: { userId },
-    orderBy: { company: { name: "asc" } },
-    select: {
-      role: true,
-      company: {
-        select: { id: true, name: true, slug: true, website: true },
-      },
-    },
-  });
+  if (baseItems.length === 0) return [];
 
-  return memberships.map((m) => ({
-    id: m.company.id,
-    name: m.company.name,
-    slug: m.company.slug,
-    website: m.company.website,
-    role: m.role === "owner" ? "OWNER" : "EDITOR",
+  const ids = baseItems.map((c) => c.id);
+
+  const [pendingRows, draftRows] = await Promise.all([
+    prisma.post.groupBy({
+      by: ["companyId"],
+      where: { companyId: { in: ids }, status: "pending_approval" as never },
+      _count: { _all: true },
+    }),
+    prisma.post.groupBy({
+      by: ["companyId"],
+      where: { companyId: { in: ids }, status: "draft" as never },
+      _count: { _all: true },
+    }),
+  ]);
+
+  const pendingMap = new Map(pendingRows.map((r) => [r.companyId, r._count._all]));
+  const draftMap = new Map(draftRows.map((r) => [r.companyId, r._count._all]));
+
+  return baseItems.map((c) => ({
+    ...c,
+    pendingCount: pendingMap.get(c.id) ?? 0,
+    draftCount: draftMap.get(c.id) ?? 0,
   }));
 }

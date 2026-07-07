@@ -112,14 +112,47 @@
     "welcome": "Здравей отново{greeting}!",
     "tagline": "Управлявай присъствието си в социалните мрежи от едно място.",
     "goToCompanies": "Към компаниите",
-    "comingSoon": "Очаквайте скоро"
+    "comingSoon": "Очаквайте скоро",
+    "stats": {
+      "companies": "Компании",
+      "pendingApprovals": "Чакащи одобрение",
+      "drafts": "Чернови"
+    },
+    "pendingWork": {
+      "title": "Чакаща работа",
+      "reviewQueue": "Прегледай опашката",
+      "posts": "{count, plural, one {# публикация чака одобрение} other {# публикации чакат одобрение}}",
+      "noPending": "Всичко е наред.",
+      "noPendingDesc": "Няма публикации, чакащи одобрение."
+    },
+    "recentActivity": {
+      "title": "Последна активност",
+      "noActivity": "Все още няма активност.",
+      "noActivityDesc": "Действия върху публикации ще се показват тук.",
+      "system": "Система"
+    },
+    "quickActions": {
+      "newCompany": "Нова компания",
+      "viewCompanies": "Виж всички компании"
+    },
+    "noCompanies": "Все още няма компании.",
+    "noCompaniesDesc": "Създай първата си компания, за да започнеш.",
+    "createCompany": "Създай компания",
+    "companiesCount": "{count, plural, one {# компания} other {# компании}}"
   },
   "companies": {
     "title": "Компании",
     "createCompany": "+ Създай компания",
     "noCompanies": "Все още няма компании.",
     "createFirst": "Създай първата си компания",
-    "count": "{count} {count, plural, one {компания} other {компании}}"
+    "count": "{count} {count, plural, one {компания} other {компании}}",
+    "searchPlaceholder": "Търси компании…",
+    "allRoles": "Всички",
+    "owner": "Собственик",
+    "editor": "Редактор",
+    "pendingApprovals": "{count, plural, one {# чакаща} other {# чакащи}}",
+    "drafts": "{count, plural, one {# чернова} other {# чернови}}",
+    "noResults": "Няма компании, съответстващи на търсенето."
   },
   "companyPage": {
     "sections": {
