@@ -44,6 +44,7 @@ export const API_ERROR_CODES = [
   "CANNOT_CHANGE_OWN_ROLE",
   "ALREADY_MEMBER",
   "INGEST_FAILED",
+  "EMAIL_NOT_VERIFIED",
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];

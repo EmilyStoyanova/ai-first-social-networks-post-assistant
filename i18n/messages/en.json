@@ -52,6 +52,7 @@
     "CANNOT_CHANGE_OWN_ROLE": "You cannot change your own role.",
     "ALREADY_MEMBER": "This user is already a member of the company.",
     "INGEST_FAILED": "Ingestion failed. Check the source URL and try again.",
+    "EMAIL_NOT_VERIFIED": "Please verify your email address before signing in.",
     "UNKNOWN": "Something went wrong. Please try again."
   },
   "brand": {
@@ -67,7 +68,13 @@
       "forgotPassword": "Forgot password?",
       "noAccount": "Don't have an account?",
       "register": "Register",
-      "accountCreated": "Account created successfully. You can now sign in.",
+      "accountCreated": "Check your inbox — we sent a verification link to your email address.",
+      "emailVerified": "Email verified successfully. You can now sign in.",
+      "tokenExpired": "Verification link has expired.",
+      "invalidToken": "Verification link is invalid or has already been used.",
+      "resendVerification": "Resend verification email",
+      "resendSent": "Verification email sent. Please check your inbox.",
+      "resending": "Sending…",
       "unexpectedError": "Unexpected server error."
     },
     "register": {

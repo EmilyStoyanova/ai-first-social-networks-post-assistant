@@ -14,10 +14,17 @@ type FieldErrors = { email?: string; password?: string };
 
 interface Props {
   registered?: boolean;
+  verified?: boolean;
+  tokenError?: "token_expired" | "invalid_token";
   callbackUrl?: string;
 }
 
-export function LoginForm({ registered = false, callbackUrl }: Props) {
+export function LoginForm({
+  registered = false,
+  verified = false,
+  tokenError,
+  callbackUrl,
+}: Props) {
   const router = useRouter();
   const t = useTranslations("auth.login");
   const tBrand = useTranslations("brand");
@@ -25,6 +32,8 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [formError, setFormError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
+  const [unverifiedEmail, setUnverifiedEmail] = useState<string | null>(null);
+  const [resendStatus, setResendStatus] = useState<"idle" | "sending" | "sent">("idle");
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -46,11 +55,13 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
       }
       setFieldErrors(errs);
       setFormError(null);
+      setUnverifiedEmail(null);
       return;
     }
 
     setFieldErrors({});
     setFormError(null);
+    setUnverifiedEmail(null);
     setIsPending(true);
 
     try {
@@ -63,7 +74,13 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
       const body: unknown = await res.json();
 
       if (!res.ok) {
-        setFormError(apiError(extractApiError(body), t("unexpectedError")));
+        const err = extractApiError(body);
+        if (err?.code === "EMAIL_NOT_VERIFIED") {
+          setUnverifiedEmail(parsed.data.email);
+          setFormError(apiError(err));
+          return;
+        }
+        setFormError(apiError(err, t("unexpectedError")));
         return;
       }
 
@@ -72,6 +89,20 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
       setFormError(t("unexpectedError"));
     } finally {
       setIsPending(false);
+    }
+  }
+
+  async function handleResend() {
+    if (!unverifiedEmail || resendStatus === "sending") return;
+    setResendStatus("sending");
+    try {
+      await fetch("/api/v1/auth/resend-verification", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: unverifiedEmail }),
+      });
+    } finally {
+      setResendStatus("sent");
     }
   }
 
@@ -90,16 +121,52 @@ export function LoginForm({ registered = false, callbackUrl }: Props) {
         </div>
 
         <form onSubmit={handleSubmit} noValidate>
-          {registered && (
+          {registered && !verified && (
             <Alert variant="success" className="mb-5">
               {t("accountCreated")}
             </Alert>
           )}
 
-          {formError && (
+          {verified && (
+            <Alert variant="success" className="mb-5">
+              {t("emailVerified")}
+            </Alert>
+          )}
+
+          {tokenError === "token_expired" && (
             <Alert variant="error" className="mb-5">
+              {t("tokenExpired")}
+            </Alert>
+          )}
+
+          {tokenError === "invalid_token" && (
+            <Alert variant="error" className="mb-5">
+              {t("invalidToken")}
+            </Alert>
+          )}
+
+          {formError && (
+            <Alert variant="error" className="mb-3">
               {formError}
             </Alert>
+          )}
+
+          {unverifiedEmail && (
+            <div className="mb-5">
+              {resendStatus === "sent" ? (
+                <Alert variant="success">{t("resendSent")}</Alert>
+              ) : (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  loading={resendStatus === "sending"}
+                  onClick={handleResend}
+                >
+                  {resendStatus === "sending" ? t("resending") : t("resendVerification")}
+                </Button>
+              )}
+            </div>
           )}
 
           <Input

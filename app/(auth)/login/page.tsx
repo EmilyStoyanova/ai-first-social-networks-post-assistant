@@ -6,19 +6,34 @@ export const metadata: Metadata = {
 };
 
 interface Props {
-  searchParams: Promise<{ registered?: string; callbackUrl?: string }>;
+  searchParams: Promise<{
+    registered?: string;
+    verified?: string;
+    error?: string;
+    callbackUrl?: string;
+  }>;
 }
 
 function sanitizeCallbackUrl(raw: string | undefined): string | undefined {
   if (!raw) return undefined;
-  // Reject absolute URLs (https://…) and protocol-relative URLs (//…).
   if (!raw.startsWith("/") || raw.startsWith("//")) return undefined;
   return raw;
 }
 
+function parseTokenError(error: string | undefined): "token_expired" | "invalid_token" | undefined {
+  if (error === "token_expired") return "token_expired";
+  if (error === "invalid_token") return "invalid_token";
+  return undefined;
+}
+
 export default async function LoginPage({ searchParams }: Props) {
-  const { registered, callbackUrl } = await searchParams;
+  const { registered, verified, error, callbackUrl } = await searchParams;
   return (
-    <LoginForm registered={registered === "1"} callbackUrl={sanitizeCallbackUrl(callbackUrl)} />
+    <LoginForm
+      registered={registered === "1"}
+      verified={verified === "1"}
+      tokenError={parseTokenError(error)}
+      callbackUrl={sanitizeCallbackUrl(callbackUrl)}
+    />
   );
 }

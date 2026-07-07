@@ -80,19 +80,21 @@ model User {
   name          String?
   isGlobalAdmin Boolean  @default(false) @map("is_global_admin")
   preferredLang String   @default("en") @map("preferred_language")
+  emailVerified Boolean  @default(false) @map("email_verified")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
 
-  companies        CompanyMember[]
-  createdCompanies Company[]       @relation("CompanyCreator")
-  uploadedAssets   MediaAsset[]
-  approvedPosts    Post[]          @relation("PostApprover")
-  rejectedPosts    Post[]          @relation("PostRejecter")
-  generatedPosts   Post[]          @relation("PostGenerator")
-  postVersions     PostVersion[]
-  auditLogs        AuditLog[]
-  apiKeys          ApiKey[]
-  llmConfigs       LlmConfig[]
+  companies               CompanyMember[]
+  createdCompanies        Company[]       @relation("CompanyCreator")
+  uploadedAssets          MediaAsset[]
+  approvedPosts           Post[]          @relation("PostApprover")
+  rejectedPosts           Post[]          @relation("PostRejecter")
+  generatedPosts          Post[]          @relation("PostGenerator")
+  postVersions            PostVersion[]
+  auditLogs               AuditLog[]
+  apiKeys                 ApiKey[]
+  llmConfigs              LlmConfig[]
+  emailVerificationTokens EmailVerificationToken[]
 
   @@map("users")
 }
@@ -383,4 +385,17 @@ model ApiKey {
   creator User @relation(fields: [createdBy], references: [id])
 
   @@map("api_keys")
+}
+
+model EmailVerificationToken {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique @map("token_hash")
+  userId    String   @map("user_id")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("email_verification_tokens")
 }

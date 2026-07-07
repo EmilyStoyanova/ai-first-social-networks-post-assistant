@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import { prisma } from "@/lib/db/client";
+import { sendVerificationEmail } from "./send-verification-email.service";
 import type { RegisterInput } from "@/lib/validators/register.schema";
 
 type RegisteredUser = {
@@ -35,6 +36,7 @@ export async function registerUser(data: RegisterInput): Promise<RegisterResult>
       passwordHash,
       isGlobalAdmin: false,
       preferredLang: "en",
+      emailVerified: false,
     },
     select: {
       id: true,
@@ -42,6 +44,11 @@ export async function registerUser(data: RegisterInput): Promise<RegisterResult>
       email: true,
       preferredLang: true,
     },
+  });
+
+  // Fire-and-forget: email send failure must not block registration
+  sendVerificationEmail(user.id, user.email, user.preferredLang).catch((err) => {
+    console.error("[register] Failed to send verification email:", err);
   });
 
   return {
