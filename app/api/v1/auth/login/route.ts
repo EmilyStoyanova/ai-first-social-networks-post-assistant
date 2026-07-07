@@ -23,6 +23,17 @@ export async function POST(request: Request) {
     const result = await loginUser(parsed.data);
 
     if (!result.success) {
+      if (result.code === "EMAIL_NOT_VERIFIED") {
+        return Response.json(
+          {
+            error: {
+              code: "EMAIL_NOT_VERIFIED",
+              message: "Please verify your email before signing in.",
+            },
+          },
+          { status: 403 }
+        );
+      }
       return Response.json(
         { error: { code: "INVALID_CREDENTIALS", message: "Invalid email or password." } },
         { status: 401 }

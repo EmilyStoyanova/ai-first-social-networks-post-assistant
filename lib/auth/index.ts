@@ -52,8 +52,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             isGlobalAdmin: user.isGlobalAdmin,
             preferredLanguage: user.preferredLang as "en" | "bg",
           };
-        } catch {
-          // Do not expose internal errors through Auth.js error handling
+        } catch (err) {
+          console.error("[auth] authorize() error:", err);
           return null;
         }
       },
