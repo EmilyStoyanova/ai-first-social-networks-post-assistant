@@ -1,17 +1,29 @@
 import { createHash, randomBytes } from "crypto";
-import { Resend } from "resend";
+import nodemailer from "nodemailer";
 import { prisma } from "@/lib/db/client";
 
 const EXPIRY_HOURS = 24;
-const FROM = "contact@edamame.digital";
 
-function getResend(): Resend {
-  const key = process.env.RESEND_API_KEY;
-  if (!key) throw new Error("RESEND_API_KEY environment variable is not set.");
-  return new Resend(key);
+function createTransport() {
+  const host = process.env.EMAIL_HOST;
+  const port = parseInt(process.env.EMAIL_PORT ?? "587", 10);
+  const secure = process.env.EMAIL_SECURE === "true";
+  const user = process.env.EMAIL_USER;
+  const pass = process.env.EMAIL_PASS;
+
+  if (!host || !user || !pass) {
+    throw new Error("EMAIL_HOST, EMAIL_USER, and EMAIL_PASS environment variables are required.");
+  }
+
+  return nodemailer.createTransport({ host, port, secure, auth: { user, pass } });
+}
+
+function getFrom(): string {
+  return process.env.EMAIL_FROM ?? "noreply@localhost";
 }
 
 function getBaseUrl(): string {
+  if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, "");
   if (process.env.NEXTAUTH_URL) return process.env.NEXTAUTH_URL.replace(/\/$/, "");
   if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
   return "http://localhost:3000";
@@ -65,8 +77,9 @@ export async function sendVerificationEmail(
   const isBg = lang === "bg";
   const subject = isBg ? "Потвърди имейл адреса си" : "Verify your email address";
 
-  await getResend().emails.send({
-    from: FROM,
+  const transporter = createTransport();
+  await transporter.sendMail({
+    from: getFrom(),
     to: email,
     subject,
     html: buildEmailHtml(verifyUrl, lang),
