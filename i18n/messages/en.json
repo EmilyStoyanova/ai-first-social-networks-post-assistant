@@ -315,7 +315,7 @@
   },
   "channels": {
     "connectBufferFirst": "Connect Buffer to sync your publishing profiles.",
-    "noProfiles": "No Buffer profiles synced yet. Connect Buffer and profiles will appear here automatically.",
+    "noProfiles": "All pages and profiles from your connected Buffer account will appear here. Connect Buffer and sync your profiles to load them.",
     "syncProfiles": "Sync profiles",
     "syncing": "Syncing…",
     "syncSuccess": "Profiles synced successfully.",
