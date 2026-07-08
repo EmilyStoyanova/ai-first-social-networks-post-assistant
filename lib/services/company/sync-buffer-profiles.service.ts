@@ -31,6 +31,7 @@ const SERVICE_TO_CHANNEL: Record<string, SocialChannel> = {
 export interface SyncBufferProfilesStats {
   synced: number;
   deactivated: number;
+  lastSyncedAt: string;
 }
 
 export type SyncBufferProfilesResult =
@@ -130,5 +131,14 @@ export async function syncBufferProfiles(companyId: string): Promise<SyncBufferP
     data: { isActive: false },
   });
 
-  return { success: true, stats: { synced, deactivated: deactivated.count } };
+  const now = new Date();
+  await prisma.bufferConnection.updateMany({
+    where: { companyId },
+    data: { lastProfileSyncAt: now },
+  });
+
+  return {
+    success: true,
+    stats: { synced, deactivated: deactivated.count, lastSyncedAt: now.toISOString() },
+  };
 }

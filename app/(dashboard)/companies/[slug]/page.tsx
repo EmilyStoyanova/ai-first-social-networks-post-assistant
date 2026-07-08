@@ -374,6 +374,7 @@ async function SettingsTab({
           initialConfigs={channelConfigs}
           canManage={canManage}
           bufferConnected={bufferConnection.connected}
+          lastSyncedAt={bufferConnection.lastProfileSyncAt?.toISOString() ?? null}
           companyAutomationMode={company?.automationMode ?? "semi_automated"}
         />
       </Section>

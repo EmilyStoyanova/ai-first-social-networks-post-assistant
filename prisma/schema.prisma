@@ -193,9 +193,10 @@ model BufferConnection {
   bufferUserId    String    @map("buffer_user_id")
   accessTokenEnc  String    @map("access_token_enc")
   refreshTokenEnc String?   @map("refresh_token_enc")
-  tokenExpiresAt  DateTime? @map("token_expires_at")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
+  tokenExpiresAt    DateTime? @map("token_expires_at")
+  lastProfileSyncAt DateTime? @map("last_profile_sync_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 

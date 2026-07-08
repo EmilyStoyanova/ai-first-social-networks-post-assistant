@@ -288,6 +288,13 @@
   "channels": {
     "connectBufferFirst": "Connect Buffer to sync your publishing profiles.",
     "noProfiles": "No Buffer profiles synced yet. Connect Buffer and profiles will appear here automatically.",
+    "syncProfiles": "Sync profiles",
+    "syncing": "Syncing…",
+    "syncSuccess": "Profiles synced successfully.",
+    "syncError": "Failed to sync profiles. Please try again.",
+    "syncHelperText": "Synchronizes all profiles from the connected Buffer account. If you've added or removed pages/accounts in Buffer, use this button to refresh the list.",
+    "lastSynced": "Last synced: {date}",
+    "neverSynced": "No synchronization has been performed yet.",
     "enabled": "Enabled",
     "disabled": "Disabled",
     "language": "Language",
