@@ -20,7 +20,7 @@ export async function SetupChecklist({
   hasEnabledChannel,
 }: Props) {
   const t = await getTranslations("setupChecklist");
-  const settingsHref = `/companies/${slug}?tab=settings`;
+  const base = `/companies/${slug}?tab=settings`;
 
   const allRequiredDone = bufferConnected && profilesSynced && hasEnabledChannel;
 
@@ -41,7 +41,7 @@ export async function SetupChecklist({
     {
       label: t("item1Label"),
       hint: t("item1Hint"),
-      href: settingsHref,
+      href: `${base}#brand`,
       linkLabel: t("item1Link"),
       done: brandDescribed,
       required: false,
@@ -49,7 +49,7 @@ export async function SetupChecklist({
     {
       label: t("item2Label"),
       hint: t("item2Hint"),
-      href: settingsHref,
+      href: `${base}#buffer`,
       linkLabel: t("item2Link"),
       done: bufferConnected,
       required: true,
@@ -57,7 +57,7 @@ export async function SetupChecklist({
     {
       label: t("item3Label"),
       hint: t("item3Hint"),
-      href: settingsHref,
+      href: `${base}#channels`,
       linkLabel: t("item3Link"),
       done: profilesSynced,
       required: true,
@@ -65,7 +65,7 @@ export async function SetupChecklist({
     {
       label: t("item4Label"),
       hint: t("item4Hint"),
-      href: settingsHref,
+      href: `${base}#channels`,
       linkLabel: t("item4Link"),
       done: hasEnabledChannel,
       required: true,

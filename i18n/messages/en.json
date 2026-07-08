@@ -153,7 +153,16 @@
     "noCompanies": "No companies yet.",
     "noCompaniesDesc": "Create your first company to get started.",
     "createCompany": "Create Company",
-    "companiesCount": "{count, plural, one {# company} other {# companies}}"
+    "companiesCount": "{count, plural, one {# company} other {# companies}}",
+    "onboarding": {
+      "title": "Let's get you started",
+      "description": "Create your first company — then configure your brand, connect Buffer, and enable channels so AI can start generating posts.",
+      "createCompany": "Create your first company"
+    },
+    "setupNeeded": {
+      "title": "Setup needed",
+      "continueSetup": "Continue setup"
+    }
   },
   "companies": {
     "title": "Companies",

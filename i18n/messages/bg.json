@@ -153,7 +153,16 @@
     "noCompanies": "Все още няма компании.",
     "noCompaniesDesc": "Създай първата си компания, за да започнеш.",
     "createCompany": "Създай компания",
-    "companiesCount": "{count, plural, one {# компания} other {# компании}}"
+    "companiesCount": "{count, plural, one {# компания} other {# компании}}",
+    "onboarding": {
+      "title": "Да започнем",
+      "description": "Създай първата си компания — после конфигурирай марката, свържи Buffer и активирай каналите, за да може AI да генерира публикации.",
+      "createCompany": "Създай първата си компания"
+    },
+    "setupNeeded": {
+      "title": "Изисква настройка",
+      "continueSetup": "Продължи настройката"
+    }
   },
   "companies": {
     "title": "Компании",

@@ -29,7 +29,6 @@ import { SetupChecklist } from "@/components/company/setup-checklist";
 import { ChannelConfigSection } from "@/components/company/channel-config-section";
 import { ContentSourcesSection } from "@/components/company/content-sources-section";
 import { GeneratedPostsSection } from "@/components/company/generated-posts-section";
-import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { Section } from "@/components/ui/Section";
@@ -378,13 +377,10 @@ async function SettingsTab({
   bufferParam,
 }: SettingsTabProps) {
   const t = await getTranslations("companyPage");
-  const tWs = await getTranslations("workspace");
 
   return (
     <div className="space-y-10">
-      {!brandGuidelines && <Alert variant="info">{tWs("setupHint")}</Alert>}
-
-      <Section title={t("sections.brand")}>
+      <Section id="brand" title={t("sections.brand")}>
         <BrandGuidelinesForm
           slug={slug}
           initialValues={brandGuidelines}
@@ -394,7 +390,7 @@ async function SettingsTab({
         />
       </Section>
 
-      <Section title={t("sections.integrations")}>
+      <Section id="buffer" title={t("sections.integrations")}>
         <BufferConnectionCard
           slug={slug}
           initialConnection={{
@@ -407,7 +403,11 @@ async function SettingsTab({
         />
       </Section>
 
-      <Section title={t("sections.channels")} description={t("sections.channelsDesc")}>
+      <Section
+        id="channels"
+        title={t("sections.channels")}
+        description={t("sections.channelsDesc")}
+      >
         <ChannelConfigSection
           slug={slug}
           initialConfigs={channelConfigs}
