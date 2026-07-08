@@ -105,7 +105,21 @@ export async function generatePostFromContext(
 ): Promise<GenerateDraftPostResult> {
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
-  const { systemPrompt, userPrompt } = buildPrompts(context, contentLanguage);
+
+  // ── Fetch recent posts before generation ──────────────────────────────────
+  // Used both as prompt context (avoid repetition) and for duplicate detection after.
+  const recentRows = await prisma.post.findMany({
+    where: { companyId, channel: context.channel.channel as SocialChannel },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    select: { id: true, content: true },
+  });
+
+  const { systemPrompt, userPrompt } = buildPrompts(
+    context,
+    contentLanguage,
+    recentRows.slice(0, 5).map((r) => ({ text: r.content }))
+  );
 
   // ── LLM call ─────────────────────────────────────────────────────────────
   // Provider name and model come from context (set by getLlmProviderInfo() during context build)
@@ -130,7 +144,7 @@ export async function generatePostFromContext(
       const response = await provider.generate({
         systemPrompt,
         userPrompt,
-        temperature: 0.7,
+        temperature: 0.85,
         maxTokens: 1024,
       });
       rawText = response.text;
@@ -154,14 +168,6 @@ export async function generatePostFromContext(
   }
 
   // ── Quality guards ────────────────────────────────────────────────────────
-
-  // Fetch last 10 posts for this company + channel to check duplicates
-  const recentRows = await prisma.post.findMany({
-    where: { companyId, channel: context.channel.channel as SocialChannel },
-    orderBy: { createdAt: "desc" },
-    take: 10,
-    select: { id: true, content: true },
-  });
 
   const duplicateResult = checkDuplicatePost({
     candidateText: parsed.text,

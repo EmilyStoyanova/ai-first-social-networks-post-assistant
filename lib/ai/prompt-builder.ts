@@ -5,6 +5,10 @@ export interface BuiltPrompts {
   userPrompt: string;
 }
 
+export interface RecentPostContext {
+  text: string;
+}
+
 // ─── Channel metadata ─────────────────────────────────────────────────────────
 
 const CHANNEL_LABELS: Record<string, string> = {
@@ -151,18 +155,14 @@ const JSON_FORMAT_INSTRUCTION = `Return ONLY a JSON object in this exact format 
   "notes": "brief creative rationale (optional)"
 }`;
 
-function buildUserPrompt(ctx: GenerationContext, contentLanguage?: string): string {
+function buildUserPrompt(
+  ctx: GenerationContext,
+  contentLanguage?: string,
+  recentPosts: RecentPostContext[] = []
+): string {
   const { channel, feedItems } = ctx;
   const channelLabel = CHANNEL_LABELS[channel.channel] ?? channel.channel;
   const lang = (contentLanguage ?? channel.postingLanguage).toUpperCase();
-
-  if (feedItems.length === 0) {
-    return [
-      `Create an original ${channelLabel} post for ${ctx.company.name}.`,
-      `Write in ${lang}.`,
-      JSON_FORMAT_INSTRUCTION,
-    ].join("\n\n");
-  }
 
   // Build feed excerpt, newest first, respecting total char budget
   let budget = TOTAL_FEED_CHAR_LIMIT;
@@ -191,20 +191,33 @@ function buildUserPrompt(ctx: GenerationContext, contentLanguage?: string): stri
       ? `Use the following content as inspiration:\n\n---\n${excerpts.join("\n---\n")}\n---`
       : "";
 
-  return [
-    `Write a ${channelLabel} post for ${ctx.company.name}.`,
-    feedSection,
-    JSON_FORMAT_INSTRUCTION,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  const recentSection =
+    recentPosts.length > 0
+      ? [
+          "Previously generated posts for this channel. Do not repeat or paraphrase them. Write a meaningfully different post with a different angle, hook, or tone.",
+          "---",
+          ...recentPosts.map((p) => p.text),
+          "---",
+        ].join("\n")
+      : "";
+
+  const intro =
+    feedItems.length === 0
+      ? `Create an original ${channelLabel} post for ${ctx.company.name}.\nWrite in ${lang}.`
+      : `Write a ${channelLabel} post for ${ctx.company.name}.`;
+
+  return [intro, feedSection, recentSection, JSON_FORMAT_INSTRUCTION].filter(Boolean).join("\n\n");
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-export function buildPrompts(ctx: GenerationContext, contentLanguage?: string): BuiltPrompts {
+export function buildPrompts(
+  ctx: GenerationContext,
+  contentLanguage?: string,
+  recentPosts: RecentPostContext[] = []
+): BuiltPrompts {
   return {
     systemPrompt: buildSystemPrompt(ctx, contentLanguage),
-    userPrompt: buildUserPrompt(ctx, contentLanguage),
+    userPrompt: buildUserPrompt(ctx, contentLanguage, recentPosts),
   };
 }
