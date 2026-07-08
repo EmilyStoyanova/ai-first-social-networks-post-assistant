@@ -5,7 +5,7 @@ import {
   BufferApiError,
   BufferTokenExpiredError,
 } from "@/lib/buffer/buffer-errors";
-import type { SocialChannel } from "@/app/generated/prisma/enums";
+import type { SocialChannel } from "@prisma/client";
 
 const SERVICE_TO_CHANNEL: Record<string, SocialChannel> = {
   facebook: "facebook",
