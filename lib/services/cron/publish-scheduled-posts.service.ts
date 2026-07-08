@@ -93,7 +93,13 @@ export async function publishScheduledPosts(companyId: string): Promise<PublishS
     const outcome = await sendPostToBuffer(client, post, profileId);
 
     if (outcome.ok) {
-      await markPostSent(companyId, post.id, outcome.updateId, { channel: post.channel });
+      await markPostSent(
+        companyId,
+        post.id,
+        outcome.updateId,
+        { channel: post.channel },
+        outcome.publishedUrl
+      );
       summary.published++;
       continue;
     }

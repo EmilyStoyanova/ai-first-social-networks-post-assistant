@@ -1,12 +1,14 @@
 "use client";
 
 import { useRouter, usePathname } from "next/navigation";
-import { useTransition, useState } from "react";
+import { useTransition, useState, useRef } from "react";
 import { useTranslations } from "next-intl";
 import Link from "next/link";
 import { Image as ImageIcon } from "lucide-react";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Button } from "@/components/ui/Button";
+import { Alert } from "@/components/ui/Alert";
+import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { MediaCard } from "./media-card";
 import type { MediaItem } from "@/lib/services/company/list-media.service";
 
@@ -73,11 +75,50 @@ export function MediaGallery({
   canDelete,
 }: Props) {
   const t = useTranslations("mediaGallery");
+  const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
   const router = useRouter();
   const pathname = usePathname();
   const [isPending, startTransition] = useTransition();
   const [items, setItems] = useState<MediaItem[]>(initialItems);
   const [total, setTotal] = useState(initialTotal);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  async function handleUpload(file: File) {
+    setUploading(true);
+    setUploadError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      form.append("slug", slug);
+      const res = await fetch("/api/v1/media/upload", { method: "POST", body: form });
+      if (!res.ok) {
+        const json = (await res.json()) as { error?: { message?: string } };
+        throw new Error(apiError(json.error));
+      }
+      const { media } = (await res.json()) as {
+        media: { id: string; url: string; width: number | null; height: number | null };
+      };
+      const newItem: MediaItem = {
+        id: media.id,
+        url: media.url,
+        width: media.width,
+        height: media.height,
+        provider: "USER_UPLOAD",
+        createdAt: new Date().toISOString(),
+        post: null,
+      };
+      setItems((prev) => [newItem, ...prev]);
+      setTotal((prev) => prev + 1);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -162,8 +203,8 @@ export function MediaGallery({
           ))}
         </div>
 
-        {/* Sort */}
-        <div className="ml-auto flex items-center gap-2">
+        {/* Sort + Upload */}
+        <div className="ml-auto flex items-center gap-3">
           <span className="text-fg-faint text-xs font-semibold tracking-wider uppercase">
             {t("sortLabel")}
           </span>
@@ -178,8 +219,32 @@ export function MediaGallery({
               </option>
             ))}
           </select>
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={uploading}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            {uploading ? t("uploading") : t("uploadImage")}
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/jpeg,image/jpg,image/png,image/webp"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void handleUpload(f);
+            }}
+          />
         </div>
       </div>
+
+      {uploadError && (
+        <Alert variant="error" className="mt-2">
+          {uploadError}
+        </Alert>
+      )}
 
       {/* Count */}
       {total > 0 && (
@@ -202,12 +267,22 @@ export function MediaGallery({
             description={channel || provider ? t("noImagesFilter") : t("noImagesDesc")}
             action={
               !channel && !provider ? (
-                <Link
-                  href={`/companies/${slug}`}
-                  className="rounded-control bg-fg hover:bg-fg/90 inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white transition-colors"
-                >
-                  {t("generateFirst")}
-                </Link>
+                <div className="flex flex-wrap items-center justify-center gap-3">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    loading={uploading}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    {t("uploadImage")}
+                  </Button>
+                  <Link
+                    href={`/companies/${slug}`}
+                    className="rounded-control border-border-strong text-fg-muted hover:bg-surface-subtle inline-flex items-center gap-1.5 border px-4 py-2 text-sm font-semibold transition-colors"
+                  >
+                    {t("generateFirst")}
+                  </Link>
+                </div>
               ) : undefined
             }
           />

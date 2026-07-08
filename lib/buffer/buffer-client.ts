@@ -20,6 +20,7 @@ export interface BufferProfile {
 export interface BufferPublishResult {
   updateId: string;
   status: string;
+  publishedUrl: string | null;
 }
 
 interface RawChannel {
@@ -32,7 +33,7 @@ interface RawChannel {
 interface RawCreatePostPayload {
   createPost?: {
     __typename?: string;
-    post?: { id: string; status?: string | null } | null;
+    post?: { id: string; status?: string | null; serviceLink?: string | null } | null;
     message?: string;
   } | null;
 }
@@ -151,7 +152,7 @@ export class BufferClient {
           mode: shareNow${buildMetadataArg(service)}${assets}
         }) {
           __typename
-          ... on PostActionSuccess { post { id status } }
+          ... on PostActionSuccess { post { id status serviceLink } }
           ... on MutationError { message }
         }
       }`;
@@ -168,7 +169,11 @@ export class BufferClient {
         throw new BufferApiError(message);
       }
 
-      first ??= { updateId: payload.post.id, status: payload.post.status ?? "sent" };
+      first ??= {
+        updateId: payload.post.id,
+        status: payload.post.status ?? "sent",
+        publishedUrl: payload.post.serviceLink ?? null,
+      };
     }
 
     if (!first) throw new BufferApiError("No Buffer channel was selected.");

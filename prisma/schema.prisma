@@ -300,6 +300,7 @@ model Post {
   mediaAssetId     String?       @map("media_asset_id")
   status           PostStatus    @default(draft)
   bufferUpdateId   String?       @map("buffer_update_id")
+  publishedPostUrl String?       @map("published_post_url")
   scheduledFor     DateTime?     @map("scheduled_for")
   publishedAt      DateTime?     @map("published_at")
   safetyFlagged    Boolean       @default(false) @map("safety_flagged")

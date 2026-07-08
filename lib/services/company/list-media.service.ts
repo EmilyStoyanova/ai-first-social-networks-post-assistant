@@ -6,7 +6,7 @@ export interface MediaItem {
   url: string;
   width: number | null;
   height: number | null;
-  provider: "LEONARDO" | "MOCK";
+  provider: "LEONARDO" | "MOCK" | "USER_UPLOAD";
   createdAt: string;
   post: {
     id: string;
@@ -39,8 +39,13 @@ function isValidChannel(v: string): v is (typeof VALID_CHANNELS)[number] {
   return (VALID_CHANNELS as readonly string[]).includes(v);
 }
 
-function deriveProvider(cloudinaryId: string): "LEONARDO" | "MOCK" {
-  return cloudinaryId === "mock-asset-id" ? "MOCK" : "LEONARDO";
+function deriveProvider(
+  cloudinaryId: string,
+  generatedBy: string
+): "LEONARDO" | "MOCK" | "USER_UPLOAD" {
+  if (cloudinaryId === "mock-asset-id") return "MOCK";
+  if (generatedBy === "user_upload") return "USER_UPLOAD";
+  return "LEONARDO";
 }
 
 function buildWhere(
@@ -114,6 +119,7 @@ export async function listMedia(
         width: true,
         height: true,
         cloudinaryId: true,
+        generatedBy: true,
         createdAt: true,
         posts: {
           orderBy: { createdAt: "desc" },
@@ -132,7 +138,7 @@ export async function listMedia(
       url: r.url,
       width: r.width,
       height: r.height,
-      provider: deriveProvider(r.cloudinaryId),
+      provider: deriveProvider(r.cloudinaryId, r.generatedBy),
       createdAt: r.createdAt.toISOString(),
       post: firstPost
         ? {

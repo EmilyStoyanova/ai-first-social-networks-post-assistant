@@ -437,6 +437,7 @@
     "reject": "Reject",
     "rejecting": "Rejecting…",
     "publishToBuffer": "Publish to Buffer",
+    "openPost": "Open post",
     "connectBufferToPublish": "Connect Buffer to publish",
     "deleteDraft": "Delete this draft?",
     "autoApprovedInfo": "This post was automatically approved because the channel is using Fully Automated mode. You can edit it or publish it to Buffer immediately.",
@@ -510,10 +511,12 @@
     "sortLabel": "Sort",
     "imageCount": "{count, plural, one {# image} other {# images}}",
     "matchingFilters": " matching filters",
-    "noImages": "No generated images yet.",
-    "noImagesDesc": "Generate your first image from a draft post.",
+    "noImages": "No images yet.",
+    "noImagesDesc": "Upload an image from your device, or generate one from a draft post.",
     "noImagesFilter": "Try adjusting your filters.",
-    "generateFirst": "Generate your first image",
+    "generateFirst": "Generate with AI",
+    "uploadImage": "Upload image",
+    "uploading": "Uploading…",
     "previousPage": "← Previous",
     "nextPage": "Next →",
     "page": "Page {page} of {total}"
@@ -534,7 +537,9 @@
     "imagePreview": "Image Preview",
     "openInNewTab": "Open in new tab",
     "imageForPost": "Image for {channel} post",
-    "mediaAsset": "Media asset"
+    "mediaAsset": "Media asset",
+    "providerUploaded": "Uploaded",
+    "providerAiGenerated": "AI generated"
   },
   "imagePicker": {
     "title": "Choose Image",

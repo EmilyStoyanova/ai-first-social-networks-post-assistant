@@ -65,6 +65,9 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
       })
     : null;
 
+  const providerLabel =
+    item.provider === "USER_UPLOAD" ? t("providerUploaded") : t("providerAiGenerated");
+
   async function handleOpenReuse() {
     setReuseOpen(true);
     setAttachError("");
@@ -155,7 +158,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
           {/* Badges row */}
           <div className="mb-3 flex flex-wrap items-center gap-2">
             {channelMeta && <Badge variant={channelMeta.variant}>{channelMeta.label}</Badge>}
-            <Badge variant="neutral">{item.provider}</Badge>
+            <Badge variant="neutral">{providerLabel}</Badge>
           </div>
 
           {/* Metadata */}
@@ -336,7 +339,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
                 </>
               )}
               <dt className="text-fg-faint font-medium">{t("status")}</dt>
-              <dd className="text-fg-muted">{item.provider}</dd>
+              <dd className="text-fg-muted">{providerLabel}</dd>
               <dt className="text-fg-faint font-medium">{t("created")}</dt>
               <dd className="text-fg-muted">{formatDate(item.createdAt)}</dd>
             </dl>

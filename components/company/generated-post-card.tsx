@@ -103,6 +103,9 @@ export function GeneratedPostCard({
   const [publishing, setPublishing] = useState(false);
   const [publishError, setPublishError] = useState("");
   const [publishedAt, setPublishedAt] = useState<string | null>(null);
+  const [publishedPostUrl, setPublishedPostUrl] = useState<string | null>(
+    post.publishedPostUrl ?? null
+  );
 
   const channelMeta = CHANNEL_META[post.channel] ?? {
     label: post.channel,
@@ -287,9 +290,10 @@ export function GeneratedPostCard({
         const json = (await res.json()) as { error?: { message?: string } };
         throw new Error(apiError(json.error));
       }
-      const json = (await res.json()) as { publishedAt: string };
+      const json = (await res.json()) as { publishedAt: string; publishedPostUrl?: string | null };
       setLocalStatus("SENT_TO_BUFFER");
       setPublishedAt(json.publishedAt);
+      setPublishedPostUrl(json.publishedPostUrl ?? null);
       setPublishOpen(false);
     } catch (err) {
       setPublishError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
@@ -532,6 +536,18 @@ export function GeneratedPostCard({
         )}
         {canPublish && !bufferConnected && isApproved && (
           <span className="text-fg-faint text-xs">{t("connectBufferToPublish")}</span>
+        )}
+
+        {/* Open post — shown when a public URL is available */}
+        {publishedPostUrl && (
+          <a
+            href={publishedPostUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-fg-muted hover:text-fg rounded-control border-border bg-surface inline-flex items-center gap-1.5 border px-3 py-1.5 text-xs font-medium transition-colors"
+          >
+            {t("openPost")} ↗
+          </a>
         )}
 
         {/* Delete — draft only, owner/admin */}

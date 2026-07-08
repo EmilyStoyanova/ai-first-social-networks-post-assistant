@@ -107,11 +107,17 @@ export async function retryFailedPosts(companyId: string): Promise<RetryFailedSu
     summary.retried++;
 
     if (outcome.ok) {
-      await markPostSent(companyId, post.id, outcome.updateId, {
-        channel: post.channel,
-        retry: true,
-        attempt: post.retryCount + 1,
-      });
+      await markPostSent(
+        companyId,
+        post.id,
+        outcome.updateId,
+        {
+          channel: post.channel,
+          retry: true,
+          attempt: post.retryCount + 1,
+        },
+        outcome.publishedUrl
+      );
       summary.recovered++;
       continue;
     }

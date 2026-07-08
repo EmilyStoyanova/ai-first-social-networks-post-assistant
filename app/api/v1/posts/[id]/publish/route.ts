@@ -121,6 +121,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       status: result.data.status,
       publishedAt: result.data.publishedAt,
       profileId: result.data.profileId,
+      publishedPostUrl: result.data.publishedPostUrl,
     },
     { status: 200 }
   );

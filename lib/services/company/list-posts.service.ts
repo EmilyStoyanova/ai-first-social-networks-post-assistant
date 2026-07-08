@@ -13,6 +13,7 @@ export interface PostItem {
   llmModel: string | null;
   mediaUrl?: string | null;
   approvedById: string | null;
+  publishedPostUrl: string | null;
   createdAt: string;
 }
 
@@ -31,6 +32,7 @@ const SELECT = {
   llmProvider: true,
   llmModel: true,
   approvedById: true,
+  publishedPostUrl: true,
   createdAt: true,
   mediaAsset: { select: { url: true } },
 } as const;
@@ -47,6 +49,7 @@ function toItem(r: {
   llmProvider: string | null;
   llmModel: string | null;
   approvedById: string | null;
+  publishedPostUrl: string | null;
   mediaAsset: { url: string } | null;
   createdAt: Date;
 }): PostItem {
@@ -62,6 +65,7 @@ function toItem(r: {
     llmProvider: r.llmProvider,
     llmModel: r.llmModel,
     approvedById: r.approvedById,
+    publishedPostUrl: r.publishedPostUrl,
     mediaUrl: r.mediaAsset?.url ?? null,
     createdAt: r.createdAt.toISOString(),
   };

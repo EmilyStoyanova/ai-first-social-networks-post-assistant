@@ -16,7 +16,8 @@ export interface SendablePost {
 }
 
 export type SendOutcome =
-  { ok: true; updateId: string } | { ok: false; message: string; tokenExpired: boolean };
+  | { ok: true; updateId: string; publishedUrl: string | null }
+  | { ok: false; message: string; tokenExpired: boolean };
 
 export async function sendPostToBuffer(
   client: BufferClient,
@@ -29,7 +30,7 @@ export async function sendPostToBuffer(
       buildPostText(post.content, post.hashtags),
       { mediaUrl: post.mediaAsset?.url }
     );
-    return { ok: true, updateId: result.updateId };
+    return { ok: true, updateId: result.updateId, publishedUrl: result.publishedUrl };
   } catch (err) {
     if (err instanceof BufferTokenExpiredError) {
       return { ok: false, message: err.message, tokenExpired: true };
@@ -55,11 +56,18 @@ export async function markPostSent(
   companyId: string,
   postId: string,
   bufferUpdateId: string,
-  metadata: Record<string, unknown>
+  metadata: Record<string, unknown>,
+  publishedPostUrl?: string | null
 ): Promise<void> {
   await prisma.post.update({
     where: { id: postId },
-    data: { status: "sent_to_buffer", bufferUpdateId, publishedAt: new Date(), lastError: null },
+    data: {
+      status: "sent_to_buffer",
+      bufferUpdateId,
+      publishedPostUrl: publishedPostUrl ?? null,
+      publishedAt: new Date(),
+      lastError: null,
+    },
   });
   await createAuditLog({
     companyId,

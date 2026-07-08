@@ -22,6 +22,7 @@ export interface PublishPostDTO {
   status: string;
   publishedAt: string;
   profileId: string;
+  publishedPostUrl: string | null;
 }
 
 export type PublishPostResult =
@@ -108,6 +109,7 @@ export async function publishPost(
         status: "SENT_TO_BUFFER",
         publishedAt: now,
         profileId,
+        publishedPostUrl: null,
       },
     };
   }
@@ -144,6 +146,7 @@ export async function publishPost(
     data: {
       status: "sent_to_buffer",
       bufferUpdateId: bufferResult.updateId,
+      publishedPostUrl: bufferResult.publishedUrl,
       publishedAt: new Date(),
     },
   });
@@ -164,6 +167,7 @@ export async function publishPost(
       status: "SENT_TO_BUFFER",
       publishedAt: now,
       profileId,
+      publishedPostUrl: bufferResult.publishedUrl,
     },
   };
 }
