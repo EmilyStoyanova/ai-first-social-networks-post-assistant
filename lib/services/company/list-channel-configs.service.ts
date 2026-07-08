@@ -7,7 +7,10 @@ export interface PostingWindow {
 }
 
 export interface ChannelConfigItem {
+  id: string;
   channel: string;
+  bufferProfileId: string | null;
+  bufferProfileName: string | null;
   enabled: boolean;
   imageRequired: boolean;
   postingLanguage: string;
@@ -15,59 +18,14 @@ export interface ChannelConfigItem {
   postsPerWeek: number;
   postingWindows: PostingWindow[];
   automationModeOverride: string | null;
-  bufferProfileId: string | null;
   updatedAt: string | null;
 }
 
-const CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const;
-
-type Channel = (typeof CHANNELS)[number];
-
-const DEFAULTS: Record<Channel, Omit<ChannelConfigItem, "channel" | "updatedAt">> = {
-  facebook: {
-    enabled: false,
-    postsPerDay: 1,
-    postsPerWeek: 5,
-    postingLanguage: "en",
-    imageRequired: true,
-    automationModeOverride: null,
-    bufferProfileId: null,
-    postingWindows: [],
-  },
-  linkedin: {
-    enabled: false,
-    postsPerDay: 1,
-    postsPerWeek: 5,
-    postingLanguage: "en",
-    imageRequired: false,
-    automationModeOverride: null,
-    bufferProfileId: null,
-    postingWindows: [],
-  },
-  instagram: {
-    enabled: false,
-    postsPerDay: 1,
-    postsPerWeek: 5,
-    postingLanguage: "en",
-    imageRequired: true,
-    automationModeOverride: null,
-    bufferProfileId: null,
-    postingWindows: [],
-  },
-  tiktok: {
-    enabled: false,
-    postsPerDay: 1,
-    postsPerWeek: 3,
-    postingLanguage: "en",
-    imageRequired: true,
-    automationModeOverride: null,
-    bufferProfileId: null,
-    postingWindows: [],
-  },
-};
-
 const SELECT = {
+  id: true,
   channel: true,
+  bufferProfileId: true,
+  bufferProfileName: true,
   enabled: true,
   imageRequired: true,
   postingLanguage: true,
@@ -75,7 +33,6 @@ const SELECT = {
   postsPerWeek: true,
   postingWindows: true,
   automationModeOverride: true,
-  bufferProfileId: true,
   updatedAt: true,
 } as const;
 
@@ -102,25 +59,26 @@ export async function listChannelConfigs(
     companyId = membership.companyId;
   }
 
-  const rows = await prisma.channelConfig.findMany({ where: { companyId }, select: SELECT });
-  const rowMap = new Map(rows.map((r) => [r.channel as Channel, r]));
-
-  const configs: ChannelConfigItem[] = CHANNELS.map((channel) => {
-    const row = rowMap.get(channel);
-    if (!row) return { channel, ...DEFAULTS[channel], updatedAt: null };
-    return {
-      channel: row.channel,
-      enabled: row.enabled,
-      imageRequired: row.imageRequired ?? DEFAULTS[channel].imageRequired,
-      postingLanguage: row.postingLanguage,
-      postsPerDay: row.postsPerDay,
-      postsPerWeek: row.postsPerWeek,
-      postingWindows: (row.postingWindows as PostingWindow[] | null) ?? [],
-      automationModeOverride: row.automationModeOverride ?? null,
-      bufferProfileId: row.bufferProfileId,
-      updatedAt: row.updatedAt.toISOString(),
-    };
+  const rows = await prisma.channelConfig.findMany({
+    where: { companyId, isActive: true },
+    select: SELECT,
+    orderBy: [{ channel: "asc" }, { bufferProfileName: "asc" }],
   });
+
+  const configs: ChannelConfigItem[] = rows.map((row) => ({
+    id: row.id,
+    channel: row.channel,
+    bufferProfileId: row.bufferProfileId,
+    bufferProfileName: row.bufferProfileName,
+    enabled: row.enabled,
+    imageRequired: row.imageRequired ?? false,
+    postingLanguage: row.postingLanguage,
+    postsPerDay: row.postsPerDay,
+    postsPerWeek: row.postsPerWeek,
+    postingWindows: (row.postingWindows as PostingWindow[] | null) ?? [],
+    automationModeOverride: row.automationModeOverride ?? null,
+    updatedAt: row.updatedAt.toISOString(),
+  }));
 
   return { success: true, configs };
 }

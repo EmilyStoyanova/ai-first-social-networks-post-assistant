@@ -31,10 +31,11 @@ export async function PUT(request: Request, context: Context) {
     return Response.json({ error: { code: "VALIDATION_ERROR", message } }, { status: 400 });
   }
 
-  const { slug, channel } = await context.params;
+  // [channel] segment is now the config UUID (not the platform name).
+  const { slug, channel: configId } = await context.params;
   const result = await upsertChannelConfig(
     slug,
-    channel,
+    configId,
     session.user.id,
     session.user.isGlobalAdmin,
     parsed.data
@@ -44,7 +45,7 @@ export async function PUT(request: Request, context: Context) {
     switch (result.code) {
       case "NOT_FOUND":
         return Response.json(
-          { error: { code: "NOT_FOUND", message: "Company not found." } },
+          { error: { code: "NOT_FOUND", message: "Channel config not found." } },
           { status: 404 }
         );
       case "FORBIDDEN":
@@ -56,16 +57,6 @@ export async function PUT(request: Request, context: Context) {
             },
           },
           { status: 403 }
-        );
-      case "INVALID_CHANNEL":
-        return Response.json(
-          {
-            error: {
-              code: "INVALID_CHANNEL",
-              message: "Invalid channel. Must be facebook, linkedin, instagram, or tiktok.",
-            },
-          },
-          { status: 400 }
         );
     }
   }

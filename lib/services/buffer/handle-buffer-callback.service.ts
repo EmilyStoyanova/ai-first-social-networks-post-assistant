@@ -3,6 +3,7 @@ import { exchangeCodeForTokens, getBufferAccountId } from "@/lib/integrations/bu
 import { verifyOAuthState } from "@/lib/integrations/buffer/state";
 import { encrypt } from "@/lib/security/encryption";
 import { checkBufferAccess } from "./_access";
+import { syncBufferProfiles } from "@/lib/services/company/sync-buffer-profiles.service";
 
 function getBufferConfig(): { clientId: string; clientSecret: string; redirectUri: string } | null {
   const clientId = process.env.BUFFER_CLIENT_ID;
@@ -79,6 +80,9 @@ export async function handleBufferCallback(
     },
     update: { bufferUserId, accessTokenEnc, refreshTokenEnc, tokenExpiresAt },
   });
+
+  // Fire-and-forget: sync Buffer profiles after connecting. Errors are non-fatal.
+  syncBufferProfiles(access.companyId).catch(() => undefined);
 
   return { success: true, slug };
 }

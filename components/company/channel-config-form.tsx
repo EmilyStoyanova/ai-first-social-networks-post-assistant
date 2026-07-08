@@ -10,7 +10,6 @@ import type {
 
 export interface ChannelFormPayload {
   enabled: boolean;
-  bufferProfileId: string | null;
   postsPerDay: number;
   postsPerWeek: number;
   language: "en" | "bg";
@@ -61,7 +60,6 @@ export function ChannelConfigForm({
   const t = useTranslations("channels");
   const tCommon = useTranslations("common");
   const [enabled, setEnabled] = useState(initialConfig.enabled);
-  const [bufferProfileId, setBufferProfileId] = useState(initialConfig.bufferProfileId ?? "");
   const [postsPerDay, setPostsPerDay] = useState(String(initialConfig.postsPerDay));
   const [postsPerWeek, setPostsPerWeek] = useState(String(initialConfig.postsPerWeek));
   const [language, setLanguage] = useState<"en" | "bg">(
@@ -77,7 +75,6 @@ export function ChannelConfigForm({
     e.preventDefault();
     onSave({
       enabled,
-      bufferProfileId: bufferProfileId.trim() || null,
       postsPerDay: Math.max(0, Math.min(20, parseInt(postsPerDay, 10) || 0)),
       postsPerWeek: Math.max(0, Math.min(100, parseInt(postsPerWeek, 10) || 0)),
       language,
@@ -184,21 +181,6 @@ export function ChannelConfigForm({
         />
         <span className="text-fg-muted text-sm font-medium">{t("imageRequiredLabel")}</span>
       </label>
-
-      {/* Buffer Profile ID */}
-      <div>
-        <label className="text-fg-muted mb-1.5 block text-sm font-medium">
-          {t("bufferProfileId")}{" "}
-          <span className="text-fg-faint font-normal">{t("bufferProfileIdOptional")}</span>
-        </label>
-        <input
-          type="text"
-          value={bufferProfileId}
-          onChange={(e) => setBufferProfileId(e.target.value)}
-          placeholder="e.g. 56d0e1b43d922b506041c12c"
-          className={`${BASE} ${NORMAL}`}
-        />
-      </div>
 
       {/* Posting windows */}
       <div>

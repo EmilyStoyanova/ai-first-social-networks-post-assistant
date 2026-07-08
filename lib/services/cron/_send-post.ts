@@ -45,7 +45,7 @@ export async function sendPostToBuffer(
 /** Channel → Buffer profile mapping from the company's channel configs. */
 export async function loadBufferProfileMap(companyId: string): Promise<Map<string, string>> {
   const configs = await prisma.channelConfig.findMany({
-    where: { companyId, bufferProfileId: { not: null } },
+    where: { companyId, isActive: true, bufferProfileId: { not: null } },
     select: { channel: true, bufferProfileId: true },
   });
   return new Map(configs.map((c) => [c.channel as string, c.bufferProfileId as string]));

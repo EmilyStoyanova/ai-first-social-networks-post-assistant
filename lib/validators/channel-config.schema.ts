@@ -24,7 +24,6 @@ const postingWindowSchema = z
 
 export const upsertChannelConfigSchema = z.object({
   enabled: z.boolean(),
-  bufferProfileId: z.string().max(256).nullable().optional(),
   postsPerDay: z.number().int().min(0).max(20),
   postsPerWeek: z.number().int().min(0).max(100),
   language: z.enum(["en", "bg"]),

@@ -286,7 +286,8 @@
     "areYouSure": "Сигурен ли си, че искаш да прекъснеш Buffer?"
   },
   "channels": {
-    "connectBufferFirst": "Свържи Buffer преди да зададеш Buffer Profile ID.",
+    "connectBufferFirst": "Свържи Buffer, за да синхронизираш профилите за публикуване.",
+    "noProfiles": "Все още няма синхронизирани Buffer профили. Свържи Buffer и профилите ще се появят тук автоматично.",
     "enabled": "Активен",
     "disabled": "Неактивен",
     "language": "Език",
@@ -295,7 +296,6 @@
     "imageRequired": "Изображение задължително",
     "automation": "Автоматизация",
     "companyDefault": "По подразбиране на компанията",
-    "bufferProfileId": "Buffer Profile ID",
     "semiAutomated": "Полуавтоматичен",
     "fullyAutomated": "Напълно автоматичен",
     "ownersOnly": "Само собственици могат да редактират настройките на каналите.",
@@ -304,7 +304,6 @@
     "automationMode": "Режим на автоматизация",
     "languageEN": "EN — Английски",
     "languageBG": "BG — Български",
-    "bufferProfileIdOptional": "Buffer Profile ID (по избор)",
     "postingWindows": "Прозорци за публикуване",
     "postingWindowsHint": "(по един на ред: MONDAY 09:00-17:00)",
     "save": "Запази",

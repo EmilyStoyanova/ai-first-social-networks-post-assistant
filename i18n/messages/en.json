@@ -286,7 +286,8 @@
     "areYouSure": "Are you sure you want to disconnect Buffer?"
   },
   "channels": {
-    "connectBufferFirst": "Connect Buffer before assigning Buffer profile IDs.",
+    "connectBufferFirst": "Connect Buffer to sync your publishing profiles.",
+    "noProfiles": "No Buffer profiles synced yet. Connect Buffer and profiles will appear here automatically.",
     "enabled": "Enabled",
     "disabled": "Disabled",
     "language": "Language",
@@ -295,7 +296,6 @@
     "imageRequired": "Image required",
     "automation": "Automation",
     "companyDefault": "Company default",
-    "bufferProfileId": "Buffer Profile ID",
     "semiAutomated": "Semi-automated",
     "fullyAutomated": "Fully automated",
     "ownersOnly": "Only company owners can edit channel settings.",
@@ -304,7 +304,6 @@
     "automationMode": "Automation mode",
     "languageEN": "EN — English",
     "languageBG": "BG — Bulgarian",
-    "bufferProfileIdOptional": "Buffer Profile ID (optional)",
     "postingWindows": "Posting windows",
     "postingWindowsHint": "(one per line: MONDAY 09:00-17:00)",
     "save": "Save",

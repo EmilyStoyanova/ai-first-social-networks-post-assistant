@@ -2,24 +2,17 @@ import { prisma } from "@/lib/db/client";
 import type { UpsertChannelConfigInput } from "@/lib/validators/channel-config.schema";
 import type { ChannelConfigItem, PostingWindow } from "./list-channel-configs.service";
 
-const VALID_CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const;
-
 export type UpsertChannelConfigResult =
   | { success: true; config: ChannelConfigItem }
-  | { success: false; code: "NOT_FOUND" | "FORBIDDEN" | "INVALID_CHANNEL" };
+  | { success: false; code: "NOT_FOUND" | "FORBIDDEN" };
 
 export async function upsertChannelConfig(
   slug: string,
-  channel: string,
+  configId: string,
   userId: string,
   isGlobalAdmin: boolean,
   data: UpsertChannelConfigInput
 ): Promise<UpsertChannelConfigResult> {
-  const normalizedChannel = channel.toLowerCase();
-  if (!VALID_CHANNELS.includes(normalizedChannel as (typeof VALID_CHANNELS)[number])) {
-    return { success: false, code: "INVALID_CHANNEL" };
-  }
-
   let companyId: string;
 
   if (isGlobalAdmin) {
@@ -36,32 +29,31 @@ export async function upsertChannelConfig(
     companyId = membership.companyId;
   }
 
-  const payload = {
-    enabled: data.enabled,
-    imageRequired: data.imageRequired,
-    postingLanguage: data.language,
-    postsPerDay: data.postsPerDay,
-    postsPerWeek: data.postsPerWeek,
-    postingWindows: (data.postingWindows ?? []) as object[],
-    automationModeOverride: data.automationModeOverride ?? null,
-    bufferProfileId: data.bufferProfileId ?? null,
-  };
+  // Verify the config belongs to this company.
+  const existing = await prisma.channelConfig.findUnique({
+    where: { id: configId },
+    select: { companyId: true },
+  });
+  if (!existing || existing.companyId !== companyId) {
+    return { success: false, code: "NOT_FOUND" };
+  }
 
-  const row = await prisma.channelConfig.upsert({
-    where: {
-      companyId_channel: {
-        companyId,
-        channel: normalizedChannel as (typeof VALID_CHANNELS)[number],
-      },
+  const row = await prisma.channelConfig.update({
+    where: { id: configId },
+    data: {
+      enabled: data.enabled,
+      imageRequired: data.imageRequired,
+      postingLanguage: data.language,
+      postsPerDay: data.postsPerDay,
+      postsPerWeek: data.postsPerWeek,
+      postingWindows: (data.postingWindows ?? []) as object[],
+      automationModeOverride: data.automationModeOverride ?? null,
     },
-    create: {
-      companyId,
-      channel: normalizedChannel as (typeof VALID_CHANNELS)[number],
-      ...payload,
-    },
-    update: payload,
     select: {
+      id: true,
       channel: true,
+      bufferProfileId: true,
+      bufferProfileName: true,
       enabled: true,
       imageRequired: true,
       postingLanguage: true,
@@ -69,13 +61,15 @@ export async function upsertChannelConfig(
       postsPerWeek: true,
       postingWindows: true,
       automationModeOverride: true,
-      bufferProfileId: true,
       updatedAt: true,
     },
   });
 
   const config: ChannelConfigItem = {
+    id: row.id,
     channel: row.channel,
+    bufferProfileId: row.bufferProfileId,
+    bufferProfileName: row.bufferProfileName,
     enabled: row.enabled,
     imageRequired: row.imageRequired ?? false,
     postingLanguage: row.postingLanguage,
@@ -83,7 +77,6 @@ export async function upsertChannelConfig(
     postsPerWeek: row.postsPerWeek,
     postingWindows: (row.postingWindows as PostingWindow[] | null) ?? [],
     automationModeOverride: row.automationModeOverride ?? null,
-    bufferProfileId: row.bufferProfileId,
     updatedAt: row.updatedAt.toISOString(),
   };
 

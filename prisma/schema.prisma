@@ -166,7 +166,10 @@ model ChannelConfig {
   id                     String          @id @default(uuid())
   companyId              String          @map("company_id")
   channel                SocialChannel
-  enabled                Boolean         @default(true)
+  bufferProfileId        String?         @map("buffer_profile_id")
+  bufferProfileName      String?         @map("buffer_profile_name")
+  enabled                Boolean         @default(false)
+  isActive               Boolean         @default(true) @map("is_active")
   imageRequired          Boolean?        @map("image_required")
   maxTextLength          Int?            @map("max_text_length")
   hashtagStyle           HashtagStyle    @default(end_of_post) @map("hashtag_style")
@@ -175,12 +178,12 @@ model ChannelConfig {
   postsPerWeek           Int             @default(5) @map("posts_per_week")
   postingWindows         Json?           @map("posting_windows")
   automationModeOverride AutomationMode? @map("automation_mode_override")
-  bufferProfileId        String?         @map("buffer_profile_id")
   updatedAt              DateTime        @updatedAt @map("updated_at")
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
-  @@unique([companyId, channel])
+  @@unique([companyId, bufferProfileId])
+  @@index([companyId, isActive])
   @@map("channel_configs")
 }
 

@@ -93,17 +93,19 @@ export function ChannelConfigCard({
     icon: <span className="text-xs font-bold">?</span>,
   };
 
+  // Card title is the Buffer profile name (e.g. "FBN Bulgaria"); platform is secondary.
+  const cardTitle = config.bufferProfileName ?? meta.label;
+
   async function handleSave(data: ChannelFormPayload) {
     setSaving(true);
     setErrorMessage("");
 
     try {
-      const res = await fetch(`/api/v1/companies/${slug}/channels/${config.channel}`, {
+      const res = await fetch(`/api/v1/companies/${slug}/channels/${config.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           enabled: data.enabled,
-          bufferProfileId: data.bufferProfileId,
           postsPerDay: data.postsPerDay,
           postsPerWeek: data.postsPerWeek,
           language: data.language,
@@ -139,9 +141,12 @@ export function ChannelConfigCard({
         >
           {meta.icon}
         </span>
-        <div className="flex flex-1 items-center justify-between gap-2">
-          <h3 className="text-fg text-sm font-semibold">{meta.label}</h3>
-          <Badge variant={config.enabled ? "success" : "neutral"}>
+        <div className="flex min-w-0 flex-1 items-center justify-between gap-2">
+          <div className="min-w-0">
+            <h3 className="text-fg truncate text-sm font-semibold">{cardTitle}</h3>
+            {config.bufferProfileName && <p className="text-fg-faint text-xs">{meta.label}</p>}
+          </div>
+          <Badge variant={config.enabled ? "success" : "neutral"} className="shrink-0">
             {config.enabled ? t("enabled") : t("disabled")}
           </Badge>
         </div>
@@ -200,12 +205,6 @@ export function ChannelConfigCard({
                 )}
               </dd>
             </div>
-            {config.bufferProfileId && (
-              <div className="flex items-center justify-between">
-                <dt className="text-fg-muted">{t("bufferProfileId")}</dt>
-                <dd className="text-fg truncate font-medium">{config.bufferProfileId}</dd>
-              </div>
-            )}
           </dl>
 
           {canManage ? (

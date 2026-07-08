@@ -22,10 +22,13 @@ export function ChannelConfigSection({
   return (
     <div className="space-y-4">
       {!bufferConnected && <Alert variant="warning">{t("connectBufferFirst")}</Alert>}
+      {bufferConnected && initialConfigs.length === 0 && (
+        <Alert variant="info">{t("noProfiles")}</Alert>
+      )}
       <div className="grid gap-4 sm:grid-cols-2">
         {initialConfigs.map((config) => (
           <ChannelConfigCard
-            key={config.channel}
+            key={config.id}
             slug={slug}
             initialConfig={config}
             canManage={canManage}
