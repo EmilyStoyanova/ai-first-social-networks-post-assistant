@@ -193,12 +193,12 @@ export function AuditLogTimeline({ logs }: TimelineProps) {
     <div className="space-y-6">
       {/* Filter bar */}
       <div className="rounded-card border-border bg-surface-subtle flex flex-wrap items-end gap-3 border px-4 py-3">
-        <div className="flex flex-col gap-1">
+        <div className="flex w-full flex-col gap-1 sm:w-auto">
           <label className="text-fg-muted text-xs font-medium">{t("filterAction")}</label>
           <select
             value={filterAction}
             onChange={(e) => setFilterAction(e.target.value)}
-            className="rounded-control border-border bg-surface text-fg focus:border-accent border px-3 py-1.5 text-sm outline-none focus:outline-none"
+            className="rounded-control border-border bg-surface text-fg focus:border-accent w-full border px-3 py-1.5 text-sm outline-none focus:outline-none sm:w-auto"
           >
             <option value="">{t("filterAllActions")}</option>
             {ALL_ACTION_KEYS.map((a) => (
@@ -209,38 +209,40 @@ export function AuditLogTimeline({ logs }: TimelineProps) {
           </select>
         </div>
 
-        <div className="flex flex-col gap-1">
+        <div className="flex w-full flex-col gap-1 sm:w-auto">
           <label className="text-fg-muted text-xs font-medium">{t("filterFrom")}</label>
           <input
             type="date"
             value={filterFrom}
             onChange={(e) => setFilterFrom(e.target.value)}
-            className="rounded-control border-border bg-surface text-fg focus:border-accent border px-3 py-1.5 text-sm outline-none focus:outline-none"
+            className="rounded-control border-border bg-surface text-fg focus:border-accent w-full border px-3 py-1.5 text-sm outline-none focus:outline-none sm:w-auto"
           />
         </div>
 
-        <div className="flex flex-col gap-1">
+        <div className="flex w-full flex-col gap-1 sm:w-auto">
           <label className="text-fg-muted text-xs font-medium">{t("filterTo")}</label>
           <input
             type="date"
             value={filterTo}
             onChange={(e) => setFilterTo(e.target.value)}
-            className="rounded-control border-border bg-surface text-fg focus:border-accent border px-3 py-1.5 text-sm outline-none focus:outline-none"
+            className="rounded-control border-border bg-surface text-fg focus:border-accent w-full border px-3 py-1.5 text-sm outline-none focus:outline-none sm:w-auto"
           />
         </div>
 
-        {hasFilters && (
-          <button
-            onClick={reset}
-            className="rounded-control border-border bg-surface text-fg-muted hover:border-border-strong hover:text-fg border px-3 py-1.5 text-sm transition-colors"
-          >
-            {t("clear")}
-          </button>
-        )}
+        <div className="flex w-full items-center justify-between sm:contents">
+          {hasFilters && (
+            <button
+              onClick={reset}
+              className="rounded-control border-border bg-surface text-fg-muted hover:border-border-strong hover:text-fg border px-3 py-1.5 text-sm transition-colors"
+            >
+              {t("clear")}
+            </button>
+          )}
 
-        <p className="text-fg-faint ml-auto self-center text-xs">
-          {t("entries", { filtered: filtered.length, total: logs.length })}
-        </p>
+          <p className="text-fg-faint ml-auto self-center text-xs">
+            {t("entries", { filtered: filtered.length, total: logs.length })}
+          </p>
+        </div>
       </div>
 
       {/* Timeline */}

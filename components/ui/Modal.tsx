@@ -67,7 +67,7 @@ export function Modal({ open, onClose, title, children, maxWidth = "lg" }: Props
         ].join(" ")}
       >
         {/* Header */}
-        <div className="border-border flex items-center justify-between border-b px-6 py-4">
+        <div className="border-border flex items-center justify-between border-b px-4 py-3 sm:px-6 sm:py-4">
           <h2 className="text-title text-fg">{title}</h2>
           <button
             onClick={onClose}
@@ -79,7 +79,7 @@ export function Modal({ open, onClose, title, children, maxWidth = "lg" }: Props
         </div>
 
         {/* Body */}
-        <div className="max-h-[80vh] overflow-y-auto px-6 py-5">{children}</div>
+        <div className="max-h-[80vh] overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">{children}</div>
       </div>
     </div>
   );

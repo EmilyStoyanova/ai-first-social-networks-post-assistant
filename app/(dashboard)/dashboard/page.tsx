@@ -59,25 +59,25 @@ export default async function DashboardPage() {
     >
       <div className="space-y-8">
         {/* Header */}
-        <div className="flex items-start justify-between gap-4">
-          <div>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
             <h1 className="text-display text-fg">{t("welcome", { greeting })}</h1>
             <p className="text-body text-fg-muted mt-1">{t("tagline")}</p>
           </div>
-          <Button href="/companies/new" variant="primary">
+          <Button href="/companies/new" variant="primary" className="shrink-0">
             {t("quickActions.newCompany")}
           </Button>
         </div>
 
         {/* Stats row */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-3 gap-3 sm:gap-4">
           {[
             { value: companies.length, label: t("stats.companies") },
             { value: totalPending, label: t("stats.pendingApprovals") },
             { value: totalDrafts, label: t("stats.drafts") },
           ].map(({ value, label }) => (
-            <Card key={label} className="px-5 py-4">
-              <p className="text-fg text-2xl font-bold tabular-nums">{value}</p>
+            <Card key={label} className="px-3 py-3 sm:px-5 sm:py-4">
+              <p className="text-fg text-xl font-bold tabular-nums sm:text-2xl">{value}</p>
               <p className="text-micro text-fg-faint mt-1">{label}</p>
             </Card>
           ))}

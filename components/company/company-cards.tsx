@@ -52,7 +52,7 @@ export function CompanyCards({ companies }: Props) {
   return (
     <div className="space-y-4">
       {/* Search + role filter */}
-      <div className="flex gap-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:gap-3">
         <input
           type="text"
           placeholder={t("searchPlaceholder")}
@@ -60,7 +60,7 @@ export function CompanyCards({ companies }: Props) {
           onChange={(e) => setSearch(e.target.value)}
           className="rounded-control border-border bg-surface text-fg focus-visible:outline-accent placeholder:text-fg-faint min-w-0 flex-1 border px-3.5 py-2 text-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-0"
         />
-        <div className="rounded-control border-border-strong flex shrink-0 overflow-hidden border">
+        <div className="rounded-control border-border-strong flex shrink-0 self-start overflow-hidden border">
           {ROLE_TABS.map((tab) => (
             <button
               key={tab.value}

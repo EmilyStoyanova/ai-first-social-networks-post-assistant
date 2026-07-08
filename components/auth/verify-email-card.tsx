@@ -20,7 +20,7 @@ export function VerifyEmailCard({ token }: Props) {
   if (!token) {
     return (
       <div className="bg-bg flex min-h-screen flex-1 items-center justify-center px-4 py-12">
-        <div className="rounded-card border-border bg-surface w-full max-w-md border px-8 py-10 shadow-sm">
+        <div className="rounded-card border-border bg-surface w-full max-w-md border px-5 py-8 shadow-sm sm:px-8 sm:py-10">
           <Alert variant="error">{t("invalidToken")}</Alert>
           <div className="mt-6 text-center text-sm">
             <Link href="/login" className="text-accent font-medium hover:underline">
@@ -58,7 +58,7 @@ export function VerifyEmailCard({ token }: Props) {
 
   return (
     <div className="bg-bg flex min-h-screen flex-1 items-center justify-center px-4 py-12">
-      <div className="rounded-card border-border bg-surface w-full max-w-md border px-8 py-10 shadow-sm">
+      <div className="rounded-card border-border bg-surface w-full max-w-md border px-5 py-8 shadow-sm sm:px-8 sm:py-10">
         <div className="mb-8 flex flex-col items-center gap-3">
           <div className="rounded-card bg-fg flex h-11 w-11 items-center justify-center shadow-sm">
             <span className="text-base font-bold text-white">AI</span>

@@ -326,7 +326,7 @@ export function MediaCard({ item, slug, canDelete = false, onDeleted }: Props) {
                 unoptimized
               />
             </div>
-            <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+            <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-xs">
               {item.width && item.height && (
                 <>
                   <dt className="text-fg-faint font-medium">{t("dimensions")}</dt>
