@@ -219,6 +219,25 @@
     "role": "Your role",
     "created": "Created"
   },
+  "setupChecklist": {
+    "title": "Getting Started",
+    "required": "Required",
+    "recommended": "Recommended",
+    "item1Label": "Describe your brand",
+    "item1Hint": "Helps AI write in your brand's voice and style.",
+    "item1Link": "Go to Brand Setup",
+    "item2Label": "Connect Buffer",
+    "item2Hint": "Required to publish posts to social media.",
+    "item2Link": "Go to Settings",
+    "item3Label": "Sync Buffer profiles",
+    "item3Hint": "Imports your social accounts so channels appear here.",
+    "item3Link": "Go to Settings",
+    "item4Label": "Enable at least one channel",
+    "item4Hint": "AI generates posts only for enabled channels.",
+    "item4Link": "Configure channels",
+    "readyTitle": "🎉 Your company is ready. AI can now generate and publish posts.",
+    "generateFirst": "Generate your first post"
+  },
   "brandGuidelines": {
     "title": "Brand Guidelines",
     "savedSuccess": "Brand guidelines saved successfully.",

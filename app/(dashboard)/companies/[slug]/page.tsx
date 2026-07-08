@@ -25,6 +25,7 @@ import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-h
 import { BrandGuidelinesForm } from "@/components/company/brand-guidelines-form";
 import { CompanyMembers } from "@/components/company/company-members";
 import { BufferConnectionCard } from "@/components/company/buffer-connection-card";
+import { SetupChecklist } from "@/components/company/setup-checklist";
 import { ChannelConfigSection } from "@/components/company/channel-config-section";
 import { ContentSourcesSection } from "@/components/company/content-sources-section";
 import { GeneratedPostsSection } from "@/components/company/generated-posts-section";
@@ -77,6 +78,14 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   let contentSources: Awaited<ReturnType<typeof listContentSources>> | null = null;
   let membersResult: Awaited<ReturnType<typeof listMembers>> | null = null;
 
+  if (activeTab === "overview") {
+    [brandGuidelines, bufferConnection, channelConfigs] = await Promise.all([
+      getBrandGuidelines(company.id),
+      getBufferConnection(company.id),
+      listChannelConfigs(slug, session.user.id, session.user.isGlobalAdmin),
+    ]);
+  }
+
   if (activeTab === "posts") {
     [postsData, bufferConnection] = await Promise.all([
       listPosts(slug, session.user.id, session.user.isGlobalAdmin),
@@ -126,7 +135,14 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         <div className="mt-8">
           {/* ── Overview ───────────────────────────────────────────────── */}
           {activeTab === "overview" && (
-            <OverviewTab company={company} slug={slug} canManage={canManage} />
+            <OverviewTab
+              company={company}
+              slug={slug}
+              canManage={canManage}
+              brandGuidelines={brandGuidelines}
+              bufferConnection={bufferConnection}
+              channelConfigs={channelConfigs?.success ? channelConfigs.configs : []}
+            />
           )}
 
           {/* ── Posts ──────────────────────────────────────────────────── */}
@@ -180,9 +196,18 @@ interface OverviewTabProps {
   company: Awaited<ReturnType<typeof getCompany>>;
   slug: string;
   canManage: boolean;
+  brandGuidelines: Awaited<ReturnType<typeof getBrandGuidelines>> | null;
+  bufferConnection: Awaited<ReturnType<typeof getBufferConnection>> | null;
+  channelConfigs: ChannelConfigItem[];
 }
 
-async function OverviewTab({ company, slug }: OverviewTabProps) {
+async function OverviewTab({
+  company,
+  slug,
+  brandGuidelines,
+  bufferConnection,
+  channelConfigs,
+}: OverviewTabProps) {
   if (!company) return null;
   const t = await getTranslations("overview");
   const tPage = await getTranslations("companyPage");
@@ -236,8 +261,22 @@ async function OverviewTab({ company, slug }: OverviewTabProps) {
     },
   ];
 
+  const brandDescribed = !!brandGuidelines?.companyDescription?.trim();
+  const bufferConnected = bufferConnection?.connected ?? false;
+  const profilesSynced = !!bufferConnection?.lastProfileSyncAt;
+  const hasEnabledChannel = channelConfigs.some((c) => c.enabled);
+
   return (
     <div className="space-y-8">
+      {/* Onboarding checklist — hidden once all required steps are done and user has visited */}
+      <SetupChecklist
+        slug={slug}
+        brandDescribed={brandDescribed}
+        bufferConnected={bufferConnected}
+        profilesSynced={profilesSynced}
+        hasEnabledChannel={hasEnabledChannel}
+      />
+
       {/* Company metadata */}
       <Card className="px-6 py-6">
         <dl className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
