@@ -43,14 +43,20 @@ interface RawCreatePostPayload {
  * Services not listed here are sent without metadata.
  */
 function buildMetadataArg(service: string): string {
-  switch (service) {
-    case "facebook":
-      return ", metadata: { facebook: { type: post } }";
-    case "instagram":
-      return ", metadata: { instagram: { type: post, shouldShareToFeed: true } }";
-    default:
-      return "";
+  const s = service.toLowerCase().replace(/\s+/g, "-");
+  if (s === "facebook" || s === "facebook-group") {
+    return ", metadata: { facebook: { type: post } }";
   }
+  if (
+    s === "instagram" ||
+    s === "instagram-business" ||
+    s === "instagrambusiness" ||
+    s === "instagram-creator" ||
+    s === "instagramcreator"
+  ) {
+    return ", metadata: { instagram: { type: post, shouldShareToFeed: true } }";
+  }
+  return "";
 }
 
 export class BufferClient {

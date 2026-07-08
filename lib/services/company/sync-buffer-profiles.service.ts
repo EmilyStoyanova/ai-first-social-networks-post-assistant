@@ -7,10 +7,24 @@ import {
 } from "@/lib/buffer/buffer-errors";
 import type { SocialChannel } from "@prisma/client";
 
+// Buffer returns various service strings depending on account/profile type.
+// All known variants are mapped here; new ones can be added without other changes.
 const SERVICE_TO_CHANNEL: Record<string, SocialChannel> = {
+  // Facebook
   facebook: "facebook",
-  linkedin: "linkedin",
+  "facebook-group": "facebook",
+  // Instagram (business / creator / personal)
   instagram: "instagram",
+  "instagram-business": "instagram",
+  instagrambusiness: "instagram",
+  "instagram-creator": "instagram",
+  instagramcreator: "instagram",
+  // LinkedIn (personal / company page)
+  linkedin: "linkedin",
+  "linkedin-company": "linkedin",
+  linkedincompany: "linkedin",
+  "linkedin-page": "linkedin",
+  // TikTok
   tiktok: "tiktok",
 };
 
@@ -51,12 +65,27 @@ export async function syncBufferProfiles(companyId: string): Promise<SyncBufferP
     throw err;
   }
 
+  console.log(
+    `[sync-profiles] companyId=${companyId} total profiles returned by Buffer: ${rawProfiles.length}`
+  );
+
   const activeProfileIds = new Set<string>();
   let synced = 0;
 
   for (const profile of rawProfiles) {
-    const channel = SERVICE_TO_CHANNEL[profile.service.toLowerCase()];
-    if (!channel) continue;
+    const serviceKey = profile.service.toLowerCase().replace(/\s+/g, "-");
+    const channel = SERVICE_TO_CHANNEL[serviceKey];
+
+    if (!channel) {
+      console.log(
+        `[sync-profiles] SKIP id=${profile.id} name="${profile.name}" service="${profile.service}" (serviceKey="${serviceKey}" not in SERVICE_TO_CHANNEL)`
+      );
+      continue;
+    }
+
+    console.log(
+      `[sync-profiles] MAP  id=${profile.id} name="${profile.name}" service="${profile.service}" → channel=${channel}`
+    );
 
     activeProfileIds.add(profile.id);
 
