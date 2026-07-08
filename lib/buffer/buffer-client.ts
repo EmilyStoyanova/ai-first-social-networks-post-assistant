@@ -180,6 +180,13 @@ export class BufferClient {
     return first;
   }
 
+  async getPostLink(bufferPostId: string): Promise<string | null> {
+    const data = await this.query<{ post: { id: string; serviceLink?: string | null } | null }>(
+      `query GetPost { post(id: ${JSON.stringify(bufferPostId)}) { id serviceLink } }`
+    );
+    return data.post?.serviceLink ?? null;
+  }
+
   async validateConnection(): Promise<boolean> {
     try {
       await this.query<{ account: { id: string } | null }>(

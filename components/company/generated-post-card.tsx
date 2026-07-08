@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import Image from "next/image";
 import { useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
@@ -116,7 +116,22 @@ export function GeneratedPostCard({
   const isPendingApproval = localStatus === "PENDING_APPROVAL";
   const isApproved = localStatus === "APPROVED";
   const isRejected = localStatus === "REJECTED";
+  const isSentToBuffer = localStatus === "SENT_TO_BUFFER";
   const isEditable = isDraft || isPendingApproval || isRejected;
+
+  // ── Lazy URL resolution for old published posts ───────────────────────────
+  const urlFetchedRef = useRef(false);
+  useEffect(() => {
+    if (!isSentToBuffer || publishedPostUrl !== null || urlFetchedRef.current) return;
+    urlFetchedRef.current = true;
+    fetch(`/api/v1/posts/${post.id}/resolve-url`, { method: "POST" })
+      .then((r) => r.json())
+      .then((json: { publishedPostUrl?: string | null }) => {
+        if (json.publishedPostUrl) setPublishedPostUrl(json.publishedPostUrl);
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Edit ──────────────────────────────────────────────────────────────────
   function handlePostSaved(newContent: string, newHashtags: string[]) {
