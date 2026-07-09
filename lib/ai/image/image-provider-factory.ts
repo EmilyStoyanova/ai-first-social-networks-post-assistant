@@ -3,6 +3,7 @@ import { LeonardoProvider } from "./leonardo.provider";
 import { OpenAIImageProvider } from "./openai.provider";
 import { FalProvider } from "./fal.provider";
 import { IdeogramProvider } from "./ideogram.provider";
+import { WorkerImageProvider } from "./worker.provider";
 import { ImageProviderError } from "./image-provider-errors";
 
 const MOCK_IMAGE_URL = "https://placehold.co/1024x1024/e5e7eb/6b7280?text=AI+Image+%28Mock%29";
@@ -18,7 +19,7 @@ class MockImageProvider implements IImageProvider {
   }
 }
 
-type ImageProviderName = "openai" | "leonardo" | "fal" | "ideogram" | "mock";
+type ImageProviderName = "openai" | "leonardo" | "fal" | "ideogram" | "worker" | "mock";
 
 function resolveProviderName(): ImageProviderName {
   const raw = process.env.IMAGE_PROVIDER?.toLowerCase().trim();
@@ -26,6 +27,7 @@ function resolveProviderName(): ImageProviderName {
   if (raw === "leonardo") return "leonardo";
   if (raw === "fal") return "fal";
   if (raw === "ideogram") return "ideogram";
+  if (raw === "worker") return "worker";
   // Default to mock so the app works without any image provider key configured.
   // Set IMAGE_PROVIDER=IDEOGRAM (or FAL / OPENAI / LEONARDO) to enable real generation.
   return "mock";
@@ -90,6 +92,16 @@ export function getImageProvider(): IImageProvider {
       const modelId = process.env.LEONARDO_MODEL_ID ?? null;
       const baseUrl = process.env.LEONARDO_API_URL;
       return new LeonardoProvider(apiKey, modelId, baseUrl);
+    }
+
+    case "worker": {
+      const workerUrl = process.env.IMAGE_WORKER_URL;
+      if (!workerUrl) {
+        throw new ImageProviderError(
+          "IMAGE_WORKER_URL is not set. Set IMAGE_PROVIDER=MOCK or configure your image worker URL."
+        );
+      }
+      return new WorkerImageProvider(workerUrl);
     }
 
     default: {
