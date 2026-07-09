@@ -33,7 +33,7 @@ interface RawChannel {
 interface RawCreatePostPayload {
   createPost?: {
     __typename?: string;
-    post?: { id: string; status?: string | null; serviceLink?: string | null } | null;
+    post?: { id: string; status?: string | null } | null;
     message?: string;
   } | null;
 }
@@ -152,7 +152,7 @@ export class BufferClient {
           mode: shareNow${buildMetadataArg(service)}${assets}
         }) {
           __typename
-          ... on PostActionSuccess { post { id status serviceLink } }
+          ... on PostActionSuccess { post { id status } }
           ... on MutationError { message }
         }
       }`;
@@ -172,7 +172,7 @@ export class BufferClient {
       first ??= {
         updateId: payload.post.id,
         status: payload.post.status ?? "sent",
-        publishedUrl: payload.post.serviceLink ?? null,
+        publishedUrl: null,
       };
     }
 
@@ -180,11 +180,10 @@ export class BufferClient {
     return first;
   }
 
-  async getPostLink(bufferPostId: string): Promise<string | null> {
-    const data = await this.query<{ post: { id: string; serviceLink?: string | null } | null }>(
-      `query GetPost { post(id: ${JSON.stringify(bufferPostId)}) { id serviceLink } }`
-    );
-    return data.post?.serviceLink ?? null;
+  async getPostLink(_bufferPostId: string): Promise<string | null> {
+    // Buffer's GraphQL API does not expose serviceLink on the Post type.
+    // URL resolution is not currently possible; callers handle null gracefully.
+    return null;
   }
 
   async validateConnection(): Promise<boolean> {
