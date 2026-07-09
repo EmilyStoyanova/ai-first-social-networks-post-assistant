@@ -186,7 +186,7 @@ export class BufferClient {
 
   async getPostLink(bufferPostId: string): Promise<string | null> {
     const data = await this.query<RawGetPostPayload>(
-      `query GetPostLink { post(id: ${JSON.stringify(bufferPostId)}) { externalLink } }`
+      `query GetPostLink { post(input: { id: ${JSON.stringify(bufferPostId)} }) { externalLink } }`
     );
     return data.post?.externalLink ?? null;
   }
