@@ -101,7 +101,13 @@ export function getImageProvider(): IImageProvider {
           "IMAGE_WORKER_URL is not set. Set IMAGE_PROVIDER=MOCK or configure your image worker URL."
         );
       }
-      return new WorkerImageProvider(workerUrl);
+      const apiKey = process.env.IMAGE_WORKER_API_KEY;
+      if (!apiKey) {
+        throw new ImageProviderError(
+          "IMAGE_WORKER_API_KEY is not set. Add your worker API key or set IMAGE_PROVIDER=MOCK."
+        );
+      }
+      return new WorkerImageProvider(workerUrl, apiKey);
     }
 
     default: {

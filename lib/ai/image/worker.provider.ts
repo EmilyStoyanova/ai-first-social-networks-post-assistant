@@ -9,27 +9,45 @@ interface WorkerResponse {
 }
 
 export class WorkerImageProvider implements IImageProvider {
-  constructor(private readonly workerUrl: string) {}
+  constructor(
+    private readonly workerUrl: string,
+    private readonly apiKey: string
+  ) {}
 
   async generate(prompt: string, options?: ImageGenerationOptions): Promise<GeneratedImage> {
     const url = this.workerUrl.replace(/\/$/, "");
+
+    const TIMEOUT_MS = 180_000;
 
     let res: Response;
     try {
       res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-worker-api-key": this.apiKey },
         body: JSON.stringify({ prompt }),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (err) {
-      throw new ImageProviderError(
+      if (err instanceof Error && err.name === "TimeoutError") {
+        throw new ImageProviderError("Image worker timed out after 180 seconds");
+      }
+      const providerError = new ImageProviderError(
         `Image worker unreachable: ${err instanceof Error ? err.message : String(err)}`
       );
+      (providerError as Error & { cause: unknown }).cause = err;
+      throw providerError;
     }
 
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new ImageProviderError(`Image worker error ${res.status}: ${text}`);
+      const providerError = new ImageProviderError(`Image worker error ${res.status}: ${text}`);
+      (providerError as Error & { cause: unknown }).cause = {
+        url,
+        status: res.status,
+        statusText: res.statusText,
+        body: text,
+      };
+      throw providerError;
     }
 
     const data = (await res.json()) as WorkerResponse;

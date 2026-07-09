@@ -66,6 +66,7 @@ export async function generatePostImage(
     provider = getImageProvider();
   } catch (err) {
     if (err instanceof ImageProviderError) {
+      logImageProviderFailure(err);
       return { success: false, code: "IMAGE_PROVIDER_ERROR", message: err.message };
     }
     throw err;
@@ -78,6 +79,7 @@ export async function generatePostImage(
     generated = await provider.generate(prompt, { width, height });
   } catch (err) {
     if (err instanceof ImageProviderError) {
+      logImageProviderFailure(err);
       return { success: false, code: "IMAGE_PROVIDER_ERROR", message: err.message };
     }
     throw err;
@@ -111,6 +113,25 @@ export async function generatePostImage(
       height: asset.height ?? generated.height,
     },
   };
+}
+
+function logImageProviderFailure(err: ImageProviderError): void {
+  console.error("[image-provider] Generation failed");
+  console.error(`  IMAGE_PROVIDER  : ${process.env.IMAGE_PROVIDER ?? "(not set)"}`);
+  console.error(`  IMAGE_WORKER_URL: ${process.env.IMAGE_WORKER_URL ?? "(not set)"}`);
+  console.error(`  ${err.name} [${err.code}]: ${err.message}`);
+  if (err.stack) {
+    console.error("  stack:\n" + err.stack);
+  }
+  const cause = (err as Error & { cause?: unknown }).cause;
+  if (cause !== undefined) {
+    if (cause instanceof Error) {
+      console.error(`  cause (${cause.name}): ${cause.message}`);
+      if (cause.stack) console.error("  cause stack:\n" + cause.stack);
+    } else {
+      console.error("  cause:", JSON.stringify(cause, null, 2));
+    }
+  }
 }
 
 function channelDimensions(channel: string): { width: number; height: number } {
