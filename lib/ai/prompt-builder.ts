@@ -119,7 +119,8 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
     "Writing Rules",
     lines(
       `- ${languageInstruction}`,
-      `- Write entirely in ${lang}.`,
+      `- Write the post text (the "text" field) entirely in ${lang}.`,
+      `- imagePrompt MUST always be written in English, regardless of the post language. Image generation models do not support ${lang === "BG" ? "Bulgarian" : lang} text.`,
       "- Stay within the brand voice described above.",
       "- Never include URLs unless specifically requested.",
       brand?.forbiddenWords.length
@@ -147,13 +148,19 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
 const CONTENT_PER_ITEM_LIMIT = 900;
 const TOTAL_FEED_CHAR_LIMIT = 5000;
 
-const JSON_FORMAT_INSTRUCTION = `Return ONLY a JSON object in this exact format (no markdown, no explanation):
+function buildJsonFormatInstruction(imageRequired: boolean): string {
+  const imagePromptLine = imageRequired
+    ? `  "imagePrompt": "REQUIRED — concise English visual description for an image generation model (no text, no emojis, no hashtags, no UI instructions; always in English regardless of post language)"`
+    : `  "imagePrompt": "optional — if provided, must be a concise English visual description for an image generation model (no text, no emojis, no hashtags; always in English regardless of post language)"`;
+
+  return `Return ONLY a JSON object in this exact format (no markdown, no explanation):
 {
   "text": "the post text",
   "hashtags": ["tag1", "tag2"],
-  "imagePrompt": "visual description for image generation (optional, omit if not relevant)",
+${imagePromptLine},
   "notes": "brief creative rationale (optional)"
 }`;
+}
 
 function buildUserPrompt(
   ctx: GenerationContext,
@@ -163,6 +170,7 @@ function buildUserPrompt(
   const { channel, feedItems } = ctx;
   const channelLabel = CHANNEL_LABELS[channel.channel] ?? channel.channel;
   const lang = (contentLanguage ?? channel.postingLanguage).toUpperCase();
+  const imageRequired = channel.imageRequired;
 
   // Build feed excerpt, newest first, respecting total char budget
   let budget = TOTAL_FEED_CHAR_LIMIT;
@@ -206,7 +214,9 @@ function buildUserPrompt(
       ? `Create an original ${channelLabel} post for ${ctx.company.name}.\nWrite in ${lang}.`
       : `Write a ${channelLabel} post for ${ctx.company.name}.`;
 
-  return [intro, feedSection, recentSection, JSON_FORMAT_INSTRUCTION].filter(Boolean).join("\n\n");
+  return [intro, feedSection, recentSection, buildJsonFormatInstruction(imageRequired)]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
