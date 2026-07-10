@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import { type SocialChannel } from "@prisma/client";
 import { buildGenerationContext } from "./build-generation-context.service";
+import { resolveGenerationAspect } from "./resolve-generation-aspect.service";
 import type { GenerationContext, ILlmProvider } from "@/lib/ai/types";
 import { buildPrompts } from "@/lib/ai/prompt-builder";
 import { getLlmProvider, NoActiveLlmProviderError } from "@/lib/ai/llm/llm-provider-factory";
@@ -140,15 +141,8 @@ export async function generatePostFromContext(
   const initialAngle = selectAngle(recentAngles);
   const initialPattern = selectPattern(recentPatterns);
 
-  const { systemPrompt, userPrompt } = buildPrompts(
-    context,
-    contentLanguage,
-    recentRows.slice(0, 5).map((r) => ({ text: r.content })),
-    { angle: initialAngle, pattern: initialPattern, recentTopics }
-  );
-
   // ── LLM provider ─────────────────────────────────────────────────────────
-  // Provider name and model come from context (set by getLlmProviderInfo() during context build)
+  // Created before aspect mining so the same provider handles both extraction and generation.
   const llmProviderStr = context.llm.provider;
   const llmModelStr = context.llm.model;
 
@@ -167,6 +161,28 @@ export async function generatePostFromContext(
     }
   }
 
+  // ── Aspect mining ─────────────────────────────────────────────────────────
+  // Errors are caught inside resolveGenerationAspect — generation always continues.
+  const {
+    aspect: initialAspect,
+    pool: aspectPool,
+    extractionRound,
+    fingerprint: aspectFingerprint,
+    usedAspectIds,
+  } = await resolveGenerationAspect({
+    feedItems: context.feedItems,
+    snapshots,
+    provider,
+  });
+
+  // ── Build prompts ─────────────────────────────────────────────────────────
+  const { systemPrompt, userPrompt } = buildPrompts(
+    context,
+    contentLanguage,
+    recentRows.slice(0, 5).map((r) => ({ text: r.content })),
+    { angle: initialAngle, pattern: initialPattern, recentTopics, aspect: initialAspect }
+  );
+
   // ── Generate with retry (duplicate-aware) ─────────────────────────────────
   // Retries up to MAX_GENERATION_ATTEMPTS times when the candidate is flagged
   // as a duplicate of a recent post. Only the final accepted post is persisted.
@@ -177,7 +193,16 @@ export async function generatePostFromContext(
       systemPrompt,
       userPrompt,
       recentRows.map((r) => ({ id: r.id, text: r.content })),
-      { initialAngle, recentAngles, initialPattern, recentPatterns, recentTopics }
+      {
+        initialAngle,
+        recentAngles,
+        initialPattern,
+        recentPatterns,
+        recentTopics,
+        initialAspect,
+        aspectPool,
+        aspectUsedIds: usedAspectIds,
+      }
     );
   } catch (err) {
     if (err instanceof LlmProviderError) {
@@ -190,7 +215,8 @@ export async function generatePostFromContext(
   }
 
   // ── Quality guards ────────────────────────────────────────────────────────
-  const { parsed, duplicateResult, selectedAngle, selectedPattern } = generationResult;
+  const { parsed, duplicateResult, selectedAngle, selectedPattern, selectedAspect } =
+    generationResult;
 
   const safetyResult = checkContentSafety({
     text: parsed.text,
@@ -258,6 +284,20 @@ export async function generatePostFromContext(
           : null,
         topic: parsed.topic ?? null,
         qualityGuards,
+        // Aspect fields — null when no aspect was mined (null fails the hasAspectFields guard
+        // in loadAspectPoolData so legacy and no-aspect posts are treated identically).
+        aspectFingerprint: aspectFingerprint && selectedAspect ? aspectFingerprint : null,
+        // Cast to Record<string, string>[] / Record<string, string> so Prisma's
+        // InputJsonObject constraint is satisfied (ContentAspect has no index signature).
+        aspectPool:
+          aspectFingerprint && selectedAspect
+            ? (aspectPool as unknown as Record<string, string>[])
+            : null,
+        selectedAspect: selectedAspect
+          ? (selectedAspect as unknown as Record<string, string>)
+          : null,
+        aspectUsedAt: aspectFingerprint && selectedAspect ? new Date().toISOString() : null,
+        aspectExtractionRound: aspectFingerprint && selectedAspect ? extractionRound : null,
       },
     },
     select: {

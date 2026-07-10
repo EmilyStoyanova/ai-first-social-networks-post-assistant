@@ -6,6 +6,7 @@ import {
   STRUCTURE_INSTRUCTIONS,
   CTA_INSTRUCTIONS,
 } from "./post-pattern";
+import type { ContentAspect } from "./content-aspect";
 
 export interface BuiltPrompts {
   systemPrompt: string;
@@ -21,6 +22,8 @@ export interface PromptDiversityHints {
   pattern?: PostPattern;
   /** Topics declared by recent posts — model is instructed to avoid these. */
   recentTopics?: readonly string[];
+  /** Dynamically mined content aspect — mandatory conceptual constraint for the post. */
+  aspect?: ContentAspect;
 }
 
 // ─── Channel metadata ─────────────────────────────────────────────────────────
@@ -230,7 +233,7 @@ function buildUserPrompt(
       ? `Create an original ${channelLabel} post for ${ctx.company.name}.\nWrite in ${lang}.`
       : `Write a ${channelLabel} post for ${ctx.company.name}.`;
 
-  const { angle, pattern, recentTopics } = diversity ?? {};
+  const { angle, pattern, recentTopics, aspect } = diversity ?? {};
 
   const angleSection = angle ? `**Content angle: ${angle}**\n${ANGLE_INSTRUCTIONS[angle]}` : "";
 
@@ -251,6 +254,15 @@ function buildUserPrompt(
         ].join("\n")
       : "";
 
+  const aspectSection = aspect
+    ? [
+        "**Content aspect — mandatory conceptual constraint**",
+        `Focus: ${aspect.focus}`,
+        "You MUST build this post around this specific focus. Do NOT replace it with a more prominent theme from the source content. The focus is the conceptual core of this post, not a suggestion.",
+        `Your imagePrompt MUST visually anchor to: ${aspect.visualConcept}`,
+      ].join("\n")
+    : "";
+
   return [
     intro,
     feedSection,
@@ -258,6 +270,7 @@ function buildUserPrompt(
     angleSection,
     patternSection,
     topicSection,
+    aspectSection,
     buildJsonFormatInstruction(imageRequired),
   ]
     .filter(Boolean)
@@ -274,6 +287,8 @@ export interface RetryContext {
   forcedAngle?: ContentAngle;
   /** When provided the retry prompt forces the model to use this writing pattern. */
   forcedPattern?: PostPattern;
+  /** When provided the retry prompt forces the model to use this content aspect. */
+  forcedAspect?: ContentAspect;
 }
 
 export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext): string {
@@ -286,6 +301,11 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     forcedLines.push(`**Hook: ${hookType}** — ${HOOK_INSTRUCTIONS[hookType]}`);
     forcedLines.push(`**Structure: ${structure}** — ${STRUCTURE_INSTRUCTIONS[structure]}`);
     forcedLines.push(`**CTA: ${ctaType}** — ${CTA_INSTRUCTIONS[ctaType]}`);
+  }
+  if (retry.forcedAspect) {
+    forcedLines.push(
+      `**Content aspect focus: ${retry.forcedAspect.focus}** — Your imagePrompt MUST visually anchor to: ${retry.forcedAspect.visualConcept}`
+    );
   }
 
   const forcedBlock =

@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/lib/auth";
 import { buildGenerationContext } from "@/lib/services/ai/build-generation-context.service";
+import { resolveGenerationAspect } from "@/lib/services/ai/resolve-generation-aspect.service";
 import { buildPrompts } from "@/lib/ai/prompt-builder";
+import { getLlmProvider } from "@/lib/ai/llm/llm-provider-factory";
+import { prisma } from "@/lib/db/client";
+import { type SocialChannel } from "@prisma/client";
 
 const bodySchema = z.object({
   channel: z
@@ -89,12 +93,46 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     }
   }
 
-  const { systemPrompt, userPrompt } = buildPrompts(result.context, parsed.data.contentLanguage);
+  const { context, companyId } = result;
+
+  // ── Aspect mining (same logic as real generation) ─────────────────────────
+  // Query recent posts so we can load the existing aspect pool for this context.
+  const recentRows = await prisma.post.findMany({
+    where: { companyId, channel: parsed.data.channel as SocialChannel },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    select: { promptSnapshot: true },
+  });
+  const snapshots = recentRows.map((r) => r.promptSnapshot as Record<string, unknown> | null);
+
+  // Get the provider for potential extraction (graceful no-op if unavailable).
+  let selectedAspect: import("@/lib/ai/content-aspect").ContentAspect | undefined;
+  try {
+    const provider =
+      process.env.AI_MOCK_MODE === "true"
+        ? { generate: async () => ({ text: "[]" }) }
+        : getLlmProvider();
+
+    const aspectResult = await resolveGenerationAspect({
+      feedItems: context.feedItems,
+      snapshots,
+      provider,
+    });
+    selectedAspect = aspectResult.aspect;
+  } catch {
+    // No provider or extraction failed — show prompt without aspect (same as generation would do)
+    selectedAspect = undefined;
+  }
+
+  const { systemPrompt, userPrompt } = buildPrompts(context, parsed.data.contentLanguage, [], {
+    aspect: selectedAspect,
+  });
 
   return NextResponse.json({
-    provider: result.context.llm.provider,
-    model: result.context.llm.model,
+    provider: context.llm.provider,
+    model: context.llm.model,
     systemPrompt,
     userPrompt,
+    selectedAspect: selectedAspect ?? null,
   });
 }

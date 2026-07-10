@@ -8,6 +8,7 @@ import {
 import { buildRetryUserPrompt } from "./prompt-builder";
 import { type ContentAngle, selectRetryAngle } from "./content-angle";
 import { type PostPattern, selectRetryPattern } from "./post-pattern";
+import { type ContentAspect, selectRetryAspect } from "./content-aspect";
 
 export const MAX_GENERATION_ATTEMPTS = 3;
 
@@ -22,6 +23,12 @@ export interface DiversityOptions {
   recentPatterns: readonly PostPattern[];
   /** Topics declared by recent posts — passed to the retry prompt for avoidance. */
   recentTopics: readonly string[];
+  /** The dynamically mined content aspect baked into the initial baseUserPrompt. */
+  initialAspect?: ContentAspect;
+  /** Full aspect pool available for retry selection. */
+  aspectPool?: ContentAspect[];
+  /** Aspect ids already used by recent posts (most-recent-first). */
+  aspectUsedIds?: string[];
 }
 
 export interface GenerationLoopResult {
@@ -31,6 +38,8 @@ export interface GenerationLoopResult {
   selectedAngle?: ContentAngle;
   /** The writing pattern that produced the accepted (or last) result. */
   selectedPattern?: PostPattern;
+  /** The content aspect that produced the accepted (or last) result. */
+  selectedAspect?: ContentAspect;
 }
 
 /**
@@ -55,12 +64,14 @@ export async function generateWithRetry(
     matchedPostId: null,
   };
 
-  // Track angles and patterns tried during this run so retries pick fresh ones.
+  // Track angles, patterns, and aspects tried during this run so retries pick fresh ones.
   let currentAngle: ContentAngle | undefined = diversityOptions?.initialAngle;
   let currentPattern: PostPattern | undefined = diversityOptions?.initialPattern;
+  let currentAspect: ContentAspect | undefined = diversityOptions?.initialAspect;
 
   const triedAngles: ContentAngle[] = currentAngle ? [currentAngle] : [];
   const triedPatterns: PostPattern[] = currentPattern ? [currentPattern] : [];
+  const triedAspectIds: string[] = currentAspect ? [currentAspect.id] : [];
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let userPrompt = baseUserPrompt;
@@ -70,6 +81,7 @@ export async function generateWithRetry(
 
       let retryAngle: ContentAngle | undefined;
       let retryPattern: PostPattern | undefined;
+      let retryAspect: ContentAspect | undefined;
 
       if (diversityOptions) {
         if (currentAngle !== undefined) {
@@ -88,6 +100,13 @@ export async function generateWithRetry(
           currentPattern = retryPattern;
           triedPatterns.push(retryPattern);
         }
+
+        if (currentAspect !== undefined && diversityOptions.aspectPool?.length) {
+          const usedIds = [...(diversityOptions.aspectUsedIds ?? []), ...triedAspectIds];
+          retryAspect = selectRetryAspect(currentAspect.id, diversityOptions.aspectPool, usedIds);
+          currentAspect = retryAspect;
+          triedAspectIds.push(retryAspect.id);
+        }
       }
 
       userPrompt = buildRetryUserPrompt(baseUserPrompt, {
@@ -96,6 +115,7 @@ export async function generateWithRetry(
         similarityScore: lastDuplicateResult.similarityScore ?? 0,
         forcedAngle: retryAngle,
         forcedPattern: retryPattern,
+        forcedAspect: retryAspect,
       });
     }
 
@@ -121,5 +141,6 @@ export async function generateWithRetry(
     duplicateResult: lastDuplicateResult,
     selectedAngle: currentAngle,
     selectedPattern: currentPattern,
+    selectedAspect: currentAspect,
   };
 }
