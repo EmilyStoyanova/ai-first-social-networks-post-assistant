@@ -1,5 +1,11 @@
 import type { GenerationContext } from "./types";
 import { type ContentAngle, ANGLE_INSTRUCTIONS } from "./content-angle";
+import {
+  type PostPattern,
+  HOOK_INSTRUCTIONS,
+  STRUCTURE_INSTRUCTIONS,
+  CTA_INSTRUCTIONS,
+} from "./post-pattern";
 
 export interface BuiltPrompts {
   systemPrompt: string;
@@ -8,6 +14,13 @@ export interface BuiltPrompts {
 
 export interface RecentPostContext {
   text: string;
+}
+
+export interface PromptDiversityHints {
+  angle?: ContentAngle;
+  pattern?: PostPattern;
+  /** Topics declared by recent posts — model is instructed to avoid these. */
+  recentTopics?: readonly string[];
 }
 
 // ─── Channel metadata ─────────────────────────────────────────────────────────
@@ -159,7 +172,8 @@ function buildJsonFormatInstruction(imageRequired: boolean): string {
   "text": "the post text",
   "hashtags": ["tag1", "tag2"],
 ${imagePromptLine},
-  "notes": "brief creative rationale (optional)"
+  "notes": "brief creative rationale (optional)",
+  "topic": "2–5 words describing the specific subject of this post (e.g. 'hiring for culture fit', 'startup cash flow')"
 }`;
 }
 
@@ -167,7 +181,7 @@ function buildUserPrompt(
   ctx: GenerationContext,
   contentLanguage?: string,
   recentPosts: RecentPostContext[] = [],
-  selectedAngle?: ContentAngle
+  diversity?: PromptDiversityHints
 ): string {
   const { channel, feedItems } = ctx;
   const channelLabel = CHANNEL_LABELS[channel.channel] ?? channel.channel;
@@ -216,15 +230,34 @@ function buildUserPrompt(
       ? `Create an original ${channelLabel} post for ${ctx.company.name}.\nWrite in ${lang}.`
       : `Write a ${channelLabel} post for ${ctx.company.name}.`;
 
-  const angleSection = selectedAngle
-    ? `**Content angle: ${selectedAngle}**\n${ANGLE_INSTRUCTIONS[selectedAngle]}`
+  const { angle, pattern, recentTopics } = diversity ?? {};
+
+  const angleSection = angle ? `**Content angle: ${angle}**\n${ANGLE_INSTRUCTIONS[angle]}` : "";
+
+  const patternSection = pattern
+    ? [
+        `**Hook: ${pattern.hookType}**\n${HOOK_INSTRUCTIONS[pattern.hookType]}`,
+        `**Structure: ${pattern.structure}**\n${STRUCTURE_INSTRUCTIONS[pattern.structure]}`,
+        `**CTA: ${pattern.ctaType}**\n${CTA_INSTRUCTIONS[pattern.ctaType]}`,
+      ].join("\n\n")
     : "";
+
+  const topicSection =
+    recentTopics && recentTopics.length > 0
+      ? [
+          "**Topic guidance**",
+          "The following subjects have been covered recently — choose a meaningfully different one:",
+          recentTopics.map((t) => `- ${t}`).join("\n"),
+        ].join("\n")
+      : "";
 
   return [
     intro,
     feedSection,
     recentSection,
     angleSection,
+    patternSection,
+    topicSection,
     buildJsonFormatInstruction(imageRequired),
   ]
     .filter(Boolean)
@@ -239,17 +272,30 @@ export interface RetryContext {
   similarityScore: number;
   /** When provided the retry prompt forces the model to use this angle. */
   forcedAngle?: ContentAngle;
+  /** When provided the retry prompt forces the model to use this writing pattern. */
+  forcedPattern?: PostPattern;
 }
 
 export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext): string {
-  const angleBlock = retry.forcedAngle
-    ? [
-        "## FORCED CONTENT ANGLE — overrides any angle instruction below",
-        `You MUST structure this regeneration as: **${retry.forcedAngle}**`,
-        ANGLE_INSTRUCTIONS[retry.forcedAngle],
-        "Do not use the same angle as the rejected attempt.",
-      ].join("\n")
-    : "";
+  const forcedLines: string[] = [];
+  if (retry.forcedAngle) {
+    forcedLines.push(`**Angle: ${retry.forcedAngle}** — ${ANGLE_INSTRUCTIONS[retry.forcedAngle]}`);
+  }
+  if (retry.forcedPattern) {
+    const { hookType, structure, ctaType } = retry.forcedPattern;
+    forcedLines.push(`**Hook: ${hookType}** — ${HOOK_INSTRUCTIONS[hookType]}`);
+    forcedLines.push(`**Structure: ${structure}** — ${STRUCTURE_INSTRUCTIONS[structure]}`);
+    forcedLines.push(`**CTA: ${ctaType}** — ${CTA_INSTRUCTIONS[ctaType]}`);
+  }
+
+  const forcedBlock =
+    forcedLines.length > 0
+      ? [
+          "## FORCED CONTENT PATTERN — overrides every angle, hook, structure, and CTA instruction below",
+          ...forcedLines,
+          "These supersede anything stated further in this prompt.",
+        ].join("\n")
+      : "";
 
   const retryBlock = [
     `⚠ REGENERATION REQUIRED (similarity score: ${retry.similarityScore.toFixed(2)} — too close to an existing post).`,
@@ -264,17 +310,17 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     retry.matchedText,
     "---",
     "",
-    angleBlock,
+    forcedBlock,
     "## What you must NOT do",
     "- Do not paraphrase the rejected attempt.",
-    "- Do not reuse the same hook, opening sentence, or first idea.",
+    "- Do not reuse the same hook type or opening sentence.",
     "- Do not reuse the same angle, core message, or argument.",
-    "- Do not reuse the same structure or flow.",
+    "- Do not reuse the same post structure or flow.",
     "- Do not reuse the same call to action.",
     "- Do not substitute synonyms — that is still paraphrasing.",
     "",
     "## What you MUST do",
-    "Build the new post entirely around the forced content angle above.",
+    "Build the new post entirely around the forced angle, hook, structure, and CTA above.",
     "The first sentence must be unrecognisable compared to the rejected attempt and the existing post.",
     "This new post should feel like a different social media campaign, not a rewrite.",
   ]
@@ -290,10 +336,10 @@ export function buildPrompts(
   ctx: GenerationContext,
   contentLanguage?: string,
   recentPosts: RecentPostContext[] = [],
-  selectedAngle?: ContentAngle
+  diversity?: PromptDiversityHints
 ): BuiltPrompts {
   return {
     systemPrompt: buildSystemPrompt(ctx, contentLanguage),
-    userPrompt: buildUserPrompt(ctx, contentLanguage, recentPosts, selectedAngle),
+    userPrompt: buildUserPrompt(ctx, contentLanguage, recentPosts, diversity),
   };
 }

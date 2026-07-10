@@ -6,6 +6,8 @@ const LlmPostSchema = z.object({
   hashtags: z.array(z.string()).default([]),
   imagePrompt: z.string().optional(),
   notes: z.string().optional(),
+  // Diversity tracking — model-declared, stored in promptSnapshot.
+  topic: z.string().optional(),
 });
 
 export type ParsedLlmPost = z.infer<typeof LlmPostSchema>;

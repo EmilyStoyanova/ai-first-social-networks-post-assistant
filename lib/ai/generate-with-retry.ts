@@ -7,14 +7,21 @@ import {
 } from "./quality/duplicate-detection";
 import { buildRetryUserPrompt } from "./prompt-builder";
 import { type ContentAngle, selectRetryAngle } from "./content-angle";
+import { type PostPattern, selectRetryPattern } from "./post-pattern";
 
 export const MAX_GENERATION_ATTEMPTS = 3;
 
-export interface AngleRotationOptions {
-  /** The angle baked into the initial baseUserPrompt. */
+export interface DiversityOptions {
+  /** The content angle baked into the initial baseUserPrompt. */
   initialAngle: ContentAngle;
-  /** Angles used by recent posts (most-recent-first). Used to avoid repetition on retry. */
+  /** Angles used by recent posts (most-recent-first). */
   recentAngles: readonly ContentAngle[];
+  /** The writing pattern baked into the initial baseUserPrompt. */
+  initialPattern: PostPattern;
+  /** Patterns used by recent posts (most-recent-first). */
+  recentPatterns: readonly PostPattern[];
+  /** Topics declared by recent posts — passed to the retry prompt for avoidance. */
+  recentTopics: readonly string[];
 }
 
 export interface GenerationLoopResult {
@@ -22,24 +29,23 @@ export interface GenerationLoopResult {
   duplicateResult: DuplicateCheckResult;
   /** The content angle that produced the accepted (or last) result. */
   selectedAngle?: ContentAngle;
+  /** The writing pattern that produced the accepted (or last) result. */
+  selectedPattern?: PostPattern;
 }
 
 /**
  * Calls the provider up to maxAttempts times, stopping as soon as the generated
  * post is not a duplicate of any entry in recentPosts. On retries, prepends an
- * explicit instruction describing the previous failure so the model takes a
- * genuinely different angle. The last result is always returned, even if still
- * flagged after all attempts.
- *
- * When angleOptions is provided the retry prompt forces a different content angle
- * on each attempt. The final angle used is returned in selectedAngle.
+ * explicit instruction with a forced angle AND writing pattern (hook / structure /
+ * CTA) so each attempt is structurally distinct. The last result is always
+ * returned, even if still flagged after all attempts.
  */
 export async function generateWithRetry(
   provider: ILlmProvider,
   systemPrompt: string,
   baseUserPrompt: string,
   recentPosts: RecentPost[],
-  angleOptions?: AngleRotationOptions,
+  diversityOptions?: DiversityOptions,
   maxAttempts = MAX_GENERATION_ATTEMPTS
 ): Promise<GenerationLoopResult> {
   let lastParsed: ParsedLlmPost | null = null;
@@ -49,9 +55,12 @@ export async function generateWithRetry(
     matchedPostId: null,
   };
 
-  // Track angles tried during this generation run so retries pick fresh ones.
-  let currentAngle: ContentAngle | undefined = angleOptions?.initialAngle;
+  // Track angles and patterns tried during this run so retries pick fresh ones.
+  let currentAngle: ContentAngle | undefined = diversityOptions?.initialAngle;
+  let currentPattern: PostPattern | undefined = diversityOptions?.initialPattern;
+
   const triedAngles: ContentAngle[] = currentAngle ? [currentAngle] : [];
+  const triedPatterns: PostPattern[] = currentPattern ? [currentPattern] : [];
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let userPrompt = baseUserPrompt;
@@ -60,13 +69,25 @@ export async function generateWithRetry(
       const matchedPost = recentPosts.find((p) => p.id === lastDuplicateResult.matchedPostId);
 
       let retryAngle: ContentAngle | undefined;
-      if (currentAngle !== undefined && angleOptions) {
-        // Combine angles from recent history with angles tried in this run so far
-        // to maximise diversity on each retry attempt.
-        const usedAngles = [...(angleOptions.recentAngles as ContentAngle[]), ...triedAngles];
-        retryAngle = selectRetryAngle(currentAngle, usedAngles);
-        currentAngle = retryAngle;
-        triedAngles.push(retryAngle);
+      let retryPattern: PostPattern | undefined;
+
+      if (diversityOptions) {
+        if (currentAngle !== undefined) {
+          const usedAngles = [...(diversityOptions.recentAngles as ContentAngle[]), ...triedAngles];
+          retryAngle = selectRetryAngle(currentAngle, usedAngles);
+          currentAngle = retryAngle;
+          triedAngles.push(retryAngle);
+        }
+
+        if (currentPattern !== undefined) {
+          const usedPatterns = [
+            ...(diversityOptions.recentPatterns as PostPattern[]),
+            ...triedPatterns,
+          ];
+          retryPattern = selectRetryPattern(currentPattern, usedPatterns);
+          currentPattern = retryPattern;
+          triedPatterns.push(retryPattern);
+        }
       }
 
       userPrompt = buildRetryUserPrompt(baseUserPrompt, {
@@ -74,6 +95,7 @@ export async function generateWithRetry(
         matchedText: matchedPost?.text ?? "",
         similarityScore: lastDuplicateResult.similarityScore ?? 0,
         forcedAngle: retryAngle,
+        forcedPattern: retryPattern,
       });
     }
 
@@ -94,5 +116,10 @@ export async function generateWithRetry(
   }
 
   // lastParsed is non-null: the loop always executes at least once.
-  return { parsed: lastParsed!, duplicateResult: lastDuplicateResult, selectedAngle: currentAngle };
+  return {
+    parsed: lastParsed!,
+    duplicateResult: lastDuplicateResult,
+    selectedAngle: currentAngle,
+    selectedPattern: currentPattern,
+  };
 }
