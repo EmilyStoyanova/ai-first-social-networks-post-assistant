@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import { parseFeed } from "@/lib/integrations/rss/parser";
 import { scrapeProductPage } from "@/lib/integrations/product-page/scraper";
+import { extractArticleContent } from "@/lib/integrations/rss/article-extractor";
 
 export type IngestContentSourceResult =
   | { success: true; created: number; updated: number }
@@ -64,12 +65,14 @@ export async function runSourceIngestion(
     const items = await parseFeed(config.url);
     for (const item of items) {
       if (!item.url) continue;
+      const extracted = await extractArticleContent(item.url);
+      const content = extracted ?? item.summary;
       const outcome = await upsertFeedItem(
         sourceId,
         companyId,
         item.url,
         item.title,
-        item.summary,
+        content,
         item.publishedAt,
         existingUrls
       );
