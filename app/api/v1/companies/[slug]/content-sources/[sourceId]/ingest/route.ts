@@ -14,12 +14,14 @@ export async function POST(
     );
 
   const { slug, sourceId } = await params;
-  const result = await ingestContentSource(
-    slug,
-    sourceId,
-    session.user.id,
-    session.user.isGlobalAdmin
-  );
+
+  let result: Awaited<ReturnType<typeof ingestContentSource>>;
+  try {
+    result = await ingestContentSource(slug, sourceId, session.user.id, session.user.isGlobalAdmin);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Ingestion failed unexpectedly";
+    return NextResponse.json({ error: { code: "INGEST_FAILED", message } }, { status: 500 });
+  }
 
   if (!result.success) {
     if (result.code === "NOT_FOUND")

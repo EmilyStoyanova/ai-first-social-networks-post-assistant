@@ -104,8 +104,12 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
         method: "POST",
       });
       if (!res.ok) {
-        const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(apiError(json.error));
+        const isJson = res.headers.get("content-type")?.includes("application/json");
+        if (isJson) {
+          const json = (await res.json()) as { error?: { message?: string } };
+          throw new Error(apiError(json.error));
+        }
+        throw new Error(tCommon("somethingWentWrong"));
       }
       const json = (await res.json()) as { created: number; updated: number };
       setIngestResult(json);
