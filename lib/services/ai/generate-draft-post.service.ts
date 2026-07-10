@@ -1,12 +1,11 @@
 import { prisma } from "@/lib/db/client";
 import { type SocialChannel } from "@prisma/client";
 import { buildGenerationContext } from "./build-generation-context.service";
-import type { GenerationContext } from "@/lib/ai/types";
+import type { GenerationContext, ILlmProvider } from "@/lib/ai/types";
 import { buildPrompts } from "@/lib/ai/prompt-builder";
 import { getLlmProvider, NoActiveLlmProviderError } from "@/lib/ai/llm/llm-provider-factory";
-import { parseLlmPost } from "@/lib/ai/parse-llm-post";
 import { LlmProviderError, LlmResponseParseError } from "@/lib/ai/errors";
-import { checkDuplicatePost } from "@/lib/ai/quality/duplicate-detection";
+import { generateWithRetry, type GenerationLoopResult } from "@/lib/ai/generate-with-retry";
 import { checkContentSafety } from "@/lib/ai/quality/content-safety";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 
@@ -121,16 +120,16 @@ export async function generatePostFromContext(
     recentRows.slice(0, 5).map((r) => ({ text: r.content }))
   );
 
-  // ── LLM call ─────────────────────────────────────────────────────────────
+  // ── LLM provider ─────────────────────────────────────────────────────────
   // Provider name and model come from context (set by getLlmProviderInfo() during context build)
   const llmProviderStr = context.llm.provider;
   const llmModelStr = context.llm.model;
-  let rawText: string;
 
+  let provider: ILlmProvider;
   if (process.env.AI_MOCK_MODE === "true") {
-    rawText = MOCK_LLM_TEXT;
+    const mockText = MOCK_LLM_TEXT;
+    provider = { generate: async () => ({ text: mockText }) };
   } else {
-    let provider: ReturnType<typeof getLlmProvider>;
     try {
       provider = getLlmProvider();
     } catch (err) {
@@ -139,28 +138,23 @@ export async function generatePostFromContext(
       }
       throw err;
     }
-
-    try {
-      const response = await provider.generate({
-        systemPrompt,
-        userPrompt,
-        temperature: 0.85,
-        maxTokens: 1024,
-      });
-      rawText = response.text;
-    } catch (err) {
-      if (err instanceof LlmProviderError) {
-        return { success: false, code: "LLM_PROVIDER_ERROR", message: err.message };
-      }
-      throw err;
-    }
   }
 
-  // ── Parse response ────────────────────────────────────────────────────────
-  let parsed: ReturnType<typeof parseLlmPost>;
+  // ── Generate with retry (duplicate-aware) ─────────────────────────────────
+  // Retries up to MAX_GENERATION_ATTEMPTS times when the candidate is flagged
+  // as a duplicate of a recent post. Only the final accepted post is persisted.
+  let generationResult!: GenerationLoopResult;
   try {
-    parsed = parseLlmPost(rawText);
+    generationResult = await generateWithRetry(
+      provider,
+      systemPrompt,
+      userPrompt,
+      recentRows.map((r) => ({ id: r.id, text: r.content }))
+    );
   } catch (err) {
+    if (err instanceof LlmProviderError) {
+      return { success: false, code: "LLM_PROVIDER_ERROR", message: err.message };
+    }
     if (err instanceof LlmResponseParseError) {
       return { success: false, code: "LLM_RESPONSE_PARSE_ERROR", message: err.message };
     }
@@ -168,11 +162,7 @@ export async function generatePostFromContext(
   }
 
   // ── Quality guards ────────────────────────────────────────────────────────
-
-  const duplicateResult = checkDuplicatePost({
-    candidateText: parsed.text,
-    recentPosts: recentRows.map((r) => ({ id: r.id, text: r.content })),
-  });
+  const { parsed, duplicateResult } = generationResult;
 
   const safetyResult = checkContentSafety({
     text: parsed.text,

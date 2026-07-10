@@ -219,6 +219,34 @@ function buildUserPrompt(
     .join("\n\n");
 }
 
+// ─── Retry prompt ─────────────────────────────────────────────────────────────
+
+export interface RetryContext {
+  candidateText: string;
+  matchedText: string;
+  similarityScore: number;
+}
+
+export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext): string {
+  const retryBlock = [
+    `REGENERATION REQUIRED — the previous attempt was too similar to an existing post (similarity score: ${retry.similarityScore.toFixed(2)}).`,
+    "",
+    "Previous attempt:",
+    "---",
+    retry.candidateText,
+    "---",
+    "",
+    "The post it was too similar to:",
+    "---",
+    retry.matchedText,
+    "---",
+    "",
+    "Write a completely new post with a different angle, opening sentence, structure, supporting points, and call to action. Do not merely replace words with synonyms — the new post must take a genuinely different approach.",
+  ].join("\n");
+
+  return `${retryBlock}\n\n${baseUserPrompt}`;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 export function buildPrompts(

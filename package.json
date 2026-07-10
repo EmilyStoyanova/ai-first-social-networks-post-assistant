@@ -18,7 +18,8 @@
     "prepare": "husky",
     "seed:editor": "node scripts/seed-editor.mjs",
     "seed:admin": "node scripts/seed-admin.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npx tsx --test lib/ai/prompt-builder.test.ts lib/ai/generate-with-retry.test.ts"
   },
   "lint-staged": {
     "*.{ts,tsx}": [
