@@ -128,9 +128,7 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
   );
 
   const languageInstruction =
-    lang === "BG"
-      ? "Generate the post in Bulgarian using natural Bulgarian business language."
-      : "Generate the post in English.";
+    lang === "BG" ? "Generate the post in Bulgarian." : "Generate the post in English.";
 
   const writingRules = section(
     "Writing Rules",
@@ -148,6 +146,23 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
     )
   );
 
+  const bulgarianQualitySection =
+    lang === "BG"
+      ? section(
+          "Bulgarian Language Quality — Mandatory",
+          lines(
+            "You are writing for a Bulgarian audience. Apply every rule below without exception.",
+            "- Write as a professional Bulgarian copywriter. Do NOT translate from English — think and write directly in Bulgarian.",
+            "- Use vocabulary and phrasing that a Bulgarian marketing professional would naturally choose. Do not reach for the nearest Bulgarian equivalent of an English word; choose the word Bulgarians actually use in this context and register.",
+            "- Prefer short, direct sentences. Avoid long compound clauses that arise from translating English subordinate constructions.",
+            "- Never produce phrases that are grammatically correct but sound foreign or unnatural to a native speaker. If a phrase reads like a translation, rephrase it from scratch.",
+            "- Examples of the kind of unnatural phrasing to avoid: 'проверената дължина', 'при въжето' — grammatically possible but not how a Bulgarian professional would naturally write. Apply the same judgment to any similar construction, regardless of the topic.",
+            "- Do not change the meaning, selected theme, structure, hashtags, image concept, or call to action. Improve only: word choice, idiomatic phrasing, sentence fluency, and grammar.",
+            "- The final text must be publishable by a Bulgarian company's marketing team without any editing."
+          )
+        )
+      : "";
+
   const parts = [
     `You are a professional social media content creator for ${company.name}.`,
     companySection,
@@ -155,6 +170,7 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
     channelSection,
     automationSection,
     writingRules,
+    bulgarianQualitySection,
   ].filter(Boolean);
 
   return parts.join("\n\n");

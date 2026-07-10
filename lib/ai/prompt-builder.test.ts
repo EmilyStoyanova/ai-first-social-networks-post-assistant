@@ -59,6 +59,80 @@ describe("prompt-builder — Bulgarian content language", () => {
   });
 });
 
+describe("prompt-builder — Bulgarian language quality section", () => {
+  it("includes the Bulgarian quality section when contentLanguage=bg", () => {
+    const { systemPrompt } = buildPrompts(makeCtx({}), "bg");
+    assert.ok(
+      systemPrompt.includes("Bulgarian Language Quality"),
+      "BG system prompt must include the quality section heading"
+    );
+    assert.ok(
+      systemPrompt.includes("professional Bulgarian copywriter"),
+      "BG system prompt must instruct writing as a professional Bulgarian copywriter"
+    );
+    assert.ok(
+      systemPrompt.includes("Do NOT translate from English"),
+      "BG system prompt must explicitly forbid translating from English"
+    );
+  });
+
+  it("includes the Bulgarian quality section when channel postingLanguage=bg (no contentLanguage override)", () => {
+    const { systemPrompt } = buildPrompts(makeCtx({ postingLanguage: "bg" }));
+    assert.ok(
+      systemPrompt.includes("Bulgarian Language Quality"),
+      "BG channel language must also trigger the quality section"
+    );
+  });
+
+  it("omits the Bulgarian quality section for English generation", () => {
+    const { systemPrompt } = buildPrompts(makeCtx({}), "en");
+    assert.ok(
+      !systemPrompt.includes("Bulgarian Language Quality"),
+      "EN system prompt must NOT include the BG quality section"
+    );
+    assert.ok(
+      !systemPrompt.includes("professional Bulgarian copywriter"),
+      "EN system prompt must NOT mention Bulgarian copywriting rules"
+    );
+  });
+
+  it("omits the Bulgarian quality section when no contentLanguage override and channel is EN", () => {
+    const { systemPrompt } = buildPrompts(makeCtx({ postingLanguage: "en" }));
+    assert.ok(
+      !systemPrompt.includes("Bulgarian Language Quality"),
+      "default EN channel must NOT include BG quality section"
+    );
+  });
+
+  it("BG prompt retains the basic language directive in Writing Rules", () => {
+    const { systemPrompt } = buildPrompts(makeCtx({}), "bg");
+    assert.ok(
+      systemPrompt.includes("Generate the post in Bulgarian."),
+      "Writing Rules must still include the basic BG language directive"
+    );
+  });
+
+  it("EN prompt Writing Rules language directive is unchanged", () => {
+    const { systemPrompt } = buildPrompts(makeCtx({}), "en");
+    assert.ok(
+      systemPrompt.includes("Generate the post in English."),
+      "EN Writing Rules language directive must remain unchanged"
+    );
+    assert.ok(
+      !systemPrompt.includes("Generate the post in Bulgarian"),
+      "EN system prompt must not mention Bulgarian directive"
+    );
+  });
+
+  it("BG quality section does not appear in the user prompt", () => {
+    const { userPrompt } = buildPrompts(makeCtx({}), "bg");
+    assert.ok(
+      !userPrompt.includes("Bulgarian Language Quality"),
+      "BG quality section must only appear in the system prompt, not the user prompt"
+    );
+  });
+});
+
 describe("prompt-builder — imageRequired", () => {
   it("marks imagePrompt as REQUIRED in the JSON format when imageRequired=true", () => {
     const { userPrompt } = buildPrompts(makeCtx({ imageRequired: true }));
