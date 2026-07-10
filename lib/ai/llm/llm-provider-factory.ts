@@ -2,6 +2,7 @@ import type { ILlmProvider, LlmRequest, LlmResponse } from "./llm-provider";
 import { GroqProvider } from "./groq.provider";
 import { AnthropicProvider } from "./anthropic.provider";
 import { OpenAILlmProvider } from "./openai.provider";
+import { TextWorkerProvider } from "./text-worker.provider";
 
 export class NoActiveLlmProviderError extends Error {
   readonly code = "NO_ACTIVE_PROVIDER" as const;
@@ -17,12 +18,16 @@ class MockLlmProvider implements ILlmProvider {
   }
 }
 
-type LlmProviderName = "groq" | "anthropic" | "openai";
+type LlmProviderName = "groq" | "anthropic" | "openai" | "text-worker";
 
 function resolveProviderName(): LlmProviderName {
-  const raw = process.env.LLM_PROVIDER?.toLowerCase().trim();
+  const raw = process.env.LLM_PROVIDER?.toLowerCase().trim().replace(/_/g, "-");
+  console.log("[llm-factory] LLM_PROVIDER raw value:", JSON.stringify(process.env.LLM_PROVIDER));
+  console.log("[llm-factory] LLM_PROVIDER normalized:", JSON.stringify(raw));
   if (raw === "anthropic") return "anthropic";
   if (raw === "openai") return "openai";
+  if (raw === "text-worker") return "text-worker";
+  console.log("[llm-factory] No match — falling back to groq");
   return "groq";
 }
 
@@ -45,6 +50,11 @@ export function getLlmProviderInfo(): { provider: string; model: string } {
       return { provider: "ANTHROPIC", model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6" };
     case "openai":
       return { provider: "OPENAI", model: process.env.OPENAI_MODEL ?? "gpt-4.1-mini" };
+    case "text-worker":
+      return {
+        provider: "TEXT_WORKER",
+        model: process.env.TEXT_WORKER_MODEL ?? "qwen3:8b",
+      };
     default: {
       const _exhaustive: never = name;
       return { provider: String(_exhaustive), model: "unknown" };
@@ -63,10 +73,12 @@ export function getLlmProvider(): ILlmProvider {
   }
 
   const name = resolveProviderName();
+  console.log("[llm-factory] getLlmProvider resolved name:", name);
 
   switch (name) {
     case "groq": {
       const apiKey = process.env.GROQ_API_KEY;
+      console.log("[llm-factory] Instantiating GroqProvider");
       if (!apiKey) {
         throw new NoActiveLlmProviderError(
           "GROQ_API_KEY is not set. Set LLM_PROVIDER=ANTHROPIC, LLM_PROVIDER=OPENAI, or AI_MOCK_MODE=true."
@@ -93,6 +105,18 @@ export function getLlmProvider(): ILlmProvider {
         );
       }
       return new OpenAILlmProvider(apiKey, process.env.OPENAI_MODEL ?? "gpt-4.1-mini");
+    }
+
+    case "text-worker": {
+      console.log("[llm-factory] Instantiating TextWorkerProvider");
+      const workerUrl = process.env.TEXT_WORKER_URL;
+      const apiKey = process.env.TEXT_WORKER_API_KEY;
+      if (!workerUrl || !apiKey) {
+        throw new NoActiveLlmProviderError(
+          "TEXT_WORKER_URL and TEXT_WORKER_API_KEY are required when LLM_PROVIDER=TEXT_WORKER."
+        );
+      }
+      return new TextWorkerProvider(workerUrl, apiKey, process.env.TEXT_WORKER_MODEL ?? "qwen3:8b");
     }
 
     default: {
