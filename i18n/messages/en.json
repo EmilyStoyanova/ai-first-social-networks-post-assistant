@@ -389,6 +389,18 @@
     "calendarEventType": "Calendar Event",
     "activeLabel": "Active"
   },
+  "feedItems": {
+    "articlesButton": "Articles ({count})",
+    "articlesButtonLoading": "Loading…",
+    "noArticles": "No articles ingested yet. Click Ingest to fetch articles from this source.",
+    "loadError": "Failed to load articles.",
+    "toggleError": "Failed to update article.",
+    "enabled": "Included",
+    "disabled": "Excluded",
+    "noTitle": "(no title)",
+    "viewOriginal": "View",
+    "ownersOnly": "Only company owners can enable or disable articles."
+  },
   "editPost": {
     "title": "Edit Post",
     "tabEdit": "Edit",

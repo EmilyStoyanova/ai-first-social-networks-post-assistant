@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { ContentSourceForm } from "./content-source-form";
+import { RssArticlesPanel } from "./rss-articles-panel";
 import type { ContentSourceItem } from "@/lib/services/company/list-content-sources.service";
 import type { ContentSourcePayload } from "./content-source-form";
 
@@ -229,6 +230,10 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
         </>
       ) : (
         <p className="text-fg-faint text-xs">{t("ownersOnly")}</p>
+      )}
+      {/* RSS articles panel — lazy-loaded per source */}
+      {source.type === "rss" && !isEditing && (
+        <RssArticlesPanel slug={slug} sourceId={source.id} canManage={canManage} />
       )}
     </Card>
   );

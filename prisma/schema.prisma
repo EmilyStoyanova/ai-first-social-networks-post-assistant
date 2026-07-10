@@ -243,6 +243,7 @@ model FeedItem {
   content     String?
   url         String
   publishedAt DateTime? @map("published_at")
+  enabled     Boolean   @default(true) @map("enabled")
   usedInPost  Boolean   @default(false) @map("used_in_post")
   createdAt   DateTime  @default(now()) @map("created_at")
 

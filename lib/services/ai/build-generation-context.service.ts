@@ -130,7 +130,7 @@ async function loadContext(
       },
     }),
     prisma.feedItem.findMany({
-      where: { companyId, source: { enabled: true } },
+      where: { companyId, enabled: true, source: { enabled: true } },
       orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
       take: 5,
       select: { id: true, title: true, content: true, url: true, publishedAt: true },
