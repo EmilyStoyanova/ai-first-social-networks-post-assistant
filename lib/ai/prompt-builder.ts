@@ -1,4 +1,5 @@
 import type { GenerationContext } from "./types";
+import { type ContentAngle, ANGLE_INSTRUCTIONS } from "./content-angle";
 
 export interface BuiltPrompts {
   systemPrompt: string;
@@ -165,7 +166,8 @@ ${imagePromptLine},
 function buildUserPrompt(
   ctx: GenerationContext,
   contentLanguage?: string,
-  recentPosts: RecentPostContext[] = []
+  recentPosts: RecentPostContext[] = [],
+  selectedAngle?: ContentAngle
 ): string {
   const { channel, feedItems } = ctx;
   const channelLabel = CHANNEL_LABELS[channel.channel] ?? channel.channel;
@@ -214,7 +216,17 @@ function buildUserPrompt(
       ? `Create an original ${channelLabel} post for ${ctx.company.name}.\nWrite in ${lang}.`
       : `Write a ${channelLabel} post for ${ctx.company.name}.`;
 
-  return [intro, feedSection, recentSection, buildJsonFormatInstruction(imageRequired)]
+  const angleSection = selectedAngle
+    ? `**Content angle: ${selectedAngle}**\n${ANGLE_INSTRUCTIONS[selectedAngle]}`
+    : "";
+
+  return [
+    intro,
+    feedSection,
+    recentSection,
+    angleSection,
+    buildJsonFormatInstruction(imageRequired),
+  ]
     .filter(Boolean)
     .join("\n\n");
 }
@@ -225,9 +237,20 @@ export interface RetryContext {
   candidateText: string;
   matchedText: string;
   similarityScore: number;
+  /** When provided the retry prompt forces the model to use this angle. */
+  forcedAngle?: ContentAngle;
 }
 
 export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext): string {
+  const angleBlock = retry.forcedAngle
+    ? [
+        "## FORCED CONTENT ANGLE — overrides any angle instruction below",
+        `You MUST structure this regeneration as: **${retry.forcedAngle}**`,
+        ANGLE_INSTRUCTIONS[retry.forcedAngle],
+        "Do not use the same angle as the rejected attempt.",
+      ].join("\n")
+    : "";
+
   const retryBlock = [
     `⚠ REGENERATION REQUIRED (similarity score: ${retry.similarityScore.toFixed(2)} — too close to an existing post).`,
     "",
@@ -241,6 +264,7 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     retry.matchedText,
     "---",
     "",
+    angleBlock,
     "## What you must NOT do",
     "- Do not paraphrase the rejected attempt.",
     "- Do not reuse the same hook, opening sentence, or first idea.",
@@ -250,24 +274,12 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     "- Do not substitute synonyms — that is still paraphrasing.",
     "",
     "## What you MUST do",
-    "Pick a completely different marketing angle from the list below and build the new post entirely around it.",
+    "Build the new post entirely around the forced content angle above.",
     "The first sentence must be unrecognisable compared to the rejected attempt and the existing post.",
     "This new post should feel like a different social media campaign, not a rewrite.",
-    "",
-    "## Alternative angles to choose from",
-    "- Education: teach one specific thing the audience does not know",
-    "- Case study: show a concrete before/after or real outcome",
-    "- ROI / business impact: lead with a number or measurable result",
-    "- Myth vs fact: open by busting a common misconception",
-    "- Quick tips: a short list of immediately actionable advice",
-    "- Common mistakes: what people get wrong and why it matters",
-    "- Trend / industry shift: frame the topic inside a change that is happening now",
-    "- FAQ: answer one question the audience is already asking",
-    "- Checklist: give a scannable step-by-step the reader can act on today",
-    "- Customer / user story: illustrate the topic through a relatable experience",
-    "",
-    "Choose the angle that fits the source content best and is furthest from the rejected attempt.",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   return `${retryBlock}\n\n${baseUserPrompt}`;
 }
@@ -277,10 +289,11 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
 export function buildPrompts(
   ctx: GenerationContext,
   contentLanguage?: string,
-  recentPosts: RecentPostContext[] = []
+  recentPosts: RecentPostContext[] = [],
+  selectedAngle?: ContentAngle
 ): BuiltPrompts {
   return {
     systemPrompt: buildSystemPrompt(ctx, contentLanguage),
-    userPrompt: buildUserPrompt(ctx, contentLanguage, recentPosts),
+    userPrompt: buildUserPrompt(ctx, contentLanguage, recentPosts, selectedAngle),
   };
 }

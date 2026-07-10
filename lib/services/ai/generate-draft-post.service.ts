@@ -8,6 +8,7 @@ import { LlmProviderError, LlmResponseParseError } from "@/lib/ai/errors";
 import { generateWithRetry, type GenerationLoopResult } from "@/lib/ai/generate-with-retry";
 import { checkContentSafety } from "@/lib/ai/quality/content-safety";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
+import { CONTENT_ANGLES, selectAngle, type ContentAngle } from "@/lib/ai/content-angle";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -111,13 +112,27 @@ export async function generatePostFromContext(
     where: { companyId, channel: context.channel.channel as SocialChannel },
     orderBy: { createdAt: "desc" },
     take: 10,
-    select: { id: true, content: true },
+    select: { id: true, content: true, promptSnapshot: true },
   });
+
+  // Extract angles from promptSnapshot (most-recent-first) — absent on legacy posts.
+  const recentAngles: ContentAngle[] = recentRows
+    .map((r) => {
+      const snap = r.promptSnapshot as Record<string, unknown> | null;
+      const angle = snap?.contentAngle;
+      return typeof angle === "string" && (CONTENT_ANGLES as readonly string[]).includes(angle)
+        ? (angle as ContentAngle)
+        : null;
+    })
+    .filter((a): a is ContentAngle => a !== null);
+
+  const initialAngle = selectAngle(recentAngles);
 
   const { systemPrompt, userPrompt } = buildPrompts(
     context,
     contentLanguage,
-    recentRows.slice(0, 5).map((r) => ({ text: r.content }))
+    recentRows.slice(0, 5).map((r) => ({ text: r.content })),
+    initialAngle
   );
 
   // ── LLM provider ─────────────────────────────────────────────────────────
@@ -149,7 +164,8 @@ export async function generatePostFromContext(
       provider,
       systemPrompt,
       userPrompt,
-      recentRows.map((r) => ({ id: r.id, text: r.content }))
+      recentRows.map((r) => ({ id: r.id, text: r.content })),
+      { initialAngle, recentAngles }
     );
   } catch (err) {
     if (err instanceof LlmProviderError) {
@@ -162,7 +178,7 @@ export async function generatePostFromContext(
   }
 
   // ── Quality guards ────────────────────────────────────────────────────────
-  const { parsed, duplicateResult } = generationResult;
+  const { parsed, duplicateResult, selectedAngle } = generationResult;
 
   const safetyResult = checkContentSafety({
     text: parsed.text,
@@ -220,6 +236,7 @@ export async function generatePostFromContext(
         model: llmModelStr,
         feedItemIds,
         generatedAt: new Date().toISOString(),
+        contentAngle: selectedAngle ?? null,
         qualityGuards,
       },
     },
