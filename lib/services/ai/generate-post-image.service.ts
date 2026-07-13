@@ -1,7 +1,10 @@
+import type { MediaSource, SocialChannel } from "@prisma/client";
 import { prisma } from "@/lib/db/client";
 import { getImageProvider } from "@/lib/ai/image/image-provider-factory";
 import { buildImagePrompt } from "@/lib/ai/image/image-prompt-builder";
 import { ImageProviderError } from "@/lib/ai/image/image-provider-errors";
+import type { IImageProvider } from "@/lib/ai/image/image-provider";
+import type { ImageStyle } from "@/lib/ai/image/image-style";
 
 export interface MediaDTO {
   id: string;
@@ -18,12 +21,67 @@ export type GeneratePostImageResult =
       message?: string;
     };
 
-export async function generatePostImage(
+// ─── Minimal DB interface for testability ─────────────────────────────────────
+
+export interface GeneratePostImageDb {
+  post: {
+    findUnique: (args: {
+      where: { id: string };
+      select: {
+        companyId: true;
+        channel: true;
+        imagePrompt: true;
+        company: { select: { brandGuidelines: { select: { forbiddenWords: true } } } };
+      };
+    }) => Promise<{
+      companyId: string;
+      channel: SocialChannel;
+      imagePrompt: string | null;
+      company: { brandGuidelines: { forbiddenWords: string[] } | null };
+    } | null>;
+    update: (args: { where: { id: string }; data: { mediaAssetId: string } }) => Promise<unknown>;
+  };
+  companyMember: {
+    findFirst: (args: {
+      where: { companyId: string; userId: string };
+      select: { role: true };
+    }) => Promise<{ role: string } | null>;
+  };
+  mediaAsset: {
+    create: (args: {
+      data: {
+        companyId: string;
+        cloudinaryId: string;
+        url: string;
+        width: number;
+        height: number;
+        generatedBy: MediaSource;
+        aiPrompt: string;
+        imageStyle: string | null;
+        uploadedBy: string;
+      };
+      select: { id: true; url: true; width: true; height: true };
+    }) => Promise<{ id: string; url: string; width: number | null; height: number | null }>;
+  };
+}
+
+export interface GeneratePostImageDeps {
+  db: GeneratePostImageDb;
+  getProvider: () => IImageProvider;
+}
+
+// ─── Core logic ───────────────────────────────────────────────────────────────
+
+export async function generatePostImageCore(
   postId: string,
   userId: string,
-  isGlobalAdmin: boolean
+  isGlobalAdmin: boolean,
+  imageStyle: ImageStyle | undefined,
+  deps: GeneratePostImageDeps
 ): Promise<GeneratePostImageResult> {
-  const post = await prisma.post.findUnique({
+  const { db, getProvider } = deps;
+
+  const post = await db.post.findUnique({
     where: { id: postId },
     select: {
       companyId: true,
@@ -40,7 +98,7 @@ export async function generatePostImage(
   if (!post) return { success: false, code: "NOT_FOUND" };
 
   if (!isGlobalAdmin) {
-    const membership = await prisma.companyMember.findFirst({
+    const membership = await db.companyMember.findFirst({
       where: { companyId: post.companyId, userId },
       select: { role: true },
     });
@@ -59,11 +117,12 @@ export async function generatePostImage(
     basePrompt: post.imagePrompt,
     channel: post.channel,
     forbiddenWords,
+    imageStyle,
   });
 
-  let provider: ReturnType<typeof getImageProvider>;
+  let provider: IImageProvider;
   try {
-    provider = getImageProvider();
+    provider = getProvider();
   } catch (err) {
     if (err instanceof ImageProviderError) {
       logImageProviderFailure(err);
@@ -85,7 +144,7 @@ export async function generatePostImage(
     throw err;
   }
 
-  const asset = await prisma.mediaAsset.create({
+  const asset = await db.mediaAsset.create({
     data: {
       companyId: post.companyId,
       cloudinaryId: generated.providerAssetId,
@@ -94,12 +153,13 @@ export async function generatePostImage(
       height: generated.height,
       generatedBy: "ai",
       aiPrompt: prompt,
+      imageStyle: imageStyle ?? null,
       uploadedBy: userId,
     },
     select: { id: true, url: true, width: true, height: true },
   });
 
-  await prisma.post.update({
+  await db.post.update({
     where: { id: postId },
     data: { mediaAssetId: asset.id },
   });
@@ -113,6 +173,20 @@ export async function generatePostImage(
       height: asset.height ?? generated.height,
     },
   };
+}
+
+// ─── Public API (uses real Prisma + configured provider) ──────────────────────
+
+export async function generatePostImage(
+  postId: string,
+  userId: string,
+  isGlobalAdmin: boolean,
+  imageStyle?: ImageStyle
+): Promise<GeneratePostImageResult> {
+  return generatePostImageCore(postId, userId, isGlobalAdmin, imageStyle, {
+    db: prisma,
+    getProvider: getImageProvider,
+  });
 }
 
 function logImageProviderFailure(err: ImageProviderError): void {

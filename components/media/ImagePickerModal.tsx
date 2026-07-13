@@ -7,6 +7,7 @@ import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
+import { IMAGE_STYLES, type ImageStyle } from "@/lib/ai/image/image-style";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -221,13 +222,18 @@ function AiGenerateTab({
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [preview, setPreview] = useState<AttachedMedia | null>(null);
+  const [imageStyle, setImageStyle] = useState<ImageStyle>("default");
 
   async function handleGenerate() {
     setGenerating(true);
     setError("");
     setPreview(null);
     try {
-      const res = await fetch(`/api/v1/posts/${postId}/generate-image`, { method: "POST" });
+      const res = await fetch(`/api/v1/posts/${postId}/generate-image`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageStyle }),
+      });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
         throw new Error(apiError(json.error));
@@ -251,6 +257,30 @@ function AiGenerateTab({
             {t("imagePrompt")}
           </p>
           <p className="text-fg-muted text-sm leading-relaxed">{postImagePrompt}</p>
+        </div>
+      )}
+
+      {postImagePrompt && (
+        <div>
+          <label
+            htmlFor="image-style"
+            className="text-fg-faint mb-1 block text-xs font-semibold tracking-wide uppercase"
+          >
+            {t("imageStyleLabel")}
+          </label>
+          <select
+            id="image-style"
+            value={imageStyle}
+            disabled={generating}
+            onChange={(e) => setImageStyle(e.target.value as ImageStyle)}
+            className="rounded-control border-border-strong focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2 text-sm outline-none focus:ring-2"
+          >
+            {IMAGE_STYLES.map((style) => (
+              <option key={style} value={style}>
+                {t(`imageStyleOption.${style}`)}
+              </option>
+            ))}
+          </select>
         </div>
       )}
 

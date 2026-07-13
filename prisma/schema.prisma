@@ -265,6 +265,7 @@ model MediaAsset {
   height       Int?
   generatedBy  MediaSource @map("generated_by")
   aiPrompt     String?     @map("ai_prompt")
+  imageStyle   String?     @map("image_style")
   uploadedBy   String      @map("uploaded_by")
   createdAt    DateTime    @default(now()) @map("created_at")
 

@@ -1,3 +1,5 @@
+import { IMAGE_STYLE_INSTRUCTIONS, type ImageStyle } from "./image-style";
+
 const CHANNEL_HINTS: Record<string, { dimensions: string; style: string }> = {
   instagram: {
     dimensions: "square 1:1 format",
@@ -20,12 +22,18 @@ const CHANNEL_HINTS: Record<string, { dimensions: string; style: string }> = {
 const SAFETY_SUFFIX =
   "No text overlays. No logos or watermarks. No faces. Photorealistic, high quality, social-media-optimized.";
 
+// Animated images must not be described as "Photorealistic" — that contradicts
+// the animated style instruction. Same safety rules, without the realism word.
+const ANIMATED_SAFETY_SUFFIX =
+  "No text overlays. No logos or watermarks. No faces. High quality, social-media-optimized.";
+
 export function buildImagePrompt(params: {
   basePrompt: string;
   channel: string;
   forbiddenWords: string[];
+  imageStyle?: ImageStyle;
 }): string {
-  const { basePrompt, channel, forbiddenWords } = params;
+  const { basePrompt, channel, forbiddenWords, imageStyle } = params;
 
   let safePrompt = basePrompt;
   for (const word of forbiddenWords) {
@@ -43,7 +51,11 @@ export function buildImagePrompt(params: {
     parts.push(`Style: ${hints.style}.`);
     parts.push(`Format: ${hints.dimensions}.`);
   }
-  parts.push(SAFETY_SUFFIX);
+  // `default` (or omitted) leaves the prompt identical to the legacy output.
+  if (imageStyle && imageStyle !== "default") {
+    parts.push(IMAGE_STYLE_INSTRUCTIONS[imageStyle]);
+  }
+  parts.push(imageStyle === "animated" ? ANIMATED_SAFETY_SUFFIX : SAFETY_SUFFIX);
 
   return parts.join(" ");
 }

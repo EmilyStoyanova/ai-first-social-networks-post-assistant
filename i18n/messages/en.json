@@ -577,6 +577,12 @@
     "searchPlaceholder": "Search by provider or date…",
     "noPrompt": "This post has no image prompt. Regenerate the post draft to get one.",
     "imagePrompt": "Image Prompt",
+    "imageStyleLabel": "Image Style",
+    "imageStyleOption": {
+      "default": "Default",
+      "realistic": "Realistic",
+      "animated": "Animated"
+    },
     "attachThis": "Attach This Image",
     "regenerate": "Regenerate",
     "generateImage": "Generate Image",

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { generatePostImage } from "@/lib/services/ai/generate-post-image.service";
+import { generateImageRequestSchema } from "@/lib/ai/image/image-style";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await auth();
@@ -13,7 +14,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const { id } = await params;
 
-  const result = await generatePostImage(id, session.user.id, session.user.isGlobalAdmin);
+  // Body is optional; when present, only a valid `imageStyle` is accepted.
+  const rawBody = await req.json().catch(() => ({}));
+  const parsed = generateImageRequestSchema.safeParse(rawBody ?? {});
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: { code: "VALIDATION_ERROR", message: "Invalid image style" } },
+      { status: 400 }
+    );
+  }
+
+  const result = await generatePostImage(
+    id,
+    session.user.id,
+    session.user.isGlobalAdmin,
+    parsed.data.imageStyle
+  );
 
   if (!result.success) {
     switch (result.code) {
