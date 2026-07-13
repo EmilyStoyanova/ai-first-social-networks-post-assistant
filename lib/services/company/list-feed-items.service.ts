@@ -46,6 +46,19 @@ async function resolveCompanyAndSource(
 
 const ITEMS_LIMIT = 50;
 
+/**
+ * True when the company has at least one enabled feed item from an enabled
+ * source — i.e. generation would be based on an RSS article (v2-1). Used to
+ * decide whether the manual source-link override is shown.
+ */
+export async function hasEnabledFeedItems(companyId: string): Promise<boolean> {
+  const item = await prisma.feedItem.findFirst({
+    where: { companyId, enabled: true, source: { enabled: true } },
+    select: { id: true },
+  });
+  return item !== null;
+}
+
 export async function listFeedItems(
   slug: string,
   sourceId: string,

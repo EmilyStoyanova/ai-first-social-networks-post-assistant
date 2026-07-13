@@ -53,6 +53,7 @@
     "ALREADY_MEMBER": "This user is already a member of the company.",
     "INGEST_FAILED": "Ingestion failed. Check the source URL and try again.",
     "EMAIL_NOT_VERIFIED": "Please verify your email address before signing in.",
+    "POST_TOO_LONG_WITH_URL": "The post plus the source link exceeds the channel's character limit. Generate again or shorten the post.",
     "UNKNOWN": "Something went wrong. Please try again."
   },
   "brand": {
@@ -346,6 +347,9 @@
     "postsPerWeekLabel": "Posts per week",
     "enabledLabel": "Enabled",
     "imageRequiredLabel": "Image required",
+    "includeSourceLink": "Source link",
+    "includeSourceLinkLabel": "Include source link by default",
+    "includeSourceLinkHelp": "When a post is generated from an RSS article, the article URL is appended to the end of the post.",
     "saveError": "Failed to save.",
     "companyDefaultHelp": "This channel uses the automation mode configured for the company.",
     "effectiveMode": "Current effective mode: {mode}"
@@ -387,7 +391,12 @@
     "promptType": "Manual Prompt",
     "productPageType": "Product Page",
     "calendarEventType": "Calendar Event",
-    "activeLabel": "Active"
+    "activeLabel": "Active",
+    "sourceLinkLabel": "Source link in posts",
+    "sourceLinkInherit": "Use channel setting",
+    "sourceLinkInclude": "Always include",
+    "sourceLinkExclude": "Never include",
+    "sourceLinkHelp": "Overrides the channel default for articles from this feed."
   },
   "feedItems": {
     "articlesButton": "Articles ({count})",
@@ -469,6 +478,10 @@
       "contentLanguageBG": "BG — Bulgarian",
       "generateDraft": "Generate Draft",
       "generating": "Generating…",
+      "sourceLink": "Source link",
+      "sourceLinkInherit": "Default (from settings)",
+      "sourceLinkInclude": "Include",
+      "sourceLinkExclude": "Don't include",
       "duplicateWarning": "Similar post detected (score {score}). Review before publishing.",
       "safetyWarning": "Safety check flagged: {terms}. Draft saved — please review before approving."
     }

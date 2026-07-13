@@ -45,6 +45,7 @@ export const API_ERROR_CODES = [
   "ALREADY_MEMBER",
   "INGEST_FAILED",
   "EMAIL_NOT_VERIFIED",
+  "POST_TOO_LONG_WITH_URL",
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];

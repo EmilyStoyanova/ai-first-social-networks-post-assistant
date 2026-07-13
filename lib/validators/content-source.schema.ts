@@ -8,7 +8,11 @@ const baseFields = {
 const rssSchema = z.object({
   type: z.literal("rss"),
   ...baseFields,
-  config: z.object({ url: z.string().url("Must be a valid URL.") }),
+  config: z.object({
+    url: z.string().url("Must be a valid URL."),
+    // Per-source source-link preference (v2-1). Omitted = inherit channel default.
+    includeSourceLink: z.boolean().optional(),
+  }),
 });
 
 const promptSchema = z.object({

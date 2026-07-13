@@ -178,6 +178,7 @@ model ChannelConfig {
   postsPerWeek           Int             @default(5) @map("posts_per_week")
   postingWindows         Json?           @map("posting_windows")
   automationModeOverride AutomationMode? @map("automation_mode_override")
+  includeSourceLink      Boolean         @default(false) @map("include_source_link")
   updatedAt              DateTime        @updatedAt @map("updated_at")
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)

@@ -1,10 +1,12 @@
 import { prisma } from "@/lib/db/client";
 
+export type ContentSourceConfig = Record<string, string | boolean>;
+
 export interface ContentSourceItem {
   id: string;
   type: string;
   name: string;
-  config: Record<string, string>;
+  config: ContentSourceConfig;
   enabled: boolean;
   lastFetchedAt: string | null;
   createdAt: string;
@@ -26,7 +28,7 @@ function toItem(r: {
     id: r.id,
     type: r.type,
     name: r.name,
-    config: r.config as Record<string, string>,
+    config: r.config as ContentSourceConfig,
     enabled: r.enabled,
     lastFetchedAt: r.lastFetchedAt?.toISOString() ?? null,
     createdAt: r.createdAt.toISOString(),

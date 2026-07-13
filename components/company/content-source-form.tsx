@@ -8,8 +8,21 @@ import type { ContentSourceItem } from "@/lib/services/company/list-content-sour
 export interface ContentSourcePayload {
   type: string;
   name: string;
-  config: Record<string, string>;
+  config: Record<string, string | boolean>;
   enabled: boolean;
+}
+
+/** Three-state source-link preference: inherit channel default, or force on/off. */
+type SourceLinkPref = "inherit" | "include" | "exclude";
+
+function asText(value: string | boolean | undefined): string {
+  return typeof value === "string" ? value : "";
+}
+
+function initialSourceLinkPref(value: string | boolean | undefined): SourceLinkPref {
+  if (value === true) return "include";
+  if (value === false) return "exclude";
+  return "inherit";
 }
 
 interface Props {
@@ -36,18 +49,28 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
 
   const [type, setType] = useState(initialData?.type ?? "rss");
   const [name, setName] = useState(initialData?.name ?? "");
-  const [url, setUrl] = useState(initialData?.config.url ?? "");
-  const [promptText, setPromptText] = useState(initialData?.config.promptText ?? "");
-  const [eventTitle, setEventTitle] = useState(initialData?.config.title ?? "");
-  const [eventDate, setEventDate] = useState(initialData?.config.date ?? "");
-  const [eventDescription, setEventDescription] = useState(initialData?.config.description ?? "");
+  const [url, setUrl] = useState(asText(initialData?.config.url));
+  const [promptText, setPromptText] = useState(asText(initialData?.config.promptText));
+  const [eventTitle, setEventTitle] = useState(asText(initialData?.config.title));
+  const [eventDate, setEventDate] = useState(asText(initialData?.config.date));
+  const [eventDescription, setEventDescription] = useState(asText(initialData?.config.description));
+  const [sourceLinkPref, setSourceLinkPref] = useState<SourceLinkPref>(
+    initialSourceLinkPref(initialData?.config.includeSourceLink)
+  );
   const [enabled, setEnabled] = useState(initialData?.enabled ?? true);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    let config: Record<string, string> = {};
+    let config: Record<string, string | boolean> = {};
 
-    if (type === "rss" || type === "product_page") {
+    if (type === "rss") {
+      config = {
+        url: url.trim(),
+        ...(sourceLinkPref === "inherit"
+          ? {}
+          : { includeSourceLink: sourceLinkPref === "include" }),
+      };
+    } else if (type === "product_page") {
       config = { url: url.trim() };
     } else if (type === "prompt") {
       config = { promptText: promptText.trim() };
@@ -115,6 +138,25 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
             className={`${BASE} ${NORMAL}`}
             required
           />
+        </div>
+      )}
+
+      {/* RSS — source link preference (inherit / include / exclude) */}
+      {type === "rss" && (
+        <div>
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">
+            {t("sourceLinkLabel")}
+          </label>
+          <select
+            value={sourceLinkPref}
+            onChange={(e) => setSourceLinkPref(e.target.value as SourceLinkPref)}
+            className={`${BASE} ${NORMAL}`}
+          >
+            <option value="inherit">{t("sourceLinkInherit")}</option>
+            <option value="include">{t("sourceLinkInclude")}</option>
+            <option value="exclude">{t("sourceLinkExclude")}</option>
+          </select>
+          <p className="text-fg-faint mt-1 text-xs">{t("sourceLinkHelp")}</p>
         </div>
       )}
 

@@ -31,14 +31,18 @@ function formatDate(iso: string | null, never: string): string {
   });
 }
 
+function asText(value: string | boolean | undefined): string {
+  return typeof value === "string" ? value : "";
+}
+
 function sourcePreview(source: ContentSourceItem): string {
   const c = source.config;
-  if (source.type === "rss" || source.type === "product_page") return c.url ?? "";
+  if (source.type === "rss" || source.type === "product_page") return asText(c.url);
   if (source.type === "prompt") {
-    const text = c.promptText ?? "";
+    const text = asText(c.promptText);
     return text.length > 80 ? text.slice(0, 80) + "…" : text;
   }
-  if (source.type === "calendar_event") return `${c.title ?? ""} · ${c.date ?? ""}`;
+  if (source.type === "calendar_event") return `${asText(c.title)} · ${asText(c.date)}`;
   return "";
 }
 

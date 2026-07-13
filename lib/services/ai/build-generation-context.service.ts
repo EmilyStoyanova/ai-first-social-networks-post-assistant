@@ -13,6 +13,13 @@ const CHANNEL_DEFAULTS: Record<ValidChannel, { postingLanguage: string; imageReq
     tiktok: { postingLanguage: "en", imageRequired: true },
   };
 
+/** Reads ContentSource.config.includeSourceLink; undefined when unset or not a boolean. */
+function extractSourceLinkPreference(config: unknown): boolean | undefined {
+  if (config === null || typeof config !== "object") return undefined;
+  const value = (config as Record<string, unknown>).includeSourceLink;
+  return typeof value === "boolean" ? value : undefined;
+}
+
 export type BuildGenerationContextResult =
   | { success: true; context: GenerationContext; companyId: string }
   | {
@@ -127,13 +134,22 @@ async function loadContext(
         postingLanguage: true,
         imageRequired: true,
         automationModeOverride: true,
+        maxTextLength: true,
+        includeSourceLink: true,
       },
     }),
     prisma.feedItem.findMany({
       where: { companyId, enabled: true, source: { enabled: true } },
       orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
       take: 5,
-      select: { id: true, title: true, content: true, url: true, publishedAt: true },
+      select: {
+        id: true,
+        title: true,
+        content: true,
+        url: true,
+        publishedAt: true,
+        source: { select: { config: true } },
+      },
     }),
   ]);
 
@@ -165,6 +181,8 @@ async function loadContext(
         channelConfigData?.postingLanguage ?? companyRow.defaultLang ?? defaults.postingLanguage,
       imageRequired: channelConfigData?.imageRequired ?? defaults.imageRequired,
       automationModeOverride: channelConfigData?.automationModeOverride ?? null,
+      maxTextLength: channelConfigData?.maxTextLength ?? null,
+      includeSourceLink: channelConfigData?.includeSourceLink ?? false,
     },
     feedItems: feedData.map((f) => ({
       id: f.id,
@@ -172,6 +190,7 @@ async function loadContext(
       content: f.content,
       url: f.url,
       publishedAt: f.publishedAt,
+      sourceLinkPreference: extractSourceLinkPreference(f.source.config),
     })),
     llm: getLlmProviderInfo(),
   };

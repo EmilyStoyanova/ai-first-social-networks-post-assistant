@@ -80,6 +80,8 @@ const CTX: GenerationContext = {
     postingLanguage: "en",
     imageRequired: false,
     automationModeOverride: null,
+    maxTextLength: null,
+    includeSourceLink: false,
   },
   feedItems: FEED_ITEMS,
   llm: { provider: "groq", model: "llama-3.3-70b-versatile" },

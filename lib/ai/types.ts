@@ -37,6 +37,9 @@ export interface ChannelContext {
   postingLanguage: string;
   imageRequired: boolean;
   automationModeOverride: string | null;
+  maxTextLength: number | null;
+  /** Channel default for appending the source article URL (v2-1). */
+  includeSourceLink: boolean;
 }
 
 export interface FeedItemContext {
@@ -45,6 +48,8 @@ export interface FeedItemContext {
   content: string | null;
   url: string;
   publishedAt: Date | null;
+  /** ContentSource.config.includeSourceLink of the item's source; undefined = inherit. */
+  sourceLinkPreference?: boolean;
 }
 
 export interface LlmContext {

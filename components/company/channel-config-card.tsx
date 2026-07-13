@@ -110,6 +110,7 @@ export function ChannelConfigCard({
           postsPerWeek: data.postsPerWeek,
           language: data.language,
           imageRequired: data.imageRequired,
+          includeSourceLink: data.includeSourceLink,
           automationModeOverride: data.automationModeOverride,
           postingWindows: data.postingWindows,
         }),
@@ -188,6 +189,12 @@ export function ChannelConfigCard({
             <div className="flex items-center justify-between">
               <dt className="text-fg-muted">{t("imageRequired")}</dt>
               <dd className="text-fg font-medium">{config.imageRequired ? t("yes") : t("no")}</dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-fg-muted">{t("includeSourceLink")}</dt>
+              <dd className="text-fg font-medium">
+                {config.includeSourceLink ? t("yes") : t("no")}
+              </dd>
             </div>
             <div className="flex items-start justify-between">
               <dt className="text-fg-muted">{t("automation")}</dt>

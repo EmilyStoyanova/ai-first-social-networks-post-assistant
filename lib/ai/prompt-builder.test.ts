@@ -20,6 +20,8 @@ function makeCtx(overrides: {
       postingLanguage: overrides.postingLanguage ?? "en",
       imageRequired: overrides.imageRequired ?? false,
       automationModeOverride: null,
+      maxTextLength: null,
+      includeSourceLink: false,
     },
     feedItems: [],
     llm: { provider: "groq", model: "llama-3.3-70b-versatile" },

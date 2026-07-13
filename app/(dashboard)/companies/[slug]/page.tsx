@@ -19,6 +19,7 @@ import {
   type ChannelConfigItem,
 } from "@/lib/services/company/list-channel-configs.service";
 import { listContentSources } from "@/lib/services/company/list-content-sources.service";
+import { hasEnabledFeedItems } from "@/lib/services/company/list-feed-items.service";
 import { listPosts } from "@/lib/services/company/list-posts.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
@@ -85,10 +86,13 @@ export default async function CompanyPage({ params, searchParams }: Props) {
     ]);
   }
 
+  let rssFeedItemsAvailable = false;
+
   if (activeTab === "posts") {
-    [postsData, bufferConnection] = await Promise.all([
+    [postsData, bufferConnection, rssFeedItemsAvailable] = await Promise.all([
       listPosts(slug, session.user.id, session.user.isGlobalAdmin),
       getBufferConnection(company.id),
+      hasEnabledFeedItems(company.id),
     ]);
   }
 
@@ -153,6 +157,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
               canPublish={canPublish}
               canApprove={canManage}
               bufferConnected={bufferConnection.connected}
+              hasRssFeedItems={rssFeedItemsAvailable}
             />
           )}
 

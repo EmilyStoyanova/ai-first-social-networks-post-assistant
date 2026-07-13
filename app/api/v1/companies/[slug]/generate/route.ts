@@ -9,6 +9,8 @@ const bodySchema = z.object({
     .transform((v) => v.toLowerCase())
     .pipe(z.enum(["facebook", "linkedin", "instagram", "tiktok"])),
   contentLanguage: z.enum(["en", "bg"]).optional().default("en"),
+  // Manual source-link override (v2-1); omitted = inherit source/channel config.
+  includeSourceLink: z.boolean().optional(),
 });
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -51,7 +53,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     parsed.data.channel,
     session.user.id,
     session.user.isGlobalAdmin,
-    parsed.data.contentLanguage
+    {
+      contentLanguage: parsed.data.contentLanguage,
+      includeSourceLinkOverride: parsed.data.includeSourceLink,
+    }
   );
 
   if (!result.success) {
@@ -102,6 +107,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
             },
           },
           { status: 502 }
+        );
+      case "POST_TOO_LONG_WITH_URL":
+        return NextResponse.json(
+          {
+            error: {
+              code: "POST_TOO_LONG_WITH_URL",
+              message: result.message ?? "Post text plus source URL exceeds the channel text limit",
+            },
+          },
+          { status: 422 }
         );
     }
   }

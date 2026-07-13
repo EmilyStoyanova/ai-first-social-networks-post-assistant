@@ -17,17 +17,23 @@ const CHANNELS = [
 
 type Channel = (typeof CHANNELS)[number]["value"];
 
+/** Three-state override: inherit the source/channel setting, or force on/off. */
+type SourceLinkOverride = "inherit" | "include" | "exclude";
+
 interface Props {
   slug: string;
   onGenerated: (post: PostItem) => void;
+  /** Whether generation is based on an RSS feed item — gates the source-link override. */
+  hasRssFeedItems: boolean;
 }
 
-export function GeneratePostForm({ slug, onGenerated }: Props) {
+export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems }: Props) {
   const t = useTranslations("posts.generate");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
   const [channel, setChannel] = useState<Channel>("FACEBOOK");
   const [contentLanguage, setContentLanguage] = useState<"en" | "bg">("en");
+  const [sourceLinkOverride, setSourceLinkOverride] = useState<SourceLinkOverride>("inherit");
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [warnings, setWarnings] = useState<GenerationWarnings | null>(null);
@@ -40,7 +46,13 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
       const res = await fetch(`/api/v1/companies/${slug}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channel, contentLanguage }),
+        body: JSON.stringify({
+          channel,
+          contentLanguage,
+          ...(hasRssFeedItems && sourceLinkOverride !== "inherit"
+            ? { includeSourceLink: sourceLinkOverride === "include" }
+            : {}),
+        }),
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
@@ -124,6 +136,28 @@ export function GeneratePostForm({ slug, onGenerated }: Props) {
             <option value="bg">{t("contentLanguageBG")}</option>
           </select>
         </div>
+
+        {hasRssFeedItems && (
+          <div className="min-w-[180px]">
+            <label
+              htmlFor="generate-source-link"
+              className="text-fg-muted mb-1.5 block text-sm font-medium"
+            >
+              {t("sourceLink")}
+            </label>
+            <select
+              id="generate-source-link"
+              value={sourceLinkOverride}
+              onChange={(e) => setSourceLinkOverride(e.target.value as SourceLinkOverride)}
+              disabled={generating}
+              className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <option value="inherit">{t("sourceLinkInherit")}</option>
+              <option value="include">{t("sourceLinkInclude")}</option>
+              <option value="exclude">{t("sourceLinkExclude")}</option>
+            </select>
+          </div>
+        )}
 
         <Button variant="primary" loading={generating} onClick={handleGenerate}>
           {generating ? t("generating") : t("generateDraft")}

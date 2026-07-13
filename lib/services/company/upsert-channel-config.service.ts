@@ -43,6 +43,7 @@ export async function upsertChannelConfig(
     data: {
       enabled: data.enabled,
       imageRequired: data.imageRequired,
+      includeSourceLink: data.includeSourceLink,
       postingLanguage: data.language,
       postsPerDay: data.postsPerDay,
       postsPerWeek: data.postsPerWeek,
@@ -56,6 +57,7 @@ export async function upsertChannelConfig(
       bufferProfileName: true,
       enabled: true,
       imageRequired: true,
+      includeSourceLink: true,
       postingLanguage: true,
       postsPerDay: true,
       postsPerWeek: true,
@@ -72,6 +74,7 @@ export async function upsertChannelConfig(
     bufferProfileName: row.bufferProfileName,
     enabled: row.enabled,
     imageRequired: row.imageRequired ?? false,
+    includeSourceLink: row.includeSourceLink,
     postingLanguage: row.postingLanguage,
     postsPerDay: row.postsPerDay,
     postsPerWeek: row.postsPerWeek,

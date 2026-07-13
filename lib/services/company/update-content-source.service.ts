@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db/client";
 import type { ContentSourceInput } from "@/lib/validators/content-source.schema";
-import type { ContentSourceItem } from "./list-content-sources.service";
+import type { ContentSourceConfig, ContentSourceItem } from "./list-content-sources.service";
 
 export type UpdateContentSourceResult =
   | { success: true; source: ContentSourceItem }
@@ -61,7 +61,7 @@ export async function updateContentSource(
       id: row.id,
       type: row.type,
       name: row.name,
-      config: row.config as Record<string, string>,
+      config: row.config as ContentSourceConfig,
       enabled: row.enabled,
       lastFetchedAt: row.lastFetchedAt?.toISOString() ?? null,
       createdAt: row.createdAt.toISOString(),

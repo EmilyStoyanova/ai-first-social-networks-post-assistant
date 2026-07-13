@@ -13,6 +13,7 @@ export interface ChannelConfigItem {
   bufferProfileName: string | null;
   enabled: boolean;
   imageRequired: boolean;
+  includeSourceLink: boolean;
   postingLanguage: string;
   postsPerDay: number;
   postsPerWeek: number;
@@ -28,6 +29,7 @@ const SELECT = {
   bufferProfileName: true,
   enabled: true,
   imageRequired: true,
+  includeSourceLink: true,
   postingLanguage: true,
   postsPerDay: true,
   postsPerWeek: true,
@@ -72,6 +74,7 @@ export async function listChannelConfigs(
     bufferProfileName: row.bufferProfileName,
     enabled: row.enabled,
     imageRequired: row.imageRequired ?? false,
+    includeSourceLink: row.includeSourceLink,
     postingLanguage: row.postingLanguage,
     postsPerDay: row.postsPerDay,
     postsPerWeek: row.postsPerWeek,

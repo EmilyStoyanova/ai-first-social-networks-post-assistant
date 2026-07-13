@@ -11,6 +11,7 @@ import { checkContentSafety } from "@/lib/ai/quality/content-safety";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 import { CONTENT_ANGLES, selectAngle, type ContentAngle } from "@/lib/ai/content-angle";
 import { selectPattern, isValidPostPattern, type PostPattern } from "@/lib/ai/post-pattern";
+import { resolveIncludeSourceLink, applySourceLink } from "@/lib/ai/source-link";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -59,7 +60,8 @@ export type GenerateDraftPostResult =
         | "INVALID_CHANNEL"
         | "NO_ACTIVE_PROVIDER"
         | "LLM_PROVIDER_ERROR"
-        | "LLM_RESPONSE_PARSE_ERROR";
+        | "LLM_RESPONSE_PARSE_ERROR"
+        | "POST_TOO_LONG_WITH_URL";
       message?: string;
     };
 
@@ -74,6 +76,11 @@ export interface GeneratePostOptions {
   scheduledFor?: Date;
   /** Defaults to "draft" (user flow). Cron generation uses "pending_approval". */
   initialStatus?: "draft" | "pending_approval";
+  /**
+   * Manual per-generation source-link override (v2-1). Undefined = inherit
+   * from the content source preference, then the channel default.
+   */
+  includeSourceLinkOverride?: boolean;
 }
 
 export async function generateDraftPost(
@@ -81,7 +88,7 @@ export async function generateDraftPost(
   rawChannel: string,
   userId: string,
   isGlobalAdmin: boolean,
-  contentLanguage?: string
+  options: Pick<GeneratePostOptions, "contentLanguage" | "includeSourceLinkOverride"> = {}
 ): Promise<GenerateDraftPostResult> {
   // Build context (also validates auth/access)
   const contextResult = await buildGenerationContext(slug, rawChannel, userId, isGlobalAdmin);
@@ -90,7 +97,8 @@ export async function generateDraftPost(
   }
 
   return generatePostFromContext(contextResult.context, contextResult.companyId, {
-    contentLanguage,
+    contentLanguage: options.contentLanguage,
+    includeSourceLinkOverride: options.includeSourceLinkOverride,
     generatedById: userId,
   });
 }
@@ -235,6 +243,32 @@ export async function generatePostFromContext(
     },
   };
 
+  // ── Source link (v2-1) ────────────────────────────────────────────────────
+  // The URL is appended programmatically — never by the LLM. The primary
+  // (newest) feed item is the source article this generation is based on.
+  const primaryFeedItem = context.feedItems[0] ?? null;
+  const sourceUrl = primaryFeedItem?.url ?? null;
+  const { include: includeSourceLink, level: includeSourceLinkLevel } = resolveIncludeSourceLink(
+    options.includeSourceLinkOverride,
+    primaryFeedItem?.sourceLinkPreference,
+    context.channel.includeSourceLink
+  );
+
+  const linkResult = applySourceLink(
+    parsed.text,
+    sourceUrl,
+    includeSourceLink,
+    context.channel.maxTextLength
+  );
+  if (!linkResult.ok) {
+    return {
+      success: false,
+      code: "POST_TOO_LONG_WITH_URL",
+      message: `Post text plus source URL exceeds the channel limit of ${context.channel.maxTextLength} characters.`,
+    };
+  }
+  const finalContent = linkResult.content;
+
   // ── Resolve final status ──────────────────────────────────────────────────
   // For manual generation (draft) on a fully_automated channel, skip the
   // approval queue so the post is immediately publishable. Safety-flagged
@@ -254,7 +288,7 @@ export async function generatePostFromContext(
       channel: context.channel.channel as SocialChannel,
       status: resolvedStatus,
       approvedAt,
-      content: parsed.text,
+      content: finalContent,
       hashtags: parsed.hashtags,
       imagePrompt: parsed.imagePrompt ?? null,
       notes: parsed.notes ?? null,
@@ -284,6 +318,10 @@ export async function generatePostFromContext(
           : null,
         topic: parsed.topic ?? null,
         qualityGuards,
+        // Source link decision (v2-1) — traceability for the appended URL.
+        sourceUrl,
+        includeSourceLink,
+        includeSourceLinkLevel,
         // Aspect fields — null when no aspect was mined (null fails the hasAspectFields guard
         // in loadAspectPoolData so legacy and no-aspect posts are treated identically).
         aspectFingerprint: aspectFingerprint && selectedAspect ? aspectFingerprint : null,

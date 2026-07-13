@@ -15,6 +15,7 @@ interface Props {
   canPublish: boolean;
   canApprove: boolean;
   bufferConnected: boolean;
+  hasRssFeedItems: boolean;
 }
 
 export function GeneratedPostsSection({
@@ -24,6 +25,7 @@ export function GeneratedPostsSection({
   canPublish,
   canApprove,
   bufferConnected,
+  hasRssFeedItems,
 }: Props) {
   const t = useTranslations("posts");
   const [posts, setPosts] = useState<PostItem[]>(initialPosts);
@@ -38,7 +40,11 @@ export function GeneratedPostsSection({
 
   return (
     <div className="space-y-4">
-      <GeneratePostForm slug={slug} onGenerated={handleGenerated} />
+      <GeneratePostForm
+        slug={slug}
+        onGenerated={handleGenerated}
+        hasRssFeedItems={hasRssFeedItems}
+      />
 
       {posts.length === 0 ? (
         <EmptyState
