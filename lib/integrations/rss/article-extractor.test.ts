@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { checkSsrf, extractReadableText, extractArticleContent } from "./article-extractor";
 import type { DnsResolver } from "./article-extractor";
 
@@ -35,6 +36,29 @@ const ARTICLE_HTML = `
   </article>
 </body></html>
 `;
+
+// ─── jsdom dependency chain — Vercel runtime compatibility ───────────────────
+
+describe("jsdom dependency chain — CJS-only (Vercel runtime compatibility)", () => {
+  // jsdom ≥27 requires ESM-only @exodus/bytes from CommonJS (via itself,
+  // html-encoding-sniffer ≥5 and whatwg-url ≥16), which throws ERR_REQUIRE_ESM
+  // on Node runtimes without require(esm) support — this broke RSS ingestion in
+  // production on Vercel. jsdom is pinned to the 26.x line (fully-CJS chain);
+  // do not upgrade past 26 until the Vercel Node runtime supports require(esm).
+  it("does not pull the ESM-only @exodus/bytes package", () => {
+    const require = createRequire(import.meta.url);
+    assert.throws(
+      () => require.resolve("@exodus/bytes"),
+      "The @exodus/bytes ESM package must not be in the dependency tree — " +
+        "it breaks jsdom under require() on the Vercel Node runtime (ERR_REQUIRE_ESM)."
+    );
+  });
+
+  it("loads jsdom and executes a full extraction (module chain is require()-safe)", () => {
+    const result = extractReadableText(ARTICLE_HTML, ARTICLE_URL);
+    assert.ok(result !== null, "jsdom + Readability extraction must work end-to-end");
+  });
+});
 
 // ─── checkSsrf — scheme validation ────────────────────────────────────────────
 
