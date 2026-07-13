@@ -1,4 +1,5 @@
-import type { GenerationContext } from "./types";
+import type { FeedItemContext, GenerationContext } from "./types";
+import { selectPrimaryFeedItem } from "./primary-feed-item";
 import { type ContentAngle, ANGLE_INSTRUCTIONS } from "./content-angle";
 import {
   type PostPattern,
@@ -181,6 +182,15 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
 const CONTENT_PER_ITEM_LIMIT = 900;
 const TOTAL_FEED_CHAR_LIMIT = 5000;
 
+/** Renders a feed item as a `**title**` + trimmed excerpt block (empty when it has neither). */
+function excerptFor(item: FeedItemContext): string {
+  const title = item.title?.trim() ?? "";
+  const raw = item.content?.trim() ?? "";
+  const excerpt =
+    raw.length > CONTENT_PER_ITEM_LIMIT ? raw.slice(0, CONTENT_PER_ITEM_LIMIT) + "…" : raw;
+  return [title ? `**${title}**` : null, excerpt || null].filter(Boolean).join("\n");
+}
+
 function buildJsonFormatInstruction(imageRequired: boolean): string {
   const imagePromptLine = imageRequired
     ? `  "imagePrompt": "REQUIRED — concise English visual description for an image generation model (no text, no emojis, no hashtags, no UI instructions; always in English regardless of post language)"`
@@ -207,32 +217,51 @@ function buildUserPrompt(
   const lang = (contentLanguage ?? channel.postingLanguage).toUpperCase();
   const imageRequired = channel.imageRequired;
 
-  // Build feed excerpt, newest first, respecting total char budget
-  let budget = TOTAL_FEED_CHAR_LIMIT;
-  const excerpts: string[] = [];
+  // One explicit primary feed item is selected here — the post must be built
+  // around it, and its URL (same item) is appended by the service afterwards.
+  // Any other feed items are provided only as clearly-separated background.
+  const primary = selectPrimaryFeedItem(feedItems);
 
-  for (const item of feedItems) {
-    if (budget <= 0) break;
+  let feedSection = "";
+  if (primary) {
+    // Primary always fits: it is allotted the budget first.
+    let budget = TOTAL_FEED_CHAR_LIMIT;
+    const primaryBlock = excerptFor(primary);
+    budget -= primaryBlock.length + 10;
 
-    const title = item.title?.trim() ?? "";
-    const raw = item.content?.trim() ?? "";
-    const excerpt =
-      raw.length > CONTENT_PER_ITEM_LIMIT ? raw.slice(0, CONTENT_PER_ITEM_LIMIT) + "…" : raw;
+    const secondaryBlocks: string[] = [];
+    for (const item of feedItems) {
+      if (item.id === primary.id) continue;
+      if (budget <= 0) break;
+      const block = excerptFor(item);
+      if (!block) continue;
+      const cost = block.length + 10; // +10 for separator overhead
+      if (cost > budget) break;
+      budget -= cost;
+      secondaryBlocks.push(block);
+    }
 
-    const block = [title ? `**${title}**` : null, excerpt || null].filter(Boolean).join("\n");
+    const primarySection = [
+      "**PRIMARY SOURCE ARTICLE — the post MUST be based on THIS article and no other.**",
+      "The topic, facts, and angle of the post must come from this article. A link to this exact article will be attached to the post, so the post text must be about it.",
+      "---",
+      primaryBlock || "(no excerpt available for the primary article)",
+      "---",
+    ].join("\n");
 
-    if (!block) continue;
+    const secondarySection =
+      secondaryBlocks.length > 0
+        ? [
+            "**Additional background context — for topical awareness only.**",
+            "Do NOT write the post about any of these. They are not the subject and their links will not be used.",
+            "---",
+            secondaryBlocks.join("\n---\n"),
+            "---",
+          ].join("\n")
+        : "";
 
-    const cost = block.length + 10; // +10 for separator overhead
-    if (cost > budget) break;
-    budget -= cost;
-    excerpts.push(block);
+    feedSection = [primarySection, secondarySection].filter(Boolean).join("\n\n");
   }
-
-  const feedSection =
-    excerpts.length > 0
-      ? `Use the following content as inspiration:\n\n---\n${excerpts.join("\n---\n")}\n---`
-      : "";
 
   const recentSection =
     recentPosts.length > 0

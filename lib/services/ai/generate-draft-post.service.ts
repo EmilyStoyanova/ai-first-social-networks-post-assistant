@@ -11,7 +11,7 @@ import { checkContentSafety } from "@/lib/ai/quality/content-safety";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 import { CONTENT_ANGLES, selectAngle, type ContentAngle } from "@/lib/ai/content-angle";
 import { selectPattern, isValidPostPattern, type PostPattern } from "@/lib/ai/post-pattern";
-import { resolveIncludeSourceLink, applySourceLink } from "@/lib/ai/source-link";
+import { resolvePostSourceLink } from "@/lib/ai/source-link";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -244,30 +244,32 @@ export async function generatePostFromContext(
   };
 
   // ── Source link (v2-1) ────────────────────────────────────────────────────
-  // The URL is appended programmatically — never by the LLM. The primary
-  // (newest) feed item is the source article this generation is based on.
-  const primaryFeedItem = context.feedItems[0] ?? null;
-  const sourceUrl = primaryFeedItem?.url ?? null;
-  const { include: includeSourceLink, level: includeSourceLinkLevel } = resolveIncludeSourceLink(
-    options.includeSourceLinkOverride,
-    primaryFeedItem?.sourceLinkPreference,
-    context.channel.includeSourceLink
-  );
-
-  const linkResult = applySourceLink(
-    parsed.text,
-    sourceUrl,
-    includeSourceLink,
-    context.channel.maxTextLength
-  );
-  if (!linkResult.ok) {
+  // The URL is appended programmatically — never by the LLM. The primary feed
+  // item is selected BEFORE the prompt is built (buildPrompts uses the same
+  // selectPrimaryFeedItem) and the model is instructed to base the post on it,
+  // so the appended URL and the generated text always refer to the same article.
+  const sourceLinkResult = resolvePostSourceLink({
+    feedItems: context.feedItems,
+    text: parsed.text,
+    manualOverride: options.includeSourceLinkOverride,
+    channelDefault: context.channel.includeSourceLink,
+    maxTextLength: context.channel.maxTextLength,
+  });
+  if (!sourceLinkResult.ok) {
     return {
       success: false,
       code: "POST_TOO_LONG_WITH_URL",
       message: `Post text plus source URL exceeds the channel limit of ${context.channel.maxTextLength} characters.`,
     };
   }
-  const finalContent = linkResult.content;
+  const {
+    finalContent,
+    sourceUrl,
+    primaryFeedItemId,
+    sourceTitle,
+    includeSourceLink,
+    includeSourceLinkLevel,
+  } = sourceLinkResult.data;
 
   // ── Resolve final status ──────────────────────────────────────────────────
   // For manual generation (draft) on a fully_automated channel, skip the
@@ -319,7 +321,11 @@ export async function generatePostFromContext(
         topic: parsed.topic ?? null,
         qualityGuards,
         // Source link decision (v2-1) — traceability for the appended URL.
+        // primaryFeedItemId/sourceTitle pin the exact article the post is based
+        // on, so text and URL are auditably the same source.
+        primaryFeedItemId,
         sourceUrl,
+        sourceTitle,
         includeSourceLink,
         includeSourceLinkLevel,
         // Aspect fields — null when no aspect was mined (null fails the hasAspectFields guard

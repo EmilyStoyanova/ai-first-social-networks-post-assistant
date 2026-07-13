@@ -6,6 +6,9 @@
  * truncated, or otherwise modified.
  */
 
+import type { FeedItemContext } from "./types";
+import { selectPrimaryFeedItem } from "./primary-feed-item";
+
 export type SourceLinkLevel = "manual" | "source" | "channel";
 
 export interface ResolvedSourceLink {
@@ -68,6 +71,60 @@ export function applySourceLink(
   }
 
   return { ok: true, content: candidate, appended: true };
+}
+
+/**
+ * Post-level source link resolution: selects the single primary feed item, then
+ * derives the appended URL, the recorded title/id, and the source-link decision
+ * from that SAME item. This is the single point that couples the primary source
+ * to the appended URL — the generated post text (built around the same primary
+ * item, see prompt-builder) and the URL can therefore never refer to different
+ * articles.
+ */
+export interface PostSourceLink {
+  finalContent: string;
+  sourceUrl: string | null;
+  primaryFeedItemId: string | null;
+  sourceTitle: string | null;
+  includeSourceLink: boolean;
+  includeSourceLinkLevel: SourceLinkLevel;
+}
+
+export type ResolvePostSourceLinkResult =
+  { ok: true; data: PostSourceLink } | { ok: false; reason: "POST_TOO_LONG_WITH_URL" };
+
+export function resolvePostSourceLink(params: {
+  feedItems: readonly FeedItemContext[];
+  text: string;
+  manualOverride: boolean | undefined;
+  channelDefault: boolean;
+  maxTextLength: number | null;
+}): ResolvePostSourceLinkResult {
+  const { feedItems, text, manualOverride, channelDefault, maxTextLength } = params;
+
+  const primary = selectPrimaryFeedItem(feedItems);
+  const sourceUrl = primary?.url ?? null;
+
+  const { include, level } = resolveIncludeSourceLink(
+    manualOverride,
+    primary?.sourceLinkPreference,
+    channelDefault
+  );
+
+  const applied = applySourceLink(text, sourceUrl, include, maxTextLength);
+  if (!applied.ok) return { ok: false, reason: "POST_TOO_LONG_WITH_URL" };
+
+  return {
+    ok: true,
+    data: {
+      finalContent: applied.content,
+      sourceUrl,
+      primaryFeedItemId: primary?.id ?? null,
+      sourceTitle: primary?.title ?? null,
+      includeSourceLink: include,
+      includeSourceLinkLevel: level,
+    },
+  };
 }
 
 /** Removes every occurrence of exactly `url`, collapsing leftover whitespace. */

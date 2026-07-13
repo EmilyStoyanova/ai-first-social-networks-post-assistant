@@ -19,7 +19,7 @@
     "seed:editor": "node scripts/seed-editor.mjs",
     "seed:admin": "node scripts/seed-admin.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "npx tsx --test lib/ai/content-angle.test.ts lib/ai/post-pattern.test.ts lib/ai/prompt-builder.test.ts lib/ai/generate-with-retry.test.ts lib/ai/content-aspect.test.ts lib/ai/source-link.test.ts lib/integrations/rss/article-extractor.test.ts lib/services/company/toggle-feed-item.service.test.ts"
+    "test": "npx tsx --test lib/ai/content-angle.test.ts lib/ai/post-pattern.test.ts lib/ai/prompt-builder.test.ts lib/ai/generate-with-retry.test.ts lib/ai/content-aspect.test.ts lib/ai/source-link.test.ts lib/ai/primary-feed-item.test.ts lib/integrations/rss/article-extractor.test.ts lib/services/company/toggle-feed-item.service.test.ts"
   },
   "lint-staged": {
     "*.{ts,tsx}": [
