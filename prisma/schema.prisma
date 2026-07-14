@@ -319,6 +319,9 @@ model Post {
   generatedById    String?       @map("generated_by")
   imagePrompt      String?       @map("image_prompt")
   notes            String?
+  // The single central claim/takeaway of the post (Phase 1.1). Nullable — legacy
+  // posts predating this column stay null; also mirrored in promptSnapshot.coreMessage.
+  coreMessage      String?       @map("core_message")
   promptSnapshot   Json?         @map("prompt_snapshot")
   llmProvider      String?       @map("llm_provider")
   llmModel         String?       @map("llm_model")

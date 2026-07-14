@@ -4,6 +4,9 @@ import { LlmResponseParseError } from "./errors";
 const LlmPostSchema = z.object({
   text: z.string().min(1, "text must be non-empty"),
   hashtags: z.array(z.string()).default([]),
+  // The single central claim/takeaway of the post (Phase 1.1) — one sentence,
+  // model-declared, stored in promptSnapshot. Required and non-empty.
+  coreMessage: z.string().trim().min(1, "coreMessage must be non-empty"),
   imagePrompt: z.string().optional(),
   notes: z.string().optional(),
   // Diversity tracking — model-declared, stored in promptSnapshot.

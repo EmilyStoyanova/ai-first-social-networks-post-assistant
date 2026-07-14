@@ -136,6 +136,49 @@ describe("prompt-builder — Bulgarian language quality section", () => {
   });
 });
 
+describe("prompt-builder — coreMessage", () => {
+  it("defines coreMessage in the system prompt with its constraints", () => {
+    const { systemPrompt } = buildPrompts(makeCtx({}), "en");
+    assert.ok(
+      systemPrompt.includes("Core Message"),
+      "system prompt must include the Core Message section"
+    );
+    assert.ok(
+      systemPrompt.includes("exactly one sentence"),
+      "coreMessage must be defined as exactly one sentence"
+    );
+    assert.ok(
+      systemPrompt.includes("independent of the hook") || systemPrompt.includes("stand on its own"),
+      "coreMessage must be defined as independent of the hook / CTA"
+    );
+    assert.ok(
+      systemPrompt.includes("NOT a summary") && systemPrompt.includes("NOT the topic"),
+      "coreMessage must be defined as neither a summary nor the topic"
+    );
+  });
+
+  it("includes coreMessage in the JSON format block of the user prompt", () => {
+    const { userPrompt } = buildPrompts(makeCtx({}), "en");
+    const coreLine = userPrompt.split("\n").find((l) => l.includes('"coreMessage"'));
+    assert.ok(coreLine, "JSON format block must include a coreMessage line");
+    assert.ok(
+      coreLine.toLowerCase().includes("one sentence"),
+      "coreMessage JSON line should describe it as one sentence"
+    );
+  });
+
+  it("instructs coreMessage to be written in the post language (BG)", () => {
+    const { systemPrompt } = buildPrompts(makeCtx({}), "bg");
+    // The Core Message section references the post language token (BG).
+    const idx = systemPrompt.indexOf("Core Message");
+    const section = systemPrompt.slice(idx);
+    assert.ok(
+      section.includes("BG"),
+      "coreMessage rule must scope the language to BG for Bulgarian posts"
+    );
+  });
+});
+
 describe("prompt-builder — imageRequired", () => {
   it("marks imagePrompt as REQUIRED in the JSON format when imageRequired=true", () => {
     const { userPrompt } = buildPrompts(makeCtx({ imageRequired: true }));

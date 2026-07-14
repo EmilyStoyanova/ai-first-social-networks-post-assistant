@@ -11,7 +11,11 @@ import type { RecentPost } from "./quality/duplicate-detection";
 //   "x y z w q" vs "a b c d"  → intersection=0, union=9 → 0.00  (<  0.75, clean)
 
 function jsonPost(text: string): string {
-  return JSON.stringify({ text, hashtags: [] });
+  return JSON.stringify({
+    text,
+    hashtags: [],
+    coreMessage: "A single central claim for this post.",
+  });
 }
 
 const DUPLICATE_TEXT = "a b c d e";

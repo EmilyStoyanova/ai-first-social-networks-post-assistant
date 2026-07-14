@@ -147,6 +147,22 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
     )
   );
 
+  const coreMessageSection = section(
+    "Core Message — Mandatory",
+    lines(
+      'Every post must be built around a single core message. The "coreMessage" field of the JSON response must contain it.',
+      "- It must be exactly one sentence.",
+      "- It must state the central claim or takeaway the reader should remember — the point the post argues or reveals.",
+      "- It must stand on its own, independent of the hook, opening line, or call to action.",
+      "- It is NOT a summary of the source article, and NOT the topic label. Do not merely name the subject.",
+      `- Write it in the same language as the post text (${lang}).`,
+      'Example — topic: "marketing automation"',
+      'Bad: "Marketing automation." (that is the topic, not a claim)',
+      'Bad: "This post talks about marketing automation." (a meta description, not a claim)',
+      'Good: "Automating repetitive marketing work gives small businesses more time for strategic growth."'
+    )
+  );
+
   const bulgarianQualitySection =
     lang === "BG"
       ? section(
@@ -171,6 +187,7 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
     channelSection,
     automationSection,
     writingRules,
+    coreMessageSection,
     bulgarianQualitySection,
   ].filter(Boolean);
 
@@ -200,6 +217,7 @@ function buildJsonFormatInstruction(imageRequired: boolean): string {
 {
   "text": "the post text",
   "hashtags": ["tag1", "tag2"],
+  "coreMessage": "one sentence stating the single central claim/takeaway of this post — not the topic, not a summary; in the same language as the post text",
 ${imagePromptLine},
   "notes": "brief creative rationale (optional)",
   "topic": "2–5 words describing the specific subject of this post (e.g. 'hiring for culture fit', 'startup cash flow')"

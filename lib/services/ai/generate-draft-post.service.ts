@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db/client";
-import { type SocialChannel } from "@prisma/client";
+import { Prisma, type SocialChannel } from "@prisma/client";
 import { buildGenerationContext } from "./build-generation-context.service";
 import { resolveGenerationAspect } from "./resolve-generation-aspect.service";
 import type { GenerationContext, ILlmProvider } from "@/lib/ai/types";
@@ -12,13 +12,19 @@ import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.se
 import { CONTENT_ANGLES, selectAngle, type ContentAngle } from "@/lib/ai/content-angle";
 import { selectPattern, isValidPostPattern, type PostPattern } from "@/lib/ai/post-pattern";
 import { resolvePostSourceLink } from "@/lib/ai/source-link";
-import { planFeedItemUsage, releaseFeedItem } from "@/lib/ai/feed-item-reservation";
+import {
+  planFeedItemUsage,
+  releaseFeedItem,
+  type FeedItemReservationDb,
+} from "@/lib/ai/feed-item-reservation";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
 const MOCK_LLM_TEXT = JSON.stringify({
   text: "Big things are coming! Stay tuned for what we have in store. 🚀",
   hashtags: ["innovation", "growth", "comingsoon"],
+  coreMessage:
+    "Anticipation for an upcoming launch builds excitement and keeps the audience engaged.",
   imagePrompt: "A vibrant team collaborating in a bright modern office",
   notes: "Mock post generated in AI_MOCK_MODE for development testing.",
 });
@@ -69,6 +75,55 @@ export type GenerateDraftPostResult =
       message?: string;
     };
 
+// ─── Minimal DB interface for testability ─────────────────────────────────────
+// Mirrors the pattern in generate-post-image.service.ts: the real Prisma client
+// satisfies this narrow shape, and unit tests inject a fake that captures writes.
+
+export interface GenerateDraftPostDb {
+  post: {
+    findMany: (args: {
+      where: { companyId: string; channel: SocialChannel };
+      orderBy: { createdAt: "desc" };
+      take: number;
+      select: { id: true; content: true; promptSnapshot: true };
+    }) => Promise<Array<{ id: string; content: string; promptSnapshot: Prisma.JsonValue | null }>>;
+    create: (args: {
+      data: Prisma.PostUncheckedCreateInput;
+      select: {
+        id: true;
+        companyId: true;
+        channel: true;
+        status: true;
+        content: true;
+        hashtags: true;
+        imagePrompt: true;
+        notes: true;
+        llmProvider: true;
+        llmModel: true;
+        createdAt: true;
+      };
+    }) => Promise<{
+      id: string;
+      companyId: string;
+      channel: SocialChannel;
+      status: string;
+      content: string;
+      hashtags: string[];
+      imagePrompt: string | null;
+      notes: string | null;
+      llmProvider: string | null;
+      llmModel: string | null;
+      createdAt: Date;
+    }>;
+  };
+  feedItem: FeedItemReservationDb["feedItem"];
+}
+
+export interface GenerateDraftPostDeps {
+  db?: GenerateDraftPostDb;
+  auditLog?: typeof createAuditLog;
+}
+
 // ─── Service ───────────────────────────────────────────────────────────────────
 
 export interface GeneratePostOptions {
@@ -115,14 +170,17 @@ export async function generateDraftPost(
 export async function generatePostFromContext(
   context: GenerationContext,
   companyId: string,
-  options: GeneratePostOptions = {}
+  options: GeneratePostOptions = {},
+  deps: GenerateDraftPostDeps = {}
 ): Promise<GenerateDraftPostResult> {
+  const db: GenerateDraftPostDb = deps.db ?? prisma;
+  const auditLog = deps.auditLog ?? createAuditLog;
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
 
   // ── Fetch recent posts before generation ──────────────────────────────────
   // Used both as prompt context (avoid repetition) and for duplicate detection after.
-  const recentRows = await prisma.post.findMany({
+  const recentRows = await db.post.findMany({
     where: { companyId, channel: context.channel.channel as SocialChannel },
     orderBy: { createdAt: "desc" },
     take: 10,
@@ -185,7 +243,7 @@ export async function generatePostFromContext(
   const plan = await planFeedItemUsage(
     context.feedItems.map((f) => f.id),
     context.hasContentSources,
-    prisma
+    db
   );
   if (plan.action === "skip") {
     // Either RSS is configured but every eligible article is already used, or a
@@ -208,7 +266,7 @@ export async function generatePostFromContext(
 
   // Frees the claimed article if generation fails before the post is persisted.
   const releaseClaimedFeedItem = async () => {
-    if (claimedFeedItemId) await releaseFeedItem(claimedFeedItemId, prisma);
+    if (claimedFeedItemId) await releaseFeedItem(claimedFeedItemId, db);
   };
 
   // ── Aspect mining ─────────────────────────────────────────────────────────
@@ -328,10 +386,13 @@ export async function generatePostFromContext(
   // ── Save post ─────────────────────────────────────────────────────────────
   const feedItemIds = context.feedItems.map((f) => f.id);
 
-  const post = await prisma.post.create({
+  const post = await db.post.create({
     data: {
       companyId,
       channel: context.channel.channel as SocialChannel,
+      // Phase 1.1 — the post's central claim/takeaway, in a dedicated column.
+      // Still mirrored in promptSnapshot.coreMessage below for audit/debugging.
+      coreMessage: parsed.coreMessage,
       // The reserved source article. The DB unique index on this column is the
       // hard guarantee that one feed item never backs two posts.
       primaryFeedItemId: claimedFeedItemId,
@@ -366,6 +427,9 @@ export async function generatePostFromContext(
             }
           : null,
         topic: parsed.topic ?? null,
+        // Phase 1.1 — the single central claim/takeaway of the post. Stored in
+        // promptSnapshot for now (same pattern as topic); no semantic infra yet.
+        coreMessage: parsed.coreMessage,
         qualityGuards,
         // Source link decision (v2-1) — traceability for the appended URL.
         // primaryFeedItemId/sourceTitle pin the exact article the post is based
@@ -406,7 +470,7 @@ export async function generatePostFromContext(
     },
   });
 
-  await createAuditLog({
+  await auditLog({
     companyId,
     userId: generatedById,
     action: AUDIT_ACTIONS.POST_GENERATED,
