@@ -5,6 +5,7 @@ import { generateWeeklySchedule } from "./generate-weekly-schedule.service";
 import { autoApprovePosts } from "./auto-approve-posts.service";
 import { publishScheduledPosts } from "./publish-scheduled-posts.service";
 import { retryFailedPosts } from "./retry-failed-posts.service";
+import { backfillEmbeddings } from "./backfill-embeddings.service";
 
 export interface CronRunSummary {
   runId: string;
@@ -66,6 +67,10 @@ export async function runCron(): Promise<CronRunSummary> {
 
     // Step 6 — retry failed posts with remaining budget
     actions.retry = await retryFailedPosts(company.id);
+
+    // Step 7 — backfill semantic embeddings for this company's pending posts
+    // (Phase 1.2). Best-effort; skips cleanly when no embedding provider is set.
+    actions.backfillEmbeddings = await backfillEmbeddings({ companyId: company.id, limit: 25 });
 
     await completeRun(run.id, actions);
     return {

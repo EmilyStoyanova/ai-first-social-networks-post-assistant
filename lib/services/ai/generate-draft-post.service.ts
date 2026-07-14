@@ -17,6 +17,7 @@ import {
   releaseFeedItem,
   type FeedItemReservationDb,
 } from "@/lib/ai/feed-item-reservation";
+import { embedPost, type EmbedPostInput, type EmbedPostOutcome } from "./embed-post.service";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -122,6 +123,8 @@ export interface GenerateDraftPostDb {
 export interface GenerateDraftPostDeps {
   db?: GenerateDraftPostDb;
   auditLog?: typeof createAuditLog;
+  /** Best-effort semantic embedding (Phase 1.2). Injected in tests. */
+  embed?: (input: EmbedPostInput) => Promise<EmbedPostOutcome>;
 }
 
 // ─── Service ───────────────────────────────────────────────────────────────────
@@ -175,6 +178,7 @@ export async function generatePostFromContext(
 ): Promise<GenerateDraftPostResult> {
   const db: GenerateDraftPostDb = deps.db ?? prisma;
   const auditLog = deps.auditLog ?? createAuditLog;
+  const embed = deps.embed ?? embedPost;
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
 
@@ -484,6 +488,25 @@ export async function generatePostFromContext(
       ...(autoApproved ? { autoApproved: true } : {}),
     },
   });
+
+  // ── Semantic embedding (Phase 1.2) ────────────────────────────────────────
+  // Best-effort and non-blocking: embedPost never throws, and any failure leaves
+  // a row for the backfill to retry. It runs AFTER the post is persisted, in its
+  // own statements (no long transaction), so it can never fail generation.
+  try {
+    await embed({
+      postId: post.id,
+      companyId,
+      channel: post.channel as SocialChannel,
+      coreMessage: parsed.coreMessage,
+      postCreatedAt: post.createdAt,
+    });
+  } catch (err) {
+    console.error(
+      `[embed] Post ${post.id} embedding failed (non-fatal):`,
+      err instanceof Error ? err.message : err
+    );
+  }
 
   const warnings: GenerationWarnings = {
     duplicate: duplicateResult,

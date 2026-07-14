@@ -341,11 +341,54 @@ model Post {
   approvedBy  User?           @relation("PostApprover", fields: [approvedById], references: [id])
   rejectedBy  User?           @relation("PostRejecter", fields: [rejectedById], references: [id])
   versions    PostVersion[]
+  semantics   PostSemantics?
 
   @@index([companyId, status])
   @@index([scheduledFor])
   @@index([retryCount, status])
   @@map("posts")
+}
+
+// ─── Semantic memory (Phase 1.2) ──────────────────────────────────────────────
+// One row per Post, holding the pgvector embedding of the post's coreMessage.
+// Deliberately a separate 1:1 table (not columns on Post): the vector is large,
+// derived, optional, regeneratable, and can fail independently of the post.
+//
+// The `embedding` column is `Unsupported("vector(1536)")` — Prisma cannot type
+// pgvector, so it is written/read via raw SQL (see post-semantics store in
+// embed-post.service.ts). Every non-vector field is normal typed Prisma.
+//
+// companyId/channel/postCreatedAt are denormalized from Post. All three are
+// immutable for a post's lifetime, so they never drift; they exist so the future
+// "latest N posts for this company+channel" gate query is a single index scan
+// with no join. No ANN index yet — that is intentionally deferred.
+model PostSemantics {
+  postId            String                       @id @map("post_id")
+  embedding         Unsupported("vector(1536)")?
+  embeddingProvider String?                      @map("embedding_provider")
+  embeddingModel    String?                      @map("embedding_model")
+  embeddingDims     Int?                         @map("embedding_dims")
+  // SHA-256 of the exact text that was embedded (the trimmed coreMessage).
+  // Lets us skip re-embedding when the source text has not changed.
+  coreMessageHash   String?                      @map("core_message_hash")
+  // pending | ready | failed. Only "ready" rows carry a usable embedding.
+  status            String                       @default("pending")
+  attempts          Int                          @default(0)
+  lastError         String?                      @map("last_error")
+
+  // Denormalized immutable routing keys for the future recency-window gate.
+  companyId         String                       @map("company_id")
+  channel           SocialChannel
+  postCreatedAt     DateTime                     @map("post_created_at")
+
+  createdAt         DateTime                     @default(now()) @map("created_at")
+  updatedAt         DateTime                     @updatedAt @map("updated_at")
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, channel, postCreatedAt(sort: Desc)])
+  @@index([status])
+  @@map("post_semantics")
 }
 
 model PostVersion {

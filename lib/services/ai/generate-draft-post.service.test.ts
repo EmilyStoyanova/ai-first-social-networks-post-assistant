@@ -4,6 +4,7 @@ import type { SocialChannel } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { generatePostFromContext } from "./generate-draft-post.service";
 import type { GenerateDraftPostDb, GenerateDraftPostDeps } from "./generate-draft-post.service";
+import type { EmbedPostInput } from "./embed-post.service";
 import type { GenerationContext } from "@/lib/ai/types";
 
 // The coreMessage baked into the AI_MOCK_MODE response (see MOCK_LLM_TEXT in the
@@ -41,8 +42,10 @@ interface RecentRow {
 function makeDeps(recentRows: RecentRow[] = []): {
   deps: GenerateDraftPostDeps;
   created: () => Prisma.PostUncheckedCreateInput | null;
+  embedded: () => EmbedPostInput | null;
 } {
   let createdData: Prisma.PostUncheckedCreateInput | null = null;
+  let embeddedInput: EmbedPostInput | null = null;
 
   const db: GenerateDraftPostDb = {
     post: {
@@ -69,8 +72,17 @@ function makeDeps(recentRows: RecentRow[] = []): {
   };
 
   return {
-    deps: { db, auditLog: async () => {} },
+    // Inject a fake embed so no real embedding provider / DB is touched.
+    deps: {
+      db,
+      auditLog: async () => {},
+      embed: async (input) => {
+        embeddedInput = input;
+        return { status: "embedded" };
+      },
+    },
     created: () => createdData,
+    embedded: () => embeddedInput,
   };
 }
 
@@ -112,6 +124,32 @@ describe("generatePostFromContext — coreMessage persistence (Phase 1.1)", () =
     assert.equal(data!.coreMessage, MOCK_CORE_MESSAGE);
     // The article was claimed, so it becomes the primary feed item.
     assert.equal(data!.primaryFeedItemId, "feed-1");
+  });
+
+  it("triggers a best-effort embedding of the post's coreMessage (Phase 1.2)", async () => {
+    const { deps, embedded } = makeDeps();
+    const context = makeContext({
+      feedItems: [
+        {
+          id: "feed-1",
+          title: "Launch incoming",
+          content: "We are preparing something big for our audience.",
+          url: "https://example.com/launch",
+          publishedAt: null,
+        },
+      ],
+      hasContentSources: true,
+    });
+
+    const result = await generatePostFromContext(context, "co-1", {}, deps);
+
+    assert.ok(result.success, "generation should succeed");
+    const embed = embedded();
+    assert.ok(embed, "embed should have been called");
+    assert.equal(embed!.postId, "post-1");
+    assert.equal(embed!.companyId, "co-1");
+    assert.equal(embed!.channel, "linkedin");
+    assert.equal(embed!.coreMessage, MOCK_CORE_MESSAGE);
   });
 
   it("persists coreMessage for a mission post (no content sources)", async () => {
