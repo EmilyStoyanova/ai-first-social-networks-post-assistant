@@ -1,29 +1,33 @@
 import { type IEmbeddingProvider } from "./embedding-provider";
 import { MockEmbeddingProvider } from "./mock-embedding.provider";
+import { WorkerEmbeddingProvider } from "./worker-embedding.provider";
 
 /**
  * Embedding-provider factory — a separate axis from getLlmProvider()
  * (embeddings are not coupled to the text provider).
  *
- * This phase is fully LOCAL-FIRST: no cloud embedding provider is wired up, and
- * embeddings never depend on any third-party API key. Resolution:
+ * Fully LOCAL-FIRST: no cloud embedding provider, no third-party API key.
+ * Resolution:
  *
  *   AI_MOCK_MODE=true            → mock (deterministic, offline)
  *   EMBEDDING_PROVIDER=mock      → mock
- *   EMBEDDING_PROVIDER=worker    → reserved for the local TEXT_WORKER; the
- *                                  WorkerEmbeddingProvider is not implemented yet,
- *                                  so it reports unusable (skip cleanly).
+ *   EMBEDDING_PROVIDER=worker    → the local TEXT_WORKER (POST {TEXT_WORKER_URL}
+ *                                  /embed, x-worker-api-key). Usable only when
+ *                                  TEXT_WORKER_URL and TEXT_WORKER_API_KEY are
+ *                                  set; otherwise reports unusable (skip cleanly).
  *   (unset / anything else)      → no active provider → embedding is skipped.
  *
- * Because no real provider is active, post generation always continues normally
- * and simply skips the best-effort embedding step. The next phase adds a
- * WorkerEmbeddingProvider backed by POST {TEXT_WORKER_URL}/embed.
+ * When no provider is usable, post generation continues normally and simply
+ * skips the best-effort embedding step.
  *
  * The dimension is fixed at EMBEDDING_DIMENSIONS to match the pgvector column.
  */
 
 /** Must equal the pgvector column dimension in post_semantics.embedding. */
-export const EMBEDDING_DIMENSIONS = 1536;
+export const EMBEDDING_DIMENSIONS = 1024;
+
+/** Model served by the local TEXT_WORKER /embed endpoint. */
+const WORKER_EMBEDDING_MODEL = "bge-m3";
 
 export class NoActiveEmbeddingProviderError extends Error {
   readonly code = "NO_ACTIVE_EMBEDDING_PROVIDER" as const;
@@ -50,6 +54,14 @@ function resolveDimensions(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : EMBEDDING_DIMENSIONS;
 }
 
+/** Worker embeddings reuse the TEXT_WORKER endpoint + key (same as text gen). */
+function resolveWorkerConfig(): { url: string; apiKey: string } | null {
+  const url = process.env.TEXT_WORKER_URL?.trim();
+  const apiKey = process.env.TEXT_WORKER_API_KEY?.trim();
+  if (!url || !apiKey) return null;
+  return { url, apiKey };
+}
+
 /**
  * Reports the active provider without instantiating a client or requiring a key.
  * Returns null when no provider is usable (worker reserved, or none configured),
@@ -66,11 +78,12 @@ export function getEmbeddingProviderInfo(): {
   switch (name) {
     case "mock":
       return { provider: "mock", model: "mock", dims };
-    case "worker":
-      // Reserved name — the abstraction supports it, but the
-      // WorkerEmbeddingProvider is not implemented in this phase. Report
-      // unusable so nothing tries to embed through it.
-      return null;
+    case "worker": {
+      // Usable only when the TEXT_WORKER endpoint + key are configured;
+      // otherwise report unusable so embedding is skipped cleanly.
+      if (!resolveWorkerConfig()) return null;
+      return { provider: "worker", model: WORKER_EMBEDDING_MODEL, dims };
+    }
     case "none":
       return null;
     default: {
@@ -92,10 +105,15 @@ export function getEmbeddingProvider(): IEmbeddingProvider {
     case "mock":
       return new MockEmbeddingProvider(dims);
 
-    case "worker":
-      throw new NoActiveEmbeddingProviderError(
-        "EMBEDDING_PROVIDER=worker is reserved but not implemented yet (WorkerEmbeddingProvider comes next). Use mock or AI_MOCK_MODE=true for now."
-      );
+    case "worker": {
+      const cfg = resolveWorkerConfig();
+      if (!cfg) {
+        throw new NoActiveEmbeddingProviderError(
+          "EMBEDDING_PROVIDER=worker requires TEXT_WORKER_URL and TEXT_WORKER_API_KEY."
+        );
+      }
+      return new WorkerEmbeddingProvider(cfg.url, cfg.apiKey, WORKER_EMBEDDING_MODEL, dims);
+    }
 
     case "none":
       throw new NoActiveEmbeddingProviderError(

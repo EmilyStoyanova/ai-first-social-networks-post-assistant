@@ -354,9 +354,10 @@ model Post {
 // Deliberately a separate 1:1 table (not columns on Post): the vector is large,
 // derived, optional, regeneratable, and can fail independently of the post.
 //
-// The `embedding` column is `Unsupported("vector(1536)")` — Prisma cannot type
+// The `embedding` column is `Unsupported("vector(1024)")` — Prisma cannot type
 // pgvector, so it is written/read via raw SQL (see post-semantics store in
 // embed-post.service.ts). Every non-vector field is normal typed Prisma.
+// Dimension 1024 matches bge-m3 served by the local TEXT_WORKER /embed endpoint.
 //
 // companyId/channel/postCreatedAt are denormalized from Post. All three are
 // immutable for a post's lifetime, so they never drift; they exist so the future
@@ -364,7 +365,7 @@ model Post {
 // with no join. No ANN index yet — that is intentionally deferred.
 model PostSemantics {
   postId            String                       @id @map("post_id")
-  embedding         Unsupported("vector(1536)")?
+  embedding         Unsupported("vector(1024)")?
   embeddingProvider String?                      @map("embedding_provider")
   embeddingModel    String?                      @map("embedding_model")
   embeddingDims     Int?                         @map("embedding_dims")

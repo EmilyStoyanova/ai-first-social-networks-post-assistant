@@ -9,7 +9,13 @@ import {
 } from "./embedding-provider-factory";
 
 // Snapshot and restore the env keys this factory reads, so tests are isolated.
-const KEYS = ["AI_MOCK_MODE", "EMBEDDING_PROVIDER", "EMBEDDING_DIMENSIONS"] as const;
+const KEYS = [
+  "AI_MOCK_MODE",
+  "EMBEDDING_PROVIDER",
+  "EMBEDDING_DIMENSIONS",
+  "TEXT_WORKER_URL",
+  "TEXT_WORKER_API_KEY",
+] as const;
 
 describe("embedding-provider-factory", () => {
   let saved: Record<string, string | undefined>;
@@ -59,8 +65,27 @@ describe("embedding-provider-factory", () => {
     assert.ok(getEmbeddingProviderOrNull());
   });
 
-  it("treats the reserved worker name as unusable in this phase", () => {
+  it("returns the worker provider when EMBEDDING_PROVIDER=worker and the worker is configured", () => {
     process.env.EMBEDDING_PROVIDER = "worker";
+    process.env.TEXT_WORKER_URL = "http://worker.local:3002";
+    process.env.TEXT_WORKER_API_KEY = "secret";
+
+    assert.deepEqual(getEmbeddingProviderInfo(), {
+      provider: "worker",
+      model: "bge-m3",
+      dims: EMBEDDING_DIMENSIONS,
+    });
+
+    const provider = getEmbeddingProvider();
+    assert.equal(provider.provider, "worker");
+    assert.equal(provider.model, "bge-m3");
+    assert.equal(provider.dims, EMBEDDING_DIMENSIONS);
+    assert.ok(getEmbeddingProviderOrNull());
+  });
+
+  it("treats worker as unusable when TEXT_WORKER_URL/API_KEY are missing", () => {
+    process.env.EMBEDDING_PROVIDER = "worker";
+    // No TEXT_WORKER_URL / TEXT_WORKER_API_KEY → skip cleanly.
 
     assert.equal(getEmbeddingProviderInfo(), null);
     assert.equal(getEmbeddingProviderOrNull(), null);
