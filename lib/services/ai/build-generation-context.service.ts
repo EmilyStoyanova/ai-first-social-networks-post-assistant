@@ -116,7 +116,7 @@ async function loadContext(
   }
 ): Promise<BuildGenerationContextResult> {
   // ── Parallel data load ────────────────────────────────────────────────────
-  const [brand, channelConfig, feedItems] = await Promise.allSettled([
+  const [brand, channelConfig, feedItems, enabledSource] = await Promise.allSettled([
     prisma.brandGuidelines.findUnique({
       where: { companyId },
       select: {
@@ -139,7 +139,10 @@ async function loadContext(
       },
     }),
     prisma.feedItem.findMany({
-      where: { companyId, enabled: true, source: { enabled: true } },
+      // usedInPost:false — one-post-per-article (Phase 0). Already-consumed
+      // articles are excluded so each generation draws from a fresh source and
+      // the same article is never rewritten twice.
+      where: { companyId, enabled: true, usedInPost: false, source: { enabled: true } },
       orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
       take: 5,
       select: {
@@ -151,11 +154,21 @@ async function loadContext(
         source: { select: { config: true } },
       },
     }),
+    // Does the company have RSS configured at all? An enabled source with every
+    // article already used yields an empty feedItems window but must NOT fall
+    // back to a mission post — the caller skips instead (Phase 0).
+    prisma.contentSource.findFirst({
+      where: { companyId, enabled: true },
+      select: { id: true },
+    }),
   ]);
 
   const brandData = brand.status === "fulfilled" ? brand.value : null;
   const channelConfigData = channelConfig.status === "fulfilled" ? channelConfig.value : null;
   const feedData = feedItems.status === "fulfilled" ? feedItems.value : [];
+  // On a query failure, err toward the mission-post path (false) rather than
+  // wrongly skipping generation; feedData already reflects claimable articles.
+  const hasContentSources = enabledSource.status === "fulfilled" && enabledSource.value !== null;
   const defaults = CHANNEL_DEFAULTS[channel];
 
   const context: GenerationContext = {
@@ -192,6 +205,7 @@ async function loadContext(
       publishedAt: f.publishedAt,
       sourceLinkPreference: extractSourceLinkPreference(f.source.config),
     })),
+    hasContentSources,
     llm: getLlmProviderInfo(),
   };
 

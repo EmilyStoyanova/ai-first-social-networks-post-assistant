@@ -249,6 +249,9 @@ model FeedItem {
   createdAt   DateTime  @default(now()) @map("created_at")
 
   source ContentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  // A feed item backs at most one generated post (one-post-per-article, V2).
+  // Enforced at the DB level by the unique index on Post.primaryFeedItemId.
+  post   Post?
 
   @@unique([sourceId, url])
   @@index([sourceId])
@@ -296,6 +299,9 @@ model Post {
   id               String        @id @default(uuid())
   companyId        String        @map("company_id")
   scheduleId       String?       @map("schedule_id")
+  // The single source article this post was generated from (V2 one-post-per-article).
+  // @unique gives a DB-level guarantee that a feed item is never reused across posts.
+  primaryFeedItemId String?      @unique @map("primary_feed_item_id")
   channel          SocialChannel
   content          String
   language         String        @default("en")
@@ -324,8 +330,9 @@ model Post {
   createdAt        DateTime      @default(now()) @map("created_at")
   updatedAt        DateTime      @updatedAt @map("updated_at")
 
-  company     Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  schedule    WeeklySchedule? @relation(fields: [scheduleId], references: [id])
+  company         Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  schedule        WeeklySchedule? @relation(fields: [scheduleId], references: [id])
+  primaryFeedItem FeedItem?      @relation(fields: [primaryFeedItemId], references: [id])
   mediaAsset  MediaAsset?     @relation(fields: [mediaAssetId], references: [id])
   generatedBy User?           @relation("PostGenerator", fields: [generatedById], references: [id])
   approvedBy  User?           @relation("PostApprover", fields: [approvedById], references: [id])

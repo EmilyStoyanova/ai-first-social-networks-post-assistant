@@ -12,6 +12,7 @@ import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.se
 import { CONTENT_ANGLES, selectAngle, type ContentAngle } from "@/lib/ai/content-angle";
 import { selectPattern, isValidPostPattern, type PostPattern } from "@/lib/ai/post-pattern";
 import { resolvePostSourceLink } from "@/lib/ai/source-link";
+import { planFeedItemUsage, releaseFeedItem } from "@/lib/ai/feed-item-reservation";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -61,7 +62,10 @@ export type GenerateDraftPostResult =
         | "NO_ACTIVE_PROVIDER"
         | "LLM_PROVIDER_ERROR"
         | "LLM_RESPONSE_PARSE_ERROR"
-        | "POST_TOO_LONG_WITH_URL";
+        | "POST_TOO_LONG_WITH_URL"
+        // Source articles existed but every one was already claimed (concurrent
+        // run / exhausted pool). Not an error — callers skip cleanly.
+        | "NO_FEED_ITEMS_AVAILABLE";
       message?: string;
     };
 
@@ -169,6 +173,44 @@ export async function generatePostFromContext(
     }
   }
 
+  // ── Claim the source article (Phase 0 — one-post-per-article) ──────────────
+  // Atomically reserve one unused feed item BEFORE any LLM call, so a concurrent
+  // cron invocation (and later iterations of this same run) can never rewrite
+  // the same article.
+  //
+  // An empty feedItems window is ambiguous, so hasContentSources disambiguates:
+  //   • no content sources          → mission/brand post (primaryFeedItemId null)
+  //   • sources exist, no candidates → skip cleanly (all articles already used)
+  //   • candidates exist            → claim one and generate from it
+  const plan = await planFeedItemUsage(
+    context.feedItems.map((f) => f.id),
+    context.hasContentSources,
+    prisma
+  );
+  if (plan.action === "skip") {
+    // Either RSS is configured but every eligible article is already used, or a
+    // concurrent run claimed the last candidate. Not an error — the caller skips.
+    return { success: false, code: "NO_FEED_ITEMS_AVAILABLE" };
+  }
+
+  let claimedFeedItemId: string | null = null;
+  if (plan.action === "generate") {
+    claimedFeedItemId = plan.feedItemId;
+    // Promote the claimed article to primary so the prompt, aspect mining and
+    // appended source URL are all built around the reserved item.
+    const claimedId = plan.feedItemId;
+    const claimed = context.feedItems.find((f) => f.id === claimedId)!;
+    const others = context.feedItems.filter((f) => f.id !== claimedId);
+    context = { ...context, feedItems: [claimed, ...others] };
+  }
+  // plan.action === "mission": no content sources — primaryFeedItemId stays null
+  // and the existing no-source mission/brand post path is used.
+
+  // Frees the claimed article if generation fails before the post is persisted.
+  const releaseClaimedFeedItem = async () => {
+    if (claimedFeedItemId) await releaseFeedItem(claimedFeedItemId, prisma);
+  };
+
   // ── Aspect mining ─────────────────────────────────────────────────────────
   // Errors are caught inside resolveGenerationAspect — generation always continues.
   const {
@@ -213,6 +255,7 @@ export async function generatePostFromContext(
       }
     );
   } catch (err) {
+    await releaseClaimedFeedItem();
     if (err instanceof LlmProviderError) {
       return { success: false, code: "LLM_PROVIDER_ERROR", message: err.message };
     }
@@ -256,6 +299,7 @@ export async function generatePostFromContext(
     maxTextLength: context.channel.maxTextLength,
   });
   if (!sourceLinkResult.ok) {
+    await releaseClaimedFeedItem();
     return {
       success: false,
       code: "POST_TOO_LONG_WITH_URL",
@@ -288,6 +332,9 @@ export async function generatePostFromContext(
     data: {
       companyId,
       channel: context.channel.channel as SocialChannel,
+      // The reserved source article. The DB unique index on this column is the
+      // hard guarantee that one feed item never backs two posts.
+      primaryFeedItemId: claimedFeedItemId,
       status: resolvedStatus,
       approvedAt,
       content: finalContent,

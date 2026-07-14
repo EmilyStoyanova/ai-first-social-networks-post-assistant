@@ -24,6 +24,7 @@ function makeCtx(overrides: {
       includeSourceLink: false,
     },
     feedItems: [],
+    hasContentSources: false,
     llm: { provider: "groq", model: "llama-3.3-70b-versatile" },
   };
 }

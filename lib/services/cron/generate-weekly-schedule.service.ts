@@ -159,9 +159,13 @@ export async function generateWeeklySchedule(companyId: string): Promise<WeeklyS
         initialStatus: "pending_approval",
       });
 
-      budget--;
-
       if (!result.success) {
+        // No unused source articles remain for this channel — a clean skip, not
+        // a failure. No LLM call happened, so the run budget is left intact for
+        // the other channels.
+        if (result.code === "NO_FEED_ITEMS_AVAILABLE") break;
+
+        budget--; // a real generation attempt consumed an LLM call
         summary.failures.push({
           channel: config.channel,
           message: result.message ?? result.code,
@@ -169,6 +173,7 @@ export async function generateWeeklySchedule(companyId: string): Promise<WeeklyS
         break; // LLM trouble is unlikely to be channel-specific; stop burning budget
       }
 
+      budget--;
       have++;
       summary.postsGenerated++;
     }

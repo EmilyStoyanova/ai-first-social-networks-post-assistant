@@ -31,6 +31,7 @@ function makeCtx(feedItems: FeedItemContext[]): GenerationContext {
       includeSourceLink: true,
     },
     feedItems,
+    hasContentSources: feedItems.length > 0,
     llm: { provider: "groq", model: "llama-3.3-70b-versatile" },
   };
 }

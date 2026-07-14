@@ -84,6 +84,7 @@ const CTX: GenerationContext = {
     includeSourceLink: false,
   },
   feedItems: FEED_ITEMS,
+  hasContentSources: true,
   llm: { provider: "groq", model: "llama-3.3-70b-versatile" },
 };
 

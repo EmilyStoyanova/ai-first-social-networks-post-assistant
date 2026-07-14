@@ -62,5 +62,13 @@ export interface GenerationContext {
   brand: BrandContext | null;
   channel: ChannelContext;
   feedItems: FeedItemContext[];
+  /**
+   * Whether the company has at least one enabled content source (Phase 0).
+   * Distinguishes "no RSS configured → mission/brand post" from "RSS configured
+   * but every eligible article is already used → skip cleanly". `feedItems` is
+   * the eligible *unused* window (max 5); it can be empty in both cases, so this
+   * flag is what tells them apart.
+   */
+  hasContentSources: boolean;
   llm: LlmContext;
 }

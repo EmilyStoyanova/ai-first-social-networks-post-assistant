@@ -118,6 +118,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
           },
           { status: 422 }
         );
+      case "NO_FEED_ITEMS_AVAILABLE":
+        return NextResponse.json(
+          {
+            error: {
+              code: "NO_FEED_ITEMS_AVAILABLE",
+              message: "No unused source articles are available to generate from right now.",
+            },
+          },
+          { status: 409 }
+        );
     }
   }
 
