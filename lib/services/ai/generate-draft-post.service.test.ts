@@ -5,6 +5,7 @@ import { Prisma } from "@prisma/client";
 import { generatePostFromContext } from "./generate-draft-post.service";
 import type { GenerateDraftPostDb, GenerateDraftPostDeps } from "./generate-draft-post.service";
 import type { EmbedPostInput } from "./embed-post.service";
+import type { SemanticCalibrationInput } from "./semantic-calibration.service";
 import type { SemanticGate } from "@/lib/ai/generate-with-retry";
 import type { GenerationContext } from "@/lib/ai/types";
 
@@ -55,9 +56,11 @@ function makeDeps(
   deps: GenerateDraftPostDeps;
   created: () => Prisma.PostUncheckedCreateInput | null;
   embedded: () => EmbedPostInput | null;
+  calibrated: () => SemanticCalibrationInput | null;
 } {
   let createdData: Prisma.PostUncheckedCreateInput | null = null;
   let embeddedInput: EmbedPostInput | null = null;
+  let calibrationInput: SemanticCalibrationInput | null = null;
 
   const db: GenerateDraftPostDb = {
     post: {
@@ -92,12 +95,16 @@ function makeDeps(
         embeddedInput = input;
         return { status: "embedded" };
       },
+      recordCalibration: async (input) => {
+        calibrationInput = input;
+      },
       // Default: accept (no semantic history) so these Phase 1.1/1.2 tests are
       // unaffected by the Phase 1.4 gate. Overridable for gate-specific tests.
       semanticGate,
     },
     created: () => createdData,
     embedded: () => embeddedInput,
+    calibrated: () => calibrationInput,
   };
 }
 
@@ -265,6 +272,32 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
     if (result.success) {
       assert.equal(result.warnings.semanticDuplicate.exhausted, true);
     }
+  });
+
+  it("writes semantic-gate calibration diagnostics for the generated post", async () => {
+    const grayGate: SemanticGate = async () => ({
+      decision: "gray_zone",
+      topSimilarity: 0.83,
+      matchedPostId: "near-1",
+      matchedCoreMessage: "A somewhat similar claim.",
+      skipped: false,
+    });
+    const { deps, calibrated } = makeDeps([], grayGate);
+
+    const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
+    assert.ok(result.success);
+
+    const cal = calibrated();
+    assert.ok(cal, "recordCalibration should have been called");
+    assert.equal(cal!.postId, "post-1");
+    assert.equal(cal!.companyId, "co-1");
+    assert.equal(cal!.channel, "linkedin");
+    assert.equal(cal!.decision, "gray_zone");
+    assert.equal(cal!.topSimilarity, 0.83);
+    assert.equal(cal!.matchedPostId, "near-1");
+    assert.equal(cal!.gateSkipped, false);
+    assert.ok(cal!.attempts >= 1);
+    assert.ok(cal!.evaluatedAt instanceof Date);
   });
 
   it("records diagnostics and does not force pending when the gate is skipped (fail open)", async () => {

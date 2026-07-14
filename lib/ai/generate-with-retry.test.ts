@@ -23,6 +23,10 @@ function jsonPost(text: string): string {
   });
 }
 
+function jsonPostWithCore(text: string, coreMessage: string): string {
+  return JSON.stringify({ text, hashtags: [], coreMessage });
+}
+
 const DUPLICATE_TEXT = "a b c d e";
 const CLEAN_TEXT = "x y z w q";
 
@@ -195,6 +199,40 @@ describe("generateWithRetry — semantic duplicate on all attempts", () => {
     assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
     assert.strictEqual(result.semanticResult.decision, "regenerate");
     assert.strictEqual(result.attempts, MAX_GENERATION_ATTEMPTS);
+  });
+});
+
+// ─── Generic coreMessage gate (Phase 1.5) ─────────────────────────────────────
+
+describe("generateWithRetry — generic coreMessage triggers a retry", () => {
+  it("retries a generic-praise coreMessage and accepts a concrete one", async () => {
+    const provider = recordingProvider([
+      jsonPostWithCore(CLEAN_TEXT, "Corfu is ideal for family holidays."),
+      jsonPostWithCore(
+        CLEAN_TEXT,
+        "Corfu's shallow north-east bays let toddlers wade safely near the shore."
+      ),
+    ]);
+    const result = await generateWithRetry(provider, "sys", "user", []);
+
+    assert.strictEqual(provider.callCount, 2, "should retry once on the generic claim");
+    assert.strictEqual(result.coreMessageGeneric, false, "final claim should be concrete");
+    assert.strictEqual(result.attempts, 2);
+
+    // The retry prompt must explain the previous claim was too generic.
+    const retryPrompt = provider.prompts[1];
+    assert.match(retryPrompt, /too generic/);
+    assert.match(retryPrompt, /Corfu is ideal for family holidays\./);
+  });
+
+  it("exhausts attempts and returns coreMessageGeneric=true when it never improves", async () => {
+    const provider = makeProvider([
+      jsonPostWithCore(CLEAN_TEXT, "This resort is the perfect choice for everyone."),
+    ]);
+    const result = await generateWithRetry(provider, "sys", "user", []);
+
+    assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
+    assert.strictEqual(result.coreMessageGeneric, true);
   });
 });
 

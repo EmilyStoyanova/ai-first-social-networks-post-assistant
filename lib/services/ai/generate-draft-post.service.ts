@@ -23,6 +23,10 @@ import {
 } from "@/lib/ai/feed-item-reservation";
 import { embedPost, type EmbedPostInput, type EmbedPostOutcome } from "./embed-post.service";
 import { createSemanticGate } from "./semantic-gate.service";
+import {
+  recordSemanticCalibration,
+  type SemanticCalibrationInput,
+} from "./semantic-calibration.service";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -140,6 +144,8 @@ export interface GenerateDraftPostDeps {
   auditLog?: typeof createAuditLog;
   /** Best-effort semantic embedding (Phase 1.2). Injected in tests. */
   embed?: (input: EmbedPostInput) => Promise<EmbedPostOutcome>;
+  /** Best-effort semantic-gate calibration write (Phase 1.5). Injected in tests. */
+  recordCalibration?: (input: SemanticCalibrationInput) => Promise<void>;
   /**
    * Semantic-duplicate gate (Phase 1.4). Injected in tests; in production a
    * real one is built per company+channel from the embedding provider + store.
@@ -199,6 +205,7 @@ export async function generatePostFromContext(
   const db: GenerateDraftPostDb = deps.db ?? prisma;
   const auditLog = deps.auditLog ?? createAuditLog;
   const embed = deps.embed ?? embedPost;
+  const recordCalibration = deps.recordCalibration ?? recordSemanticCalibration;
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
 
@@ -361,6 +368,7 @@ export async function generatePostFromContext(
     parsed,
     duplicateResult,
     semanticResult,
+    coreMessageGeneric,
     attempts,
     selectedAngle,
     selectedPattern,
@@ -510,6 +518,8 @@ export async function generatePostFromContext(
           decision: semanticResult.decision,
           attempts,
           skipped: semanticResult.skipped,
+          // Phase 1.5 — the final candidate's coreMessage was generic praise.
+          coreMessageGeneric,
         },
         // Source link decision (v2-1) — traceability for the appended URL.
         // primaryFeedItemId/sourceTitle pin the exact article the post is based
@@ -563,6 +573,23 @@ export async function generatePostFromContext(
       ...(generatedById ? {} : { automated: true }),
       ...(autoApproved ? { autoApproved: true } : {}),
     },
+  });
+
+  // ── Semantic-gate calibration (Phase 1.5) ─────────────────────────────────
+  // Best-effort and non-blocking: persists the gate outcome for this post to its
+  // post_semantics row so calibration is queryable. Runs regardless of whether
+  // embedding is available, so even a skipped gate leaves a calibration record.
+  await recordCalibration({
+    postId: post.id,
+    companyId,
+    channel: post.channel as SocialChannel,
+    postCreatedAt: post.createdAt,
+    topSimilarity: semanticResult.topSimilarity,
+    matchedPostId: semanticResult.matchedPostId,
+    decision: semanticResult.decision,
+    attempts,
+    gateSkipped: semanticResult.skipped,
+    evaluatedAt: new Date(),
   });
 
   // ── Semantic embedding (Phase 1.2) ────────────────────────────────────────

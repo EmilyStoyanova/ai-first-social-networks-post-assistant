@@ -6,6 +6,7 @@ import {
   type RecentPost,
 } from "./quality/duplicate-detection";
 import { type SemanticDecision } from "./quality/semantic-duplicate";
+import { assessCoreMessage } from "./quality/core-message-quality";
 import { buildRetryUserPrompt } from "./prompt-builder";
 import { type ContentAngle, selectRetryAngle } from "./content-angle";
 import { type PostPattern, selectRetryPattern } from "./post-pattern";
@@ -69,6 +70,12 @@ export interface GenerationLoopResult {
   duplicateResult: DuplicateCheckResult;
   /** Semantic-duplicate evaluation of the accepted (or last) candidate. */
   semanticResult: SemanticGateResult;
+  /**
+   * True when the accepted (or last) candidate's coreMessage is generic praise
+   * with no specific reason. It never blocks the save (fail-safe) but is a
+   * retry trigger and a calibration signal (Phase 1.5).
+   */
+  coreMessageGeneric: boolean;
   /** Number of generation attempts actually made (1..maxAttempts). */
   attempts: number;
   /** The content angle that produced the accepted (or last) result. */
@@ -106,6 +113,7 @@ export async function generateWithRetry(
     matchedPostId: null,
   };
   let lastSemanticResult: SemanticGateResult = NO_SEMANTIC_GATE;
+  let lastCoreMessageGeneric = false;
 
   // Track angles, patterns, and aspects tried during this run so retries pick fresh ones.
   let currentAngle: ContentAngle | undefined = diversityOptions?.initialAngle;
@@ -165,11 +173,18 @@ export async function generateWithRetry(
             }
           : undefined;
 
+      // When the previous attempt's central claim was generic praise, tell the
+      // model to replace it with a specific, testable claim (not merely reword).
+      const genericCoreMessage = lastCoreMessageGeneric
+        ? { previousCoreMessage: lastParsed.coreMessage }
+        : undefined;
+
       userPrompt = buildRetryUserPrompt(baseUserPrompt, {
         candidateText: lastParsed.text,
         matchedText: matchedPost?.text ?? "",
         similarityScore: lastDuplicateResult.similarityScore ?? 0,
         semanticDuplicate,
+        genericCoreMessage,
         forcedAngle: retryAngle,
         forcedPattern: retryPattern,
         forcedAspect: retryAspect,
@@ -191,9 +206,15 @@ export async function generateWithRetry(
     lastSemanticResult = semanticGate
       ? await semanticGate({ coreMessage: lastParsed.coreMessage })
       : NO_SEMANTIC_GATE;
+    lastCoreMessageGeneric = assessCoreMessage(lastParsed.coreMessage).generic;
 
-    // Retry on a near-verbatim (Jaccard) hit OR a semantic-duplicate "regenerate".
-    const needsRetry = lastDuplicateResult.flagged || lastSemanticResult.decision === "regenerate";
+    // Retry on a near-verbatim (Jaccard) hit, a semantic-duplicate "regenerate",
+    // OR a generic coreMessage (broad praise hides real repetition). All three
+    // are fail-safe: the last candidate is returned even if still flagged.
+    const needsRetry =
+      lastDuplicateResult.flagged ||
+      lastSemanticResult.decision === "regenerate" ||
+      lastCoreMessageGeneric;
     if (!needsRetry) break;
   }
 
@@ -202,6 +223,7 @@ export async function generateWithRetry(
     parsed: lastParsed!,
     duplicateResult: lastDuplicateResult,
     semanticResult: lastSemanticResult,
+    coreMessageGeneric: lastCoreMessageGeneric,
     attempts: attemptsMade,
     selectedAngle: currentAngle,
     selectedPattern: currentPattern,

@@ -44,7 +44,12 @@ export function isGenericFocus(focus: string): boolean {
   if (words.length < 3) return true;
   const GENERIC =
     /^(overview|introduction|summary|general information|about the (company|brand|product|service)|miscellaneous|other content|various topics?|the main (topic|subject|theme))$/;
-  return GENERIC.test(norm);
+  // Broad praise themes (anchored — only when the WHOLE focus is the platitude,
+  // so a narrow focus that merely contains "great for" is unaffected). Keeps the
+  // aspect pool made of distinct facts/benefits/problems rather than mood.
+  const GENERIC_PRAISE =
+    /^(?:(?:great|good|perfect|ideal|fun)\s+for\s+[\w\s]+|something\s+for\s+everyone|a\s+(?:must[-\s]?visit|dream)\s+[\w\s]+)$/;
+  return GENERIC.test(norm) || GENERIC_PRAISE.test(norm);
 }
 
 export function tooSimilarToExisting(

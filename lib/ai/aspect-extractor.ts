@@ -87,8 +87,9 @@ export async function extractAspects(
       : "";
 
   const systemPrompt =
-    "You extract distinct content aspects from source material. " +
-    "Each aspect is a specific angle a social media post could take on the provided content. " +
+    "You extract distinct, narrow content aspects from source material. " +
+    "Each aspect is a specific, actionable angle a single social media post could take on the provided content. " +
+    "Prefer narrow sub-aspects over broad themes: every aspect must identify ONE distinct fact, benefit, problem, audience need, or takeaway that is grounded in the source. " +
     "Return ONLY a raw JSON array — no markdown fences, no explanation.";
 
   const userPrompt =
@@ -96,18 +97,21 @@ export async function extractAspects(
     sourceContent +
     "\n---\n" +
     exclusionBlock +
-    "\nExtract distinct aspects from the source content above. " +
+    "\nExtract distinct, fine-grained aspects from the source content above. " +
     "Each aspect must be genuinely specific to this content — not a generic marketing angle.\n\n" +
     "Return ONLY a JSON array in this exact format:\n" +
     "[\n" +
     "  {\n" +
     '    "title": "short label (3-6 words)",\n' +
-    '    "focus": "specific conceptual focus (8-20 words, concrete and unique to this content)",\n' +
+    '    "focus": "one narrow, actionable sub-aspect: a distinct fact, benefit, problem, audience need, or takeaway (8-20 words, concrete and grounded in the source)",\n' +
     '    "visualConcept": "concrete visual scene for an image generation model (10-20 words, no text, logos, or people)"\n' +
     "  }\n" +
     "]\n\n" +
     "Rules:\n" +
-    "- Each focus must be specific to the source content — avoid generic themes like 'innovation' or 'success'\n" +
+    "- Prefer narrow, actionable sub-aspects over broad themes — 'shallow calm bays suit toddlers' beats 'great for families'\n" +
+    "- Each focus must identify ONE distinct fact, benefit, problem, audience need, or takeaway — not a mood or generic praise\n" +
+    "- Each focus must be specific to the source content and grounded in it — avoid generic themes like 'innovation' or 'success', and do not invent facts the source does not support\n" +
+    "- Reject aspects that differ only by wording: two focuses that make the same point with different words are the SAME aspect — return only one\n" +
     "- Minimum 3 distinct words per focus — no one-word or two-word focuses\n" +
     "- visualConcept must be photorealistic and concrete — not abstract\n" +
     "- Return only aspects you are confident about — do NOT pad to a fixed count";

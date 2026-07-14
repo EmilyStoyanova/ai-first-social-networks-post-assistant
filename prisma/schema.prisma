@@ -377,6 +377,19 @@ model PostSemantics {
   attempts          Int                          @default(0)
   lastError         String?                      @map("last_error")
 
+  // ── Semantic-gate calibration diagnostics (Phase 1.5) ──────────────────────
+  // The gate outcome for THIS post when it was generated. Queryable home for
+  // calibration (not duplicated as columns on Post). Written best-effort right
+  // after the post is created, independent of whether embedding succeeded, so
+  // even skipped-gate generations leave a calibration record. All nullable —
+  // legacy rows and rows written only by the embed path leave them null.
+  gateTopSimilarity Float?                       @map("gate_top_similarity")
+  gateMatchedPostId String?                      @map("gate_matched_post_id")
+  gateDecision      String?                      @map("gate_decision")
+  gateAttempts      Int?                         @map("gate_attempts")
+  gateSkipped       Boolean?                     @map("gate_skipped")
+  gateEvaluatedAt   DateTime?                    @map("gate_evaluated_at")
+
   // Denormalized immutable routing keys for the future recency-window gate.
   companyId         String                       @map("company_id")
   channel           SocialChannel

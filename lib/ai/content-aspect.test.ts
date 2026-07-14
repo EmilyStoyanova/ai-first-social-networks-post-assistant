@@ -181,6 +181,69 @@ describe("validateAspects — duplicate/similar focus rejection", () => {
   });
 });
 
+// ─── 3b. validateAspects — distinct fine-grained aspects ──────────────────────
+
+describe("validateAspects — distinct fine-grained aspects", () => {
+  it("rejects a second aspect that differs from the first only by wording", () => {
+    // Same underlying point ('shallow calm bays suit families with toddlers'),
+    // just reworded — must collapse to a single aspect.
+    const raw = [
+      {
+        title: "Calm bays for toddlers",
+        focus: "shallow calm bays let families with toddlers wade safely",
+        visualConcept: "a calm shallow turquoise bay with gentle ripples",
+      },
+      {
+        title: "Safe shallow water",
+        focus: "families with toddlers can safely wade in the shallow calm bays",
+        visualConcept: "toddler-friendly shallow shoreline under blue sky",
+      },
+    ];
+    const result = validateAspects(raw);
+    assert.strictEqual(result.length, 1, "wording-only variants must collapse to one aspect");
+  });
+
+  it("keeps genuinely distinct fine-grained sub-aspects of the same subject", () => {
+    // Both are about Corfu families, but each makes a DIFFERENT concrete point:
+    // one about beaches, one about food — distinct facts, so both are kept.
+    const raw = [
+      {
+        title: "Shallow toddler beaches",
+        focus: "shallow calm east-coast bays let toddlers wade safely near the shore",
+        visualConcept: "a calm shallow turquoise bay with gentle ripples at dawn",
+      },
+      {
+        title: "Family-friendly tavernas",
+        focus: "village tavernas offer child portions and highchairs away from crowds",
+        visualConcept: "a quiet stone taverna courtyard with wooden tables under vines",
+      },
+    ];
+    const result = validateAspects(raw);
+    assert.strictEqual(result.length, 2, "distinct concrete sub-aspects must both survive");
+  });
+
+  it("rejects broad/generic focuses in favour of narrow ones", () => {
+    const raw = [
+      { title: "Great for families", focus: "great for families", visualConcept: "a beach" },
+      {
+        title: "Shallow toddler bays",
+        focus: "shallow calm bays let toddlers wade safely near the shore",
+        visualConcept: "a calm shallow turquoise bay with gentle ripples",
+      },
+    ];
+    const result = validateAspects(raw);
+    // "great for families" is 3 words but a generic praise theme; the narrow one survives.
+    assert.ok(
+      result.some((a) => a.focus.includes("shallow")),
+      "the narrow, actionable sub-aspect must be kept"
+    );
+    assert.ok(
+      !result.some((a) => a.focus === "great for families"),
+      "the broad generic theme must not survive alongside the narrow one"
+    );
+  });
+});
+
 // ─── 4. selectAspect — unused first, then LRU ────────────────────────────────
 
 describe("selectAspect — unused aspects preferred", () => {

@@ -152,10 +152,16 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
     lines(
       'Every post must be built around a single core message. The "coreMessage" field of the JSON response must contain it.',
       "- It must be exactly one sentence.",
-      "- It must state the central claim or takeaway the reader should remember — the point the post argues or reveals.",
+      "- It must state ONE specific, testable central claim — a point that could be verified against the source content, not a mood or an impression.",
       "- It must stand on its own, independent of the hook, opening line, or call to action.",
-      "- It is NOT a summary of the source article, and NOT the topic label. Do not merely name the subject.",
+      "- It is NOT a summary of the source article, and NOT the topic label. Do not merely name the subject or restate the article title.",
+      '- Avoid generic destination or product praise. Do NOT use phrases such as "ideal place", "perfect choice", "unforgettable experience", "something for everyone", "a must-visit", or "the best" UNLESS the source supports a specific, concrete reason that you state in the same sentence.',
+      "- Anchor the claim to a concrete differentiator from the source: a specific fact, feature, number, problem solved, audience need, or takeaway. If the post has a content aspect, the coreMessage must express that aspect's concrete differentiator.",
       `- Write it in the same language as the post text (${lang}).`,
+      'Example — topic: "family holidays in Corfu"',
+      'Bad: "Corfu is ideal for family holidays." (generic praise — no specific, testable reason)',
+      'Bad: "Family holidays in Corfu." (that is the topic, not a claim)',
+      'Good: "Corfu\'s shallow, calm north-east bays let toddlers wade safely, which is why families with young children favour it."',
       'Example — topic: "marketing automation"',
       'Bad: "Marketing automation." (that is the topic, not a claim)',
       'Bad: "This post talks about marketing automation." (a meta description, not a claim)',
@@ -322,6 +328,7 @@ function buildUserPrompt(
         "**Content aspect — mandatory conceptual constraint**",
         `Focus: ${aspect.focus}`,
         "You MUST build this post around this specific focus. Do NOT replace it with a more prominent theme from the source content. The focus is the conceptual core of this post, not a suggestion.",
+        "Your coreMessage MUST express the concrete differentiator of this focus as one specific, testable claim — not broad praise about the overall subject.",
         `Your imagePrompt MUST visually anchor to: ${aspect.visualConcept}`,
       ].join("\n")
     : "";
@@ -356,6 +363,13 @@ export interface RetryContext {
   semanticDuplicate?: {
     repeatedCoreMessage: string;
     similarity: number;
+  };
+  /**
+   * Present when the retry was triggered because the previous coreMessage was
+   * generic praise. The model must replace it with a specific, testable claim.
+   */
+  genericCoreMessage?: {
+    previousCoreMessage: string;
   };
   /** When provided the retry prompt forces the model to use this angle. */
   forcedAngle?: ContentAngle;
@@ -396,6 +410,22 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     ? ["## The existing post it was too similar to", "---", retry.matchedText, "---", ""].join("\n")
     : "";
 
+  // Generic-coreMessage block — the previous central claim was broad praise.
+  const genericCoreBlock = retry.genericCoreMessage
+    ? [
+        "## Your previous central claim was too generic",
+        "The previous coreMessage was broad destination/product praise, not a specific claim:",
+        "---",
+        retry.genericCoreMessage.previousCoreMessage,
+        "---",
+        "Replace it with ONE specific, testable claim that the source content supports.",
+        "- Do NOT use praise phrases like 'ideal place', 'perfect choice', 'unforgettable experience', 'something for everyone' unless you immediately give a concrete, verifiable reason.",
+        "- Anchor the claim to a concrete detail: a specific fact, number, feature, audience need, or takeaway from the source.",
+        "- Do not merely restate the article title or topic.",
+        "",
+      ].join("\n")
+    : "";
+
   // Semantic-duplicate block — the central CLAIM was repeated, not just wording.
   const semanticBlock = retry.semanticDuplicate
     ? [
@@ -420,6 +450,7 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     "",
     nearVerbatimBlock,
     semanticBlock,
+    genericCoreBlock,
     forcedBlock,
     "## What you must NOT do",
     "- Do not paraphrase the rejected attempt.",
