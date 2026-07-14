@@ -344,8 +344,19 @@ function buildUserPrompt(
 
 export interface RetryContext {
   candidateText: string;
+  /** The near-verbatim (Jaccard) match, if any. Empty string when none. */
   matchedText: string;
+  /** Jaccard similarity of the near-verbatim match. */
   similarityScore: number;
+  /**
+   * Present when the retry was triggered by a SEMANTIC duplicate: the previous
+   * attempt's central claim was too close to an existing post's. The model must
+   * produce a substantially different central claim, not merely reword.
+   */
+  semanticDuplicate?: {
+    repeatedCoreMessage: string;
+    similarity: number;
+  };
   /** When provided the retry prompt forces the model to use this angle. */
   forcedAngle?: ContentAngle;
   /** When provided the retry prompt forces the model to use this writing pattern. */
@@ -380,19 +391,35 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
         ].join("\n")
       : "";
 
+  // Near-verbatim (Jaccard) match block — only when there is a matched post.
+  const nearVerbatimBlock = retry.matchedText
+    ? ["## The existing post it was too similar to", "---", retry.matchedText, "---", ""].join("\n")
+    : "";
+
+  // Semantic-duplicate block — the central CLAIM was repeated, not just wording.
+  const semanticBlock = retry.semanticDuplicate
+    ? [
+        `## Semantic duplicate — your previous central claim was too close (cosine ${retry.semanticDuplicate.similarity.toFixed(2)}) to an existing post`,
+        "Existing central claim that was repeated:",
+        "---",
+        retry.semanticDuplicate.repeatedCoreMessage,
+        "---",
+        "You MUST make a SUBSTANTIALLY DIFFERENT central claim (coreMessage): a genuinely different point or takeaway.",
+        "A different hook, CTA, wording, or structure is NOT enough — the underlying idea itself must be different.",
+        "",
+      ].join("\n")
+    : "";
+
   const retryBlock = [
-    `⚠ REGENERATION REQUIRED (similarity score: ${retry.similarityScore.toFixed(2)} — too close to an existing post).`,
+    `⚠ REGENERATION REQUIRED (too close to an existing post).`,
     "",
     "## Rejected attempt",
     "---",
     retry.candidateText,
     "---",
     "",
-    "## The existing post it was too similar to",
-    "---",
-    retry.matchedText,
-    "---",
-    "",
+    nearVerbatimBlock,
+    semanticBlock,
     forcedBlock,
     "## What you must NOT do",
     "- Do not paraphrase the rejected attempt.",

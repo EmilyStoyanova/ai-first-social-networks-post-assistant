@@ -5,7 +5,16 @@ import { Prisma } from "@prisma/client";
 import { generatePostFromContext } from "./generate-draft-post.service";
 import type { GenerateDraftPostDb, GenerateDraftPostDeps } from "./generate-draft-post.service";
 import type { EmbedPostInput } from "./embed-post.service";
+import type { SemanticGate } from "@/lib/ai/generate-with-retry";
 import type { GenerationContext } from "@/lib/ai/types";
+
+const ACCEPT_GATE: SemanticGate = async () => ({
+  decision: "accept",
+  topSimilarity: null,
+  matchedPostId: null,
+  matchedCoreMessage: null,
+  skipped: false,
+});
 
 // The coreMessage baked into the AI_MOCK_MODE response (see MOCK_LLM_TEXT in the
 // service). Tests run in mock mode so no live LLM provider is contacted.
@@ -39,7 +48,10 @@ interface RecentRow {
   promptSnapshot: Prisma.JsonValue | null;
 }
 
-function makeDeps(recentRows: RecentRow[] = []): {
+function makeDeps(
+  recentRows: RecentRow[] = [],
+  semanticGate: SemanticGate = ACCEPT_GATE
+): {
   deps: GenerateDraftPostDeps;
   created: () => Prisma.PostUncheckedCreateInput | null;
   embedded: () => EmbedPostInput | null;
@@ -72,7 +84,7 @@ function makeDeps(recentRows: RecentRow[] = []): {
   };
 
   return {
-    // Inject a fake embed so no real embedding provider / DB is touched.
+    // Inject a fake embed + semantic gate so no real provider / DB is touched.
     deps: {
       db,
       auditLog: async () => {},
@@ -80,6 +92,9 @@ function makeDeps(recentRows: RecentRow[] = []): {
         embeddedInput = input;
         return { status: "embedded" };
       },
+      // Default: accept (no semantic history) so these Phase 1.1/1.2 tests are
+      // unaffected by the Phase 1.4 gate. Overridable for gate-specific tests.
+      semanticGate,
     },
     created: () => createdData,
     embedded: () => embeddedInput,
@@ -191,6 +206,95 @@ describe("generatePostFromContext — coreMessage persistence (Phase 1.1)", () =
 
     assert.ok(result.success, "generation should tolerate legacy null coreMessage rows");
     assert.equal(created()!.coreMessage, MOCK_CORE_MESSAGE);
+  });
+});
+
+// ─── Semantic duplicate gate (Phase 1.4) ──────────────────────────────────────
+
+describe("generatePostFromContext — semantic duplicate gate", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const regenerateGate: SemanticGate = async () => ({
+    decision: "regenerate",
+    topSimilarity: 0.93,
+    matchedPostId: "dup-1",
+    matchedCoreMessage: "A previously used central claim.",
+    skipped: false,
+  });
+
+  it("forces pending approval and warns when all attempts stay too similar (even fully automated)", async () => {
+    const { deps, created } = makeDeps([], regenerateGate);
+    // Fully automated draft would normally auto-approve; the semantic gate must override that.
+    const ctx = makeContext({
+      company: {
+        name: "Acme",
+        website: null,
+        automationMode: "fully_automated",
+        defaultLang: "en",
+      },
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", { initialStatus: "draft" }, deps);
+    assert.ok(result.success, "generation should still succeed (fail-safe save)");
+
+    const data = created()!;
+    assert.equal(data.status, "pending_approval", "must be held for human review");
+    assert.equal(data.approvedAt ?? null, null, "must not be auto-approved");
+
+    const snapshot = data.promptSnapshot as Record<string, unknown>;
+    const guards = snapshot.qualityGuards as Record<string, Record<string, unknown>>;
+    assert.equal(guards.semanticDuplicate.warning, true);
+    assert.equal(guards.semanticDuplicate.decision, "regenerate");
+
+    const gate = snapshot.semanticGate as Record<string, unknown>;
+    assert.equal(gate.decision, "regenerate");
+    assert.equal(gate.matchedPostId, "dup-1");
+    assert.equal(gate.attempts, 3, "should have exhausted all attempts");
+    assert.equal(gate.skipped, false);
+
+    if (result.success) {
+      assert.equal(result.warnings.semanticDuplicate.exhausted, true);
+    }
+  });
+
+  it("records diagnostics and does not force pending when the gate is skipped (fail open)", async () => {
+    const skippedGate: SemanticGate = async () => ({
+      decision: "accept",
+      topSimilarity: null,
+      matchedPostId: null,
+      matchedCoreMessage: null,
+      skipped: true,
+    });
+    const { deps, created } = makeDeps([], skippedGate);
+    const ctx = makeContext({
+      company: {
+        name: "Acme",
+        website: null,
+        automationMode: "fully_automated",
+        defaultLang: "en",
+      },
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", { initialStatus: "draft" }, deps);
+    assert.ok(result.success);
+
+    const data = created()!;
+    // Fail-open: not a semantic duplicate → normal auto-approval proceeds.
+    assert.equal(data.status, "approved");
+    const snapshot = data.promptSnapshot as Record<string, unknown>;
+    const gate = snapshot.semanticGate as Record<string, unknown>;
+    assert.equal(gate.skipped, true);
+    assert.equal(gate.decision, "accept");
   });
 });
 

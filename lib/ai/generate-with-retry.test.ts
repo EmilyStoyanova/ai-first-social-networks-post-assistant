@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { generateWithRetry, MAX_GENERATION_ATTEMPTS } from "./generate-with-retry";
+import {
+  generateWithRetry,
+  MAX_GENERATION_ATTEMPTS,
+  type SemanticGate,
+  type SemanticGateResult,
+} from "./generate-with-retry";
 import type { ILlmProvider, LlmRequest, LlmResponse } from "./types";
 import type { RecentPost } from "./quality/duplicate-detection";
 
@@ -35,6 +40,45 @@ function makeProvider(responses: string[]): ILlmProvider & { callCount: number }
     },
   };
   return provider;
+}
+
+// Provider that also records the userPrompts it was given, for retry-prompt assertions.
+function recordingProvider(
+  responses: string[]
+): ILlmProvider & { callCount: number; prompts: string[] } {
+  let i = 0;
+  const provider = {
+    callCount: 0,
+    prompts: [] as string[],
+    async generate(req: LlmRequest): Promise<LlmResponse> {
+      provider.callCount++;
+      provider.prompts.push(req.userPrompt);
+      return { text: responses[Math.min(i++, responses.length - 1)] };
+    },
+  };
+  return provider;
+}
+
+const ACCEPT: SemanticGateResult = {
+  decision: "accept",
+  topSimilarity: 0.1,
+  matchedPostId: null,
+  matchedCoreMessage: null,
+  skipped: false,
+};
+
+const REGENERATE: SemanticGateResult = {
+  decision: "regenerate",
+  topSimilarity: 0.92,
+  matchedPostId: "sem-1",
+  matchedCoreMessage: "The repeated central claim.",
+  skipped: false,
+};
+
+// A gate that yields the given results in order, repeating the last one.
+function gateSequence(results: SemanticGateResult[]): SemanticGate {
+  let i = 0;
+  return async () => results[Math.min(i++, results.length - 1)];
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -89,5 +133,91 @@ describe("generateWithRetry — no recent posts", () => {
 
     assert.strictEqual(provider.callCount, 1, "should not retry when there is nothing to compare");
     assert.strictEqual(result.duplicateResult.flagged, false);
+  });
+});
+
+// ─── Semantic gate (Phase 1.4) ─────────────────────────────────────────────────
+
+describe("generateWithRetry — semantic gate accept", () => {
+  it("accepts on the first attempt when the gate is below threshold", async () => {
+    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      undefined,
+      gateSequence([ACCEPT])
+    );
+
+    assert.strictEqual(provider.callCount, 1);
+    assert.strictEqual(result.semanticResult.decision, "accept");
+    assert.strictEqual(result.attempts, 1);
+  });
+});
+
+describe("generateWithRetry — semantic duplicate then successful retry", () => {
+  it("retries a Jaccard-clean but semantically-duplicate candidate and injects the repeated claim", async () => {
+    // Both attempts are Jaccard-clean; only the semantic gate forces the retry.
+    const provider = recordingProvider([jsonPost(CLEAN_TEXT), jsonPost(CLEAN_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      undefined,
+      gateSequence([REGENERATE, ACCEPT])
+    );
+
+    assert.strictEqual(provider.callCount, 2, "should retry exactly once");
+    assert.strictEqual(result.semanticResult.decision, "accept");
+    assert.strictEqual(result.attempts, 2);
+
+    // The retry prompt must tell the model which central claim was repeated.
+    const retryPrompt = provider.prompts[1];
+    assert.match(retryPrompt, /Semantic duplicate/);
+    assert.match(retryPrompt, /The repeated central claim\./);
+  });
+});
+
+describe("generateWithRetry — semantic duplicate on all attempts", () => {
+  it("exhausts the attempts and returns the final regenerate decision", async () => {
+    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      undefined,
+      gateSequence([REGENERATE])
+    );
+
+    assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
+    assert.strictEqual(result.semanticResult.decision, "regenerate");
+    assert.strictEqual(result.attempts, MAX_GENERATION_ATTEMPTS);
+  });
+});
+
+describe("generateWithRetry — gray zone accepts without retrying", () => {
+  it("does not retry when the gate returns gray_zone", async () => {
+    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
+    const grayZone: SemanticGateResult = {
+      decision: "gray_zone",
+      topSimilarity: 0.83,
+      matchedPostId: "sem-2",
+      matchedCoreMessage: "A somewhat similar claim.",
+      skipped: false,
+    };
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      undefined,
+      gateSequence([grayZone])
+    );
+
+    assert.strictEqual(provider.callCount, 1, "gray zone is accepted, not regenerated");
+    assert.strictEqual(result.semanticResult.decision, "gray_zone");
   });
 });

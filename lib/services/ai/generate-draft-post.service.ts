@@ -6,7 +6,11 @@ import type { GenerationContext, ILlmProvider } from "@/lib/ai/types";
 import { buildPrompts } from "@/lib/ai/prompt-builder";
 import { getLlmProvider, NoActiveLlmProviderError } from "@/lib/ai/llm/llm-provider-factory";
 import { LlmProviderError, LlmResponseParseError } from "@/lib/ai/errors";
-import { generateWithRetry, type GenerationLoopResult } from "@/lib/ai/generate-with-retry";
+import {
+  generateWithRetry,
+  type GenerationLoopResult,
+  type SemanticGate,
+} from "@/lib/ai/generate-with-retry";
 import { checkContentSafety } from "@/lib/ai/quality/content-safety";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 import { CONTENT_ANGLES, selectAngle, type ContentAngle } from "@/lib/ai/content-angle";
@@ -18,6 +22,7 @@ import {
   type FeedItemReservationDb,
 } from "@/lib/ai/feed-item-reservation";
 import { embedPost, type EmbedPostInput, type EmbedPostOutcome } from "./embed-post.service";
+import { createSemanticGate } from "./semantic-gate.service";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -55,6 +60,16 @@ export interface GenerationWarnings {
   safety: {
     flagged: boolean;
     matchedTerms: string[];
+  };
+  /** Semantic-duplicate gate outcome for the accepted (or last) candidate. */
+  semanticDuplicate: {
+    decision: "accept" | "gray_zone" | "regenerate";
+    topSimilarity: number | null;
+    matchedPostId: string | null;
+    /** True when all attempts stayed too similar (post forced to pending approval). */
+    exhausted: boolean;
+    /** True when the gate could not run (fail-open). */
+    skipped: boolean;
   };
 }
 
@@ -125,6 +140,11 @@ export interface GenerateDraftPostDeps {
   auditLog?: typeof createAuditLog;
   /** Best-effort semantic embedding (Phase 1.2). Injected in tests. */
   embed?: (input: EmbedPostInput) => Promise<EmbedPostOutcome>;
+  /**
+   * Semantic-duplicate gate (Phase 1.4). Injected in tests; in production a
+   * real one is built per company+channel from the embedding provider + store.
+   */
+  semanticGate?: SemanticGate;
 }
 
 // ─── Service ───────────────────────────────────────────────────────────────────
@@ -295,9 +315,17 @@ export async function generatePostFromContext(
     { angle: initialAngle, pattern: initialPattern, recentTopics, aspect: initialAspect }
   );
 
+  // ── Semantic duplicate gate (Phase 1.4) ───────────────────────────────────
+  // Embeds each candidate's coreMessage and compares it (cosine) against the
+  // latest ready embeddings for this company+channel. Fail-open: any failure
+  // leaves generation working and is surfaced as a skip. The gate never stores.
+  const semanticGate =
+    deps.semanticGate ?? createSemanticGate(companyId, context.channel.channel as SocialChannel);
+
   // ── Generate with retry (duplicate-aware) ─────────────────────────────────
-  // Retries up to MAX_GENERATION_ATTEMPTS times when the candidate is flagged
-  // as a duplicate of a recent post. Only the final accepted post is persisted.
+  // Retries up to MAX_GENERATION_ATTEMPTS times when the candidate is a
+  // near-verbatim (Jaccard) or semantic duplicate. Only the final accepted post
+  // is persisted; rejected candidates leave no embedding behind.
   let generationResult!: GenerationLoopResult;
   try {
     generationResult = await generateWithRetry(
@@ -314,7 +342,8 @@ export async function generatePostFromContext(
         initialAspect,
         aspectPool,
         aspectUsedIds: usedAspectIds,
-      }
+      },
+      semanticGate
     );
   } catch (err) {
     await releaseClaimedFeedItem();
@@ -328,13 +357,35 @@ export async function generatePostFromContext(
   }
 
   // ── Quality guards ────────────────────────────────────────────────────────
-  const { parsed, duplicateResult, selectedAngle, selectedPattern, selectedAspect } =
-    generationResult;
+  const {
+    parsed,
+    duplicateResult,
+    semanticResult,
+    attempts,
+    selectedAngle,
+    selectedPattern,
+    selectedAspect,
+  } = generationResult;
 
   const safetyResult = checkContentSafety({
     text: parsed.text,
     brandForbiddenWords: context.brand?.forbiddenWords ?? [],
   });
+
+  // Every attempt stayed at/above the regenerate threshold — the post is a
+  // semantic duplicate we could not shake off. Save it, but force human review.
+  const semanticExhausted = semanticResult.decision === "regenerate";
+
+  // Log (calibration) the fail-open skip and the gray zone; never block.
+  if (semanticResult.skipped) {
+    console.warn(
+      `[semantic-gate] Skipped for company ${companyId} channel ${context.channel.channel} (fail-open; embedding or lookup unavailable).`
+    );
+  } else if (semanticResult.decision === "gray_zone") {
+    console.warn(
+      `[semantic-gate] Gray zone (topSimilarity=${semanticResult.topSimilarity}, matched=${semanticResult.matchedPostId}) — accepted; thresholds pending calibration.`
+    );
+  }
 
   const qualityGuards = {
     duplicate: {
@@ -345,6 +396,14 @@ export async function generatePostFromContext(
     safety: {
       flagged: safetyResult.flagged,
       matchedTerms: safetyResult.matchedTerms,
+    },
+    semanticDuplicate: {
+      decision: semanticResult.decision,
+      topSimilarity: semanticResult.topSimilarity,
+      matchedPostId: semanticResult.matchedPostId,
+      skipped: semanticResult.skipped,
+      // Warning: all attempts remained too similar; held for approval below.
+      warning: semanticExhausted,
     },
   };
 
@@ -379,12 +438,21 @@ export async function generatePostFromContext(
 
   // ── Resolve final status ──────────────────────────────────────────────────
   // For manual generation (draft) on a fully_automated channel, skip the
-  // approval queue so the post is immediately publishable. Safety-flagged
-  // posts are always held for human review regardless of mode.
+  // approval queue so the post is immediately publishable. Safety-flagged posts
+  // are always held for human review regardless of mode. A semantic duplicate
+  // that survived every attempt is likewise ALWAYS held for approval — even on
+  // fully automated channels — so a human can decide whether it is too similar.
   const effectiveMode = context.channel.automationModeOverride ?? context.company.automationMode;
   const autoApproved =
-    initialStatus === "draft" && effectiveMode === "fully_automated" && !safetyResult.flagged;
-  const resolvedStatus = autoApproved ? ("approved" as const) : initialStatus;
+    initialStatus === "draft" &&
+    effectiveMode === "fully_automated" &&
+    !safetyResult.flagged &&
+    !semanticExhausted;
+  const resolvedStatus: "draft" | "pending_approval" | "approved" = autoApproved
+    ? "approved"
+    : semanticExhausted
+      ? "pending_approval"
+      : initialStatus;
   const approvedAt = autoApproved ? new Date() : null;
 
   // ── Save post ─────────────────────────────────────────────────────────────
@@ -431,10 +499,18 @@ export async function generatePostFromContext(
             }
           : null,
         topic: parsed.topic ?? null,
-        // Phase 1.1 — the single central claim/takeaway of the post. Stored in
-        // promptSnapshot for now (same pattern as topic); no semantic infra yet.
+        // Phase 1.1 — the single central claim/takeaway of the post. Also stored
+        // in the dedicated Post.coreMessage column; mirrored here for auditing.
         coreMessage: parsed.coreMessage,
         qualityGuards,
+        // Phase 1.4 — semantic-duplicate gate diagnostics for calibration.
+        semanticGate: {
+          topSimilarity: semanticResult.topSimilarity,
+          matchedPostId: semanticResult.matchedPostId,
+          decision: semanticResult.decision,
+          attempts,
+          skipped: semanticResult.skipped,
+        },
         // Source link decision (v2-1) — traceability for the appended URL.
         // primaryFeedItemId/sourceTitle pin the exact article the post is based
         // on, so text and URL are auditably the same source.
@@ -511,6 +587,13 @@ export async function generatePostFromContext(
   const warnings: GenerationWarnings = {
     duplicate: duplicateResult,
     safety: safetyResult,
+    semanticDuplicate: {
+      decision: semanticResult.decision,
+      topSimilarity: semanticResult.topSimilarity,
+      matchedPostId: semanticResult.matchedPostId,
+      exhausted: semanticExhausted,
+      skipped: semanticResult.skipped,
+    },
   };
 
   return {
