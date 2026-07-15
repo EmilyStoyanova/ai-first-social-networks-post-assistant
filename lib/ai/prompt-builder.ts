@@ -371,6 +371,12 @@ export interface RetryContext {
   genericCoreMessage?: {
     previousCoreMessage: string;
   };
+  /**
+   * Present when the retry was triggered because the previous attempt's topic
+   * repeated a recently-used subject (Topic Memory). Holds the previous topic so
+   * the model is told exactly which subject to move away from.
+   */
+  repeatedTopic?: string;
   /** When provided the retry prompt forces the model to use this angle. */
   forcedAngle?: ContentAngle;
   /** When provided the retry prompt forces the model to use this writing pattern. */
@@ -426,6 +432,19 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
       ].join("\n")
     : "";
 
+  // Repeated-topic block (Topic Memory) — the conceptual subject was reused.
+  const repeatedTopicBlock = retry.repeatedTopic
+    ? [
+        "## You reused a recently-covered topic",
+        "The previous attempt's topic repeats a subject already used in a recent post:",
+        "---",
+        retry.repeatedTopic,
+        "---",
+        "Choose a MEANINGFULLY DIFFERENT conceptual topic. Do not restate the same subject with new wording — cover a genuinely different angle or aspect from the source content.",
+        "",
+      ].join("\n")
+    : "";
+
   // Semantic-duplicate block — the central CLAIM was repeated, not just wording.
   const semanticBlock = retry.semanticDuplicate
     ? [
@@ -451,6 +470,7 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     nearVerbatimBlock,
     semanticBlock,
     genericCoreBlock,
+    repeatedTopicBlock,
     forcedBlock,
     "## What you must NOT do",
     "- Do not paraphrase the rejected attempt.",

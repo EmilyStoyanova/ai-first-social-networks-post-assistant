@@ -15,6 +15,7 @@ import { checkContentSafety } from "@/lib/ai/quality/content-safety";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 import { CONTENT_ANGLES, selectAngle, type ContentAngle } from "@/lib/ai/content-angle";
 import { selectPattern, isValidPostPattern, type PostPattern } from "@/lib/ai/post-pattern";
+import { buildTopicMemory, TOPIC_MEMORY_SIZE } from "@/lib/ai/topic-memory";
 import { resolvePostSourceLink } from "@/lib/ai/source-link";
 import {
   planFeedItemUsage,
@@ -211,16 +212,31 @@ export async function generatePostFromContext(
   const initialStatus = options.initialStatus ?? "draft";
 
   // ── Fetch recent posts before generation ──────────────────────────────────
-  // Used both as prompt context (avoid repetition) and for duplicate detection after.
+  // Used both as prompt context (avoid repetition) and for duplicate detection
+  // after. Topic Memory needs a wider window (30) than the diversity/Jaccard
+  // signals (10), so we fetch 30 and slice the first 10 for the rest.
   const recentRows = await db.post.findMany({
     where: { companyId, channel: context.channel.channel as SocialChannel },
     orderBy: { createdAt: "desc" },
-    take: 10,
+    take: TOPIC_MEMORY_SIZE,
     select: { id: true, content: true, promptSnapshot: true },
   });
 
+  // Topic Memory — normalized conceptual topics from the last 30 posts. Fed to
+  // the prompt as recently-used subjects to avoid AND used to reject a candidate
+  // whose normalized topic collides with one already used (a retry trigger).
+  const topicMemory = buildTopicMemory(
+    recentRows.map(
+      (r) =>
+        (r.promptSnapshot as Record<string, unknown> | null)?.topic as string | null | undefined
+    )
+  );
+
+  // Diversity/Jaccard signals use only the most recent 10, as before.
+  const recentRows10 = recentRows.slice(0, 10);
+
   // Extract diversity signals from promptSnapshot (most-recent-first) — absent on legacy posts.
-  const snapshots = recentRows.map((r) => r.promptSnapshot as Record<string, unknown> | null);
+  const snapshots = recentRows10.map((r) => r.promptSnapshot as Record<string, unknown> | null);
 
   const recentAngles: ContentAngle[] = snapshots
     .map((s) => {
@@ -234,11 +250,6 @@ export async function generatePostFromContext(
   const recentPatterns: PostPattern[] = snapshots
     .map((s) => s?.contentPattern)
     .filter((p): p is PostPattern => isValidPostPattern(p));
-
-  const recentTopics: string[] = snapshots
-    .map((s) => s?.topic)
-    .filter((t): t is string => typeof t === "string" && t.length > 0)
-    .slice(0, 8);
 
   const initialAngle = selectAngle(recentAngles);
   const initialPattern = selectPattern(recentPatterns);
@@ -333,8 +344,13 @@ export async function generatePostFromContext(
   const { systemPrompt, userPrompt } = buildPrompts(
     context,
     contentLanguage,
-    recentRows.slice(0, 5).map((r) => ({ text: r.content })),
-    { angle: initialAngle, pattern: initialPattern, recentTopics, aspect: initialAspect }
+    recentRows10.slice(0, 5).map((r) => ({ text: r.content })),
+    {
+      angle: initialAngle,
+      pattern: initialPattern,
+      recentTopics: topicMemory,
+      aspect: initialAspect,
+    }
   );
 
   // ── Semantic duplicate gate (Phase 1.4) ───────────────────────────────────
@@ -354,13 +370,13 @@ export async function generatePostFromContext(
       provider,
       systemPrompt,
       userPrompt,
-      recentRows.map((r) => ({ id: r.id, text: r.content })),
+      recentRows10.map((r) => ({ id: r.id, text: r.content })),
       {
         initialAngle,
         recentAngles,
         initialPattern,
         recentPatterns,
-        recentTopics,
+        recentTopics: topicMemory,
         initialAspect,
         aspectPool,
         aspectUsedIds: usedAspectIds,
@@ -393,6 +409,7 @@ export async function generatePostFromContext(
     duplicateResult,
     semanticResult,
     coreMessageGeneric,
+    topicRepeated,
     attempts,
     selectedAngle,
     selectedPattern,
@@ -544,6 +561,8 @@ export async function generatePostFromContext(
           skipped: semanticResult.skipped,
           // Phase 1.5 — the final candidate's coreMessage was generic praise.
           coreMessageGeneric,
+          // Topic Memory — the final candidate's normalized topic was already used.
+          topicRepeated,
         },
         // Source link decision (v2-1) — traceability for the appended URL.
         // primaryFeedItemId/sourceTitle pin the exact article the post is based

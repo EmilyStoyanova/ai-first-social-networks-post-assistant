@@ -519,6 +519,56 @@ describe("generatePostFromContext — evergreen prompt sources", () => {
   });
 });
 
+// ─── Topic Memory ──────────────────────────────────────────────────────────────
+
+describe("generatePostFromContext — Topic Memory", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  it("feeds normalized, de-duplicated recent topics into the prompt as an avoid-list", async () => {
+    const rows: RecentRow[] = [
+      { id: "p1", content: "post one", promptSnapshot: { topic: "Authentic Lisbon!" } },
+      { id: "p2", content: "post two", promptSnapshot: { topic: "authentic  lisbon" } }, // dup key
+      { id: "p3", content: "post three", promptSnapshot: { topic: "Barcelona Nightlife" } },
+    ];
+    const { deps, created } = makeDeps(rows);
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+    assert.ok(result.success);
+
+    const snapshot = created()!.promptSnapshot as Record<string, unknown>;
+    const userPrompt = snapshot.userPrompt as string;
+    assert.match(userPrompt, /Topic guidance/, "the prompt must carry a recent-topics avoid-list");
+    assert.ok(userPrompt.includes("authentic lisbon"), "topics are normalized in the prompt");
+    assert.ok(userPrompt.includes("barcelona nightlife"));
+    // De-duplicated: the normalized key appears exactly once in the avoid-list.
+    assert.equal(userPrompt.split("authentic lisbon").length - 1, 1);
+  });
+
+  it("records the topicRepeated diagnostic in promptSnapshot", async () => {
+    // The mock LLM response declares no topic, so it can never be a repeat.
+    const { deps, created } = makeDeps([
+      { id: "p1", content: "post one", promptSnapshot: { topic: "Authentic Lisbon" } },
+    ]);
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+    assert.ok(result.success);
+
+    const snapshot = created()!.promptSnapshot as Record<string, unknown>;
+    const gate = snapshot.semanticGate as Record<string, unknown>;
+    assert.equal(gate.topicRepeated, false);
+  });
+});
+
 // Type-level guard: the column is nullable, so legacy rows may omit/null it.
 const _nullableCoreMessage: Prisma.PostUncheckedCreateInput["coreMessage"] = null;
 void _nullableCoreMessage;

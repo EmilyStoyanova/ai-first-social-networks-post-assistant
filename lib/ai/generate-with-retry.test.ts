@@ -6,6 +6,7 @@ import {
   type SemanticGate,
   type SemanticGateResult,
 } from "./generate-with-retry";
+import type { DiversityOptions } from "./generate-with-retry";
 import type { ILlmProvider, LlmRequest, LlmResponse } from "./types";
 import type { RecentPost } from "./quality/duplicate-detection";
 
@@ -25,6 +26,27 @@ function jsonPost(text: string): string {
 
 function jsonPostWithCore(text: string, coreMessage: string): string {
   return JSON.stringify({ text, hashtags: [], coreMessage });
+}
+
+function jsonPostWithTopic(text: string, topic: string): string {
+  return JSON.stringify({
+    text,
+    hashtags: [],
+    coreMessage: "A single central claim for this post.",
+    topic,
+  });
+}
+
+// Full DiversityOptions carrying the normalized topic memory. Angle/pattern are
+// valid so retry selection has something to rotate through.
+function makeDiversity(topicMemory: string[]): DiversityOptions {
+  return {
+    initialAngle: "Educational",
+    recentAngles: [],
+    initialPattern: { hookType: "Question", structure: "List", ctaType: "Share" },
+    recentPatterns: [],
+    recentTopics: topicMemory,
+  };
 }
 
 const DUPLICATE_TEXT = "a b c d e";
@@ -233,6 +255,100 @@ describe("generateWithRetry — generic coreMessage triggers a retry", () => {
 
     assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
     assert.strictEqual(result.coreMessageGeneric, true);
+  });
+});
+
+// ─── Topic Memory ──────────────────────────────────────────────────────────────
+// All scenarios use mocked provider responses (jsonPostWithTopic / makeProvider /
+// recordingProvider) — the real TEXT_WORKER is never contacted.
+
+describe("Topic Memory — 1. same topic, different formatting normalizes and triggers retry", () => {
+  // Every formatting variant must collapse to the same key as the memory entry
+  // "authentic lisbon" and therefore be rejected as a repeat.
+  for (const variant of ["Authentic Lisbon", "authentic-lisbon!", "  AUTHENTIC   LISBON  "]) {
+    it(`treats ${JSON.stringify(variant)} as a repeat of "authentic lisbon"`, async () => {
+      // Provider keeps returning the same variant, so the retry loop runs to
+      // exhaustion — proving the normalized match forced a retry every time.
+      const provider = makeProvider([jsonPostWithTopic(CLEAN_TEXT, variant)]);
+      const result = await generateWithRetry(
+        provider,
+        "sys",
+        "user",
+        [],
+        makeDiversity(["authentic lisbon"])
+      );
+
+      assert.strictEqual(
+        provider.callCount,
+        MAX_GENERATION_ATTEMPTS,
+        "the normalized-topic collision must trigger retries"
+      );
+      assert.strictEqual(result.topicRepeated, true);
+    });
+  }
+});
+
+describe("Topic Memory — 2. same destination, different topic is accepted", () => {
+  it('accepts "Barcelona city and beach" when memory holds "Local Barcelona culture"', async () => {
+    const provider = makeProvider([jsonPostWithTopic(CLEAN_TEXT, "Barcelona city and beach")]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      makeDiversity(["local barcelona culture"])
+    );
+
+    assert.strictEqual(provider.callCount, 1, "a genuinely different topic needs no retry");
+    assert.strictEqual(result.topicRepeated, false);
+    assert.strictEqual(result.attempts, 1);
+  });
+});
+
+describe("Topic Memory — 3. repeated then fresh topic retries once and accepts", () => {
+  it("returns attempts=2 and topicRepeated=false", async () => {
+    // Attempt 1 repeats the memory; attempt 2 is a fresh topic that is accepted.
+    const provider = recordingProvider([
+      jsonPostWithTopic(CLEAN_TEXT, "Authentic Lisbon"),
+      jsonPostWithTopic(CLEAN_TEXT, "Lisbon street food"),
+    ]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      makeDiversity(["authentic lisbon"])
+    );
+
+    assert.strictEqual(provider.callCount, 2, "should retry exactly once");
+    assert.strictEqual(result.attempts, 2);
+    assert.strictEqual(result.topicRepeated, false);
+
+    // The retry prompt must name the reused topic so the model moves off it.
+    const retryPrompt = provider.prompts[1];
+    assert.match(retryPrompt, /recently-covered topic/);
+    assert.match(retryPrompt, /Authentic Lisbon/);
+  });
+});
+
+describe("Topic Memory — 4. repeated on all attempts exhausts and returns the last candidate", () => {
+  it("returns attempts=3 and topicRepeated=true with the last (still-repeated) candidate", async () => {
+    const provider = makeProvider([jsonPostWithTopic(DUPLICATE_TEXT, "Authentic Lisbon")]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      makeDiversity(["authentic lisbon"])
+    );
+
+    assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
+    assert.strictEqual(result.attempts, MAX_GENERATION_ATTEMPTS);
+    assert.strictEqual(result.attempts, 3);
+    assert.strictEqual(result.topicRepeated, true);
+    // Fail-safe: the last candidate is still returned even though it stayed repeated.
+    assert.strictEqual(result.parsed.text, DUPLICATE_TEXT);
+    assert.strictEqual(result.parsed.topic, "Authentic Lisbon");
   });
 });
 
