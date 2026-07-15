@@ -6,6 +6,7 @@ import {
   EMBEDDING_DIMENSIONS,
   getEmbeddingProviderOrNull,
 } from "@/lib/ai/embedding/embedding-provider-factory";
+import { buildSemanticDocument } from "./build-semantic-document";
 
 /**
  * Best-effort semantic embedding of a post's coreMessage (Phase 1.2).
@@ -16,9 +17,10 @@ import {
  *     post already exists; failures leave a 'failed' row for the backfill to retry.
  *   • Skips work when the coreMessage hash already matches a 'ready' row.
  *
- * Only `coreMessage` is embedded (the normalized semantic claim), never the full
- * post content. No similarity/cosine/gating is computed here — this phase only
- * populates the store.
+ * The embedded text is the semantic document (topic + coreMessage + aspect
+ * focus, missing sections omitted) built by build-semantic-document, never the
+ * full post content. No similarity/cosine/gating is computed here — this phase
+ * only populates the store.
  */
 
 export interface EmbedPostInput {
@@ -27,6 +29,10 @@ export interface EmbedPostInput {
   channel: SocialChannel;
   /** The post's central claim. Null (legacy posts) → nothing to embed. */
   coreMessage: string | null;
+  /** The post's declared topic — enriches the embedded document when present. */
+  topic?: string | null;
+  /** The mined aspect focus — enriches the embedded document when present. */
+  aspectFocus?: string | null;
   postCreatedAt: Date;
 }
 
@@ -42,6 +48,7 @@ export type EmbedPostOutcome =
 
 export interface SemanticsRow extends EmbedPostInput {
   coreMessage: string; // non-null here
+  /** SHA-256 of the exact text embedded (the semantic document), for change detection. */
   coreMessageHash: string;
   vector: number[];
   provider: string;
@@ -55,8 +62,9 @@ export interface PostSemanticsStore {
   recordFailure(input: EmbedPostInput, coreMessageHash: string, error: string): Promise<void>;
 }
 
-export function coreMessageHash(coreMessage: string): string {
-  return createHash("sha256").update(coreMessage).digest("hex");
+/** SHA-256 of the exact text embedded (the semantic document). */
+export function coreMessageHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }
 
 // ─── Default (Prisma) store ───────────────────────────────────────────────────
@@ -131,8 +139,16 @@ export async function embedPost(
   const core = input.coreMessage?.trim();
   if (!core) return { status: "skipped", reason: "no_core_message" };
 
+  // Embed the semantic document (topic + core message + aspect focus), not the
+  // bare coreMessage — richer signal, same store/gate mechanics.
+  const document = buildSemanticDocument({
+    topic: input.topic,
+    coreMessage: core,
+    aspectFocus: input.aspectFocus,
+  });
+
   const store = deps.store ?? prismaSemanticsStore;
-  const hash = coreMessageHash(core);
+  const hash = coreMessageHash(document);
 
   // Skip when an up-to-date embedding already exists.
   try {
@@ -148,7 +164,7 @@ export async function embedPost(
   if (!provider) return { status: "skipped", reason: "no_provider" };
 
   try {
-    const result = await provider.embed([core]);
+    const result = await provider.embed([document]);
     const vector = result.vectors[0];
     if (!vector || result.dims !== EMBEDDING_DIMENSIONS || vector.length !== EMBEDDING_DIMENSIONS) {
       throw new Error(

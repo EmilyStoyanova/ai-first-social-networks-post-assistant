@@ -10,6 +10,7 @@ import {
   type SemanticNeighbor,
 } from "@/lib/ai/quality/semantic-duplicate";
 import { type SemanticGate, type SemanticGateResult } from "@/lib/ai/generate-with-retry";
+import { buildSemanticDocument } from "./build-semantic-document";
 
 /**
  * Builds the semantic-duplicate gate (Phase 1.4) wired to a real embedding
@@ -100,7 +101,7 @@ export function createSemanticGate(
   const store = deps.store ?? prismaSemanticNeighborStore;
   const provider = deps.provider !== undefined ? deps.provider : getEmbeddingProviderOrNull();
 
-  return async ({ coreMessage }): Promise<SemanticGateResult> => {
+  return async ({ coreMessage, topic, aspectFocus }): Promise<SemanticGateResult> => {
     const core = coreMessage?.trim();
     // Nothing to compare — a clean accept, not a failure.
     if (!core) {
@@ -116,8 +117,12 @@ export function createSemanticGate(
     // No provider configured → fail open (gate skipped).
     if (!provider) return ACCEPT_SKIPPED;
 
+    // Embed the same semantic document shape the store persists (topic + core
+    // message + aspect focus), so the candidate and its neighbors are comparable.
+    const document = buildSemanticDocument({ topic, coreMessage: core, aspectFocus });
+
     try {
-      const result = await provider.embed([core]);
+      const result = await provider.embed([document]);
       const vector = result.vectors[0];
       if (
         !vector ||

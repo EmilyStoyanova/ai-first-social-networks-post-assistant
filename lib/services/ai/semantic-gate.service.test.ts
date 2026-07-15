@@ -47,6 +47,27 @@ function throwingProvider(): IEmbeddingProvider {
   };
 }
 
+/** Records the texts embedded, so tests can assert the document sent to the provider. */
+function capturingProvider(
+  sink: string[],
+  vector: number[] = CANDIDATE_VECTOR
+): IEmbeddingProvider {
+  return {
+    provider: "fake",
+    model: "fake",
+    dims: vector.length,
+    embed: async (texts) => {
+      sink.push(...texts);
+      return {
+        vectors: texts.map(() => vector),
+        provider: "fake",
+        model: "fake",
+        dims: vector.length,
+      };
+    },
+  };
+}
+
 interface Captured {
   companyId?: string;
   channel?: SocialChannel;
@@ -97,6 +118,50 @@ describe("createSemanticGate — decisions", () => {
     const result = await gate({ coreMessage: "A fresh central claim." });
     assert.equal(result.decision, "accept");
     assert.equal(result.skipped, false);
+  });
+});
+
+describe("createSemanticGate — embedded document", () => {
+  it("embeds the full semantic document (topic + core message + aspect focus)", async () => {
+    const texts: string[] = [];
+    const captured: Captured = { calls: 0 };
+    const gate = createSemanticGate("co-1", "linkedin" as SocialChannel, {
+      provider: capturingProvider(texts),
+      store: fakeStore([], captured),
+    });
+
+    await gate({
+      coreMessage: "Toddlers can wade safely in the shallow bays.",
+      topic: "Family beaches in Corfu",
+      aspectFocus: "safe swimming conditions for small children",
+    });
+
+    assert.equal(texts.length, 1);
+    assert.equal(
+      texts[0],
+      [
+        "Topic: Family beaches in Corfu",
+        "",
+        "Core message:",
+        "Toddlers can wade safely in the shallow bays.",
+        "",
+        "Aspect:",
+        "safe swimming conditions for small children",
+      ].join("\n")
+    );
+  });
+
+  it("embeds only the core-message section when topic and aspect are absent", async () => {
+    const texts: string[] = [];
+    const captured: Captured = { calls: 0 };
+    const gate = createSemanticGate("co-1", "linkedin" as SocialChannel, {
+      provider: capturingProvider(texts),
+      store: fakeStore([], captured),
+    });
+
+    await gate({ coreMessage: "A standalone central claim." });
+
+    assert.equal(texts[0], "Core message:\nA standalone central claim.");
   });
 });
 

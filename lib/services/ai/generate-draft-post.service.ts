@@ -626,6 +626,8 @@ export async function generatePostFromContext(
       companyId,
       channel: post.channel as SocialChannel,
       coreMessage: parsed.coreMessage,
+      topic: parsed.topic ?? null,
+      aspectFocus: selectedAspect?.focus ?? null,
       postCreatedAt: post.createdAt,
     });
   } catch (err) {

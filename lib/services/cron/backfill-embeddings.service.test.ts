@@ -10,6 +10,8 @@ function candidate(id: string) {
     company_id: "co-1",
     channel: "linkedin" as SocialChannel,
     core_message: `claim ${id}`,
+    topic: null,
+    aspect_focus: null,
     created_at: new Date("2026-07-14T00:00:00Z"),
   };
 }
@@ -62,6 +64,31 @@ describe("backfillEmbeddings (Phase 1.2)", () => {
 
     assert.deepEqual(seen, ["a", "b", "c"]);
     assert.deepEqual(summary, { scanned: 3, embedded: 1, skipped: 1, failed: 1 });
+  });
+
+  it("passes the candidate topic and aspect focus through to embed", async () => {
+    const calls: EmbedPostInput[] = [];
+    await backfillEmbeddings(
+      {},
+      {
+        providerAvailable: () => true,
+        findCandidates: async () => [
+          {
+            ...candidate("a"),
+            topic: "A topic",
+            aspect_focus: "an aspect focus",
+          },
+        ],
+        embed: async (input) => {
+          calls.push(input);
+          return { status: "embedded" };
+        },
+      }
+    );
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].topic, "A topic");
+    assert.equal(calls[0].aspectFocus, "an aspect focus");
   });
 
   it("passes companyId and limit through to the candidate query", async () => {

@@ -10,6 +10,7 @@ import {
   type PostSemanticsStore,
   type SemanticsRow,
 } from "./embed-post.service";
+import { buildSemanticDocument } from "./build-semantic-document";
 
 // ─── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -24,6 +25,15 @@ function makeInput(overrides: Partial<EmbedPostInput> = {}): EmbedPostInput {
   };
 }
 
+/** The exact text embedded for an input — the semantic document, hashed for change detection. */
+function documentFor(input: EmbedPostInput): string {
+  return buildSemanticDocument({
+    topic: input.topic,
+    coreMessage: input.coreMessage?.trim(),
+    aspectFocus: input.aspectFocus,
+  });
+}
+
 function makeProvider(dims = EMBEDDING_DIMENSIONS): IEmbeddingProvider {
   return {
     provider: "fake",
@@ -35,6 +45,24 @@ function makeProvider(dims = EMBEDDING_DIMENSIONS): IEmbeddingProvider {
       model: "fake-model",
       dims,
     }),
+  };
+}
+
+/** Records the texts handed to the provider, so tests can assert the embedded document. */
+function capturingProvider(sink: string[], dims = EMBEDDING_DIMENSIONS): IEmbeddingProvider {
+  return {
+    provider: "fake",
+    model: "fake-model",
+    dims,
+    embed: async (texts) => {
+      sink.push(...texts);
+      return {
+        vectors: texts.map(() => new Array<number>(dims).fill(0.01)),
+        provider: "fake",
+        model: "fake-model",
+        dims,
+      };
+    },
   };
 }
 
@@ -95,12 +123,50 @@ describe("embedPost (Phase 1.2)", () => {
     assert.equal(state.saved!.postId, "post-1");
     assert.equal(state.saved!.vector.length, EMBEDDING_DIMENSIONS);
     assert.equal(state.saved!.provider, "fake");
-    assert.equal(state.saved!.coreMessageHash, coreMessageHash(input.coreMessage!.trim()));
+    // The stored hash covers the exact embedded text (the semantic document).
+    assert.equal(state.saved!.coreMessageHash, coreMessageHash(documentFor(input)));
   });
 
-  it("skips re-embedding when the coreMessage hash is unchanged and ready", async () => {
-    const input = makeInput();
-    const hash = coreMessageHash(input.coreMessage!.trim());
+  it("embeds the full semantic document (topic + core message + aspect focus)", async () => {
+    const { store } = makeStore();
+    const texts: string[] = [];
+    const input = makeInput({
+      coreMessage: "Toddlers can wade safely in the shallow north-east bays.",
+      topic: "Family beaches in Corfu",
+      aspectFocus: "safe swimming conditions for small children",
+    });
+
+    const result = await embedPost(input, { provider: capturingProvider(texts), store });
+
+    assert.deepEqual(result, { status: "embedded" });
+    assert.equal(texts.length, 1, "should embed exactly one document");
+    assert.equal(
+      texts[0],
+      [
+        "Topic: Family beaches in Corfu",
+        "",
+        "Core message:",
+        "Toddlers can wade safely in the shallow north-east bays.",
+        "",
+        "Aspect:",
+        "safe swimming conditions for small children",
+      ].join("\n")
+    );
+  });
+
+  it("embeds only the core-message section when topic and aspect are absent", async () => {
+    const { store } = makeStore();
+    const texts: string[] = [];
+    const input = makeInput({ topic: null, aspectFocus: null });
+
+    await embedPost(input, { provider: capturingProvider(texts), store });
+
+    assert.equal(texts[0], `Core message:\n${input.coreMessage!.trim()}`);
+  });
+
+  it("skips re-embedding when the document hash is unchanged and ready", async () => {
+    const input = makeInput({ topic: "A topic", aspectFocus: "an aspect focus" });
+    const hash = coreMessageHash(documentFor(input));
     const { store, state } = makeStore({ coreMessageHash: hash, status: "ready" });
 
     const result = await embedPost(input, { provider: makeProvider(), store });
@@ -108,9 +174,22 @@ describe("embedPost (Phase 1.2)", () => {
     assert.equal(state.saved, null, "should not call the provider/store again");
   });
 
+  it("re-embeds when the topic changes even though the coreMessage is identical", async () => {
+    // A row hashed from a document WITHOUT the topic no longer matches once the
+    // topic enriches the document → the stale embedding is refreshed.
+    const input = makeInput({ topic: "New topic" });
+    const staleHash = coreMessageHash(documentFor(makeInput()));
+    const { store, state } = makeStore({ coreMessageHash: staleHash, status: "ready" });
+
+    const result = await embedPost(input, { provider: makeProvider(), store });
+    assert.deepEqual(result, { status: "embedded" });
+    assert.ok(state.saved);
+    assert.equal(state.saved!.coreMessageHash, coreMessageHash(documentFor(input)));
+  });
+
   it("re-embeds when an existing row is not ready even if the hash matches", async () => {
     const input = makeInput();
-    const hash = coreMessageHash(input.coreMessage!.trim());
+    const hash = coreMessageHash(documentFor(input));
     const { store, state } = makeStore({ coreMessageHash: hash, status: "failed" });
 
     const result = await embedPost(input, { provider: makeProvider(), store });

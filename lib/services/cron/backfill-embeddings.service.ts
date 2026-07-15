@@ -31,6 +31,10 @@ interface CandidateRow {
   company_id: string;
   channel: SocialChannel;
   core_message: string;
+  /** Read from prompt_snapshot; enriches the embedded document (null when absent). */
+  topic: string | null;
+  /** Read from prompt_snapshot.selectedAspect.focus; null when the post had no aspect. */
+  aspect_focus: string | null;
   created_at: Date;
 }
 
@@ -46,7 +50,10 @@ async function defaultFindCandidates(
   limit: number
 ): Promise<CandidateRow[]> {
   return prisma.$queryRaw<CandidateRow[]>`
-    SELECT p."id", p."company_id", p."channel"::text AS channel, p."core_message", p."created_at"
+    SELECT p."id", p."company_id", p."channel"::text AS channel, p."core_message",
+           p."prompt_snapshot"->>'topic' AS topic,
+           p."prompt_snapshot"->'selectedAspect'->>'focus' AS aspect_focus,
+           p."created_at"
     FROM "posts" p
     LEFT JOIN "post_semantics" s ON s."post_id" = p."id"
     WHERE p."core_message" IS NOT NULL
@@ -86,6 +93,8 @@ export async function backfillEmbeddings(
       companyId: c.company_id,
       channel: c.channel,
       coreMessage: c.core_message,
+      topic: c.topic,
+      aspectFocus: c.aspect_focus,
       postCreatedAt: c.created_at,
     });
     if (outcome.status === "embedded") summary.embedded += 1;

@@ -36,6 +36,10 @@ export interface SemanticGateResult {
 
 export type SemanticGate = (candidate: {
   coreMessage: string | null;
+  /** The candidate's declared topic — enriches the embedded document when present. */
+  topic?: string | null;
+  /** The aspect focus used for this candidate — enriches the embedded document. */
+  aspectFocus?: string | null;
 }) => Promise<SemanticGateResult>;
 
 /** Neutral result when no gate is wired — treated as "gate did not evaluate". */
@@ -224,7 +228,11 @@ export async function generateWithRetry(
       recentPosts,
     });
     lastSemanticResult = semanticGate
-      ? await semanticGate({ coreMessage: lastParsed.coreMessage })
+      ? await semanticGate({
+          coreMessage: lastParsed.coreMessage,
+          topic: lastParsed.topic,
+          aspectFocus: currentAspect?.focus,
+        })
       : NO_SEMANTIC_GATE;
     lastCoreMessageGeneric = assessCoreMessage(lastParsed.coreMessage).generic;
 
