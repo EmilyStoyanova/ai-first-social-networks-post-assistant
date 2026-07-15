@@ -27,12 +27,18 @@ export function parseLlmPost(raw: string): ParsedLlmPost {
   try {
     parsed = JSON.parse(cleaned);
   } catch {
-    throw new LlmResponseParseError(`LLM response is not valid JSON: ${cleaned.slice(0, 200)}`);
+    throw new LlmResponseParseError(
+      `LLM response is not valid JSON: ${cleaned.slice(0, 200)}`,
+      "INVALID_JSON"
+    );
   }
 
   const result = LlmPostSchema.safeParse(parsed);
   if (!result.success) {
-    throw new LlmResponseParseError(`LLM response failed validation: ${result.error.message}`);
+    throw new LlmResponseParseError(
+      `LLM response failed validation: ${result.error.message}`,
+      "MISSING_OR_INVALID_FIELDS"
+    );
   }
 
   return result.data;

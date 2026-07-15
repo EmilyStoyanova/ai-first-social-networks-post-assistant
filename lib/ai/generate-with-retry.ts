@@ -1,5 +1,6 @@
 import type { ILlmProvider } from "./types";
 import { parseLlmPost, type ParsedLlmPost } from "./parse-llm-post";
+import { LlmResponseParseError } from "./errors";
 import {
   checkDuplicatePost,
   type DuplicateCheckResult,
@@ -191,6 +192,10 @@ export async function generateWithRetry(
       });
     }
 
+    // Diagnostic: mark the start of each attempt so the worker-status lines
+    // (logged by the provider) can be attributed to a specific attempt.
+    console.info(`[llm-diag] generation attempt ${attempt}/${maxAttempts}`);
+
     const response = await provider.generate({
       systemPrompt,
       userPrompt,
@@ -198,7 +203,22 @@ export async function generateWithRetry(
       maxTokens: 1024,
     });
 
-    lastParsed = parseLlmPost(response.text);
+    // Diagnostic: classify a parse failure (invalid JSON vs. missing/invalid
+    // fields such as an absent coreMessage) before it propagates to the 502
+    // mapping. Only the category and raw length are logged — never the content.
+    try {
+      lastParsed = parseLlmPost(response.text);
+    } catch (err) {
+      if (err instanceof LlmResponseParseError) {
+        console.warn(
+          `[llm-diag] attempt ${attempt} parse failed: category=${
+            err.category ?? "unknown"
+          } rawLength=${response.text.length}`
+        );
+      }
+      throw err;
+    }
+
     lastDuplicateResult = checkDuplicatePost({
       candidateText: lastParsed.text,
       recentPosts,
@@ -215,6 +235,24 @@ export async function generateWithRetry(
       lastDuplicateResult.flagged ||
       lastSemanticResult.decision === "regenerate" ||
       lastCoreMessageGeneric;
+
+    // Diagnostic: which of the three triggers fired, and whether retries remain.
+    if (needsRetry) {
+      const retryReason = lastDuplicateResult.flagged
+        ? "jaccard_duplicate"
+        : lastSemanticResult.decision === "regenerate"
+          ? "semantic_duplicate"
+          : "generic_core_message";
+      const willRetry = attempt < maxAttempts;
+      console.info(
+        `[llm-diag] attempt ${attempt} needs retry: reason=${retryReason} willRetry=${willRetry}${
+          willRetry ? "" : " (retries exhausted — returning last candidate)"
+        }`
+      );
+    } else {
+      console.info(`[llm-diag] attempt ${attempt} accepted`);
+    }
+
     if (!needsRetry) break;
   }
 

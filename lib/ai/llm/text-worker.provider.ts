@@ -31,13 +31,25 @@ export class TextWorkerProvider implements ILlmProvider {
         signal: AbortSignal.timeout(120_000),
       });
     } catch (err) {
+      // Diagnostic: distinguish a timeout from an unreachable/transport failure.
+      // No prompt, key, or body content is logged — only the failure category.
       if (err instanceof Error && err.name === "TimeoutError") {
+        console.warn("[llm-diag] text-worker transport failure: category=timeout");
         throw new LlmProviderError("Text worker timed out after 120 seconds");
       }
+      console.warn(
+        `[llm-diag] text-worker transport failure: category=unreachable name=${
+          err instanceof Error ? err.name : "unknown"
+        }`
+      );
       throw new LlmProviderError(
         `Text worker unreachable: ${err instanceof Error ? err.message : String(err)}`
       );
     }
+
+    // Diagnostic: the worker HTTP status for this POST (one line per attempt,
+    // including the aspect-mining call). Status/ok only — no response body.
+    console.info(`[llm-diag] text-worker response: status=${res.status} ok=${res.ok}`);
 
     if (!res.ok) {
       const body = await res.text().catch(() => res.statusText);

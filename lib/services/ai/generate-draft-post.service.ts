@@ -369,10 +369,19 @@ export async function generatePostFromContext(
     );
   } catch (err) {
     await releaseClaimedFeedItem();
+    // Diagnostic: the terminal error code the route maps to HTTP 502. No prompt,
+    // key, or model content is logged — the code (and parse category) suffice to
+    // classify the failure. The provider already logged worker status/transport.
     if (err instanceof LlmProviderError) {
+      console.warn("[llm-diag] generation aborted → code=LLM_PROVIDER_ERROR (maps to HTTP 502)");
       return { success: false, code: "LLM_PROVIDER_ERROR", message: err.message };
     }
     if (err instanceof LlmResponseParseError) {
+      console.warn(
+        `[llm-diag] generation aborted → code=LLM_RESPONSE_PARSE_ERROR (maps to HTTP 502) category=${
+          err.category ?? "unknown"
+        }`
+      );
       return { success: false, code: "LLM_RESPONSE_PARSE_ERROR", message: err.message };
     }
     throw err;
