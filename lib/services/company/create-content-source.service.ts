@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import type { ContentSourceInput } from "@/lib/validators/content-source.schema";
 import type { ContentSourceConfig, ContentSourceItem } from "./list-content-sources.service";
+import { runSourceIngestion } from "./ingest-content-source.service";
 
 export type CreateContentSourceResult =
   | { success: true; source: ContentSourceItem }
@@ -48,6 +49,25 @@ export async function createContentSource(
     },
     select: SELECT,
   });
+
+  // A prompt source has no external feed to poll — its feed item is derived
+  // purely from promptText. Materialize it immediately (reusing the shared
+  // ingestion core) so the source is usable for generation right away; article
+  // sources are ingested lazily by the manual/cron ingest instead. Best-effort:
+  // a failure here must not fail source creation — the next ingest retries.
+  if (row.type === "prompt") {
+    try {
+      await runSourceIngestion(
+        { id: row.id, type: row.type, name: row.name, config: row.config },
+        companyId
+      );
+    } catch (err) {
+      console.error(
+        `[content-source] Immediate prompt ingestion failed for ${row.id} (non-fatal):`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
 
   return {
     success: true,

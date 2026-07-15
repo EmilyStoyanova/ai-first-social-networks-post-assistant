@@ -52,40 +52,54 @@ export async function claimFeedItem(
 }
 
 /**
- * The decision a generation makes about its source article, given the eligible
- * unused candidates and whether the company has any RSS configured at all.
+ * The decision a generation makes about its source, given the eligible unused
+ * *article* candidates, whether the company has any article source at all, and
+ * whether an evergreen (prompt/calendar) item is available:
  *
- *   • "mission"  — no content sources; write a mission/brand post (no article)
- *   • "skip"     — sources exist but no article can be claimed; skip cleanly
- *   • "generate" — an article was reserved; generate from it
+ *   • "mission"   — no sources of any kind; write a mission/brand post
+ *   • "skip"      — article sources exist but no unused article can be claimed,
+ *                   and no evergreen item is available; skip cleanly
+ *   • "generate"  — an article was reserved; generate from it (consumes a claim)
+ *   • "evergreen" — no article claimed, but a reusable prompt/calendar item is
+ *                   available; generate from it without claiming or consuming
  */
 export type FeedItemPlan =
-  { action: "mission" } | { action: "skip" } | { action: "generate"; feedItemId: string };
+  | { action: "mission" }
+  | { action: "skip" }
+  | { action: "generate"; feedItemId: string }
+  | { action: "evergreen" };
 
 /**
- * Resolves the three-way source-article decision, claiming an item when one is
- * available. An empty candidate window is ambiguous on its own — it means either
- * "no RSS configured" or "RSS configured but every article is already used" — so
- * `hasContentSources` disambiguates:
+ * Resolves the source decision, claiming an article item when one is available.
  *
- *   - candidates present, claim succeeds → generate from the claimed item
- *   - candidates present, all raced away → skip (nothing left to claim)
- *   - no candidates, sources exist       → skip (do NOT drift to a mission post)
- *   - no candidates, no sources          → mission/brand post
+ * Article claiming takes priority: if any consumable candidate can be claimed it
+ * wins. Otherwise an empty (or fully-raced) article window is disambiguated by
+ * whether an evergreen item is present and whether article sources exist:
  *
- * Only "generate" consumes a claim; "mission" and "skip" touch no rows.
+ *   - article candidates present, claim succeeds → generate from claimed item
+ *   - no article claimed, evergreen item present  → evergreen (reuse, no claim)
+ *   - no article claimed, article sources exist   → skip (do NOT drift to mission)
+ *   - no article claimed, no sources at all       → mission/brand post
+ *
+ * Only "generate" consumes a claim; "mission", "skip", and "evergreen" touch no
+ * rows — evergreen items are deliberately never marked used, so they stay
+ * reusable across generations.
  */
 export async function planFeedItemUsage(
-  candidateIds: readonly string[],
-  hasContentSources: boolean,
+  articleCandidateIds: readonly string[],
+  hasArticleSources: boolean,
+  hasEvergreenItems: boolean,
   db: FeedItemReservationDb
 ): Promise<FeedItemPlan> {
-  if (candidateIds.length === 0) {
-    return hasContentSources ? { action: "skip" } : { action: "mission" };
+  if (articleCandidateIds.length > 0) {
+    const claimed = await claimFeedItem(articleCandidateIds, db);
+    if (claimed) return { action: "generate", feedItemId: claimed };
+    // Every article candidate was claimed by a concurrent run — fall through to
+    // the evergreen / skip / mission decision below.
   }
-  const claimed = await claimFeedItem(candidateIds, db);
-  if (!claimed) return { action: "skip" };
-  return { action: "generate", feedItemId: claimed };
+  if (hasEvergreenItems) return { action: "evergreen" };
+  if (hasArticleSources) return { action: "skip" };
+  return { action: "mission" };
 }
 
 /**

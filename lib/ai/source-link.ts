@@ -8,6 +8,7 @@
 
 import type { FeedItemContext } from "./types";
 import { selectPrimaryFeedItem } from "./primary-feed-item";
+import { isConsumableItem } from "./source-types";
 
 export type SourceLinkLevel = "manual" | "source" | "channel";
 
@@ -103,11 +104,15 @@ export function resolvePostSourceLink(params: {
   const { feedItems, text, manualOverride, channelDefault, maxTextLength } = params;
 
   const primary = selectPrimaryFeedItem(feedItems);
-  const sourceUrl = primary?.url ?? null;
+  // Only single-use article items carry an appendable source URL. Evergreen
+  // (prompt/calendar) primaries have synthetic urls like `prompt:<id>` that must
+  // never be appended, so they are treated as having no source link.
+  const linkable = primary && isConsumableItem(primary) ? primary : null;
+  const sourceUrl = linkable?.url ?? null;
 
   const { include, level } = resolveIncludeSourceLink(
     manualOverride,
-    primary?.sourceLinkPreference,
+    linkable?.sourceLinkPreference,
     channelDefault
   );
 
@@ -119,8 +124,8 @@ export function resolvePostSourceLink(params: {
     data: {
       finalContent: applied.content,
       sourceUrl,
-      primaryFeedItemId: primary?.id ?? null,
-      sourceTitle: primary?.title ?? null,
+      primaryFeedItemId: linkable?.id ?? null,
+      sourceTitle: linkable?.title ?? null,
       includeSourceLink: include,
       includeSourceLinkLevel: level,
     },

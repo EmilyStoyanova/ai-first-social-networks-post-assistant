@@ -50,6 +50,13 @@ export interface FeedItemContext {
   publishedAt: Date | null;
   /** ContentSource.config.includeSourceLink of the item's source; undefined = inherit. */
   sourceLinkPreference?: boolean;
+  /**
+   * Whether this item is a single-use article (rss/product_page) governed by the
+   * one-post-per-article reservation, or evergreen (prompt/calendar_event) and
+   * therefore reusable and never consumed. Omitted defaults to consumable so
+   * article contexts that predate this flag keep their behaviour.
+   */
+  consumable?: boolean;
 }
 
 export interface LlmContext {
@@ -63,12 +70,14 @@ export interface GenerationContext {
   channel: ChannelContext;
   feedItems: FeedItemContext[];
   /**
-   * Whether the company has at least one enabled content source (Phase 0).
-   * Distinguishes "no RSS configured → mission/brand post" from "RSS configured
-   * but every eligible article is already used → skip cleanly". `feedItems` is
-   * the eligible *unused* window (max 5); it can be empty in both cases, so this
-   * flag is what tells them apart.
+   * Whether the company has at least one enabled *article* source (rss or
+   * product_page) — the sources subject to one-post-per-article (Phase 0).
+   * Distinguishes "no article source configured → mission/brand post" from
+   * "article source configured but every eligible article is already used →
+   * skip cleanly". Evergreen prompt/calendar sources deliberately do NOT set
+   * this flag: an empty article window with an evergreen item present must still
+   * generate, not skip.
    */
-  hasContentSources: boolean;
+  hasArticleSources: boolean;
   llm: LlmContext;
 }

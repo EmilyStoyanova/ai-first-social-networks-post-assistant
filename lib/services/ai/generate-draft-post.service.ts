@@ -21,6 +21,7 @@ import {
   releaseFeedItem,
   type FeedItemReservationDb,
 } from "@/lib/ai/feed-item-reservation";
+import { isConsumableItem } from "@/lib/ai/source-types";
 import { embedPost, type EmbedPostInput, type EmbedPostOutcome } from "./embed-post.service";
 import { createSemanticGate } from "./semantic-gate.service";
 import {
@@ -262,23 +263,30 @@ export async function generatePostFromContext(
     }
   }
 
-  // ── Claim the source article (Phase 0 — one-post-per-article) ──────────────
-  // Atomically reserve one unused feed item BEFORE any LLM call, so a concurrent
-  // cron invocation (and later iterations of this same run) can never rewrite
-  // the same article.
+  // ── Claim the source (Phase 0 — one-post-per-article) ──────────────────────
+  // Only single-use ARTICLE items (rss/product_page) are claimable; atomically
+  // reserve one BEFORE any LLM call so a concurrent cron invocation (and later
+  // iterations of this same run) can never rewrite the same article. Evergreen
+  // (prompt/calendar) items are never claimed and never consumed — they stay
+  // reusable across generations.
   //
-  // An empty feedItems window is ambiguous, so hasContentSources disambiguates:
-  //   • no content sources          → mission/brand post (primaryFeedItemId null)
-  //   • sources exist, no candidates → skip cleanly (all articles already used)
-  //   • candidates exist            → claim one and generate from it
+  // The four-way decision (see planFeedItemUsage):
+  //   • no sources at all            → mission/brand post (primaryFeedItemId null)
+  //   • article source, no candidates → skip cleanly (all articles already used)
+  //   • article candidate claimable   → claim one and generate from it
+  //   • evergreen item available       → generate from it, no claim, reusable
+  const articleCandidateIds = context.feedItems.filter(isConsumableItem).map((f) => f.id);
+  const hasEvergreenItems = context.feedItems.some((f) => !isConsumableItem(f));
   const plan = await planFeedItemUsage(
-    context.feedItems.map((f) => f.id),
-    context.hasContentSources,
+    articleCandidateIds,
+    context.hasArticleSources,
+    hasEvergreenItems,
     db
   );
   if (plan.action === "skip") {
-    // Either RSS is configured but every eligible article is already used, or a
-    // concurrent run claimed the last candidate. Not an error — the caller skips.
+    // Article sources are configured but every eligible article is already used
+    // (or a concurrent run claimed the last candidate) and no evergreen item is
+    // available. Not an error — the caller skips.
     return { success: false, code: "NO_FEED_ITEMS_AVAILABLE" };
   }
 
@@ -291,9 +299,16 @@ export async function generatePostFromContext(
     const claimed = context.feedItems.find((f) => f.id === claimedId)!;
     const others = context.feedItems.filter((f) => f.id !== claimedId);
     context = { ...context, feedItems: [claimed, ...others] };
+  } else if (plan.action === "evergreen") {
+    // Reusable prompt/calendar content. Restrict the context to evergreen items
+    // so the post is built purely around them — this also drops any article that
+    // was claimable at build time but raced away, so it can never leak in as the
+    // primary. primaryFeedItemId stays null, so the item is never consumed.
+    const evergreen = context.feedItems.filter((f) => !isConsumableItem(f));
+    context = { ...context, feedItems: evergreen };
   }
-  // plan.action === "mission": no content sources — primaryFeedItemId stays null
-  // and the existing no-source mission/brand post path is used.
+  // plan.action === "mission": no sources — primaryFeedItemId stays null and the
+  // existing no-source mission/brand post path is used.
 
   // Frees the claimed article if generation fails before the post is persisted.
   const releaseClaimedFeedItem = async () => {

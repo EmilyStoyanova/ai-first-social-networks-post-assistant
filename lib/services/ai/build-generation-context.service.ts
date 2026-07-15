@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import { getLlmProviderInfo } from "@/lib/ai/llm/llm-provider-factory";
 import type { GenerationContext } from "@/lib/ai/types";
+import { CONSUMABLE_SOURCE_TYPES, isConsumableSourceType } from "@/lib/ai/source-types";
 
 const VALID_CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const;
 type ValidChannel = (typeof VALID_CHANNELS)[number];
@@ -141,7 +142,8 @@ async function loadContext(
     prisma.feedItem.findMany({
       // usedInPost:false — one-post-per-article (Phase 0). Already-consumed
       // articles are excluded so each generation draws from a fresh source and
-      // the same article is never rewritten twice.
+      // the same article is never rewritten twice. Evergreen (prompt/calendar)
+      // items are never marked used, so they always remain in this window.
       where: { companyId, enabled: true, usedInPost: false, source: { enabled: true } },
       orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
       take: 5,
@@ -151,14 +153,16 @@ async function loadContext(
         content: true,
         url: true,
         publishedAt: true,
-        source: { select: { config: true } },
+        source: { select: { type: true, config: true } },
       },
     }),
-    // Does the company have RSS configured at all? An enabled source with every
-    // article already used yields an empty feedItems window but must NOT fall
-    // back to a mission post — the caller skips instead (Phase 0).
+    // Does the company have an ARTICLE source (rss/product_page) configured at
+    // all? Such a source with every article already used yields an empty
+    // article window but must NOT fall back to a mission post — the caller skips
+    // instead (Phase 0). Evergreen prompt/calendar sources are excluded here on
+    // purpose: they never force a skip.
     prisma.contentSource.findFirst({
-      where: { companyId, enabled: true },
+      where: { companyId, enabled: true, type: { in: [...CONSUMABLE_SOURCE_TYPES] } },
       select: { id: true },
     }),
   ]);
@@ -168,7 +172,7 @@ async function loadContext(
   const feedData = feedItems.status === "fulfilled" ? feedItems.value : [];
   // On a query failure, err toward the mission-post path (false) rather than
   // wrongly skipping generation; feedData already reflects claimable articles.
-  const hasContentSources = enabledSource.status === "fulfilled" && enabledSource.value !== null;
+  const hasArticleSources = enabledSource.status === "fulfilled" && enabledSource.value !== null;
   const defaults = CHANNEL_DEFAULTS[channel];
 
   const context: GenerationContext = {
@@ -204,8 +208,10 @@ async function loadContext(
       url: f.url,
       publishedAt: f.publishedAt,
       sourceLinkPreference: extractSourceLinkPreference(f.source.config),
+      // rss/product_page → single-use article; prompt/calendar_event → evergreen.
+      consumable: isConsumableSourceType(f.source.type),
     })),
-    hasContentSources,
+    hasArticleSources,
     llm: getLlmProviderInfo(),
   };
 

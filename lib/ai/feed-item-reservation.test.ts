@@ -253,39 +253,99 @@ describe("post uniqueness backstop", () => {
 
 // ─── 10. Empty-feed disambiguation (no sources vs. sources exhausted) ─────────
 
-describe("planFeedItemUsage — three-way source decision", () => {
-  it("no content sources → mission post (no claim, no skip)", async () => {
+describe("planFeedItemUsage — four-way source decision", () => {
+  it("no sources of any kind → mission post (no claim, no skip)", async () => {
     const db = new MockFeedItemDb([]);
-    const plan = await planFeedItemUsage([], /* hasContentSources */ false, db);
+    const plan = await planFeedItemUsage(
+      [],
+      /* hasArticleSources */ false,
+      /* evergreen */ false,
+      db
+    );
 
     assert.deepStrictEqual(plan, { action: "mission" });
   });
 
-  it("sources exist but no eligible unused items → skip cleanly", async () => {
+  it("article sources exist but no eligible unused items → skip cleanly", async () => {
     // The company has RSS configured, but every article is already used, so the
     // candidate window is empty. This must NOT fall back to a mission post.
     const db = new MockFeedItemDb(["A"], ["A"]);
-    const candidates: string[] = []; // builder returns 0 unused items
-    const plan = await planFeedItemUsage(candidates, /* hasContentSources */ true, db);
+    const candidates: string[] = []; // builder returns 0 unused article items
+    const plan = await planFeedItemUsage(candidates, /* hasArticleSources */ true, false, db);
 
     assert.deepStrictEqual(plan, { action: "skip" });
   });
 
-  it("eligible unused items → claim one and generate", async () => {
+  it("eligible unused article items → claim one and generate", async () => {
     const db = new MockFeedItemDb(["A", "B"]);
-    const plan = await planFeedItemUsage(["A", "B"], /* hasContentSources */ true, db);
+    const plan = await planFeedItemUsage(["A", "B"], /* hasArticleSources */ true, false, db);
 
     assert.deepStrictEqual(plan, { action: "generate", feedItemId: "A" });
     assert.strictEqual(db.isUsed("A"), true, "the claimed item is marked used");
     assert.strictEqual(db.isUsed("B"), false, "the untouched item stays free");
   });
 
-  it("candidates present but all raced away → skip, not mission", async () => {
-    // hasContentSources is true and candidate ids were passed, but each was
+  it("article candidates present but all raced away → skip, not mission", async () => {
+    // hasArticleSources is true and candidate ids were passed, but each was
     // claimed by a concurrent run between context build and claim.
     const db = new MockFeedItemDb(["A"], ["A"]);
-    const plan = await planFeedItemUsage(["A"], /* hasContentSources */ true, db);
+    const plan = await planFeedItemUsage(["A"], /* hasArticleSources */ true, false, db);
 
     assert.deepStrictEqual(plan, { action: "skip" });
+  });
+
+  // ── Evergreen (prompt/calendar) — reusable, never claimed ──────────────────
+
+  it("evergreen item, no article source → evergreen (no claim)", async () => {
+    // A prompt-only company: no article candidates, no article sources, but a
+    // reusable evergreen item is available. Must generate, not fall to mission.
+    const db = new MockFeedItemDb([]);
+    const plan = await planFeedItemUsage(
+      [],
+      /* hasArticleSources */ false,
+      /* evergreen */ true,
+      db
+    );
+
+    assert.deepStrictEqual(plan, { action: "evergreen" });
+  });
+
+  it("exhausted article source + evergreen item → evergreen (not skip)", async () => {
+    // Mixed company: RSS is exhausted (empty article window) but a prompt item
+    // remains. The prompt keeps the company generating instead of skipping.
+    const db = new MockFeedItemDb([]);
+    const plan = await planFeedItemUsage(
+      [],
+      /* hasArticleSources */ true,
+      /* evergreen */ true,
+      db
+    );
+
+    assert.deepStrictEqual(plan, { action: "evergreen" });
+  });
+
+  it("article candidate present alongside evergreen → article wins (claims it)", async () => {
+    const db = new MockFeedItemDb(["A"]);
+    const plan = await planFeedItemUsage(
+      ["A"],
+      /* hasArticleSources */ true,
+      /* evergreen */ true,
+      db
+    );
+
+    assert.deepStrictEqual(plan, { action: "generate", feedItemId: "A" });
+    assert.strictEqual(db.isUsed("A"), true, "the article is still consumed");
+  });
+
+  it("article candidates all raced but evergreen present → evergreen, not skip", async () => {
+    const db = new MockFeedItemDb(["A"], ["A"]);
+    const plan = await planFeedItemUsage(
+      ["A"],
+      /* hasArticleSources */ true,
+      /* evergreen */ true,
+      db
+    );
+
+    assert.deepStrictEqual(plan, { action: "evergreen" });
   });
 });

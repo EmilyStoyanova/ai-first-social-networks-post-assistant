@@ -37,7 +37,7 @@ function makeContext(overrides: Partial<GenerationContext> = {}): GenerationCont
       includeSourceLink: false,
     },
     feedItems: [],
-    hasContentSources: false,
+    hasArticleSources: false,
     llm: { provider: "groq", model: "llama-3.3-70b-versatile" },
     ...overrides,
   };
@@ -135,7 +135,7 @@ describe("generatePostFromContext — coreMessage persistence (Phase 1.1)", () =
           publishedAt: null,
         },
       ],
-      hasContentSources: true,
+      hasArticleSources: true,
     });
 
     const result = await generatePostFromContext(context, "co-1", {}, deps);
@@ -160,7 +160,7 @@ describe("generatePostFromContext — coreMessage persistence (Phase 1.1)", () =
           publishedAt: null,
         },
       ],
-      hasContentSources: true,
+      hasArticleSources: true,
     });
 
     const result = await generatePostFromContext(context, "co-1", {}, deps);
@@ -176,7 +176,7 @@ describe("generatePostFromContext — coreMessage persistence (Phase 1.1)", () =
 
   it("persists coreMessage for a mission post (no content sources)", async () => {
     const { deps, created } = makeDeps();
-    const context = makeContext({ feedItems: [], hasContentSources: false });
+    const context = makeContext({ feedItems: [], hasArticleSources: false });
 
     const result = await generatePostFromContext(context, "co-1", {}, deps);
 
@@ -328,6 +328,194 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
     const gate = snapshot.semanticGate as Record<string, unknown>;
     assert.equal(gate.skipped, true);
     assert.equal(gate.decision, "accept");
+  });
+});
+
+// ─── Evergreen (prompt/calendar) sources — reusable, never consumed ────────────
+
+describe("generatePostFromContext — evergreen prompt sources", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const PROMPT_TEXT =
+    "Share one concrete productivity tip our small-business audience can use today.";
+
+  // Deps whose feedItem.updateMany records every call, so we can prove evergreen
+  // items are NEVER claimed/consumed while article items ARE.
+  function makeSpyDeps(): {
+    deps: GenerateDraftPostDeps;
+    created: () => Prisma.PostUncheckedCreateInput | null;
+    claimCalls: () => number;
+  } {
+    let createdData: Prisma.PostUncheckedCreateInput | null = null;
+    let claims = 0;
+    const db: GenerateDraftPostDb = {
+      post: {
+        findMany: async () => [],
+        create: async (args) => {
+          createdData = args.data;
+          return {
+            id: "post-1",
+            companyId: args.data.companyId,
+            channel: args.data.channel as SocialChannel,
+            status: "draft",
+            content: args.data.content,
+            hashtags: [],
+            imagePrompt: null,
+            notes: null,
+            llmProvider: null,
+            llmModel: null,
+            createdAt: new Date(),
+          };
+        },
+      },
+      feedItem: {
+        updateMany: async () => {
+          claims++;
+          return { count: 1 };
+        },
+      },
+    };
+    return {
+      deps: {
+        db,
+        auditLog: async () => {},
+        embed: async () => ({ status: "embedded" }),
+        recordCalibration: async () => {},
+        semanticGate: ACCEPT_GATE,
+      },
+      created: () => createdData,
+      claimCalls: () => claims,
+    };
+  }
+
+  function promptContext(): GenerationContext {
+    return makeContext({
+      feedItems: [
+        {
+          id: "prompt-1",
+          title: "Weekly productivity tip",
+          content: PROMPT_TEXT,
+          url: "prompt:src-1",
+          publishedAt: null,
+          consumable: false,
+        },
+      ],
+      // Prompt-only company: no article sources configured.
+      hasArticleSources: false,
+    });
+  }
+
+  it("generates from a prompt-only company (evergreen), without claiming the item", async () => {
+    const { deps, created, claimCalls } = makeSpyDeps();
+
+    const result = await generatePostFromContext(promptContext(), "co-1", {}, deps);
+
+    assert.ok(result.success, "prompt-only generation should succeed (not 409)");
+    assert.equal(claimCalls(), 0, "evergreen items are never claimed/consumed");
+    const data = created()!;
+    assert.equal(data.primaryFeedItemId, null, "an evergreen item never backs primaryFeedItemId");
+  });
+
+  it("passes the prompt text through to the generation context (reaches the LLM)", async () => {
+    const { deps, created } = makeSpyDeps();
+
+    const result = await generatePostFromContext(promptContext(), "co-1", {}, deps);
+    assert.ok(result.success);
+
+    const snapshot = created()!.promptSnapshot as Record<string, unknown>;
+    assert.ok(
+      typeof snapshot.userPrompt === "string" && snapshot.userPrompt.includes(PROMPT_TEXT),
+      "the prompt text must appear in the user prompt sent to the model"
+    );
+  });
+
+  it("is reusable across multiple posts (same prompt item is never exhausted)", async () => {
+    const { deps, created, claimCalls } = makeSpyDeps();
+
+    const first = await generatePostFromContext(promptContext(), "co-1", {}, deps);
+    assert.ok(first.success, "first generation should succeed");
+    assert.equal(created()!.primaryFeedItemId, null);
+
+    // A second generation on the identical context still succeeds — the prompt
+    // item was not consumed by the first, so nothing changed between runs.
+    const second = await generatePostFromContext(promptContext(), "co-1", {}, deps);
+    assert.ok(second.success, "second generation from the same prompt should also succeed");
+    assert.equal(created()!.primaryFeedItemId, null);
+    assert.equal(claimCalls(), 0, "no claim happened across either generation");
+  });
+
+  it("still generates from the prompt when article sources are exhausted (mixed company)", async () => {
+    // build-generation-context excludes used articles, so an exhausted-RSS +
+    // prompt company arrives here with only the evergreen item in the window and
+    // hasArticleSources = true. That must generate, not skip (409).
+    const { deps, created, claimCalls } = makeSpyDeps();
+    const ctx = makeContext({
+      feedItems: [
+        {
+          id: "prompt-1",
+          title: "Weekly productivity tip",
+          content: PROMPT_TEXT,
+          url: "prompt:src-1",
+          publishedAt: null,
+          consumable: false,
+        },
+      ],
+      hasArticleSources: true,
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success, "prompt remains usable even with an exhausted article source");
+    assert.equal(claimCalls(), 0, "the evergreen item is still not consumed");
+    assert.equal(created()!.primaryFeedItemId, null);
+  });
+
+  it("claims and consumes an article item (rss stays single-use)", async () => {
+    const { deps, created, claimCalls } = makeSpyDeps();
+    const ctx = makeContext({
+      feedItems: [
+        {
+          id: "article-1",
+          title: "Launch incoming",
+          content: "We are preparing something big.",
+          url: "https://example.com/launch",
+          publishedAt: null,
+          consumable: true,
+        },
+      ],
+      hasArticleSources: true,
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(claimCalls(), 1, "an article item is claimed (consumed) exactly once");
+    assert.equal(created()!.primaryFeedItemId, "article-1", "the article backs primaryFeedItemId");
+  });
+
+  it("produces a mission post when the company has no sources at all", async () => {
+    const { deps, created, claimCalls } = makeSpyDeps();
+
+    const result = await generatePostFromContext(
+      makeContext({ feedItems: [], hasArticleSources: false }),
+      "co-1",
+      {},
+      deps
+    );
+
+    assert.ok(result.success, "no-source generation should produce a mission post");
+    assert.equal(claimCalls(), 0);
+    assert.equal(created()!.primaryFeedItemId, null);
   });
 });
 
