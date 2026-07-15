@@ -239,9 +239,9 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
     skipped: false,
   });
 
-  it("forces pending approval and warns when all attempts stay too similar (even fully automated)", async () => {
-    const { deps, created } = makeDeps([], regenerateGate);
-    // Fully automated draft would normally auto-approve; the semantic gate must override that.
+  it("aborts with CANNOT_GENERATE_UNIQUE_POST and does NOT save when all attempts stay too similar", async () => {
+    const { deps, created, embedded, calibrated } = makeDeps([], regenerateGate);
+    // Even a fully-automated draft must abort — never persist an unresolved duplicate.
     const ctx = makeContext({
       company: {
         name: "Acme",
@@ -252,26 +252,83 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
     });
 
     const result = await generatePostFromContext(ctx, "co-1", { initialStatus: "draft" }, deps);
-    assert.ok(result.success, "generation should still succeed (fail-safe save)");
 
-    const data = created()!;
-    assert.equal(data.status, "pending_approval", "must be held for human review");
-    assert.equal(data.approvedAt ?? null, null, "must not be auto-approved");
-
-    const snapshot = data.promptSnapshot as Record<string, unknown>;
-    const guards = snapshot.qualityGuards as Record<string, Record<string, unknown>>;
-    assert.equal(guards.semanticDuplicate.warning, true);
-    assert.equal(guards.semanticDuplicate.decision, "regenerate");
-
-    const gate = snapshot.semanticGate as Record<string, unknown>;
-    assert.equal(gate.decision, "regenerate");
-    assert.equal(gate.matchedPostId, "dup-1");
-    assert.equal(gate.attempts, 3, "should have exhausted all attempts");
-    assert.equal(gate.skipped, false);
-
-    if (result.success) {
-      assert.equal(result.warnings.semanticDuplicate.exhausted, true);
+    assert.equal(result.success, false, "generation must fail (not persisted)");
+    if (!result.success) {
+      assert.equal(result.code, "CANNOT_GENERATE_UNIQUE_POST");
     }
+    assert.equal(created(), null, "the post must NOT be saved");
+    assert.equal(embedded(), null, "no embedding for an aborted post");
+    assert.equal(calibrated(), null, "no calibration for an aborted post");
+  });
+
+  it("releases the claimed source article when it aborts on an unresolved duplicate", async () => {
+    // An article is claimed up front; when generation aborts the claim must be
+    // released so the article can back a future (unique) post.
+    let claims = 0;
+    let releases = 0;
+    const db: GenerateDraftPostDb = {
+      post: {
+        findMany: async () => [],
+        create: async () => {
+          throw new Error("post.create must not be called on an aborted generation");
+        },
+      },
+      feedItem: {
+        // planFeedItemUsage claims with a status→used update (count 1); releaseFeedItem
+        // nulls it back. Both go through updateMany here — distinguish by call order.
+        updateMany: async () => {
+          if (claims === 0) {
+            claims++;
+            return { count: 1 };
+          }
+          releases++;
+          return { count: 1 };
+        },
+      },
+    };
+    const deps: GenerateDraftPostDeps = {
+      db,
+      auditLog: async () => {},
+      embed: async () => ({ status: "embedded" }),
+      recordCalibration: async () => {},
+      semanticGate: regenerateGate,
+    };
+    const ctx = makeContext({
+      feedItems: [
+        {
+          id: "article-1",
+          title: "Launch incoming",
+          content: "We are preparing something big.",
+          url: "https://example.com/launch",
+          publishedAt: null,
+          consumable: true,
+        },
+      ],
+      hasArticleSources: true,
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "CANNOT_GENERATE_UNIQUE_POST");
+    assert.equal(claims, 1, "the article was claimed");
+    assert.equal(releases, 1, "the claim was released on abort");
+  });
+
+  it("aborts and does NOT save when the candidate is a near-verbatim duplicate on every attempt", async () => {
+    // Jaccard path: a recent post identical to the mock output flags every attempt,
+    // so the loop exhausts with duplicateResult.flagged and generation aborts.
+    const MOCK_TEXT = "Big things are coming! Stay tuned for what we have in store. 🚀";
+    const recentRows: RecentRow[] = [{ id: "recent-1", content: MOCK_TEXT, promptSnapshot: null }];
+    // ACCEPT_GATE: the semantic gate is clean, so only Jaccard forces the abort.
+    const { deps, created } = makeDeps(recentRows, ACCEPT_GATE);
+
+    const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "CANNOT_GENERATE_UNIQUE_POST");
+    assert.equal(created(), null, "a near-verbatim duplicate must not be saved");
   });
 
   it("writes semantic-gate calibration diagnostics for the generated post", async () => {

@@ -54,6 +54,7 @@
     "INGEST_FAILED": "Ingestion failed. Check the source URL and try again.",
     "EMAIL_NOT_VERIFIED": "Please verify your email address before signing in.",
     "POST_TOO_LONG_WITH_URL": "The post plus the source link exceeds the channel's character limit. Generate again or shorten the post.",
+    "CANNOT_GENERATE_UNIQUE_POST": "Couldn't create a post different enough from recent ones. Try again later or add fresh source material.",
     "UNKNOWN": "Something went wrong. Please try again."
   },
   "brand": {

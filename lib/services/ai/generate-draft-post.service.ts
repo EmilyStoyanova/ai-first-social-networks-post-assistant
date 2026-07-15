@@ -72,7 +72,11 @@ export interface GenerationWarnings {
     decision: "accept" | "gray_zone" | "regenerate";
     topSimilarity: number | null;
     matchedPostId: string | null;
-    /** True when all attempts stayed too similar (post forced to pending approval). */
+    /**
+     * Always false on a successful result: a candidate that stayed too similar
+     * through every attempt aborts with CANNOT_GENERATE_UNIQUE_POST instead of
+     * being persisted. Retained for backward compatibility.
+     */
     exhausted: boolean;
     /** True when the gate could not run (fail-open). */
     skipped: boolean;
@@ -91,6 +95,10 @@ export type GenerateDraftPostResult =
         | "LLM_PROVIDER_ERROR"
         | "LLM_RESPONSE_PARSE_ERROR"
         | "POST_TOO_LONG_WITH_URL"
+        // Every retry was exhausted and the final candidate was still a
+        // duplicate (near-verbatim, semantic, or a repeated topic). We refuse to
+        // persist a post we could not make unique.
+        | "CANNOT_GENERATE_UNIQUE_POST"
         // Source articles existed but every one was already claimed (concurrent
         // run / exhausted pool). Not an error — callers skip cleanly.
         | "NO_FEED_ITEMS_AVAILABLE";
@@ -416,14 +424,35 @@ export async function generatePostFromContext(
     selectedAspect,
   } = generationResult;
 
+  // ── Uniqueness abort ──────────────────────────────────────────────────────
+  // The retry loop always returns its last candidate. If that candidate is
+  // STILL a duplicate after every attempt — a near-verbatim (Jaccard) match, a
+  // semantic "regenerate", or a repeated conceptual topic — we refuse to persist
+  // it. Generation is aborted with a dedicated error and the claimed source
+  // article is released so it can back a future (unique) post. Note: a skipped
+  // semantic gate reports decision "accept", so fail-open never triggers this.
+  // (A generic coreMessage is a fail-safe signal only and never aborts here.)
+  if (duplicateResult.flagged || semanticResult.decision === "regenerate" || topicRepeated) {
+    await releaseClaimedFeedItem();
+    const reason = duplicateResult.flagged
+      ? "jaccard_duplicate"
+      : semanticResult.decision === "regenerate"
+        ? "semantic_duplicate"
+        : "topic_repeated";
+    console.warn(
+      `[generation] Aborted after ${attempts} attempts → code=CANNOT_GENERATE_UNIQUE_POST reason=${reason} (post not saved).`
+    );
+    return {
+      success: false,
+      code: "CANNOT_GENERATE_UNIQUE_POST",
+      message: "Could not generate a sufficiently unique post after all attempts.",
+    };
+  }
+
   const safetyResult = checkContentSafety({
     text: parsed.text,
     brandForbiddenWords: context.brand?.forbiddenWords ?? [],
   });
-
-  // Every attempt stayed at/above the regenerate threshold — the post is a
-  // semantic duplicate we could not shake off. Save it, but force human review.
-  const semanticExhausted = semanticResult.decision === "regenerate";
 
   // Log (calibration) the fail-open skip and the gray zone; never block.
   if (semanticResult.skipped) {
@@ -451,8 +480,10 @@ export async function generatePostFromContext(
       topSimilarity: semanticResult.topSimilarity,
       matchedPostId: semanticResult.matchedPostId,
       skipped: semanticResult.skipped,
-      // Warning: all attempts remained too similar; held for approval below.
-      warning: semanticExhausted,
+      // A "regenerate" that survives every attempt now aborts generation before
+      // this point (CANNOT_GENERATE_UNIQUE_POST), so a persisted post is never
+      // an unresolved semantic duplicate.
+      warning: false,
     },
   };
 
@@ -488,20 +519,14 @@ export async function generatePostFromContext(
   // ── Resolve final status ──────────────────────────────────────────────────
   // For manual generation (draft) on a fully_automated channel, skip the
   // approval queue so the post is immediately publishable. Safety-flagged posts
-  // are always held for human review regardless of mode. A semantic duplicate
-  // that survived every attempt is likewise ALWAYS held for approval — even on
-  // fully automated channels — so a human can decide whether it is too similar.
+  // are always held for human review regardless of mode. Unresolved duplicates
+  // never reach this point — they abort above (CANNOT_GENERATE_UNIQUE_POST).
   const effectiveMode = context.channel.automationModeOverride ?? context.company.automationMode;
   const autoApproved =
-    initialStatus === "draft" &&
-    effectiveMode === "fully_automated" &&
-    !safetyResult.flagged &&
-    !semanticExhausted;
+    initialStatus === "draft" && effectiveMode === "fully_automated" && !safetyResult.flagged;
   const resolvedStatus: "draft" | "pending_approval" | "approved" = autoApproved
     ? "approved"
-    : semanticExhausted
-      ? "pending_approval"
-      : initialStatus;
+    : initialStatus;
   const approvedAt = autoApproved ? new Date() : null;
 
   // ── Save post ─────────────────────────────────────────────────────────────
@@ -663,7 +688,8 @@ export async function generatePostFromContext(
       decision: semanticResult.decision,
       topSimilarity: semanticResult.topSimilarity,
       matchedPostId: semanticResult.matchedPostId,
-      exhausted: semanticExhausted,
+      // A persisted post is never an exhausted duplicate — those abort earlier.
+      exhausted: false,
       skipped: semanticResult.skipped,
     },
   };

@@ -128,6 +128,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
           },
           { status: 409 }
         );
+      case "CANNOT_GENERATE_UNIQUE_POST":
+        return NextResponse.json(
+          {
+            error: {
+              code: "CANNOT_GENERATE_UNIQUE_POST",
+              message:
+                result.message ??
+                "Could not generate a sufficiently unique post. Try again later or add fresh source material.",
+            },
+          },
+          { status: 409 }
+        );
     }
   }
 
