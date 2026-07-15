@@ -1,10 +1,17 @@
 import { prisma } from "@/lib/db/client";
-import { Prisma, type SocialChannel } from "@prisma/client";
+import { Prisma, type SocialChannel, type LlmProvider } from "@prisma/client";
 import { buildGenerationContext } from "./build-generation-context.service";
 import { resolveGenerationAspect } from "./resolve-generation-aspect.service";
 import type { GenerationContext, ILlmProvider } from "@/lib/ai/types";
 import { buildPrompts } from "@/lib/ai/prompt-builder";
-import { getLlmProvider, NoActiveLlmProviderError } from "@/lib/ai/llm/llm-provider-factory";
+import {
+  getLlmProvider,
+  getLlmProviderFromConfig,
+  NoActiveLlmProviderError,
+  ProviderConfigMissingError,
+  LLM_PROVIDER_LABEL,
+} from "@/lib/ai/llm/llm-provider-factory";
+import { decrypt } from "@/lib/security/encryption";
 import { LlmProviderError, LlmResponseParseError } from "@/lib/ai/errors";
 import {
   generateWithRetry,
@@ -83,6 +90,15 @@ export interface GenerationWarnings {
   };
 }
 
+/**
+ * Why a CANNOT_GENERATE_UNIQUE_POST abort happened. Surfaced to the API/UI so
+ * the user gets a reason-specific explanation instead of a generic error.
+ *   • jaccard_duplicate  — wording stayed near-verbatim to a recent post
+ *   • semantic_duplicate — the central claim repeated a recent post's
+ *   • topic_repeated     — the conceptual topic was already used recently
+ */
+export type UniquenessFailureReason = "jaccard_duplicate" | "semantic_duplicate" | "topic_repeated";
+
 export type GenerateDraftPostResult =
   | { success: true; post: GeneratedPostDTO; warnings: GenerationWarnings }
   | {
@@ -92,6 +108,12 @@ export type GenerateDraftPostResult =
         | "FORBIDDEN"
         | "INVALID_CHANNEL"
         | "NO_ACTIVE_PROVIDER"
+        // A per-generation llmConfigId was supplied but no active config matches
+        // it (deleted or deactivated). Distinct from NO_ACTIVE_PROVIDER (v2-5).
+        | "LLM_CONFIG_NOT_FOUND"
+        // The selected provider is missing required runtime config (e.g. a
+        // text_worker config with no base URL / TEXT_WORKER_URL) (v2-5).
+        | "PROVIDER_CONFIG_MISSING"
         | "LLM_PROVIDER_ERROR"
         | "LLM_RESPONSE_PARSE_ERROR"
         | "POST_TOO_LONG_WITH_URL"
@@ -103,6 +125,10 @@ export type GenerateDraftPostResult =
         // run / exhausted pool). Not an error — callers skip cleanly.
         | "NO_FEED_ITEMS_AVAILABLE";
       message?: string;
+      /** Set only for CANNOT_GENERATE_UNIQUE_POST — which guard forced the abort. */
+      reason?: UniquenessFailureReason;
+      /** Set only for CANNOT_GENERATE_UNIQUE_POST — attempts made before aborting. */
+      attempts?: number;
     };
 
 // ─── Minimal DB interface for testability ─────────────────────────────────────
@@ -161,6 +187,18 @@ export interface GenerateDraftPostDeps {
    * real one is built per company+channel from the embedding provider + store.
    */
   semanticGate?: SemanticGate;
+  /**
+   * Loads an active LlmConfig for per-generation provider selection (v2-5).
+   * Injected in tests; production reads the DB. Returns null when no active
+   * config matches the id. Never returns the decrypted key — only the encrypted
+   * blob, decrypted by the service just before building the provider.
+   */
+  loadLlmConfig?: (id: string) => Promise<{
+    provider: LlmProvider;
+    modelName: string;
+    apiKeyEnc: string;
+    baseUrl: string | null;
+  } | null>;
 }
 
 // ─── Service ───────────────────────────────────────────────────────────────────
@@ -179,6 +217,11 @@ export interface GeneratePostOptions {
    * from the content source preference, then the channel default.
    */
   includeSourceLinkOverride?: boolean;
+  /**
+   * Explicit LLM config to use for this generation (v2-5). Undefined = use the
+   * env-var default provider (getLlmProvider), leaving the default path unchanged.
+   */
+  llmConfigId?: string;
 }
 
 export async function generateDraftPost(
@@ -186,7 +229,10 @@ export async function generateDraftPost(
   rawChannel: string,
   userId: string,
   isGlobalAdmin: boolean,
-  options: Pick<GeneratePostOptions, "contentLanguage" | "includeSourceLinkOverride"> = {}
+  options: Pick<
+    GeneratePostOptions,
+    "contentLanguage" | "includeSourceLinkOverride" | "llmConfigId"
+  > = {}
 ): Promise<GenerateDraftPostResult> {
   // Build context (also validates auth/access)
   const contextResult = await buildGenerationContext(slug, rawChannel, userId, isGlobalAdmin);
@@ -197,6 +243,7 @@ export async function generateDraftPost(
   return generatePostFromContext(contextResult.context, contextResult.companyId, {
     contentLanguage: options.contentLanguage,
     includeSourceLinkOverride: options.includeSourceLinkOverride,
+    llmConfigId: options.llmConfigId,
     generatedById: userId,
   });
 }
@@ -216,6 +263,13 @@ export async function generatePostFromContext(
   const auditLog = deps.auditLog ?? createAuditLog;
   const embed = deps.embed ?? embedPost;
   const recordCalibration = deps.recordCalibration ?? recordSemanticCalibration;
+  const loadLlmConfig =
+    deps.loadLlmConfig ??
+    ((id: string) =>
+      prisma.llmConfig.findFirst({
+        where: { id, isActive: true },
+        select: { provider: true, modelName: true, apiKeyEnc: true, baseUrl: true },
+      }));
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
 
@@ -263,14 +317,50 @@ export async function generatePostFromContext(
   const initialPattern = selectPattern(recentPatterns);
 
   // ── LLM provider ─────────────────────────────────────────────────────────
-  // Created before aspect mining so the same provider handles both extraction and generation.
-  const llmProviderStr = context.llm.provider;
-  const llmModelStr = context.llm.model;
+  // Created before aspect mining so the same provider handles both extraction and
+  // generation. Retries reuse this exact instance (passed once into the retry
+  // loop below) — provider/model never switch mid-generation.
+  //
+  // Two resolution paths (v2-5):
+  //   • llmConfigId set → load + decrypt that config, build a provider from it
+  //   • otherwise       → env-var default (getLlmProvider), unchanged behaviour
+  const llmConfigId = options.llmConfigId ?? null;
+  let llmProviderStr = context.llm.provider;
+  let llmModelStr = context.llm.model;
+
+  const isMock = process.env.AI_MOCK_MODE === "true";
+  const mockProvider: ILlmProvider = { generate: async () => ({ text: MOCK_LLM_TEXT }) };
 
   let provider: ILlmProvider;
-  if (process.env.AI_MOCK_MODE === "true") {
-    const mockText = MOCK_LLM_TEXT;
-    provider = { generate: async () => ({ text: mockText }) };
+  if (llmConfigId) {
+    const config = await loadLlmConfig(llmConfigId);
+    // Inactive or deleted config → treat as not found (never fall back silently
+    // to the default provider — the user made an explicit choice).
+    if (!config) {
+      return { success: false, code: "LLM_CONFIG_NOT_FOUND" };
+    }
+    // Provenance stored on the post and in promptSnapshot reflects the CONFIG.
+    llmProviderStr = LLM_PROVIDER_LABEL[config.provider];
+    llmModelStr = config.modelName;
+    if (isMock) {
+      provider = mockProvider;
+    } else {
+      try {
+        provider = getLlmProviderFromConfig({
+          provider: config.provider,
+          modelName: config.modelName,
+          apiKey: decrypt(config.apiKeyEnc),
+          baseUrl: config.baseUrl,
+        });
+      } catch (err) {
+        if (err instanceof ProviderConfigMissingError) {
+          return { success: false, code: "PROVIDER_CONFIG_MISSING", message: err.message };
+        }
+        throw err;
+      }
+    }
+  } else if (isMock) {
+    provider = mockProvider;
   } else {
     try {
       provider = getLlmProvider();
@@ -434,7 +524,7 @@ export async function generatePostFromContext(
   // (A generic coreMessage is a fail-safe signal only and never aborts here.)
   if (duplicateResult.flagged || semanticResult.decision === "regenerate" || topicRepeated) {
     await releaseClaimedFeedItem();
-    const reason = duplicateResult.flagged
+    const reason: UniquenessFailureReason = duplicateResult.flagged
       ? "jaccard_duplicate"
       : semanticResult.decision === "regenerate"
         ? "semantic_duplicate"
@@ -446,6 +536,8 @@ export async function generatePostFromContext(
       success: false,
       code: "CANNOT_GENERATE_UNIQUE_POST",
       message: "Could not generate a sufficiently unique post after all attempts.",
+      reason,
+      attempts,
     };
   }
 
@@ -562,6 +654,9 @@ export async function generatePostFromContext(
         userPrompt,
         provider: llmProviderStr,
         model: llmModelStr,
+        // v2-5 — the explicitly selected config (null when the env-var default
+        // provider was used). provider/model above already reflect the choice.
+        llmConfigId,
         feedItemIds,
         generatedAt: new Date().toISOString(),
         contentAngle: selectedAngle ?? null,

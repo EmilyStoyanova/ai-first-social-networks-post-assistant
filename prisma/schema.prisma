@@ -63,6 +63,7 @@ enum LlmProvider {
   claude
   openai
   grok
+  text_worker
 }
 
 enum CronStatus {

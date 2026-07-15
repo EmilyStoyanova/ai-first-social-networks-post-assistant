@@ -11,6 +11,8 @@ const bodySchema = z.object({
   contentLanguage: z.enum(["en", "bg"]).optional().default("en"),
   // Manual source-link override (v2-1); omitted = inherit source/channel config.
   includeSourceLink: z.boolean().optional(),
+  // Explicit per-generation LLM config (v2-5); omitted = env-var default provider.
+  llmConfigId: z.string().min(1).optional(),
 });
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -56,6 +58,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     {
       contentLanguage: parsed.data.contentLanguage,
       includeSourceLinkOverride: parsed.data.includeSourceLink,
+      llmConfigId: parsed.data.llmConfigId,
     }
   );
 
@@ -87,6 +90,26 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
             error: {
               code: "NO_ACTIVE_PROVIDER",
               message: "No active LLM provider configured. Configure one in Admin → LLM Providers.",
+            },
+          },
+          { status: 503 }
+        );
+      case "LLM_CONFIG_NOT_FOUND":
+        return NextResponse.json(
+          {
+            error: {
+              code: "LLM_CONFIG_NOT_FOUND",
+              message: "The selected LLM is no longer available. Pick another or use the default.",
+            },
+          },
+          { status: 404 }
+        );
+      case "PROVIDER_CONFIG_MISSING":
+        return NextResponse.json(
+          {
+            error: {
+              code: "PROVIDER_CONFIG_MISSING",
+              message: result.message ?? "The selected LLM is missing required configuration.",
             },
           },
           { status: 503 }
@@ -136,6 +159,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
               message:
                 result.message ??
                 "Could not generate a sufficiently unique post. Try again later or add fresh source material.",
+              // Diagnostics so the UI can explain WHY and after how many tries.
+              reason: result.reason,
+              attempts: result.attempts,
             },
           },
           { status: 409 }

@@ -37,6 +37,8 @@
     "UNSUPPORTED_TYPE": "This file type is not supported.",
     "NO_IMAGE_PROMPT": "This post has no image prompt.",
     "NO_ACTIVE_PROVIDER": "No active LLM provider configured. Configure one in Admin → LLM Providers.",
+    "LLM_CONFIG_NOT_FOUND": "The selected LLM is no longer available. Pick another or use the default.",
+    "PROVIDER_CONFIG_MISSING": "The selected LLM is missing required configuration.",
     "LLM_RESPONSE_PARSE_ERROR": "The AI returned an unexpected response. Please try again.",
     "LLM_PROVIDER_ERROR": "The AI provider returned an error. Please try again.",
     "INVALID_REQUEST": "Invalid request.",
@@ -483,8 +485,14 @@
       "sourceLinkInherit": "Default (from settings)",
       "sourceLinkInclude": "Include",
       "sourceLinkExclude": "Don't include",
+      "llm": "AI model",
+      "llmSystemDefault": "System default (auto)",
       "duplicateWarning": "Similar post detected (score {score}). Review before publishing.",
-      "safetyWarning": "Safety check flagged: {terms}. Draft saved — please review before approving."
+      "safetyWarning": "Safety check flagged: {terms}. Draft saved — please review before approving.",
+      "uniqueErrorTopicRepeated": "We couldn't find a fresh angle after {attempts} attempts — recent posts already cover this topic. Add new source material or try again later.",
+      "uniqueErrorSemanticDuplicate": "After {attempts} attempts the draft kept making the same point as a recent post. Add new source material or try again later.",
+      "uniqueErrorJaccardDuplicate": "After {attempts} attempts the wording stayed too close to a recent post. Add new source material or try again later.",
+      "uniqueErrorGeneric": "We couldn't create a post different enough from recent ones after {attempts} attempts. Add new source material or try again later."
     }
   },
   "approval": {

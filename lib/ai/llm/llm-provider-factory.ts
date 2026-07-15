@@ -1,3 +1,4 @@
+import type { LlmProvider } from "@prisma/client";
 import type { ILlmProvider, LlmRequest, LlmResponse } from "./llm-provider";
 import { GroqProvider } from "./groq.provider";
 import { AnthropicProvider } from "./anthropic.provider";
@@ -9,6 +10,19 @@ export class NoActiveLlmProviderError extends Error {
   constructor(message?: string) {
     super(message ?? "No LLM provider is configured.");
     this.name = "NoActiveLlmProviderError";
+  }
+}
+
+/**
+ * Thrown when a selected provider is missing required runtime configuration —
+ * currently only `text_worker` without a resolvable worker URL. Raised before
+ * any network call so the caller can surface a distinct error (v2-5).
+ */
+export class ProviderConfigMissingError extends Error {
+  readonly code = "PROVIDER_CONFIG_MISSING" as const;
+  constructor(message?: string) {
+    super(message ?? "The selected provider is missing required configuration.");
+    this.name = "ProviderConfigMissingError";
   }
 }
 
@@ -125,3 +139,57 @@ export function getLlmProvider(): ILlmProvider {
     }
   }
 }
+
+/**
+ * Instantiate an LLM provider from a decrypted LlmConfig (v2-5).
+ *
+ * A parallel resolution path to getLlmProvider(): this is used when a caller
+ * explicitly selects a configured provider for a single generation. It never
+ * touches the database and never reads env-var provider selection — the caller
+ * is responsible for loading the config and decrypting `apiKey` first.
+ *
+ * `text_worker` falls back to the TEXT_WORKER_URL env var when the config has no
+ * explicit baseUrl; if neither is present it throws ProviderConfigMissingError
+ * before any network call.
+ */
+export function getLlmProviderFromConfig(config: {
+  provider: LlmProvider;
+  modelName: string;
+  apiKey: string; // already decrypted
+  baseUrl?: string | null;
+}): ILlmProvider {
+  switch (config.provider) {
+    case "claude":
+      return new AnthropicProvider(config.apiKey, config.modelName, config.baseUrl);
+    case "openai":
+      return new OpenAILlmProvider(config.apiKey, config.modelName, config.baseUrl);
+    case "grok":
+      return new GroqProvider(config.apiKey, config.modelName, config.baseUrl ?? undefined);
+    case "text_worker": {
+      const workerUrl = config.baseUrl ?? process.env.TEXT_WORKER_URL;
+      if (!workerUrl) {
+        throw new ProviderConfigMissingError(
+          "text_worker provider requires a base URL or the TEXT_WORKER_URL environment variable."
+        );
+      }
+      return new TextWorkerProvider(workerUrl, config.apiKey, config.modelName);
+    }
+    default: {
+      const _exhaustive: never = config.provider;
+      throw new NoActiveLlmProviderError(`Unsupported provider: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/**
+ * Human-readable, uppercase provider label for a configured LlmProvider. Used
+ * for display names and for the `llmProvider` provenance stored on a post. Kept
+ * distinct from the env-var factory's labels (e.g. "ANTHROPIC") on purpose —
+ * a config-selected provider is a separate provenance identified by enum value.
+ */
+export const LLM_PROVIDER_LABEL: Record<LlmProvider, string> = {
+  claude: "CLAUDE",
+  openai: "OPENAI",
+  grok: "GROK",
+  text_worker: "TEXT_WORKER",
+};

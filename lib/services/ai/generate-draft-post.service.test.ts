@@ -256,6 +256,9 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
     assert.equal(result.success, false, "generation must fail (not persisted)");
     if (!result.success) {
       assert.equal(result.code, "CANNOT_GENERATE_UNIQUE_POST");
+      // Diagnostics surfaced to the API/UI.
+      assert.equal(result.reason, "semantic_duplicate");
+      assert.equal(result.attempts, 3);
     }
     assert.equal(created(), null, "the post must NOT be saved");
     assert.equal(embedded(), null, "no embedding for an aborted post");
@@ -327,7 +330,12 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
     const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
 
     assert.equal(result.success, false);
-    if (!result.success) assert.equal(result.code, "CANNOT_GENERATE_UNIQUE_POST");
+    if (!result.success) {
+      assert.equal(result.code, "CANNOT_GENERATE_UNIQUE_POST");
+      // Jaccard is checked first, so it wins the reason.
+      assert.equal(result.reason, "jaccard_duplicate");
+      assert.equal(result.attempts, 3);
+    }
     assert.equal(created(), null, "a near-verbatim duplicate must not be saved");
   });
 
@@ -623,6 +631,79 @@ describe("generatePostFromContext — Topic Memory", () => {
     const snapshot = created()!.promptSnapshot as Record<string, unknown>;
     const gate = snapshot.semanticGate as Record<string, unknown>;
     assert.equal(gate.topicRepeated, false);
+  });
+});
+
+// ─── Per-generation LLM selector (v2-5) ────────────────────────────────────────
+
+describe("generatePostFromContext — per-generation LLM selector", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  it("uses the selected config's provider/model and records llmConfigId in promptSnapshot", async () => {
+    const { deps, created } = makeDeps();
+    let loadedId: string | null = null;
+    deps.loadLlmConfig = async (id) => {
+      loadedId = id;
+      return {
+        provider: "claude",
+        modelName: "claude-sonnet-4-6",
+        apiKeyEnc: "enc",
+        baseUrl: null,
+      };
+    };
+
+    const result = await generatePostFromContext(context(), "co-1", { llmConfigId: "cfg-1" }, deps);
+
+    assert.ok(result.success, "generation with a selected config should succeed");
+    assert.equal(loadedId, "cfg-1", "the selected config id is loaded");
+    const data = created()!;
+    // Provenance stored on the post reflects the CONFIG, not the env-var default.
+    assert.equal(data.llmProvider, "CLAUDE");
+    assert.equal(data.llmModel, "claude-sonnet-4-6");
+    const snapshot = data.promptSnapshot as Record<string, unknown>;
+    assert.equal(snapshot.llmConfigId, "cfg-1");
+    assert.equal(snapshot.provider, "CLAUDE");
+    assert.equal(snapshot.model, "claude-sonnet-4-6");
+  });
+
+  it("returns LLM_CONFIG_NOT_FOUND (and saves nothing) when the config is inactive or missing", async () => {
+    const { deps, created } = makeDeps();
+    deps.loadLlmConfig = async () => null;
+
+    const result = await generatePostFromContext(context(), "co-1", { llmConfigId: "gone" }, deps);
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "LLM_CONFIG_NOT_FOUND");
+    assert.equal(created(), null, "no post is saved when the selected LLM is unavailable");
+  });
+
+  it("uses the env-var default and never loads a config when no llmConfigId is given", async () => {
+    const { deps, created } = makeDeps();
+    let loaderCalls = 0;
+    deps.loadLlmConfig = async () => {
+      loaderCalls++;
+      return null;
+    };
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(loaderCalls, 0, "loadLlmConfig must not run on the default path");
+    const snapshot = created()!.promptSnapshot as Record<string, unknown>;
+    assert.equal(snapshot.llmConfigId, null, "llmConfigId is null on the default path");
+    // Falls back to context.llm (see makeContext).
+    assert.equal(snapshot.provider, "groq");
+    assert.equal(snapshot.model, "llama-3.3-70b-versatile");
   });
 });
 

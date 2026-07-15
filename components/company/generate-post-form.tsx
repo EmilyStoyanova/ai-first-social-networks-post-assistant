@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
@@ -20,6 +20,30 @@ type Channel = (typeof CHANNELS)[number]["value"];
 /** Three-state override: inherit the source/channel setting, or force on/off. */
 type SourceLinkOverride = "inherit" | "include" | "exclude";
 
+/** A selectable LLM returned by GET /companies/[slug]/available-llms (v2-5). */
+interface AvailableLlm {
+  id: string;
+  displayName: string;
+  provider: string;
+  model: string;
+  isDefault: boolean;
+}
+
+/** Diagnostics the generate API attaches to a CANNOT_GENERATE_UNIQUE_POST error. */
+interface GenerateApiError {
+  code?: string;
+  message?: string;
+  reason?: "jaccard_duplicate" | "semantic_duplicate" | "topic_repeated";
+  attempts?: number;
+}
+
+/** Maps the abort reason to its reason-specific translation key. */
+const UNIQUE_ERROR_KEY: Record<NonNullable<GenerateApiError["reason"]>, string> = {
+  topic_repeated: "uniqueErrorTopicRepeated",
+  semantic_duplicate: "uniqueErrorSemanticDuplicate",
+  jaccard_duplicate: "uniqueErrorJaccardDuplicate",
+};
+
 interface Props {
   slug: string;
   onGenerated: (post: PostItem) => void;
@@ -34,9 +58,44 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems }: Props) 
   const [channel, setChannel] = useState<Channel>("FACEBOOK");
   const [contentLanguage, setContentLanguage] = useState<"en" | "bg">("en");
   const [sourceLinkOverride, setSourceLinkOverride] = useState<SourceLinkOverride>("inherit");
+  // Empty string = "System default (auto)"; otherwise an LlmConfig id (v2-5).
+  const [llmConfigId, setLlmConfigId] = useState("");
+  const [availableLlms, setAvailableLlms] = useState<AvailableLlm[]>([]);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [warnings, setWarnings] = useState<GenerationWarnings | null>(null);
+
+  // Load the company's selectable LLMs once. Failure is silent — the dropdown
+  // simply stays at "System default", preserving the pre-v2-5 behaviour.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/v1/companies/${slug}/available-llms`);
+        if (!res.ok) return;
+        const json = (await res.json()) as { data?: AvailableLlm[] };
+        if (!cancelled && Array.isArray(json.data)) setAvailableLlms(json.data);
+      } catch {
+        // Non-fatal: leave the dropdown at the system default.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [slug]);
+
+  /**
+   * Resolves a generate-API error to a user-facing message. A uniqueness abort
+   * (CANNOT_GENERATE_UNIQUE_POST) gets a reason-specific explanation that names
+   * how many attempts were made; everything else uses the generic code mapping.
+   */
+  function resolveGenerateError(err?: GenerateApiError): string {
+    if (err?.code === "CANNOT_GENERATE_UNIQUE_POST") {
+      const key = (err.reason && UNIQUE_ERROR_KEY[err.reason]) ?? "uniqueErrorGeneric";
+      return t(key, { attempts: err.attempts ?? 3 });
+    }
+    return apiError(err);
+  }
 
   async function handleGenerate() {
     setGenerating(true);
@@ -52,11 +111,14 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems }: Props) 
           ...(hasRssFeedItems && sourceLinkOverride !== "inherit"
             ? { includeSourceLink: sourceLinkOverride === "include" }
             : {}),
+          // Omit entirely when "System default" is selected so the server keeps
+          // its env-var default provider path unchanged (v2-5).
+          ...(llmConfigId ? { llmConfigId } : {}),
         }),
       });
       if (!res.ok) {
-        const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(apiError(json.error));
+        const json = (await res.json()) as { error?: GenerateApiError };
+        throw new Error(resolveGenerateError(json.error));
       }
       const json = (await res.json()) as { post: PostItem; warnings: GenerationWarnings };
       onGenerated(json.post);
@@ -155,6 +217,32 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems }: Props) 
               <option value="inherit">{t("sourceLinkInherit")}</option>
               <option value="include">{t("sourceLinkInclude")}</option>
               <option value="exclude">{t("sourceLinkExclude")}</option>
+            </select>
+          </div>
+        )}
+
+        {availableLlms.length > 0 && (
+          <div className="min-w-[200px]">
+            <label
+              htmlFor="generate-llm"
+              className="text-fg-muted mb-1.5 block text-sm font-medium"
+            >
+              {t("llm")}
+            </label>
+            <select
+              id="generate-llm"
+              value={llmConfigId}
+              onChange={(e) => setLlmConfigId(e.target.value)}
+              disabled={generating}
+              className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <option value="">{t("llmSystemDefault")}</option>
+              {availableLlms.map((llm) => (
+                <option key={llm.id} value={llm.id}>
+                  {llm.displayName}
+                  {llm.isDefault ? " ★" : ""}
+                </option>
+              ))}
             </select>
           </div>
         )}
