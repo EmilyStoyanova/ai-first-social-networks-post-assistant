@@ -10,7 +10,7 @@ import { LlmConfigRow } from "./llm-config-row";
 
 export type ClientLlmConfig = {
   id: string;
-  provider: "CLAUDE" | "OPENAI" | "GROK";
+  provider: "CLAUDE" | "OPENAI" | "GROK" | "TEXT_WORKER";
   model: string;
   isActive: boolean;
   createdAt: string;

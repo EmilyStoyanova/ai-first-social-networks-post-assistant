@@ -28,7 +28,10 @@ const MODEL_PLACEHOLDER: Record<string, string> = {
   CLAUDE: "claude-sonnet-4-6",
   OPENAI: "gpt-4o",
   GROK: "grok-4",
+  TEXT_WORKER: "qwen3:8b",
 };
+
+type ProviderValue = "CLAUDE" | "OPENAI" | "GROK" | "TEXT_WORKER";
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -45,9 +48,7 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
   const apiError = useApiErrorMessage();
   const isEdit = config !== undefined;
 
-  const [provider, setProvider] = useState<"CLAUDE" | "OPENAI" | "GROK">(
-    config?.provider ?? "CLAUDE"
-  );
+  const [provider, setProvider] = useState<ProviderValue>(config?.provider ?? "CLAUDE");
   const [model, setModel] = useState(config?.model ?? "");
   const [apiKey, setApiKey] = useState("");
   const [isActive, setIsActive] = useState(config?.isActive ?? false);
@@ -136,13 +137,14 @@ export function LlmConfigForm({ config, onSaved, onCancel }: Props) {
             </label>
             <select
               value={provider}
-              onChange={(e) => setProvider(e.target.value as "CLAUDE" | "OPENAI" | "GROK")}
+              onChange={(e) => setProvider(e.target.value as ProviderValue)}
               disabled={isSubmitting}
               className={fieldCls(false, isSubmitting)}
             >
               <option value="CLAUDE">Claude</option>
               <option value="OPENAI">OpenAI</option>
               <option value="GROK">Grok</option>
+              <option value="TEXT_WORKER">Text Worker</option>
             </select>
           </div>
         )}

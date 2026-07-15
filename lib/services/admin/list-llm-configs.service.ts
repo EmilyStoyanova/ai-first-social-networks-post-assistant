@@ -2,7 +2,7 @@ import { prisma } from "@/lib/db/client";
 
 // ─── Shared types ─────────────────────────────────────────────────────────────
 
-export type LlmProvider = "CLAUDE" | "OPENAI" | "GROK";
+export type LlmProvider = "CLAUDE" | "OPENAI" | "GROK" | "TEXT_WORKER";
 
 export type LlmConfigItem = {
   id: string;
@@ -28,12 +28,14 @@ const PROVIDER_FROM_DB: Record<string, LlmProvider> = {
   claude: "CLAUDE",
   openai: "OPENAI",
   grok: "GROK",
+  text_worker: "TEXT_WORKER",
 };
 
-export const PROVIDER_TO_DB: Record<LlmProvider, "claude" | "openai" | "grok"> = {
+export const PROVIDER_TO_DB: Record<LlmProvider, "claude" | "openai" | "grok" | "text_worker"> = {
   CLAUDE: "claude",
   OPENAI: "openai",
   GROK: "grok",
+  TEXT_WORKER: "text_worker",
 };
 
 export function toLlmConfigItem(row: {

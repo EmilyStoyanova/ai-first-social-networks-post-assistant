@@ -16,6 +16,7 @@ const PROVIDER_META: Record<string, { label: string }> = {
   CLAUDE: { label: "Claude" },
   OPENAI: { label: "OpenAI" },
   GROK: { label: "Grok" },
+  TEXT_WORKER: { label: "Text Worker" },
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────

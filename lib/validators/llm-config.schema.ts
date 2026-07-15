@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const createLlmConfigSchema = z.object({
-  provider: z.enum(["CLAUDE", "OPENAI", "GROK"]),
+  provider: z.enum(["CLAUDE", "OPENAI", "GROK", "TEXT_WORKER"]),
   model: z.string().min(1, "Model is required."),
   apiKey: z.string().min(1, "API key is required."),
   isActive: z.boolean().default(false),
