@@ -7,6 +7,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { ChannelConfigCard } from "./channel-config-card";
 import type { ChannelConfigItem } from "@/lib/services/company/list-channel-configs.service";
+import { formatDateTime } from "@/lib/i18n/format-date";
 
 interface Props {
   slug: string;
@@ -18,13 +19,7 @@ interface Props {
 }
 
 function formatSyncDate(isoString: string, locale: string): string {
-  return new Intl.DateTimeFormat(locale, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(isoString));
+  return formatDateTime(isoString, locale);
 }
 
 export function ChannelConfigSection({

@@ -14,6 +14,7 @@ import type { BufferProfileItem } from "@/lib/services/buffer/list-buffer-profil
 import { EditPostModal } from "./edit-post-modal";
 import { PostActivityModal } from "./post-activity-modal";
 import { ImagePickerModal, type GalleryMediaItem } from "@/components/media/ImagePickerModal";
+import { formatDateTime } from "@/lib/i18n/format-date";
 
 type BadgeVariant =
   "owner" | "editor" | "comingSoon" | "success" | "warning" | "danger" | "neutral" | "readonly";
@@ -24,16 +25,6 @@ const CHANNEL_META: Record<string, { label: string; variant: BadgeVariant }> = {
   INSTAGRAM: { label: "Instagram", variant: "warning" },
   TIKTOK: { label: "TikTok", variant: "danger" },
 };
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString("en-GB", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 interface Props {
   slug: string;
@@ -325,7 +316,7 @@ export function GeneratedPostCard({
           <Badge variant={channelMeta.variant}>{channelMeta.label}</Badge>
           <StatusBadge status={localStatus.toLowerCase() as PostStatusValue} />
         </div>
-        <span className="text-fg-faint text-xs">{formatDate(post.createdAt)}</span>
+        <span className="text-fg-faint text-xs">{formatDateTime(post.createdAt)}</span>
       </div>
 
       {/* Post text */}
@@ -383,7 +374,7 @@ export function GeneratedPostCard({
       {publishedAt && (
         <div className="rounded-control bg-status-success-bg mb-3 border border-green-100 px-4 py-3">
           <p className="text-status-success-fg text-xs font-semibold">
-            {t("sentToBuffer", { date: formatDate(publishedAt) })}
+            {t("sentToBuffer", { date: formatDateTime(publishedAt) })}
           </p>
         </div>
       )}

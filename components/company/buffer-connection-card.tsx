@@ -6,6 +6,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { formatDate } from "@/lib/i18n/format-date";
 
 interface Props {
   slug: string;
@@ -104,13 +105,7 @@ export function BufferConnectionCard({ slug, initialConnection, canManage, buffe
               {connection.connectedAt && (
                 <div className="flex items-center gap-2 text-sm">
                   <dt className="text-fg-muted">{t("connectedSince")}</dt>
-                  <dd className="text-fg">
-                    {new Date(connection.connectedAt).toLocaleDateString(undefined, {
-                      year: "numeric",
-                      month: "short",
-                      day: "numeric",
-                    })}
-                  </dd>
+                  <dd className="text-fg">{formatDate(connection.connectedAt)}</dd>
                 </div>
               )}
             </dl>

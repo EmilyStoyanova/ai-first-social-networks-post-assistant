@@ -11,6 +11,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Modal } from "@/components/ui/Modal";
 import type { MediaItem } from "@/lib/services/company/list-media.service";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
+import { formatDate } from "@/lib/i18n/format-date";
 
 type BadgeVariant =
   "owner" | "editor" | "comingSoon" | "success" | "warning" | "danger" | "neutral" | "readonly";
@@ -21,14 +22,6 @@ const CHANNEL_META: Record<string, { label: string; variant: BadgeVariant }> = {
   INSTAGRAM: { label: "Instagram", variant: "warning" },
   TIKTOK: { label: "TikTok", variant: "danger" },
 };
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
 
 interface Props {
   item: MediaItem;

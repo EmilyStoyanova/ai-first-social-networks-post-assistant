@@ -5,6 +5,7 @@ import { ExternalLink } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import type { FeedItemRow } from "@/lib/services/company/list-feed-items.service";
+import { formatDate as formatSharedDate } from "@/lib/i18n/format-date";
 
 interface Props {
   slug: string;
@@ -14,11 +15,7 @@ interface Props {
 
 function formatDate(iso: string | null): string {
   if (!iso) return "";
-  return new Date(iso).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
+  return formatSharedDate(iso);
 }
 
 function contentSnippet(content: string | null): string {

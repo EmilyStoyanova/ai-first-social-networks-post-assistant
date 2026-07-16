@@ -4,10 +4,9 @@ import { Building2 } from "lucide-react";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import type { AdminCompanyItem } from "@/lib/services/admin/list-companies.service";
+import { formatDateNumeric } from "@/lib/i18n/format-date";
 
-function fmtDate(d: Date) {
-  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
-}
+const fmtDate = formatDateNumeric;
 
 interface Props {
   companies: AdminCompanyItem[];

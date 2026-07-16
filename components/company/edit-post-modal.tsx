@@ -6,6 +6,7 @@ import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
+import { formatDateTime } from "@/lib/i18n/format-date";
 
 interface PostVersionItem {
   id: string;
@@ -25,16 +26,6 @@ interface Props {
   canRestore: boolean;
   onClose: () => void;
   onSaved: (newContent: string, newHashtags: string[]) => void;
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString("en-GB", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 }
 
 export function EditPostModal({
@@ -217,7 +208,7 @@ export function EditPostModal({
                     <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
                       <span className="text-fg-muted text-xs font-semibold">v{v.version}</span>
                       <span className="text-fg-faint text-xs">·</span>
-                      <span className="text-fg-faint text-xs">{formatDate(v.createdAt)}</span>
+                      <span className="text-fg-faint text-xs">{formatDateTime(v.createdAt)}</span>
                       {v.changedByName && (
                         <>
                           <span className="text-fg-faint text-xs">·</span>

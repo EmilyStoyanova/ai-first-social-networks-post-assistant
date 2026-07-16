@@ -8,6 +8,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
 import { IMAGE_STYLES, type ImageStyle } from "@/lib/ai/image/image-style";
+import { formatDate } from "@/lib/i18n/format-date";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -41,14 +42,6 @@ interface Props {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
 
 // ─── Tab bar ──────────────────────────────────────────────────────────────────
 

@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/Card";
 import { ContentSourceForm } from "./content-source-form";
 import { RssArticlesPanel } from "./rss-articles-panel";
 import type { ContentSourceItem } from "@/lib/services/company/list-content-sources.service";
+import { formatDateTime } from "@/lib/i18n/format-date";
 import type { ContentSourcePayload } from "./content-source-form";
 
 interface Props {
@@ -22,13 +23,7 @@ interface Props {
 
 function formatDate(iso: string | null, never: string): string {
   if (!iso) return never;
-  return new Date(iso).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatDateTime(iso);
 }
 
 function asText(value: string | boolean | undefined): string {

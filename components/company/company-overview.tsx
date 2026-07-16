@@ -2,6 +2,7 @@ import { getTranslations } from "next-intl/server";
 import type { CompanyDetails } from "@/lib/services/company/get-company.service";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
+import { formatDateLong } from "@/lib/i18n/format-date";
 
 interface Props {
   company: CompanyDetails;
@@ -9,13 +10,8 @@ interface Props {
 
 export async function CompanyOverview({ company }: Props) {
   const t = await getTranslations("overview");
-  const locale = typeof navigator !== "undefined" ? undefined : "en-GB";
 
-  const formattedDate = company.createdAt.toLocaleDateString(locale ?? "en-GB", {
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  });
+  const formattedDate = formatDateLong(company.createdAt);
 
   return (
     <Card className="px-6 py-6">

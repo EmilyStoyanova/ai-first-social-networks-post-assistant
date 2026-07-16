@@ -33,6 +33,7 @@ import { GeneratedPostsSection } from "@/components/company/generated-posts-sect
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { Section } from "@/components/ui/Section";
+import { formatDateLong } from "@/lib/i18n/format-date";
 import Link from "next/link";
 
 interface Props {
@@ -217,11 +218,7 @@ async function OverviewTab({
   const tPage = await getTranslations("companyPage");
   const tWs = await getTranslations("workspace");
 
-  const formattedDate = company.createdAt.toLocaleDateString("en-GB", {
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  });
+  const formattedDate = formatDateLong(company.createdAt);
 
   const PRIMARY_CARDS = [
     {

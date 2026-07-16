@@ -14,6 +14,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { AuditLogItem } from "@/lib/services/audit/audit-log.service";
+import { formatDateTime } from "@/lib/i18n/format-date";
 
 // ─── Display maps ──────────────────────────────────────────────────────────────
 
@@ -52,16 +53,6 @@ const ALL_ACTION_KEYS = [
 ] as const;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString("en-GB", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 // ─── Entries list (shared between page and modal) ──────────────────────────────
 
@@ -145,7 +136,7 @@ export function AuditLogEntries({ logs }: EntriesProps) {
               <div className="min-w-0 flex-1 pb-1">
                 <p className="text-fg text-sm font-medium">{label}</p>
                 <p className="text-fg-muted text-xs">
-                  {actor} · {formatDate(log.createdAt)}
+                  {actor} · {formatDateTime(log.createdAt)}
                 </p>
                 {log.entityId && (
                   <p className="text-data text-fg-faint">

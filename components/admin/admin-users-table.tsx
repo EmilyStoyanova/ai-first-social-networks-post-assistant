@@ -4,10 +4,9 @@ import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import type { AdminUserItem } from "@/lib/services/admin/list-users.service";
+import { formatDateNumeric } from "@/lib/i18n/format-date";
 
-function fmtDate(d: Date) {
-  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
-}
+const fmtDate = formatDateNumeric;
 
 interface Props {
   users: AdminUserItem[];
