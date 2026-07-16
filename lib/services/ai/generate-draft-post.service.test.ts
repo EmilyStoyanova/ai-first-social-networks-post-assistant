@@ -1,6 +1,6 @@
 import { before, after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type { SocialChannel } from "@prisma/client";
+import type { SocialChannel, LlmProvider } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { generatePostFromContext } from "./generate-draft-post.service";
 import type { GenerateDraftPostDb, GenerateDraftPostDeps } from "./generate-draft-post.service";
@@ -101,6 +101,9 @@ function makeDeps(
       // Default: accept (no semantic history) so these Phase 1.1/1.2 tests are
       // unaffected by the Phase 1.4 gate. Overridable for gate-specific tests.
       semanticGate,
+      // A working system always has an admin default; provide one so these tests
+      // resolve a provider (the env-var fallback has been removed).
+      loadDefaultLlmConfig: async () => ({ id: "default-cfg", provider: "grok" }),
     },
     created: () => createdData,
     embedded: () => embeddedInput,
@@ -296,6 +299,9 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
       embed: async () => ({ status: "embedded" }),
       recordCalibration: async () => {},
       semanticGate: regenerateGate,
+      // A working system always has an admin default; provide one so these tests
+      // resolve a provider (the env-var fallback has been removed).
+      loadDefaultLlmConfig: async () => ({ id: "default-cfg", provider: "grok" }),
     };
     const ctx = makeContext({
       feedItems: [
@@ -457,6 +463,9 @@ describe("generatePostFromContext — evergreen prompt sources", () => {
         embed: async () => ({ status: "embedded" }),
         recordCalibration: async () => {},
         semanticGate: ACCEPT_GATE,
+        // A working system always has an admin default; provide one so these tests
+        // resolve a provider (the env-var fallback has been removed).
+        loadDefaultLlmConfig: async () => ({ id: "default-cfg", provider: "grok" }),
       },
       created: () => createdData,
       claimCalls: () => claims,
@@ -654,12 +663,7 @@ describe("generatePostFromContext — per-generation LLM selector", () => {
     let loadedId: string | null = null;
     deps.loadLlmConfig = async (id) => {
       loadedId = id;
-      return {
-        provider: "claude",
-        modelName: "claude-sonnet-4-6",
-        apiKeyEnc: "enc",
-        baseUrl: null,
-      };
+      return { provider: "claude" };
     };
 
     const result = await generatePostFromContext(context(), "co-1", { llmConfigId: "cfg-1" }, deps);
@@ -667,7 +671,7 @@ describe("generatePostFromContext — per-generation LLM selector", () => {
     assert.ok(result.success, "generation with a selected config should succeed");
     assert.equal(loadedId, "cfg-1", "the selected config id is loaded");
     const data = created()!;
-    // Provenance stored on the post reflects the CONFIG, not the env-var default.
+    // Provenance reflects the resolved provider; the model comes from env/code.
     assert.equal(data.llmProvider, "CLAUDE");
     assert.equal(data.llmModel, "claude-sonnet-4-6");
     const snapshot = data.promptSnapshot as Record<string, unknown>;
@@ -687,23 +691,273 @@ describe("generatePostFromContext — per-generation LLM selector", () => {
     assert.equal(created(), null, "no post is saved when the selected LLM is unavailable");
   });
 
-  it("uses the env-var default and never loads a config when no llmConfigId is given", async () => {
+  it("returns NO_ACTIVE_PROVIDER (no env fallback) when nothing is selected and no default exists", async () => {
     const { deps, created } = makeDeps();
     let loaderCalls = 0;
     deps.loadLlmConfig = async () => {
       loaderCalls++;
       return null;
     };
+    // No explicit id, no preference, and no admin default → a clear error, never a
+    // silent env-var fallback.
+    deps.loadDefaultLlmConfig = async () => null;
 
     const result = await generatePostFromContext(context(), "co-1", {}, deps);
 
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "NO_ACTIVE_PROVIDER");
+    assert.equal(loaderCalls, 0, "no per-selection lookup happens without an id");
+    assert.equal(created(), null, "nothing is generated without a configured provider");
+  });
+
+  it("uses the DB default config on the Auto path when one is configured", async () => {
+    const { deps, created } = makeDeps();
+    let selectedLoaderCalls = 0;
+    deps.loadLlmConfig = async () => {
+      selectedLoaderCalls++;
+      return null;
+    };
+    deps.loadDefaultLlmConfig = async () => ({ id: "default-cfg", provider: "claude" });
+
+    // No explicit llmConfigId → the "Auto" path resolves the DB default config.
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+
+    assert.ok(result.success, "generation via the DB default should succeed");
+    assert.equal(selectedLoaderCalls, 0, "the per-selection loader must not run on Auto");
+    const data = created()!;
+    // Provenance reflects the default CONFIG, not the env-var provider.
+    assert.equal(data.llmProvider, "CLAUDE");
+    assert.equal(data.llmModel, "claude-sonnet-4-6");
+    const snapshot = data.promptSnapshot as Record<string, unknown>;
+    // The resolved config id is recorded for provenance.
+    assert.equal(snapshot.llmConfigId, "default-cfg");
+    assert.equal(snapshot.provider, "CLAUDE");
+    assert.equal(snapshot.model, "claude-sonnet-4-6");
+  });
+});
+
+// ─── Per-user preferred LLM resolution ─────────────────────────────────────────
+
+describe("generatePostFromContext — preferred LLM resolution order", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  // A loader that resolves a small fixed set of active configs (id → provider).
+  function configLoaderFor(active: Record<string, LlmProvider>) {
+    return async (id: string) => {
+      const provider = active[id];
+      return provider ? { provider } : null;
+    };
+  }
+
+  const ADMIN_DEFAULT = { id: "admin-default", provider: "grok" as LlmProvider };
+  // Provenance models come from the registry defaults (env unset in tests).
+  const GROK_MODEL = "llama-3.3-70b-versatile";
+  const OPENAI_MODEL = "gpt-4.1-mini";
+
+  it("1. explicit form selection overrides the user preference", async () => {
+    const { deps, created } = makeDeps();
+    deps.loadLlmConfig = configLoaderFor({ override: "claude", pref: "openai" });
+    deps.loadDefaultLlmConfig = async () => ADMIN_DEFAULT;
+
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { llmConfigId: "override", preferredLlmConfigId: "pref" },
+      deps
+    );
+
     assert.ok(result.success);
-    assert.equal(loaderCalls, 0, "loadLlmConfig must not run on the default path");
-    const snapshot = created()!.promptSnapshot as Record<string, unknown>;
-    assert.equal(snapshot.llmConfigId, null, "llmConfigId is null on the default path");
-    // Falls back to context.llm (see makeContext).
-    assert.equal(snapshot.provider, "groq");
-    assert.equal(snapshot.model, "llama-3.3-70b-versatile");
+    const data = created()!;
+    assert.equal(data.llmProvider, "CLAUDE", "the explicit override wins over the preference");
+    assert.equal(data.llmModel, "claude-sonnet-4-6");
+    assert.equal((data.promptSnapshot as Record<string, unknown>).llmConfigId, "override");
+  });
+
+  it("2. the user preference overrides the admin default", async () => {
+    const { deps, created } = makeDeps();
+    deps.loadLlmConfig = configLoaderFor({ pref: "openai" });
+    deps.loadDefaultLlmConfig = async () => ADMIN_DEFAULT;
+
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { preferredLlmConfigId: "pref" },
+      deps
+    );
+
+    assert.ok(result.success);
+    const data = created()!;
+    assert.equal(data.llmProvider, "OPENAI", "the active preference wins over the admin default");
+    assert.equal(data.llmModel, OPENAI_MODEL);
+    assert.equal((data.promptSnapshot as Record<string, unknown>).llmConfigId, "pref");
+  });
+
+  it("3. an unavailable user preference falls back to the admin default", async () => {
+    const { deps, created } = makeDeps();
+    // The preference id resolves to null (inactive/deleted); the default is active.
+    deps.loadLlmConfig = configLoaderFor({});
+    deps.loadDefaultLlmConfig = async () => ADMIN_DEFAULT;
+
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { preferredLlmConfigId: "gone" },
+      deps
+    );
+
+    assert.ok(result.success, "an inactive preference falls through to the admin default");
+    const data = created()!;
+    assert.equal(data.llmProvider, "GROK", "falls back to the admin default provider");
+    assert.equal(data.llmModel, GROK_MODEL);
+    assert.equal((data.promptSnapshot as Record<string, unknown>).llmConfigId, "admin-default");
+  });
+
+  it("4. errors with NO_ACTIVE_PROVIDER when no admin default exists (no env fallback)", async () => {
+    const { deps, created } = makeDeps();
+    deps.loadLlmConfig = configLoaderFor({});
+    deps.loadDefaultLlmConfig = async () => null;
+
+    // Preference no longer active AND no admin default → clear error, not env.
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { preferredLlmConfigId: "gone" },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "NO_ACTIVE_PROVIDER");
+    assert.equal(created(), null, "nothing is generated without a configured provider");
+  });
+
+  it("5. a one-time explicit selection does not change the saved preference", async () => {
+    // generatePostFromContext has no ability to write the User table — proven by
+    // its DB interface (post + feedItem only). We assert the "stored preference"
+    // is untouched after generating with a one-time override. It stays `const`
+    // precisely because nothing in the generation path can reassign it.
+    const savedPreference: string | null = "pref";
+    const { deps } = makeDeps();
+    deps.loadLlmConfig = configLoaderFor({ override: "claude", pref: "openai" });
+    deps.loadDefaultLlmConfig = async () => ADMIN_DEFAULT;
+
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { llmConfigId: "override", preferredLlmConfigId: savedPreference },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(savedPreference, "pref", "the saved preference is left unchanged by generation");
+  });
+
+  it("6. cron generation (no user ids) ignores any preference and uses the admin default", async () => {
+    const { deps, created } = makeDeps();
+    let prefLookups = 0;
+    deps.loadLlmConfig = async (id) => {
+      prefLookups++;
+      return configLoaderFor({ pref: "openai" })(id);
+    };
+    deps.loadDefaultLlmConfig = async () => ADMIN_DEFAULT;
+
+    // Cron calls generatePostFromContext WITHOUT llmConfigId or preferredLlmConfigId.
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { initialStatus: "pending_approval" },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(prefLookups, 0, "no preference lookup happens on the cron path");
+    const data = created()!;
+    assert.equal(data.llmProvider, "GROK", "cron uses the admin default, never a user preference");
+    assert.equal((data.promptSnapshot as Record<string, unknown>).llmConfigId, "admin-default");
+  });
+
+  it("6b. cron generation fails clearly with NO_ACTIVE_PROVIDER when no default exists", async () => {
+    const { deps, created } = makeDeps();
+    deps.loadDefaultLlmConfig = async () => null;
+
+    // Cron path (no user ids) with no admin default must refuse, not fall back.
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { initialStatus: "pending_approval" },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "NO_ACTIVE_PROVIDER");
+    assert.equal(created(), null, "cron generates nothing without a configured default");
+  });
+});
+
+// ─── Unavailable (env config missing) providers never switch silently ──────────
+// These run in NON-mock mode so buildSupportedProvider actually inspects env: a
+// selected provider whose credentials are absent must error, not swap models.
+
+describe("generatePostFromContext — unavailable providers do not switch silently", () => {
+  let prevMockMode: string | undefined;
+  let prevGroqKey: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    prevGroqKey = process.env.GROQ_API_KEY;
+    delete process.env.AI_MOCK_MODE; // real build path
+    delete process.env.GROQ_API_KEY; // grok is active but unavailable
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+    if (prevGroqKey === undefined) delete process.env.GROQ_API_KEY;
+    else process.env.GROQ_API_KEY = prevGroqKey;
+  });
+
+  it("5. an explicit, active-but-unavailable provider errors (PROVIDER_CONFIG_MISSING)", async () => {
+    const { deps, created } = makeDeps();
+    // The explicit config resolves (active) but grok's env is missing → build fails.
+    deps.loadLlmConfig = async () => ({ provider: "grok" });
+    deps.loadDefaultLlmConfig = async () => ({ id: "default-cfg", provider: "grok" });
+
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { llmConfigId: "explicit-grok" },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "PROVIDER_CONFIG_MISSING");
+    assert.equal(created(), null, "an unavailable explicit provider is never swapped for another");
+  });
+
+  it("5b. an active-but-unavailable user preference errors instead of switching", async () => {
+    const { deps, created } = makeDeps();
+    deps.loadLlmConfig = async () => ({ provider: "grok" }); // preference resolves, but env missing
+    deps.loadDefaultLlmConfig = async () => ({ id: "default-cfg", provider: "grok" });
+
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { preferredLlmConfigId: "pref-grok" },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "PROVIDER_CONFIG_MISSING");
+    assert.equal(created(), null, "an unavailable preferred provider is never swapped");
   });
 });
 

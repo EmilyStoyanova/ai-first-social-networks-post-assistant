@@ -1,5 +1,13 @@
 type Variant =
-  "owner" | "editor" | "comingSoon" | "success" | "warning" | "danger" | "neutral" | "readonly";
+  | "owner"
+  | "editor"
+  | "comingSoon"
+  | "success"
+  | "warning"
+  | "danger"
+  | "neutral"
+  | "readonly"
+  | "accent";
 
 interface Props {
   variant: Variant;
@@ -18,6 +26,7 @@ const VARIANT_CLASSES: Record<Variant, string> = {
   danger: "bg-status-danger-bg text-status-danger-fg",
   neutral: "bg-status-neutral-bg text-status-neutral-fg",
   readonly: "bg-surface-subtle text-fg-faint",
+  accent: "bg-accent/10 text-accent",
 };
 
 export function Badge({ variant, children, className }: Props) {

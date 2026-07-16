@@ -8,7 +8,9 @@ import {
   getSetupStatuses,
   isSetupComplete,
 } from "@/lib/services/dashboard/get-setup-statuses.service";
+import { getUserLlmSettings } from "@/lib/services/user/get-user-llm-settings.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
+import { LlmPreferenceCard } from "@/components/user/llm-preference-card";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -54,6 +56,10 @@ export default async function DashboardPage() {
     user.id,
     user.isGlobalAdmin
   );
+
+  // Personal preferred-LLM control — only shown when admins have configured at
+  // least one active model to choose from.
+  const llmSettings = await getUserLlmSettings(user.id);
 
   const setupStatuses =
     companies.length > 0 ? await getSetupStatuses(companies.map((c) => c.id)) : new Map();
@@ -101,6 +107,14 @@ export default async function DashboardPage() {
             </Card>
           ))}
         </div>
+
+        {/* Personal AI-model preference */}
+        {llmSettings.llms.length > 0 && (
+          <LlmPreferenceCard
+            llms={llmSettings.llms}
+            preferredLlmConfigId={llmSettings.preferredLlmConfigId}
+          />
+        )}
 
         {companies.length === 0 ? (
           /* First-run onboarding card */

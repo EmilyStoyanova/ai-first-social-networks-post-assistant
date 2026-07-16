@@ -1,82 +1,125 @@
 import type { LlmProvider } from "@prisma/client";
 import { prisma } from "@/lib/db/client";
-import { getLlmProviderInfo } from "@/lib/ai/llm/llm-provider-factory";
+import { getSupportedProviderInfo } from "@/lib/ai/llm/supported-providers";
 
 /**
- * A configured LLM a company member may pick for a single generation (v2-5).
- * Deliberately narrow: it NEVER carries the API key, encrypted secret, base URL,
- * or creator — only what the generation dropdown needs to render and select.
+ * A provider a user may pick for a single generation, or save as a preference.
+ * Deliberately narrow: it NEVER carries credentials — only what the dropdown
+ * needs. The model/name come from the code registry (env), not the DB.
  */
 export interface AvailableLlm {
   id: string;
   displayName: string;
   provider: LlmProvider;
   model: string;
-  /** True when this config's provider matches the env-var default (LLM_PROVIDER). */
+  /** True for the single system default config that "Auto" resolves to. */
   isDefault: boolean;
+  /** True for the caller's saved preferred config (only when it is still active). */
+  isPreferred: boolean;
 }
 
 export type GetAvailableLlmsResult =
   { success: true; llms: AvailableLlm[] } | { success: false; code: "NOT_FOUND" };
 
-/** Friendly, human-facing provider name for the dropdown display label. */
-const PROVIDER_DISPLAY: Record<LlmProvider, string> = {
-  claude: "Claude",
-  openai: "OpenAI",
-  grok: "Grok",
-  text_worker: "Text Worker",
-};
-
 /**
- * Maps a configured provider enum to the uppercase label the env-var factory
- * reports via getLlmProviderInfo().provider, so `isDefault` compares like-for-like
- * ("claude" config ↔ "ANTHROPIC" env default).
+ * Maps an active runtime-state row to an AvailableLlm, flagging default/preferred.
+ * Display name and model come from the supported-providers registry (env/code).
  */
-const PROVIDER_TO_ENV_LABEL: Record<LlmProvider, string> = {
-  claude: "ANTHROPIC",
-  openai: "OPENAI",
-  grok: "GROQ",
-  text_worker: "TEXT_WORKER",
-};
+export function toAvailableLlm(
+  row: { id: string; provider: LlmProvider; isDefault: boolean },
+  preferredLlmConfigId: string | null
+): AvailableLlm {
+  const info = getSupportedProviderInfo(row.provider);
+  const model = info?.model ?? "";
+  return {
+    id: row.id,
+    displayName: info ? `${info.displayName} · ${model}` : row.provider,
+    provider: row.provider,
+    model,
+    isDefault: row.isDefault,
+    isPreferred: row.id === preferredLlmConfigId,
+  };
+}
+
+// ─── Minimal DB interface for testability ─────────────────────────────────────
+
+export interface AvailableLlmsDb {
+  company: {
+    findUnique: (args: {
+      where: { slug: string };
+      select: { id: true };
+    }) => Promise<{ id: string } | null>;
+  };
+  companyMember: {
+    findFirst: (args: {
+      where: { company: { slug: string }; userId: string };
+      select: { companyId: true };
+    }) => Promise<{ companyId: string } | null>;
+  };
+  user: {
+    findUnique: (args: {
+      where: { id: string };
+      select: { preferredLlmConfigId: true };
+    }) => Promise<{ preferredLlmConfigId: string | null } | null>;
+  };
+  llmConfig: {
+    findMany: (args: {
+      where: { isActive: true };
+      select: { id: true; provider: true; isDefault: true };
+      orderBy: { createdAt: "asc" };
+    }) => Promise<Array<{ id: string; provider: LlmProvider; isDefault: boolean }>>;
+  };
+}
 
 /**
  * Lists the active LLM configs available to a company member for per-generation
  * selection. Any member (owner or editor) or a global admin may read this; the
- * response is scrubbed of every secret (see AvailableLlm).
+ * response is scrubbed of every secret (see AvailableLlm). ALL active configs are
+ * returned — activation is no longer exclusive — the single default is marked
+ * (what "Auto" resolves to) and the caller's saved preference is flagged so the
+ * generation form can preselect it.
  */
-export async function getAvailableLlms(
+export async function getAvailableLlmsCore(
   slug: string,
   userId: string,
-  isGlobalAdmin: boolean
+  isGlobalAdmin: boolean,
+  db: AvailableLlmsDb
 ): Promise<GetAvailableLlmsResult> {
   // RBAC — confirm the caller can see this company (mirrors listChannelConfigs).
   if (isGlobalAdmin) {
-    const company = await prisma.company.findUnique({ where: { slug }, select: { id: true } });
+    const company = await db.company.findUnique({ where: { slug }, select: { id: true } });
     if (!company) return { success: false, code: "NOT_FOUND" };
   } else {
-    const membership = await prisma.companyMember.findFirst({
+    const membership = await db.companyMember.findFirst({
       where: { company: { slug }, userId },
       select: { companyId: true },
     });
     if (!membership) return { success: false, code: "NOT_FOUND" };
   }
 
-  const rows = await prisma.llmConfig.findMany({
+  const user = await db.user.findUnique({
+    where: { id: userId },
+    select: { preferredLlmConfigId: true },
+  });
+  const preferredLlmConfigId = user?.preferredLlmConfigId ?? null;
+
+  const rows = await db.llmConfig.findMany({
     where: { isActive: true },
-    // Explicit select — the encrypted key and base URL must never leave this layer.
-    select: { id: true, provider: true, modelName: true },
+    select: { id: true, provider: true, isDefault: true },
     orderBy: { createdAt: "asc" },
   });
 
-  const defaultEnvLabel = getLlmProviderInfo().provider;
-
-  const llms: AvailableLlm[] = rows.map((row) => ({
-    id: row.id,
-    displayName: `${PROVIDER_DISPLAY[row.provider]} · ${row.modelName}`,
-    provider: row.provider,
-    model: row.modelName,
-    isDefault: PROVIDER_TO_ENV_LABEL[row.provider] === defaultEnvLabel,
-  }));
+  const llms = rows.map((row) => toAvailableLlm(row, preferredLlmConfigId));
 
   return { success: true, llms };
+}
+
+// ─── Public API (uses real Prisma) ────────────────────────────────────────────
+
+export async function getAvailableLlms(
+  slug: string,
+  userId: string,
+  isGlobalAdmin: boolean
+): Promise<GetAvailableLlmsResult> {
+  return getAvailableLlmsCore(slug, userId, isGlobalAdmin, prisma);
 }

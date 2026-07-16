@@ -27,6 +27,8 @@ interface AvailableLlm {
   provider: string;
   model: string;
   isDefault: boolean;
+  /** The user's saved preference — preselected in the dropdown (v2-6). */
+  isPreferred: boolean;
 }
 
 /** Diagnostics the generate API attaches to a CANNOT_GENERATE_UNIQUE_POST error. */
@@ -66,7 +68,9 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems }: Props) 
   const [warnings, setWarnings] = useState<GenerationWarnings | null>(null);
 
   // Load the company's selectable LLMs once. Failure is silent — the dropdown
-  // simply stays at "System default", preserving the pre-v2-5 behaviour.
+  // simply stays at "System default", preserving the pre-v2-5 behaviour. When the
+  // user has a saved preference among the active models, preselect it (v2-6); a
+  // one-time change here never persists back to the saved preference.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -74,7 +78,11 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems }: Props) 
         const res = await fetch(`/api/v1/companies/${slug}/available-llms`);
         if (!res.ok) return;
         const json = (await res.json()) as { data?: AvailableLlm[] };
-        if (!cancelled && Array.isArray(json.data)) setAvailableLlms(json.data);
+        if (!cancelled && Array.isArray(json.data)) {
+          setAvailableLlms(json.data);
+          const preferred = json.data.find((llm) => llm.isPreferred);
+          if (preferred) setLlmConfigId(preferred.id);
+        }
       } catch {
         // Non-fatal: leave the dropdown at the system default.
       }

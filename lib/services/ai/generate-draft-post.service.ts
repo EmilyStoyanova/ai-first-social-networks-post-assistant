@@ -4,14 +4,12 @@ import { buildGenerationContext } from "./build-generation-context.service";
 import { resolveGenerationAspect } from "./resolve-generation-aspect.service";
 import type { GenerationContext, ILlmProvider } from "@/lib/ai/types";
 import { buildPrompts } from "@/lib/ai/prompt-builder";
+import { LLM_PROVIDER_LABEL } from "@/lib/ai/llm/llm-provider-factory";
 import {
-  getLlmProvider,
-  getLlmProviderFromConfig,
-  NoActiveLlmProviderError,
-  ProviderConfigMissingError,
-  LLM_PROVIDER_LABEL,
-} from "@/lib/ai/llm/llm-provider-factory";
-import { decrypt } from "@/lib/security/encryption";
+  buildSupportedProvider,
+  getSupportedProviderInfo,
+  ProviderNotAvailableError,
+} from "@/lib/ai/llm/supported-providers";
 import { LlmProviderError, LlmResponseParseError } from "@/lib/ai/errors";
 import {
   generateWithRetry,
@@ -108,11 +106,11 @@ export type GenerateDraftPostResult =
         | "FORBIDDEN"
         | "INVALID_CHANNEL"
         | "NO_ACTIVE_PROVIDER"
-        // A per-generation llmConfigId was supplied but no active config matches
-        // it (deleted or deactivated). Distinct from NO_ACTIVE_PROVIDER (v2-5).
+        // A per-generation llmConfigId was supplied but no active provider-state
+        // row matches it (deleted or deactivated). Distinct from NO_ACTIVE_PROVIDER.
         | "LLM_CONFIG_NOT_FOUND"
-        // The selected provider is missing required runtime config (e.g. a
-        // text_worker config with no base URL / TEXT_WORKER_URL) (v2-5).
+        // The resolved provider is active but its required environment config is
+        // now absent/incomplete (e.g. TEXT_WORKER_URL/API key removed).
         | "PROVIDER_CONFIG_MISSING"
         | "LLM_PROVIDER_ERROR"
         | "LLM_RESPONSE_PARSE_ERROR"
@@ -188,17 +186,18 @@ export interface GenerateDraftPostDeps {
    */
   semanticGate?: SemanticGate;
   /**
-   * Loads an active LlmConfig for per-generation provider selection (v2-5).
-   * Injected in tests; production reads the DB. Returns null when no active
-   * config matches the id. Never returns the decrypted key — only the encrypted
-   * blob, decrypted by the service just before building the provider.
+   * Resolves an ACTIVE provider-state row by id for per-generation selection.
+   * Injected in tests; production reads the DB. Returns null when no active row
+   * matches the id. Only the provider enum is returned — credentials and model
+   * come from env (see supported-providers.ts), never the DB.
    */
-  loadLlmConfig?: (id: string) => Promise<{
-    provider: LlmProvider;
-    modelName: string;
-    apiKeyEnc: string;
-    baseUrl: string | null;
-  } | null>;
+  loadLlmConfig?: (id: string) => Promise<{ provider: LlmProvider } | null>;
+  /**
+   * Loads the single system-default provider for the "Auto" path (no explicit
+   * llmConfigId). Injected in tests; production reads the DB. Returns null when no
+   * DB default is configured — the caller then falls back to the env-var provider.
+   */
+  loadDefaultLlmConfig?: () => Promise<{ id: string; provider: LlmProvider } | null>;
 }
 
 // ─── Service ───────────────────────────────────────────────────────────────────
@@ -218,10 +217,20 @@ export interface GeneratePostOptions {
    */
   includeSourceLinkOverride?: boolean;
   /**
-   * Explicit LLM config to use for this generation (v2-5). Undefined = use the
-   * env-var default provider (getLlmProvider), leaving the default path unchanged.
+   * Explicit, one-time LLM config chosen in the generation form (v2-5). Highest
+   * priority: when set it wins over the user preference and the admin default.
+   * An inactive/deleted id is a hard error (LLM_CONFIG_NOT_FOUND) — never a
+   * silent fallback, since the user made an explicit choice.
    */
   llmConfigId?: string;
+  /**
+   * The acting user's saved preferred LLM config id (persistent). Consulted only
+   * when no explicit llmConfigId is given, and only if it is still active — an
+   * unavailable preference falls back to the admin default (never an error).
+   * Cron/scheduled generation leaves this undefined so it always uses the admin
+   * default, never a user's preference.
+   */
+  preferredLlmConfigId?: string | null;
 }
 
 export async function generateDraftPost(
@@ -240,10 +249,22 @@ export async function generateDraftPost(
     return { success: false, code: contextResult.code };
   }
 
+  // Load the user's saved preference only when the form did not send an explicit
+  // one-time selection — an explicit choice always wins, so the read is skipped.
+  let preferredLlmConfigId: string | null = null;
+  if (!options.llmConfigId) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { preferredLlmConfigId: true },
+    });
+    preferredLlmConfigId = user?.preferredLlmConfigId ?? null;
+  }
+
   return generatePostFromContext(contextResult.context, contextResult.companyId, {
     contentLanguage: options.contentLanguage,
     includeSourceLinkOverride: options.includeSourceLinkOverride,
     llmConfigId: options.llmConfigId,
+    preferredLlmConfigId,
     generatedById: userId,
   });
 }
@@ -268,7 +289,14 @@ export async function generatePostFromContext(
     ((id: string) =>
       prisma.llmConfig.findFirst({
         where: { id, isActive: true },
-        select: { provider: true, modelName: true, apiKeyEnc: true, baseUrl: true },
+        select: { provider: true },
+      }));
+  const loadDefaultLlmConfig =
+    deps.loadDefaultLlmConfig ??
+    (() =>
+      prisma.llmConfig.findFirst({
+        where: { isActive: true, isDefault: true },
+        select: { id: true, provider: true },
       }));
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
@@ -321,9 +349,17 @@ export async function generatePostFromContext(
   // generation. Retries reuse this exact instance (passed once into the retry
   // loop below) — provider/model never switch mid-generation.
   //
-  // Two resolution paths (v2-5):
-  //   • llmConfigId set → load + decrypt that config, build a provider from it
-  //   • otherwise       → env-var default (getLlmProvider), unchanged behaviour
+  // Resolution order (highest priority first):
+  //   1. options.llmConfigId — explicit, one-time form selection (hard error if
+  //      inactive/deleted; never a silent fallback)
+  //   2. options.preferredLlmConfigId — the user's saved preference, used only if
+  //      still active (an inactive preference falls through to the admin default,
+  //      which the settings UI surfaces as the effective selection)
+  //   3. the single admin default config (active + isDefault)
+  //   4. no match → a clear configuration error. There is NO env-var fallback: a
+  //      provider is NEVER selected implicitly from LLM_PROVIDER or other env
+  //      defaults (env holds only credentials/models/URLs).
+  // Cron/scheduled generation passes neither id, so it requires the admin default.
   const llmConfigId = options.llmConfigId ?? null;
   let llmProviderStr = context.llm.provider;
   let llmModelStr = context.llm.model;
@@ -331,42 +367,62 @@ export async function generatePostFromContext(
   const isMock = process.env.AI_MOCK_MODE === "true";
   const mockProvider: ILlmProvider = { generate: async () => ({ text: MOCK_LLM_TEXT }) };
 
-  let provider: ILlmProvider;
+  // Resolve which provider to use, and the config id actually used (recorded on the
+  // post/promptSnapshot for provenance).
+  let selectedConfig: { provider: LlmProvider } | null = null;
+  let resolvedLlmConfigId: string | null = null;
   if (llmConfigId) {
-    const config = await loadLlmConfig(llmConfigId);
-    // Inactive or deleted config → treat as not found (never fall back silently
-    // to the default provider — the user made an explicit choice).
-    if (!config) {
+    // An explicit choice is never silently swapped: an inactive/deleted id errors.
+    selectedConfig = await loadLlmConfig(llmConfigId);
+    if (!selectedConfig) {
       return { success: false, code: "LLM_CONFIG_NOT_FOUND" };
     }
-    // Provenance stored on the post and in promptSnapshot reflects the CONFIG.
-    llmProviderStr = LLM_PROVIDER_LABEL[config.provider];
-    llmModelStr = config.modelName;
-    if (isMock) {
-      provider = mockProvider;
-    } else {
-      try {
-        provider = getLlmProviderFromConfig({
-          provider: config.provider,
-          modelName: config.modelName,
-          apiKey: decrypt(config.apiKeyEnc),
-          baseUrl: config.baseUrl,
-        });
-      } catch (err) {
-        if (err instanceof ProviderConfigMissingError) {
-          return { success: false, code: "PROVIDER_CONFIG_MISSING", message: err.message };
-        }
-        throw err;
+    resolvedLlmConfigId = llmConfigId;
+  } else {
+    // User preference first (only when still active), then the admin default.
+    if (options.preferredLlmConfigId) {
+      const preferred = await loadLlmConfig(options.preferredLlmConfigId);
+      if (preferred) {
+        selectedConfig = preferred;
+        resolvedLlmConfigId = options.preferredLlmConfigId;
       }
     }
-  } else if (isMock) {
+    if (!selectedConfig) {
+      const adminDefault = await loadDefaultLlmConfig();
+      if (adminDefault) {
+        selectedConfig = adminDefault;
+        resolvedLlmConfigId = adminDefault.id;
+      }
+    }
+  }
+
+  // No explicit selection, no active preference, and no active admin default. There
+  // is deliberately no env fallback — refuse clearly so an admin configures one.
+  if (!selectedConfig) {
+    return {
+      success: false,
+      code: "NO_ACTIVE_PROVIDER",
+      message: "No default AI model is configured. Contact an administrator.",
+    };
+  }
+
+  // Provenance reflects the resolved provider; the model comes from env (code).
+  llmProviderStr = LLM_PROVIDER_LABEL[selectedConfig.provider];
+  llmModelStr = getSupportedProviderInfo(selectedConfig.provider)?.model ?? llmModelStr;
+
+  let provider: ILlmProvider;
+  if (isMock) {
     provider = mockProvider;
   } else {
     try {
-      provider = getLlmProvider();
+      const built = buildSupportedProvider(selectedConfig.provider);
+      provider = built.instance;
+      llmModelStr = built.model;
     } catch (err) {
-      if (err instanceof NoActiveLlmProviderError) {
-        return { success: false, code: "NO_ACTIVE_PROVIDER", message: err.message };
+      // The provider was active but its env config is now absent/incomplete. This
+      // is a hard error — an explicit/preferred provider is never silently swapped.
+      if (err instanceof ProviderNotAvailableError) {
+        return { success: false, code: "PROVIDER_CONFIG_MISSING", message: err.message };
       }
       throw err;
     }
@@ -654,9 +710,10 @@ export async function generatePostFromContext(
         userPrompt,
         provider: llmProviderStr,
         model: llmModelStr,
-        // v2-5 — the explicitly selected config (null when the env-var default
-        // provider was used). provider/model above already reflect the choice.
-        llmConfigId,
+        // The LlmConfig actually used — an explicit selection, the user preference,
+        // or the admin default. Null only when the env-var fallback ran. provider/
+        // model above already reflect the resolved choice.
+        llmConfigId: resolvedLlmConfigId,
         feedItemIds,
         generatedAt: new Date().toISOString(),
         contentAngle: selectedAngle ?? null,

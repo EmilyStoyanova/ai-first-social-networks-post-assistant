@@ -81,6 +81,10 @@ model User {
   name          String?
   isGlobalAdmin Boolean  @default(false) @map("is_global_admin")
   preferredLang String   @default("en") @map("preferred_language")
+  // Per-user preferred LLM config. Nullable = "use system default". The relation
+  // is SetNull so deleting a config never orphans the FK — the user simply falls
+  // back to the admin default at generation time.
+  preferredLlmConfigId String? @map("preferred_llm_config_id")
   emailVerified Boolean  @default(false) @map("email_verified")
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
@@ -94,7 +98,7 @@ model User {
   postVersions            PostVersion[]
   auditLogs               AuditLog[]
   apiKeys                 ApiKey[]
-  llmConfigs              LlmConfig[]
+  preferredLlmConfig      LlmConfig?               @relation("UserPreferredLlm", fields: [preferredLlmConfigId], references: [id], onDelete: SetNull)
   emailVerificationTokens EmailVerificationToken[]
 
   @@map("users")
@@ -205,18 +209,21 @@ model BufferConnection {
   @@map("buffer_connections")
 }
 
+// Runtime state for a supported LLM provider — one row per provider. Credentials,
+// worker URLs, and model names come from environment variables (see
+// lib/ai/llm/supported-providers.ts); this table stores ONLY which providers the
+// admin has turned on and which single one is the global default.
 model LlmConfig {
   id        String      @id @default(uuid())
-  provider  LlmProvider
-  modelName String      @map("model_name")
-  apiKeyEnc String      @map("api_key_enc")
-  baseUrl   String?     @map("base_url")
+  provider  LlmProvider @unique
   isActive  Boolean     @default(false) @map("is_active")
-  createdBy String      @map("created_by")
+  // The single global default ("Auto"). At most one row is true at a time
+  // (enforced by the service layer). A default is always active.
+  isDefault Boolean     @default(false) @map("is_default")
   createdAt DateTime    @default(now()) @map("created_at")
   updatedAt DateTime    @updatedAt @map("updated_at")
 
-  creator User @relation(fields: [createdBy], references: [id])
+  preferredByUsers User[] @relation("UserPreferredLlm")
 
   @@map("llm_configs")
 }

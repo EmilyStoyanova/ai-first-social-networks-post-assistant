@@ -89,7 +89,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
           {
             error: {
               code: "NO_ACTIVE_PROVIDER",
-              message: "No active LLM provider configured. Configure one in Admin → LLM Providers.",
+              message: "No default AI model is configured. Contact an administrator.",
             },
           },
           { status: 503 }

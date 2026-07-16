@@ -36,7 +36,7 @@
     "UPLOAD_FAILED": "Upload failed. Please try again.",
     "UNSUPPORTED_TYPE": "This file type is not supported.",
     "NO_IMAGE_PROMPT": "This post has no image prompt.",
-    "NO_ACTIVE_PROVIDER": "No active LLM provider configured. Configure one in Admin → LLM Providers.",
+    "NO_ACTIVE_PROVIDER": "No default AI model is configured. Contact an administrator.",
     "LLM_CONFIG_NOT_FOUND": "The selected LLM is no longer available. Pick another or use the default.",
     "PROVIDER_CONFIG_MISSING": "The selected LLM is missing required configuration.",
     "LLM_RESPONSE_PARSE_ERROR": "The AI returned an unexpected response. Please try again.",
@@ -166,6 +166,16 @@
     "setupNeeded": {
       "title": "Setup needed",
       "continueSetup": "Continue setup"
+    }
+  },
+  "settings": {
+    "preferredLlm": {
+      "title": "Preferred AI model",
+      "description": "The model used to generate your posts by default. You can still override it for a single post when generating.",
+      "label": "Your preferred model",
+      "systemDefault": "System default (auto)",
+      "saved": "Saved",
+      "saveError": "Couldn't save your preference. Please try again."
     }
   },
   "companies": {
@@ -640,24 +650,23 @@
     "membersCol": "Members",
     "slug": "Slug",
     "website": "Website",
-    "addProvider": "Add Provider",
-    "configuredProviders": "Configured Providers",
-    "noProviders": "No providers configured yet.",
-    "provider": "Provider",
-    "model": "Model",
-    "modelRequired": "Model is required.",
-    "apiKey": "API Key",
-    "apiKeyRequired": "API key is required.",
-    "apiKeyHint": "Leave empty to keep existing key",
-    "active": "Active",
+    "providersHint": "Providers and their credentials are configured in code and deployment secrets. Here you choose which available providers are active and which one is the default.",
+    "statusAvailable": "Available",
+    "statusMisconfigured": "Misconfigured",
+    "statusNotConfigured": "Not configured",
+    "cannotActivateHint": "Configure this provider's environment variables before activating it.",
     "activeLlm": "ACTIVE",
     "inactiveLlm": "Inactive",
+    "defaultLlm": "DEFAULT",
     "activating": "Activating…",
     "setActive": "Set Active",
-    "deleteProvider": "Delete this provider?",
-    "saveShort": "Save",
-    "saveConfigError": "Failed to save configuration.",
+    "deactivate": "Deactivate",
+    "deactivating": "Deactivating…",
+    "setDefault": "Set as Default",
+    "settingDefault": "Setting…",
     "activateError": "Failed to activate provider.",
-    "deleteError": "Failed to delete provider."
+    "deactivateError": "Failed to deactivate provider.",
+    "setDefaultError": "Failed to set default provider.",
+    "providerUpdateError": "Failed to update provider."
   }
 }

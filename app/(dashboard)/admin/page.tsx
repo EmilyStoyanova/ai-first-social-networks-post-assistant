@@ -4,7 +4,7 @@ import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { listAdminUsers } from "@/lib/services/admin/list-users.service";
 import { listAdminCompanies } from "@/lib/services/admin/list-companies.service";
-import { listLlmConfigs } from "@/lib/services/admin/list-llm-configs.service";
+import { listLlmProviders } from "@/lib/services/admin/list-llm-providers.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Section } from "@/components/ui/Section";
@@ -25,23 +25,17 @@ export default async function AdminPage() {
   const t = await getTranslations("admin");
   const tNav = await getTranslations("navigation");
 
-  const [usersResult, companiesResult, configsResult] = await Promise.all([
+  const [usersResult, companiesResult, providersResult] = await Promise.all([
     listAdminUsers(session.user.isGlobalAdmin),
     listAdminCompanies(session.user.isGlobalAdmin),
-    listLlmConfigs(session.user.isGlobalAdmin),
+    listLlmProviders(session.user.isGlobalAdmin),
   ]);
 
   const users = usersResult.success ? usersResult.users : [];
   const companies = companiesResult.success ? companiesResult.companies : [];
   const adminCount = users.filter((u) => u.isGlobalAdmin).length;
 
-  const configs = configsResult.success
-    ? configsResult.configs.map((c) => ({
-        ...c,
-        createdAt: c.createdAt.toISOString(),
-        updatedAt: c.updatedAt.toISOString(),
-      }))
-    : [];
+  const providers = providersResult.success ? providersResult.providers : [];
 
   return (
     <DashboardLayout
@@ -62,7 +56,7 @@ export default async function AdminPage() {
         />
 
         <Section title={t("llmProviders")}>
-          <LlmConfigSection initialConfigs={configs} />
+          <LlmConfigSection initialProviders={providers} />
         </Section>
 
         <Section title={t("users")}>

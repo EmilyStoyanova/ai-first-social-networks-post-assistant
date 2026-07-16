@@ -1,17 +1,17 @@
 import { z } from "zod";
 
-export const createLlmConfigSchema = z.object({
-  provider: z.enum(["CLAUDE", "OPENAI", "GROK", "TEXT_WORKER"]),
-  model: z.string().min(1, "Model is required."),
-  apiKey: z.string().min(1, "API key is required."),
-  isActive: z.boolean().default(false),
-});
+/**
+ * Admin runtime-state toggle for a supported provider. Credentials are never
+ * accepted here — availability comes from environment variables only. At least
+ * one flag must be present.
+ */
+export const setLlmProviderStateSchema = z
+  .object({
+    isActive: z.boolean().optional(),
+    isDefault: z.boolean().optional(),
+  })
+  .refine((d) => d.isActive !== undefined || d.isDefault !== undefined, {
+    message: "Provide isActive and/or isDefault.",
+  });
 
-export const updateLlmConfigSchema = z.object({
-  model: z.string().min(1, "Model cannot be empty.").optional(),
-  apiKey: z.string().min(1, "API key cannot be empty.").optional(),
-  isActive: z.boolean().optional(),
-});
-
-export type CreateLlmConfigInput = z.infer<typeof createLlmConfigSchema>;
-export type UpdateLlmConfigInput = z.infer<typeof updateLlmConfigSchema>;
+export type SetLlmProviderStateInput = z.infer<typeof setLlmProviderStateSchema>;

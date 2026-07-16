@@ -3,83 +3,53 @@
 import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { Card } from "@/components/ui/Card";
-import { LlmConfigForm } from "./llm-config-form";
 import { LlmConfigRow } from "./llm-config-row";
 
 // ─── Shared type ──────────────────────────────────────────────────────────────
 
-export type ClientLlmConfig = {
-  id: string;
-  provider: "CLAUDE" | "OPENAI" | "GROK" | "TEXT_WORKER";
+export type ProviderStatus = "available" | "misconfigured" | "not_configured";
+
+export type ClientLlmProvider = {
+  provider: "claude" | "openai" | "grok" | "text_worker";
+  displayName: string;
   model: string;
+  status: ProviderStatus;
   isActive: boolean;
-  createdAt: string;
-  updatedAt: string;
+  isDefault: boolean;
 };
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 interface Props {
-  initialConfigs: ClientLlmConfig[];
+  initialProviders: ClientLlmProvider[];
 }
 
-export function LlmConfigSection({ initialConfigs }: Props) {
+export function LlmConfigSection({ initialProviders }: Props) {
   const t = useTranslations("admin");
-  const [configs, setConfigs] = useState<ClientLlmConfig[]>(initialConfigs);
+  const [providers, setProviders] = useState<ClientLlmProvider[]>(initialProviders);
 
-  function handleCreated(config: ClientLlmConfig) {
-    setConfigs((prev) => {
-      const base = config.isActive ? prev.map((c) => ({ ...c, isActive: false })) : prev;
-      return [...base, config];
-    });
-  }
-
-  function handleUpdated(updated: ClientLlmConfig) {
-    setConfigs((prev) =>
-      prev.map((c) => {
-        if (c.id === updated.id) return updated;
-        return updated.isActive ? { ...c, isActive: false } : c;
+  // Activation is not exclusive; only the default is. When a provider becomes the
+  // default, clear the flag on every other provider so the UI stays consistent.
+  function handleUpdated(updated: ClientLlmProvider) {
+    setProviders((prev) =>
+      prev.map((p) => {
+        if (p.provider === updated.provider) return updated;
+        return updated.isDefault ? { ...p, isDefault: false } : p;
       })
     );
   }
 
-  function handleDeleted(id: string) {
-    setConfigs((prev) => prev.filter((c) => c.id !== id));
-  }
-
   return (
     <Card className="px-6 py-6">
-      {/* Header */}
-      <div className="mb-5">
+      <div className="mb-2">
         <h2 className="text-fg text-sm font-semibold">{t("llmProviders")}</h2>
+        <p className="text-fg-muted mt-1 text-sm">{t("providersHint")}</p>
       </div>
 
-      {/* Add Provider */}
-      <div className="mb-5">
-        <h3 className="text-micro text-fg-faint mb-3">{t("addProvider")}</h3>
-        <LlmConfigForm onSaved={handleCreated} />
-      </div>
-
-      <hr className="border-border mb-5" />
-
-      {/* Configured Providers */}
-      <div>
-        <h3 className="text-micro text-fg-faint mb-3">{t("configuredProviders")}</h3>
-
-        {configs.length === 0 ? (
-          <p className="text-fg-faint py-4 text-center text-sm">{t("noProviders")}</p>
-        ) : (
-          <div className="divide-border divide-y">
-            {configs.map((config) => (
-              <LlmConfigRow
-                key={config.id}
-                config={config}
-                onUpdated={handleUpdated}
-                onDeleted={handleDeleted}
-              />
-            ))}
-          </div>
-        )}
+      <div className="divide-border divide-y">
+        {providers.map((provider) => (
+          <LlmConfigRow key={provider.provider} provider={provider} onUpdated={handleUpdated} />
+        ))}
       </div>
     </Card>
   );
