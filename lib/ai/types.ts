@@ -59,11 +59,6 @@ export interface FeedItemContext {
   consumable?: boolean;
 }
 
-export interface LlmContext {
-  provider: string;
-  model: string;
-}
-
 export interface GenerationContext {
   company: CompanyContext;
   brand: BrandContext | null;
@@ -79,5 +74,4 @@ export interface GenerationContext {
    * generate, not skip.
    */
   hasArticleSources: boolean;
-  llm: LlmContext;
 }

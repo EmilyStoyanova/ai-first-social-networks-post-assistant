@@ -837,7 +837,7 @@ Centered 400px card on a plain background, product wordmark above, no shell. Sin
 │  (LLM providers)                        [Add configuration]      │
 │  ┌ Anthropic · claude-fable-5        [Active] ── Edit · ⋯ ┐      │
 │  ┌ OpenAI · gpt-4o                    Activate · Edit · ⋯ ┐      │
-│  ┌ Grok · grok-3                      Activate · Edit · ⋯ ┐      │
+│  ┌ Groq · llama-3.3-70b-versatile                      Activate · Edit · ⋯ ┐      │
 ```
 
 ---

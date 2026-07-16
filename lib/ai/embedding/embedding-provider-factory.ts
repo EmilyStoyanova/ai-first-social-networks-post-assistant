@@ -3,8 +3,9 @@ import { MockEmbeddingProvider } from "./mock-embedding.provider";
 import { WorkerEmbeddingProvider } from "./worker-embedding.provider";
 
 /**
- * Embedding-provider factory — a separate axis from getLlmProvider()
- * (embeddings are not coupled to the text provider).
+ * Embedding-provider factory — a separate axis from LLM text generation
+ * (embeddings are not coupled to the text provider, and unlike it this factory
+ * is legitimately env-driven: there is no admin-managed embedding config).
  *
  * Fully LOCAL-FIRST: no cloud embedding provider, no third-party API key.
  * Resolution:

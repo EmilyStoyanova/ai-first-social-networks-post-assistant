@@ -56,8 +56,10 @@ interface ProviderDef {
 
 const DEFS: readonly ProviderDef[] = [
   {
+    // The `grok` enum value is a historical misnomer kept for DB compatibility;
+    // this provider is Groq (api.groq.com), never xAI's Grok.
     provider: "grok",
-    displayName: "Grok",
+    displayName: "Groq",
     model: () => process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
     status: () => (process.env.GROQ_API_KEY ? "available" : "not_configured"),
     build: (model) => {

@@ -17,18 +17,18 @@ An AI-powered tool that automates social media post creation, scheduling, and pu
 
 ## Technology Stack
 
-| Layer              | Technology                                                                                                                                                                                        |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Frontend**       | Next.js 16 (App Router), React (RSC + Client Components), Tailwind CSS, ShadCN/UI, TanStack Query, next-intl (i18n: EN / BG)                                                                      |
-| **Backend**        | Next.js Route Handlers, TypeScript (strict), Zod (validation), Prisma ORM                                                                                                                         |
-| **Database**       | PostgreSQL — Neon (serverless, free tier)                                                                                                                                                         |
-| **Authentication** | Auth.js v5 (Credentials provider), JWT sessions, bcrypt                                                                                                                                           |
-| **AI — Text**      | Multi-LLM with runtime switching: Claude (Anthropic), OpenAI GPT-4o, Grok (xAI). Grok recommended for local development (free tier). Active provider configured by global admin and stored in DB. |
-| **AI — Images**    | Leonardo.ai API                                                                                                                                                                                   |
-| **Storage**        | Cloudinary (media assets, CDN, free tier) — required in v1 for logo uploads, user gallery, and AI-generated images; no persistent file system on Vercel serverless                                |
-| **Deployment**     | Vercel (Hobby plan)                                                                                                                                                                               |
-| **External APIs**  | Buffer API (publishing, analytics), Cloudinary API, Leonardo.ai API                                                                                                                               |
-| **Dev tooling**    | ESLint, Prettier, Husky, lint-staged, Sentry (error tracking)                                                                                                                                     |
+| Layer              | Technology                                                                                                                                                                                          |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Frontend**       | Next.js 16 (App Router), React (RSC + Client Components), Tailwind CSS, ShadCN/UI, TanStack Query, next-intl (i18n: EN / BG)                                                                        |
+| **Backend**        | Next.js Route Handlers, TypeScript (strict), Zod (validation), Prisma ORM                                                                                                                           |
+| **Database**       | PostgreSQL — Neon (serverless, free tier)                                                                                                                                                           |
+| **Authentication** | Auth.js v5 (Credentials provider), JWT sessions, bcrypt                                                                                                                                             |
+| **AI — Text**      | Multi-LLM with runtime switching: Claude (Anthropic), OpenAI GPT-4o, Groq (Llama). Groq recommended for local development (free tier). Active provider configured by global admin and stored in DB. |
+| **AI — Images**    | Leonardo.ai API                                                                                                                                                                                     |
+| **Storage**        | Cloudinary (media assets, CDN, free tier) — required in v1 for logo uploads, user gallery, and AI-generated images; no persistent file system on Vercel serverless                                  |
+| **Deployment**     | Vercel (Hobby plan)                                                                                                                                                                                 |
+| **External APIs**  | Buffer API (publishing, analytics), Cloudinary API, Leonardo.ai API                                                                                                                                 |
+| **Dev tooling**    | ESLint, Prettier, Husky, lint-staged, Sentry (error tracking)                                                                                                                                       |
 
 ---
 
@@ -69,7 +69,7 @@ An AI-powered tool that automates social media post creation, scheduling, and pu
 - **Vercel Hobby plan** — deployment targets the free Hobby plan; one cron job available with a 60-second function execution limit
 - **Neon free tier** — 512 MB database storage is sufficient for v1 user volumes
 - **Cloudinary free tier** — 25 GB monthly bandwidth is sufficient; per-company gallery capped at 50 assets to stay within limits
-- **LLM API access** — at least one LLM provider API key (Claude, OpenAI, or Grok) is configured by the global admin; Grok's free tier is suitable for local development; token costs in production are absorbed by the operator
+- **LLM API access** — at least one LLM provider API key (Claude, OpenAI, or Groq) is configured by the global admin; Groq's free tier is suitable for local development; token costs in production are absorbed by the operator
 - **Leonardo.ai API access** — a valid API key is provided; free-tier credits are sufficient for v1 usage
 - **UI language** — the application interface supports English (EN) and Bulgarian (BG) via `next-intl`; the user selects their preferred language in profile settings
 - **Content language** — generated posts can be produced in EN or BG as configured per company or per channel; the LLM is instructed to generate in the target language
@@ -124,7 +124,7 @@ Next.js Server (Vercel)
         │
         ├──► PostgreSQL via Prisma (Neon free tier)
         ├──► Buffer API (OAuth, drafts, analytics)
-        ├──► LLM Router → Claude / GPT-4o / Grok (active provider from DB)
+        ├──► LLM Router → Claude / GPT-4o / Groq (active provider from DB)
         ├──► Leonardo.ai (image generation)
         └──► Cloudinary (media storage + CDN)
 ```
@@ -144,7 +144,7 @@ Next.js Server (Vercel)
 | Dependency                                | Purpose                                                                                                                        | If Unavailable                                                                                                                                            |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Buffer API**                            | Social network OAuth, post scheduling, publishing, and analytics                                                               | Core publishing is non-functional; no viable v1 fallback — must monitor Buffer's status page                                                              |
-| **LLM Provider (Claude / OpenAI / Grok)** | Text generation for posts, hashtags, safety checks. Active provider is stored in DB and switchable by global admin at runtime. | If the active provider is unavailable, the admin switches to another in the admin panel — no code change required; all providers share a common interface |
+| **LLM Provider (Claude / OpenAI / Groq)** | Text generation for posts, hashtags, safety checks. Active provider is stored in DB and switchable by global admin at runtime. | If the active provider is unavailable, the admin switches to another in the admin panel — no code change required; all providers share a common interface |
 | **Leonardo.ai API**                       | AI image generation                                                                                                            | Users fall back to manual gallery uploads; generation feature is disabled gracefully in UI                                                                |
 | **Cloudinary**                            | Media asset storage and CDN delivery                                                                                           | Image uploads and delivery are blocked; no local file storage on Vercel serverless                                                                        |
 | **Neon PostgreSQL**                       | Primary data store for all application data                                                                                    | Entire application is non-functional; Neon provides automatic failover within its free tier                                                               |
@@ -368,7 +368,7 @@ users ──< company_members >── companies
 | 2     | **Company & Brand Management** — multi-company CRUD, team invitations, brand guidelines, global admin, LLM config UI                                                                                                         | 3–4   | Medium     |
 | 3     | **Buffer Integration & Channel Configuration** — OAuth flow, AES-256 token storage, per-channel settings (schedule, windows, language, image rules, automation override)                                                     | 5–6   | High       |
 | 4     | **Content Sources & Feed Ingestion** — RSS parser, product URL crawler, manual prompts, calendar events, per-source deduplication                                                                                            | 7–8   | Medium     |
-| 5     | **AI Content Generation Engine** — LLM router (Claude/GPT-4o/Grok), weekly schedule generation, channel-specific prompt builder, duplicate detection, content safety check                                                   | 9–10  | Very High  |
+| 5     | **AI Content Generation Engine** — LLM router (Claude/GPT-4o/Groq), weekly schedule generation, channel-specific prompt builder, duplicate detection, content safety check                                                   | 9–10  | Very High  |
 | 6     | **Media Gallery & Image Generation** — Cloudinary signed uploads, Leonardo.ai integration, image picker (gallery + generate tabs), brand-aware generation prompts                                                            | 11–12 | Medium     |
 | 7     | **Post Approval Workflow** — approval queue driven by company/channel automation mode, post editor with inline image picker, version history, rejection with notes, audit log page, weekly calendar view                     | 13–14 | Medium     |
 | 8     | **Scheduling, Automation & Reliability** — Vercel Cron dispatcher, Buffer send with retry logic, health endpoint                                                                                                             | 15    | Medium     |

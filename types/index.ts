@@ -30,4 +30,3 @@ export type PostStatus =
   | "sent_to_buffer"
   | "published"
   | "failed";
-export type LlmProvider = "claude" | "openai" | "grok";

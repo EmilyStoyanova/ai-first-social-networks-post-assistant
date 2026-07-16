@@ -114,6 +114,26 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
           },
           { status: 503 }
         );
+      case "LLM_RATE_LIMITED": {
+        const retryAfterSec =
+          result.retryAfterMs !== undefined
+            ? Math.max(1, Math.ceil(result.retryAfterMs / 1000))
+            : undefined;
+        return NextResponse.json(
+          {
+            error: {
+              code: "LLM_RATE_LIMITED",
+              message: "The AI provider is temporarily rate limited. Please try again shortly.",
+              retryAfterMs: result.retryAfterMs,
+            },
+          },
+          {
+            status: 429,
+            // Standard header so clients/proxies can honour the provider's wait.
+            headers: retryAfterSec !== undefined ? { "retry-after": String(retryAfterSec) } : {},
+          }
+        );
+      }
       case "LLM_PROVIDER_ERROR":
         return NextResponse.json(
           {

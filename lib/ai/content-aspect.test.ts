@@ -85,7 +85,6 @@ const CTX: GenerationContext = {
   },
   feedItems: FEED_ITEMS,
   hasArticleSources: true,
-  llm: { provider: "groq", model: "llama-3.3-70b-versatile" },
 };
 
 // ─── 1. aspectId — deterministic ──────────────────────────────────────────────

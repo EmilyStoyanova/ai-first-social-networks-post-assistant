@@ -4,13 +4,12 @@ import { buildGenerationContext } from "./build-generation-context.service";
 import { resolveGenerationAspect } from "./resolve-generation-aspect.service";
 import type { GenerationContext, ILlmProvider } from "@/lib/ai/types";
 import { buildPrompts } from "@/lib/ai/prompt-builder";
-import { LLM_PROVIDER_LABEL } from "@/lib/ai/llm/llm-provider-factory";
+import { resolveLlmSelection } from "./resolve-llm-selection.service";
 import {
   buildSupportedProvider,
-  getSupportedProviderInfo,
   ProviderNotAvailableError,
 } from "@/lib/ai/llm/supported-providers";
-import { LlmProviderError, LlmResponseParseError } from "@/lib/ai/errors";
+import { LlmProviderError, LlmRateLimitError, LlmResponseParseError } from "@/lib/ai/errors";
 import {
   generateWithRetry,
   type GenerationLoopResult,
@@ -112,6 +111,9 @@ export type GenerateDraftPostResult =
         // The resolved provider is active but its required environment config is
         // now absent/incomplete (e.g. TEXT_WORKER_URL/API key removed).
         | "PROVIDER_CONFIG_MISSING"
+        // The provider is rate limiting us (HTTP 429) and its bounded retries were
+        // exhausted. We never switch provider/model to dodge a limit.
+        | "LLM_RATE_LIMITED"
         | "LLM_PROVIDER_ERROR"
         | "LLM_RESPONSE_PARSE_ERROR"
         | "POST_TOO_LONG_WITH_URL"
@@ -127,6 +129,11 @@ export type GenerateDraftPostResult =
       reason?: UniquenessFailureReason;
       /** Set only for CANNOT_GENERATE_UNIQUE_POST — attempts made before aborting. */
       attempts?: number;
+      /**
+       * Set only for LLM_RATE_LIMITED, and only when the provider advertised a
+       * Retry-After — how long to wait before trying again.
+       */
+      retryAfterMs?: number;
     };
 
 // ─── Minimal DB interface for testability ─────────────────────────────────────
@@ -284,20 +291,6 @@ export async function generatePostFromContext(
   const auditLog = deps.auditLog ?? createAuditLog;
   const embed = deps.embed ?? embedPost;
   const recordCalibration = deps.recordCalibration ?? recordSemanticCalibration;
-  const loadLlmConfig =
-    deps.loadLlmConfig ??
-    ((id: string) =>
-      prisma.llmConfig.findFirst({
-        where: { id, isActive: true },
-        select: { provider: true },
-      }));
-  const loadDefaultLlmConfig =
-    deps.loadDefaultLlmConfig ??
-    (() =>
-      prisma.llmConfig.findFirst({
-        where: { isActive: true, isDefault: true },
-        select: { id: true, provider: true },
-      }));
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
 
@@ -347,75 +340,38 @@ export async function generatePostFromContext(
   // ── LLM provider ─────────────────────────────────────────────────────────
   // Created before aspect mining so the same provider handles both extraction and
   // generation. Retries reuse this exact instance (passed once into the retry
-  // loop below) — provider/model never switch mid-generation.
-  //
-  // Resolution order (highest priority first):
-  //   1. options.llmConfigId — explicit, one-time form selection (hard error if
-  //      inactive/deleted; never a silent fallback)
-  //   2. options.preferredLlmConfigId — the user's saved preference, used only if
-  //      still active (an inactive preference falls through to the admin default,
-  //      which the settings UI surfaces as the effective selection)
-  //   3. the single admin default config (active + isDefault)
-  //   4. no match → a clear configuration error. There is NO env-var fallback: a
-  //      provider is NEVER selected implicitly from LLM_PROVIDER or other env
-  //      defaults (env holds only credentials/models/URLs).
-  // Cron/scheduled generation passes neither id, so it requires the admin default.
-  const llmConfigId = options.llmConfigId ?? null;
-  let llmProviderStr = context.llm.provider;
-  let llmModelStr = context.llm.model;
-
+  // loop below) — provider/model never switch mid-generation, including in
+  // response to a rate limit.
   const isMock = process.env.AI_MOCK_MODE === "true";
   const mockProvider: ILlmProvider = { generate: async () => ({ text: MOCK_LLM_TEXT }) };
 
   // Resolve which provider to use, and the config id actually used (recorded on the
-  // post/promptSnapshot for provenance).
-  let selectedConfig: { provider: LlmProvider } | null = null;
-  let resolvedLlmConfigId: string | null = null;
-  if (llmConfigId) {
-    // An explicit choice is never silently swapped: an inactive/deleted id errors.
-    selectedConfig = await loadLlmConfig(llmConfigId);
-    if (!selectedConfig) {
-      return { success: false, code: "LLM_CONFIG_NOT_FOUND" };
-    }
-    resolvedLlmConfigId = llmConfigId;
-  } else {
-    // User preference first (only when still active), then the admin default.
-    if (options.preferredLlmConfigId) {
-      const preferred = await loadLlmConfig(options.preferredLlmConfigId);
-      if (preferred) {
-        selectedConfig = preferred;
-        resolvedLlmConfigId = options.preferredLlmConfigId;
-      }
-    }
-    if (!selectedConfig) {
-      const adminDefault = await loadDefaultLlmConfig();
-      if (adminDefault) {
-        selectedConfig = adminDefault;
-        resolvedLlmConfigId = adminDefault.id;
-      }
-    }
+  // post/promptSnapshot for provenance). See resolve-llm-selection.service.ts for
+  // the precedence rules; it is shared with the prompt-preview route so a preview
+  // can never report a provider other than the one that really runs.
+  const selectionResult = await resolveLlmSelection(
+    {
+      llmConfigId: options.llmConfigId ?? null,
+      preferredLlmConfigId: options.preferredLlmConfigId ?? null,
+    },
+    { loadLlmConfig: deps.loadLlmConfig, loadDefaultLlmConfig: deps.loadDefaultLlmConfig }
+  );
+  if (!selectionResult.success) {
+    return { success: false, code: selectionResult.code, message: selectionResult.message };
   }
-
-  // No explicit selection, no active preference, and no active admin default. There
-  // is deliberately no env fallback — refuse clearly so an admin configures one.
-  if (!selectedConfig) {
-    return {
-      success: false,
-      code: "NO_ACTIVE_PROVIDER",
-      message: "No default AI model is configured. Contact an administrator.",
-    };
-  }
+  const { selection } = selectionResult;
+  const resolvedLlmConfigId = selection.llmConfigId;
 
   // Provenance reflects the resolved provider; the model comes from env (code).
-  llmProviderStr = LLM_PROVIDER_LABEL[selectedConfig.provider];
-  llmModelStr = getSupportedProviderInfo(selectedConfig.provider)?.model ?? llmModelStr;
+  const llmProviderStr = selection.providerLabel;
+  let llmModelStr = selection.model;
 
   let provider: ILlmProvider;
   if (isMock) {
     provider = mockProvider;
   } else {
     try {
-      const built = buildSupportedProvider(selectedConfig.provider);
+      const built = buildSupportedProvider(selection.provider);
       provider = built.instance;
       llmModelStr = built.model;
     } catch (err) {
@@ -542,6 +498,15 @@ export async function generatePostFromContext(
     // Diagnostic: the terminal error code the route maps to HTTP 502. No prompt,
     // key, or model content is logged — the code (and parse category) suffice to
     // classify the failure. The provider already logged worker status/transport.
+    // Must precede the LlmProviderError branch — LlmRateLimitError extends it.
+    if (err instanceof LlmRateLimitError) {
+      console.warn(
+        `[llm-diag] generation aborted → code=LLM_RATE_LIMITED (maps to HTTP 429) retryAfterMs=${
+          err.retryAfterMs ?? "unknown"
+        }`
+      );
+      return { success: false, code: "LLM_RATE_LIMITED", retryAfterMs: err.retryAfterMs };
+    }
     if (err instanceof LlmProviderError) {
       console.warn("[llm-diag] generation aborted → code=LLM_PROVIDER_ERROR (maps to HTTP 502)");
       return { success: false, code: "LLM_PROVIDER_ERROR", message: err.message };

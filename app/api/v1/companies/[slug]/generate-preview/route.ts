@@ -4,7 +4,8 @@ import { auth } from "@/lib/auth";
 import { buildGenerationContext } from "@/lib/services/ai/build-generation-context.service";
 import { resolveGenerationAspect } from "@/lib/services/ai/resolve-generation-aspect.service";
 import { buildPrompts } from "@/lib/ai/prompt-builder";
-import { getLlmProvider } from "@/lib/ai/llm/llm-provider-factory";
+import { resolveLlmSelection } from "@/lib/services/ai/resolve-llm-selection.service";
+import { buildSupportedProvider } from "@/lib/ai/llm/supported-providers";
 import { prisma } from "@/lib/db/client";
 import { type SocialChannel } from "@prisma/client";
 
@@ -14,6 +15,8 @@ const bodySchema = z.object({
     .transform((v) => v.toLowerCase())
     .pipe(z.enum(["facebook", "linkedin", "instagram", "tiktok"])),
   contentLanguage: z.enum(["en", "bg"]).optional().default("en"),
+  // Mirrors the real generate endpoint so a preview reflects the same choice.
+  llmConfigId: z.string().min(1).optional(),
 });
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -95,6 +98,50 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
 
   const { context, companyId } = result;
 
+  // ── Provider selection (identical to real generation) ─────────────────────
+  // Resolved from LlmConfig rows via the shared resolver — never from env — so
+  // the provider/model shown here is the one a real generation would use.
+  let preferredLlmConfigId: string | null = null;
+  if (!parsed.data.llmConfigId) {
+    const user = await prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: { preferredLlmConfigId: true },
+    });
+    preferredLlmConfigId = user?.preferredLlmConfigId ?? null;
+  }
+
+  const selectionResult = await resolveLlmSelection({
+    llmConfigId: parsed.data.llmConfigId ?? null,
+    preferredLlmConfigId,
+  });
+
+  if (!selectionResult.success) {
+    switch (selectionResult.code) {
+      case "LLM_CONFIG_NOT_FOUND":
+        return NextResponse.json(
+          {
+            error: {
+              code: "LLM_CONFIG_NOT_FOUND",
+              message: "The selected LLM is no longer available. Pick another or use the default.",
+            },
+          },
+          { status: 404 }
+        );
+      case "NO_ACTIVE_PROVIDER":
+        return NextResponse.json(
+          {
+            error: {
+              code: "NO_ACTIVE_PROVIDER",
+              message: "No default AI model is configured. Contact an administrator.",
+            },
+          },
+          { status: 503 }
+        );
+    }
+  }
+
+  const { selection } = selectionResult;
+
   // ── Aspect mining (same logic as real generation) ─────────────────────────
   // Query recent posts so we can load the existing aspect pool for this context.
   const recentRows = await prisma.post.findMany({
@@ -111,7 +158,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     const provider =
       process.env.AI_MOCK_MODE === "true"
         ? { generate: async () => ({ text: "[]" }) }
-        : getLlmProvider();
+        : buildSupportedProvider(selection.provider).instance;
 
     const aspectResult = await resolveGenerationAspect({
       feedItems: context.feedItems,
@@ -129,8 +176,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
   });
 
   return NextResponse.json({
-    provider: context.llm.provider,
-    model: context.llm.model,
+    provider: selection.providerLabel,
+    model: selection.model,
+    llmConfigId: selection.llmConfigId,
     systemPrompt,
     userPrompt,
     selectedAspect: selectedAspect ?? null,

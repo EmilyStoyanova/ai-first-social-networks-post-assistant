@@ -1,5 +1,19 @@
 # v2-5 — Per-Generation LLM Model Selector
 
+> **Superseded — historical record.** This document describes the design as
+> planned. The shipped architecture diverges in three ways:
+>
+> 1. **There is no env-var provider selection.** `LLM_PROVIDER` and
+>    `getLlmProvider()` are gone. Every provider is resolved from `LlmConfig`
+>    rows via `lib/services/ai/resolve-llm-selection.service.ts`; env supplies
+>    only credentials, model names, and worker URLs.
+> 2. **`LlmConfig` stores runtime state only** (`isActive`, `isDefault`). API
+>    keys, model names, and `baseUrl` are no longer stored in the DB.
+> 3. **`isDefault` is an admin choice**, not a mirror of an env var.
+>
+> The `grok` enum value below is a historical misnomer retained for DB
+> compatibility: the provider is **Groq** (`api.groq.com`), never xAI's Grok.
+
 ## Goal
 
 Let users select which configured LLM to use for a specific generation request. The LLM factory remains env-var driven at its core; per-generation selection layers on top without modifying the factory's primary path.
@@ -48,7 +62,7 @@ export function getLlmProviderFromConfig(config: {
     case "openai":
       return new OpenAIProvider(config.apiKey, config.modelName);
     case "grok":
-      return new GrokProvider(config.apiKey, config.modelName);
+      return new GroqProvider(config.apiKey, config.modelName);
     case "text_worker":
       return new TextWorkerProvider(
         config.baseUrl ?? process.env.TEXT_WORKER_URL!,

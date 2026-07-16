@@ -1,5 +1,4 @@
 import { prisma } from "@/lib/db/client";
-import { getLlmProviderInfo } from "@/lib/ai/llm/llm-provider-factory";
 import type { GenerationContext } from "@/lib/ai/types";
 import { CONSUMABLE_SOURCE_TYPES, isConsumableSourceType } from "@/lib/ai/source-types";
 
@@ -212,7 +211,6 @@ async function loadContext(
       consumable: isConsumableSourceType(f.source.type),
     })),
     hasArticleSources,
-    llm: getLlmProviderInfo(),
   };
 
   return { success: true, context, companyId };

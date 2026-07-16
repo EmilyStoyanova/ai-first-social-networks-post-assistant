@@ -38,7 +38,6 @@ function makeContext(overrides: Partial<GenerationContext> = {}): GenerationCont
     },
     feedItems: [],
     hasArticleSources: false,
-    llm: { provider: "groq", model: "llama-3.3-70b-versatile" },
     ...overrides,
   };
 }
@@ -761,7 +760,7 @@ describe("generatePostFromContext — preferred LLM resolution order", () => {
 
   const ADMIN_DEFAULT = { id: "admin-default", provider: "grok" as LlmProvider };
   // Provenance models come from the registry defaults (env unset in tests).
-  const GROK_MODEL = "llama-3.3-70b-versatile";
+  const GROQ_MODEL_NAME = "llama-3.3-70b-versatile";
   const OPENAI_MODEL = "gpt-4.1-mini";
 
   it("1. explicit form selection overrides the user preference", async () => {
@@ -817,8 +816,8 @@ describe("generatePostFromContext — preferred LLM resolution order", () => {
 
     assert.ok(result.success, "an inactive preference falls through to the admin default");
     const data = created()!;
-    assert.equal(data.llmProvider, "GROK", "falls back to the admin default provider");
-    assert.equal(data.llmModel, GROK_MODEL);
+    assert.equal(data.llmProvider, "GROQ", "falls back to the admin default provider");
+    assert.equal(data.llmModel, GROQ_MODEL_NAME);
     assert.equal((data.promptSnapshot as Record<string, unknown>).llmConfigId, "admin-default");
   });
 
@@ -881,7 +880,7 @@ describe("generatePostFromContext — preferred LLM resolution order", () => {
     assert.ok(result.success);
     assert.equal(prefLookups, 0, "no preference lookup happens on the cron path");
     const data = created()!;
-    assert.equal(data.llmProvider, "GROK", "cron uses the admin default, never a user preference");
+    assert.equal(data.llmProvider, "GROQ", "cron uses the admin default, never a user preference");
     assert.equal((data.promptSnapshot as Record<string, unknown>).llmConfigId, "admin-default");
   });
 

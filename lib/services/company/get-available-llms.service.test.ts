@@ -35,9 +35,15 @@ function makeDb(
 }
 
 describe("getAvailableLlmsCore", () => {
-  it("returns all active configs (Grok and Text Worker together)", async () => {
+  it("returns all active configs (Groq and Text Worker together)", async () => {
     const db = makeDb([
-      { id: "grok", provider: "grok", modelName: "grok-4", isActive: true, isDefault: true },
+      {
+        id: "grok",
+        provider: "grok",
+        modelName: "llama-3.3-70b-versatile",
+        isActive: true,
+        isDefault: true,
+      },
       {
         id: "tw",
         provider: "text_worker",
@@ -57,7 +63,13 @@ describe("getAvailableLlmsCore", () => {
 
   it("marks only the single default config as isDefault", async () => {
     const db = makeDb([
-      { id: "grok", provider: "grok", modelName: "grok-4", isActive: true, isDefault: true },
+      {
+        id: "grok",
+        provider: "grok",
+        modelName: "llama-3.3-70b-versatile",
+        isActive: true,
+        isDefault: true,
+      },
       {
         id: "tw",
         provider: "text_worker",
@@ -77,7 +89,13 @@ describe("getAvailableLlmsCore", () => {
 
   it("excludes inactive configs", async () => {
     const db = makeDb([
-      { id: "grok", provider: "grok", modelName: "grok-4", isActive: true, isDefault: true },
+      {
+        id: "grok",
+        provider: "grok",
+        modelName: "llama-3.3-70b-versatile",
+        isActive: true,
+        isDefault: true,
+      },
       { id: "openai", provider: "openai", modelName: "gpt-4o", isActive: false, isDefault: false },
     ]);
 
@@ -91,7 +109,13 @@ describe("getAvailableLlmsCore", () => {
   it("flags the caller's active saved preference as isPreferred", async () => {
     const db = makeDb(
       [
-        { id: "grok", provider: "grok", modelName: "grok-4", isActive: true, isDefault: true },
+        {
+          id: "grok",
+          provider: "grok",
+          modelName: "llama-3.3-70b-versatile",
+          isActive: true,
+          isDefault: true,
+        },
         {
           id: "tw",
           provider: "text_worker",
@@ -115,7 +139,15 @@ describe("getAvailableLlmsCore", () => {
     // The stored preference points at an inactive config, so it never appears in
     // the active list and nothing is flagged — the form shows the system default.
     const db = makeDb(
-      [{ id: "grok", provider: "grok", modelName: "grok-4", isActive: true, isDefault: true }],
+      [
+        {
+          id: "grok",
+          provider: "grok",
+          modelName: "llama-3.3-70b-versatile",
+          isActive: true,
+          isDefault: true,
+        },
+      ],
       "openai-inactive"
     );
 

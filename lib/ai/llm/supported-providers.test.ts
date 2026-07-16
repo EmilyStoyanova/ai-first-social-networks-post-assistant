@@ -54,7 +54,7 @@ describe("supported-providers registry", () => {
     assert.equal(isProviderAvailable("grok"), false);
   });
 
-  it("reports available for Grok once GROQ_API_KEY exists", () => {
+  it("reports available for Groq once GROQ_API_KEY exists", () => {
     process.env.GROQ_API_KEY = "k";
     assert.equal(getSupportedProviderInfo("grok")!.status, "available");
     assert.equal(isProviderAvailable("grok"), true);
@@ -70,8 +70,14 @@ describe("supported-providers registry", () => {
 
   it("resolves the model from env, falling back to a default", () => {
     assert.equal(getSupportedProviderInfo("grok")!.model, "llama-3.3-70b-versatile");
-    process.env.GROQ_MODEL = "grok-4";
-    assert.equal(getSupportedProviderInfo("grok")!.model, "grok-4");
+    process.env.GROQ_MODEL = "llama-3.1-8b-instant";
+    assert.equal(getSupportedProviderInfo("grok")!.model, "llama-3.1-8b-instant");
+  });
+
+  // The `grok` enum value is a historical misnomer; the vendor is Groq, and the
+  // UI must never say "Grok" (xAI's unrelated model family).
+  it("displays the Groq provider as Groq, not Grok", () => {
+    assert.equal(getSupportedProviderInfo("grok")!.displayName, "Groq");
   });
 
   it("builds an instance when available and throws when not", () => {

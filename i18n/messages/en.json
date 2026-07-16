@@ -40,6 +40,7 @@
     "LLM_CONFIG_NOT_FOUND": "The selected LLM is no longer available. Pick another or use the default.",
     "PROVIDER_CONFIG_MISSING": "The selected LLM is missing required configuration.",
     "LLM_RESPONSE_PARSE_ERROR": "The AI returned an unexpected response. Please try again.",
+    "LLM_RATE_LIMITED": "The AI provider is temporarily rate limited. Please try again shortly.",
     "LLM_PROVIDER_ERROR": "The AI provider returned an error. Please try again.",
     "INVALID_REQUEST": "Invalid request.",
     "INVALID_PROFILE": "Invalid Buffer profile.",

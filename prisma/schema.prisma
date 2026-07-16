@@ -62,6 +62,9 @@ enum PostStatus {
 enum LlmProvider {
   claude
   openai
+  /// Groq (api.groq.com), NOT xAI's Grok. The value is a historical misnomer kept
+  /// for DB compatibility; renaming it would require a data migration for no
+  /// functional gain. User-facing name and provenance label are both "Groq"/"GROQ".
   grok
   text_worker
 }
