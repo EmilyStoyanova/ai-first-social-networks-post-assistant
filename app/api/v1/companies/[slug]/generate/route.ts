@@ -166,7 +166,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
           {
             error: {
               code: "NO_FEED_ITEMS_AVAILABLE",
-              message: "No unused source articles are available to generate from right now.",
+              message:
+                "No unused source articles are available to generate from right now. Ingest a content source to fetch new articles, or add an RSS source.",
             },
           },
           { status: 409 }

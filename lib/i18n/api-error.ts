@@ -50,6 +50,7 @@ export const API_ERROR_CODES = [
   "EMAIL_NOT_VERIFIED",
   "POST_TOO_LONG_WITH_URL",
   "CANNOT_GENERATE_UNIQUE_POST",
+  "NO_FEED_ITEMS_AVAILABLE",
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
