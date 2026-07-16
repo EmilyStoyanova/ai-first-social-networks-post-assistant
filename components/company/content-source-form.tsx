@@ -57,6 +57,13 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
   const [sourceLinkPref, setSourceLinkPref] = useState<SourceLinkPref>(
     initialSourceLinkPref(initialData?.config.includeSourceLink)
   );
+  const [translateEnabled, setTranslateEnabled] = useState(
+    initialData?.config.translateEnabled === true
+  );
+  // Empty = use the company content language (v2-4).
+  const [translateToLanguage, setTranslateToLanguage] = useState(
+    asText(initialData?.config.translateToLanguage)
+  );
   const [enabled, setEnabled] = useState(initialData?.enabled ?? true);
 
   function handleSubmit(e: React.FormEvent) {
@@ -69,6 +76,14 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
         ...(sourceLinkPref === "inherit"
           ? {}
           : { includeSourceLink: sourceLinkPref === "include" }),
+        // Omitted entirely when off, and the target is omitted when it should
+        // follow the company content language.
+        ...(translateEnabled
+          ? {
+              translateEnabled: true,
+              ...(translateToLanguage ? { translateToLanguage } : {}),
+            }
+          : {}),
       };
     } else if (type === "product_page") {
       config = { url: url.trim() };
@@ -157,6 +172,40 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
             <option value="exclude">{t("sourceLinkExclude")}</option>
           </select>
           <p className="text-fg-faint mt-1 text-xs">{t("sourceLinkHelp")}</p>
+        </div>
+      )}
+
+      {/* RSS — translation (v2-4). Target defaults to the company content language. */}
+      {type === "rss" && (
+        <div>
+          <label className="flex cursor-pointer items-center gap-3">
+            <input
+              type="checkbox"
+              checked={translateEnabled}
+              onChange={(e) => setTranslateEnabled(e.target.checked)}
+              className="border-border-strong text-status-success-dot focus:ring-accent h-4 w-4 rounded"
+            />
+            <span className="text-fg-muted text-sm font-medium">{t("translateLabel")}</span>
+          </label>
+          <p className="text-fg-faint mt-1 text-xs">{t("translateHelp")}</p>
+
+          {translateEnabled && (
+            <div className="mt-3">
+              <label className="text-fg-muted mb-1.5 block text-sm font-medium">
+                {t("translateLanguageLabel")}
+              </label>
+              <select
+                value={translateToLanguage}
+                onChange={(e) => setTranslateToLanguage(e.target.value)}
+                className={`${BASE} ${NORMAL}`}
+              >
+                <option value="">{t("translateLanguageDefault")}</option>
+                <option value="en">{t("translateLanguageEn")}</option>
+                <option value="bg">{t("translateLanguageBg")}</option>
+              </select>
+              <p className="text-fg-faint mt-1 text-xs">{t("translateLanguageHelp")}</p>
+            </div>
+          )}
         </div>
       )}
 

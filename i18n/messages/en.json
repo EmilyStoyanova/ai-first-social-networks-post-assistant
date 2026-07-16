@@ -410,7 +410,14 @@
     "sourceLinkInherit": "Use channel setting",
     "sourceLinkInclude": "Always include",
     "sourceLinkExclude": "Never include",
-    "sourceLinkHelp": "Overrides the channel default for articles from this feed."
+    "sourceLinkHelp": "Overrides the channel default for articles from this feed.",
+    "translateLabel": "Translate articles",
+    "translateHelp": "Articles are translated before a post is written. The original article is always kept.",
+    "translateLanguageLabel": "Translate into",
+    "translateLanguageDefault": "Company content language",
+    "translateLanguageEn": "English",
+    "translateLanguageBg": "Bulgarian",
+    "translateLanguageHelp": "Translation runs on a schedule. Until it finishes, posts use the original article."
   },
   "feedItems": {
     "articlesButton": "Articles ({count})",
@@ -422,7 +429,12 @@
     "disabled": "Excluded",
     "noTitle": "(no title)",
     "viewOriginal": "View",
-    "ownersOnly": "Only company owners can enable or disable articles."
+    "ownersOnly": "Only company owners can enable or disable articles.",
+    "translationCompleted": "Translated · {lang}",
+    "translationPending": "Translation pending",
+    "translationFailed": "Translation failed",
+    "translationOriginal": "Original",
+    "translationErrorSummary": "Translation failed: {error}. It will be retried automatically."
   },
   "editPost": {
     "title": "Edit Post",

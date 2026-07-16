@@ -259,6 +259,26 @@ model FeedItem {
   usedInPost  Boolean   @default(false) @map("used_in_post")
   createdAt   DateTime  @default(now()) @map("created_at")
 
+  // Translation (v2-4). Written only for RSS sources with translation enabled.
+  // `title` and `content` above always hold the ORIGINAL article text and are
+  // never overwritten by translation; generation falls back to them unless
+  // translationStatus is 'completed'.
+  translatedTitle          String?   @map("translated_title")
+  translatedContent        String?   @map("translated_content")
+  /// ISO 639-1, e.g. "bg".
+  translationLanguage      String?   @map("translation_language")
+  /// pending | completed | failed | skipped
+  translationStatus        String?   @map("translation_status")
+  /// sha256(title + content + targetLang) — unchanged content skips re-translation.
+  translationHash          String?   @map("translation_hash")
+  translationError         String?   @map("translation_error")
+  translatedAt             DateTime? @map("translated_at")
+  translationProvider      String?   @map("translation_provider")
+  translationModel         String?   @map("translation_model")
+  translationAttemptCount  Int       @default(0) @map("translation_attempt_count")
+  translationLastAttemptAt DateTime? @map("translation_last_attempt_at")
+  translationNextRetryAt   DateTime? @map("translation_next_retry_at")
+
   source ContentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   // A feed item backs at most one generated post (one-post-per-article, V2).
   // Enforced at the DB level by the unique index on Post.primaryFeedItemId.
@@ -266,6 +286,9 @@ model FeedItem {
 
   @@unique([sourceId, url])
   @@index([sourceId])
+  // Drives the cron translation batch: eligible items are selected by status and
+  // ordered by next-retry time.
+  @@index([translationStatus, translationNextRetryAt])
   @@map("feed_items")
 }
 

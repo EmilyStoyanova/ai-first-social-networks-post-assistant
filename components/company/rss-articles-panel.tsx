@@ -27,6 +27,38 @@ function contentSnippet(content: string | null): string {
   return plain.length > 160 ? plain.slice(0, 160) + "…" : plain;
 }
 
+/**
+ * Translation status badge (v2-4). "skipped" and null both mean the post is
+ * written from the original article, so they share the "original" label.
+ */
+function TranslationBadge({ item }: { item: FeedItemRow }) {
+  const t = useTranslations("feedItems");
+
+  const STYLES: Record<string, string> = {
+    completed: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+    pending: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+    failed: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+    original: "bg-surface-subtle text-fg-faint",
+  };
+
+  const status = item.translationStatus;
+  const key =
+    status === "completed" || status === "pending" || status === "failed" ? status : "original";
+
+  const label =
+    key === "completed"
+      ? t("translationCompleted", { lang: (item.translationLanguage ?? "").toUpperCase() })
+      : key === "pending"
+        ? t("translationPending")
+        : key === "failed"
+          ? t("translationFailed")
+          : t("translationOriginal");
+
+  return (
+    <span className={`text-micro rounded px-1.5 py-0.5 font-medium ${STYLES[key]}`}>{label}</span>
+  );
+}
+
 interface ArticleRowProps {
   slug: string;
   sourceId: string;
@@ -112,19 +144,28 @@ function ArticleRow({ slug, sourceId, item, canManage, onToggle }: ArticleRowPro
           </p>
         )}
 
+        {item.translationStatus === "failed" && item.translationError && (
+          <p className="text-fg-faint mt-1 text-xs">
+            {t("translationErrorSummary", { error: item.translationError })}
+          </p>
+        )}
+
         {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
       </div>
 
-      {/* State badge */}
-      <span
-        className={`text-micro mt-0.5 shrink-0 rounded px-1.5 py-0.5 font-medium ${
-          item.enabled
-            ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-            : "bg-surface-subtle text-fg-faint"
-        }`}
-      >
-        {item.enabled ? t("enabled") : t("disabled")}
-      </span>
+      {/* State badges */}
+      <div className="mt-0.5 flex shrink-0 flex-col items-end gap-1">
+        <span
+          className={`text-micro rounded px-1.5 py-0.5 font-medium ${
+            item.enabled
+              ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+              : "bg-surface-subtle text-fg-faint"
+          }`}
+        >
+          {item.enabled ? t("enabled") : t("disabled")}
+        </span>
+        <TranslationBadge item={item} />
+      </div>
     </li>
   );
 }

@@ -36,6 +36,9 @@ export interface ToggleFeedItemDb {
         publishedAt: true;
         enabled: true;
         createdAt: true;
+        translationStatus: true;
+        translationLanguage: true;
+        translationError: true;
       };
     }) => Promise<{
       id: string;
@@ -46,6 +49,9 @@ export interface ToggleFeedItemDb {
       publishedAt: Date | null;
       enabled: boolean;
       createdAt: Date;
+      translationStatus: string | null;
+      translationLanguage: string | null;
+      translationError: string | null;
     }>;
   };
 }
@@ -95,6 +101,9 @@ export async function toggleFeedItemCore(
       publishedAt: true,
       enabled: true,
       createdAt: true,
+      translationStatus: true,
+      translationLanguage: true,
+      translationError: true,
     },
   });
 
@@ -109,6 +118,9 @@ export async function toggleFeedItemCore(
       publishedAt: row.publishedAt?.toISOString() ?? null,
       enabled: row.enabled,
       createdAt: row.createdAt.toISOString(),
+      translationStatus: row.translationStatus,
+      translationLanguage: row.translationLanguage,
+      translationError: row.translationError,
     },
   };
 }

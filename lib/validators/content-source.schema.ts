@@ -5,6 +5,9 @@ const baseFields = {
   enabled: z.boolean().optional(),
 };
 
+/** Content languages the app generates in; also the translation targets (v2-4). */
+export const TRANSLATION_LANGUAGES = ["en", "bg"] as const;
+
 const rssSchema = z.object({
   type: z.literal("rss"),
   ...baseFields,
@@ -12,6 +15,10 @@ const rssSchema = z.object({
     url: z.string().url("Must be a valid URL."),
     // Per-source source-link preference (v2-1). Omitted = inherit channel default.
     includeSourceLink: z.boolean().optional(),
+    // Per-source translation (v2-4). Omitted = disabled; when enabled without a
+    // target, the company's content language is used.
+    translateEnabled: z.boolean().optional(),
+    translateToLanguage: z.enum(TRANSLATION_LANGUAGES).optional(),
   }),
 });
 

@@ -57,6 +57,12 @@ export interface FeedItemContext {
    * article contexts that predate this flag keep their behaviour.
    */
   consumable?: boolean;
+  /**
+   * Whether `title`/`content` above hold the LLM translation rather than the
+   * original article text (v2-4). Provenance only — the text is already
+   * resolved; nothing downstream should re-decide based on this.
+   */
+  usedTranslation?: boolean;
 }
 
 export interface GenerationContext {

@@ -9,6 +9,11 @@ export interface FeedItemRow {
   publishedAt: string | null;
   enabled: boolean;
   createdAt: string;
+  /** pending | completed | failed | skipped | null (v2-4). */
+  translationStatus: string | null;
+  translationLanguage: string | null;
+  /** Populated only for a failed translation; shown as an error summary. */
+  translationError: string | null;
 }
 
 export type ListFeedItemsResult =
@@ -81,6 +86,9 @@ export async function listFeedItems(
       publishedAt: true,
       enabled: true,
       createdAt: true,
+      translationStatus: true,
+      translationLanguage: true,
+      translationError: true,
     },
   });
 
@@ -89,12 +97,17 @@ export async function listFeedItems(
     items: rows.map((r) => ({
       id: r.id,
       sourceId: r.sourceId,
+      // Always the ORIGINAL article text — the panel lists source material, not
+      // the translation (v2-4).
       title: r.title,
       content: r.content,
       url: r.url,
       publishedAt: r.publishedAt?.toISOString() ?? null,
       enabled: r.enabled,
       createdAt: r.createdAt.toISOString(),
+      translationStatus: r.translationStatus,
+      translationLanguage: r.translationLanguage,
+      translationError: r.translationError,
     })),
   };
 }

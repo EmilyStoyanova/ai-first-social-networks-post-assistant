@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import type { GenerationContext } from "@/lib/ai/types";
 import { CONSUMABLE_SOURCE_TYPES, isConsumableSourceType } from "@/lib/ai/source-types";
+import { resolveFeedItemContent } from "@/lib/ai/feed-item-translation";
 
 const VALID_CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const;
 type ValidChannel = (typeof VALID_CHANNELS)[number];
@@ -152,6 +153,11 @@ async function loadContext(
         content: true,
         url: true,
         publishedAt: true,
+        // v2-4 — translated text is preferred over the original only when the
+        // translation completed; see resolveFeedItemContent below.
+        translatedTitle: true,
+        translatedContent: true,
+        translationStatus: true,
         source: { select: { type: true, config: true } },
       },
     }),
@@ -200,16 +206,23 @@ async function loadContext(
       maxTextLength: channelConfigData?.maxTextLength ?? null,
       includeSourceLink: channelConfigData?.includeSourceLink ?? false,
     },
-    feedItems: feedData.map((f) => ({
-      id: f.id,
-      title: f.title,
-      content: f.content,
-      url: f.url,
-      publishedAt: f.publishedAt,
-      sourceLinkPreference: extractSourceLinkPreference(f.source.config),
-      // rss/product_page → single-use article; prompt/calendar_event → evergreen.
-      consumable: isConsumableSourceType(f.source.type),
-    })),
+    // Resolving translation HERE — the single place feed rows become generation
+    // input — means every downstream consumer (prompt builder, aspect mining,
+    // source-link resolution) sees one consistent text (v2-4).
+    feedItems: feedData.map((f) => {
+      const resolved = resolveFeedItemContent(f);
+      return {
+        id: f.id,
+        title: resolved.title,
+        content: resolved.content,
+        url: f.url,
+        publishedAt: f.publishedAt,
+        sourceLinkPreference: extractSourceLinkPreference(f.source.config),
+        // rss/product_page → single-use article; prompt/calendar_event → evergreen.
+        consumable: isConsumableSourceType(f.source.type),
+        usedTranslation: resolved.usedTranslation,
+      };
+    }),
     hasArticleSources,
   };
 

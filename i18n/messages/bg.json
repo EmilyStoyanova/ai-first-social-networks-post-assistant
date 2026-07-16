@@ -410,7 +410,14 @@
     "sourceLinkInherit": "Според настройката на канала",
     "sourceLinkInclude": "Винаги добавяй",
     "sourceLinkExclude": "Никога не добавяй",
-    "sourceLinkHelp": "Замества настройката на канала за статиите от този източник."
+    "sourceLinkHelp": "Замества настройката на канала за статиите от този източник.",
+    "translateLabel": "Превеждай статиите",
+    "translateHelp": "Статиите се превеждат, преди да се напише публикация. Оригиналът се запазва.",
+    "translateLanguageLabel": "Превод на",
+    "translateLanguageDefault": "Езика на съдържанието",
+    "translateLanguageEn": "Английски",
+    "translateLanguageBg": "Български",
+    "translateLanguageHelp": "Преводът върви по график. Докато не стане, публикациите ползват оригинала."
   },
   "feedItems": {
     "articlesButton": "Статии ({count})",
@@ -422,7 +429,12 @@
     "disabled": "Изключена",
     "noTitle": "(без заглавие)",
     "viewOriginal": "Виж",
-    "ownersOnly": "Само собственици могат да включват или изключват статии."
+    "ownersOnly": "Само собственици могат да включват или изключват статии.",
+    "translationCompleted": "Преведена · {lang}",
+    "translationPending": "Чака превод",
+    "translationFailed": "Неуспешен превод",
+    "translationOriginal": "Оригинал",
+    "translationErrorSummary": "Преводът не успя: {error}. Ще опитаме пак автоматично."
   },
   "editPost": {
     "title": "Редактирай публикация",

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import { Prisma } from "@prisma/client";
 import { ingestCompanySources } from "./ingest-company-sources.service";
+import { translateFeedItems } from "./translate-feed-items.service";
 import { generateWeeklySchedule } from "./generate-weekly-schedule.service";
 import { autoApprovePosts } from "./auto-approve-posts.service";
 import { publishScheduledPosts } from "./publish-scheduled-posts.service";
@@ -21,8 +22,9 @@ export interface CronRunSummary {
  * lastCronProcessedAt. Every execution is recorded in cron_runs.
  *
  * Steps (per implementation plan, Phase 8):
- *   1. record start   2. fetch feeds   3. generate weekly schedule
- *   4. auto-approve   5. send to Buffer   6. retry failed   7. record completion
+ *   1. record start   2. fetch feeds   2b. translate feed items (v2-4)
+ *   3. generate weekly schedule   4. auto-approve   5. send to Buffer
+ *   6. retry failed   7. backfill embeddings   8. record completion
  */
 export async function runCron(): Promise<CronRunSummary> {
   const run = await prisma.cronRun.create({
@@ -55,6 +57,11 @@ export async function runCron(): Promise<CronRunSummary> {
 
     // Step 2 — fetch feeds
     actions.ingest = await ingestCompanySources(company.id);
+
+    // Step 2b — translate queued RSS items before they reach generation (v2-4).
+    // Bounded per run; untranslated items are not blocked — generation falls back
+    // to the original article text.
+    actions.translate = await translateFeedItems({ companyId: company.id });
 
     // Step 3 — generate next week's schedule (budgeted; resumes across runs)
     actions.weeklySchedule = await generateWeeklySchedule(company.id);

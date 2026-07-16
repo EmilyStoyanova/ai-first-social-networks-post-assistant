@@ -17,6 +17,9 @@ function makeFeedItemRow(enabled: boolean) {
     publishedAt: NOW,
     enabled,
     createdAt: NOW,
+    translationStatus: null,
+    translationLanguage: null,
+    translationError: null,
   };
 }
 

@@ -2,10 +2,70 @@ import { prisma } from "@/lib/db/client";
 import { parseFeed } from "@/lib/integrations/rss/parser";
 import { scrapeProductPage } from "@/lib/integrations/product-page/scraper";
 import { extractArticleContent } from "@/lib/integrations/rss/article-extractor";
+import {
+  computeTranslationHash,
+  isTranslatableSourceType,
+  resolveTranslationConfig,
+  type TranslationConfig,
+} from "@/lib/ai/feed-item-translation";
+import type { Prisma } from "@prisma/client";
 
 export type IngestContentSourceResult =
   | { success: true; created: number; updated: number }
   | { success: false; code: "NOT_FOUND" | "FORBIDDEN" | "INGEST_FAILED"; message?: string };
+
+/** What ingestion knows about an existing row's translation state. */
+interface ExistingTranslation {
+  translationHash: string | null;
+  translationStatus: string | null;
+}
+
+/**
+ * Translation state to write for a NEW item (v2-4). Eligible items enter the
+ * cron queue as "pending"; ineligible ones are marked "skipped" so the UI can
+ * say "original" rather than "not yet processed".
+ */
+function translationFieldsForCreate(
+  cfg: TranslationConfig | null
+): Partial<Prisma.FeedItemUncheckedCreateInput> {
+  // Not a translatable source type — translation fields stay null entirely.
+  if (!cfg) return {};
+  if (!cfg.enabled) return { translationStatus: "skipped" };
+  return { translationStatus: "pending", translationLanguage: cfg.targetLanguage };
+}
+
+/**
+ * Translation state to write for an EXISTING item. The stored hash is the input
+ * the item was last translated (or last attempted) against, so an identical hash
+ * means nothing changed: leave the row exactly as it is. That preserves a
+ * completed translation, an in-flight pending, and — importantly — a failed
+ * item's attempt count and backoff, which a blind re-queue would reset and turn
+ * into an infinite retry loop.
+ */
+function translationFieldsForUpdate(
+  cfg: TranslationConfig | null,
+  hash: string,
+  existing: ExistingTranslation | undefined
+): Partial<Prisma.FeedItemUncheckedUpdateInput> {
+  if (!cfg) return {};
+  if (!cfg.enabled) {
+    // Translation was turned off for this source: stop retrying and make
+    // generation fall back to the original text.
+    return existing?.translationStatus === "skipped"
+      ? {}
+      : { translationStatus: "skipped", translationNextRetryAt: null };
+  }
+  if (existing && existing.translationHash === hash) return {};
+
+  // New or changed input (or a changed target language) — a fresh attempt budget.
+  return {
+    translationStatus: "pending",
+    translationLanguage: cfg.targetLanguage,
+    translationAttemptCount: 0,
+    translationError: null,
+    translationNextRetryAt: null,
+  };
+}
 
 async function upsertFeedItem(
   sourceId: string,
@@ -14,17 +74,35 @@ async function upsertFeedItem(
   title: string | null,
   content: string | null,
   publishedAt: Date | null,
-  existingUrls: Set<string>
+  existingUrls: Set<string>,
+  translation: TranslationConfig | null,
+  existingTranslations: Map<string, ExistingTranslation>
 ): Promise<"created" | "updated"> {
   if (existingUrls.has(url)) {
+    const hash = computeTranslationHash(title, content, translation?.targetLanguage ?? "");
     await prisma.feedItem.update({
       where: { sourceId_url: { sourceId, url } },
-      data: { title, content, publishedAt },
+      // title/content always carry the ORIGINAL article text — translation never
+      // writes here (v2-4).
+      data: {
+        title,
+        content,
+        publishedAt,
+        ...translationFieldsForUpdate(translation, hash, existingTranslations.get(url)),
+      },
     });
     return "updated";
   } else {
     await prisma.feedItem.create({
-      data: { sourceId, companyId, url, title, content, publishedAt },
+      data: {
+        sourceId,
+        companyId,
+        url,
+        title,
+        content,
+        publishedAt,
+        ...translationFieldsForCreate(translation),
+      },
     });
     existingUrls.add(url);
     return "created";
@@ -51,12 +129,29 @@ export async function runSourceIngestion(
   const sourceId = source.id;
   const config = source.config as Record<string, string>;
 
+  // Translation target defaults to the company's content language (v2-4).
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { defaultLang: true },
+  });
+  // null for source types that are never translated (prompt/product_page/
+  // calendar_event) — their rows keep null translation fields.
+  const translation = isTranslatableSourceType(source.type)
+    ? resolveTranslationConfig(source.type, source.config, company?.defaultLang ?? "en")
+    : null;
+
   // Pre-fetch existing URLs for this source to avoid N+1 existence checks
   const existingRows = await prisma.feedItem.findMany({
     where: { sourceId },
-    select: { url: true },
+    select: { url: true, translationHash: true, translationStatus: true },
   });
   const existingUrls = new Set(existingRows.map((r) => r.url));
+  const existingTranslations = new Map<string, ExistingTranslation>(
+    existingRows.map((r) => [
+      r.url,
+      { translationHash: r.translationHash, translationStatus: r.translationStatus },
+    ])
+  );
 
   let created = 0;
   let updated = 0;
@@ -74,7 +169,9 @@ export async function runSourceIngestion(
         item.title,
         content,
         item.publishedAt,
-        existingUrls
+        existingUrls,
+        translation,
+        existingTranslations
       );
       if (outcome === "created") created++;
       else updated++;
@@ -93,7 +190,9 @@ export async function runSourceIngestion(
       meta.ogTitle ?? meta.title,
       content,
       null,
-      existingUrls
+      existingUrls,
+      translation,
+      existingTranslations
     );
     if (outcome === "created") created++;
     else updated++;
@@ -106,7 +205,9 @@ export async function runSourceIngestion(
       source.name,
       config.promptText,
       null,
-      existingUrls
+      existingUrls,
+      translation,
+      existingTranslations
     );
     if (outcome === "created") created++;
     else updated++;
@@ -125,7 +226,9 @@ export async function runSourceIngestion(
       config.title,
       content,
       publishedAt,
-      existingUrls
+      existingUrls,
+      translation,
+      existingTranslations
     );
     if (outcome === "created") created++;
     else updated++;
