@@ -63,6 +63,12 @@ export interface GeneratedPostDTO {
   notes: string | null;
   llmProvider: string | null;
   llmModel: string | null;
+  /**
+   * URL of the auto-generated image already attached to this post, or null when
+   * none was generated. Named to match `PostItem.mediaUrl` so the client can
+   * render the new post straight from this response with no refetch.
+   */
+  mediaUrl: string | null;
   createdAt: Date;
 }
 
@@ -828,13 +834,19 @@ export async function generatePostFromContext(
   // The try/catch is belt-and-braces: autoGeneratePostImage already swallows its
   // own failures, but the post is already committed at this point, so nothing
   // thrown here may be allowed to turn a saved post into a failed generation.
+  //
+  // The pipeline attaches the media itself; the URL is captured here only so the
+  // response can carry it. A post whose image failed simply reports mediaUrl
+  // null and can still be illustrated manually.
+  let mediaUrl: string | null = null;
   try {
-    await autoImage({
+    const outcome = await autoImage({
       postId: post.id,
       companyId,
       enabled: context.channel.autoGenerateImage,
       generatedById,
     });
+    if (outcome.status === "generated") mediaUrl = outcome.media.url;
   } catch (err) {
     console.error(
       `[auto-image] Post ${post.id} auto image generation failed (non-fatal):`,
@@ -868,6 +880,7 @@ export async function generatePostFromContext(
       notes: post.notes,
       llmProvider: post.llmProvider,
       llmModel: post.llmModel,
+      mediaUrl,
       createdAt: post.createdAt,
     },
     warnings,

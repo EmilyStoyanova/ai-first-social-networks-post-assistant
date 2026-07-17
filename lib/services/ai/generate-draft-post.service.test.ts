@@ -104,7 +104,12 @@ function makeDeps(
       // Captured so no test reaches the real image pipeline.
       autoImage: async (input) => {
         autoImageInput = input;
-        return { status: "skipped", reason: "disabled" };
+        return input.enabled
+          ? {
+              status: "generated",
+              media: { id: "asset-1", url: "https://cdn.example/auto.png", width: 1, height: 1 },
+            }
+          : { status: "skipped", reason: "disabled" };
       },
       // Default: accept (no semantic history) so these Phase 1.1/1.2 tests are
       // unaffected by the Phase 1.4 gate. Overridable for gate-specific tests.
@@ -1029,6 +1034,40 @@ describe("generatePostFromContext — automatic image generation", () => {
     assert.ok(result.success);
     assert.ok(created());
     assert.equal(autoImaged()?.postId, result.post.id);
+  });
+
+  it("returns the generated image URL so the UI shows it without a refetch", async () => {
+    const { deps } = makeDeps();
+    const ctx = makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png");
+  });
+
+  it("returns mediaUrl null when the channel has auto generation off", async () => {
+    const { deps } = makeDeps();
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(result.post.mediaUrl, null);
+  });
+
+  it("returns mediaUrl null when image generation fails", async () => {
+    const { deps } = makeDeps();
+    deps.autoImage = async () => ({ status: "failed", code: "IMAGE_PROVIDER_ERROR" });
+    const ctx = makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success, "a failed image must never fail the post");
+    assert.equal(result.post.mediaUrl, null);
   });
 
   it("still returns a successful post when image generation throws", async () => {

@@ -71,11 +71,15 @@ describe("autoGeneratePostImage — setting disabled", () => {
 });
 
 describe("autoGeneratePostImage — setting enabled", () => {
-  it("generates and reports the attached media id", async () => {
+  it("generates and reports the attached media, URL included", async () => {
     const { deps, calls } = makeDeps();
     const outcome = await autoGeneratePostImage({ ...INPUT, enabled: true }, deps);
 
-    assert.deepEqual(outcome, { status: "generated", mediaId: "asset-1" });
+    // The URL is what lets the caller render the image without a refetch.
+    assert.deepEqual(outcome, {
+      status: "generated",
+      media: { id: "asset-1", url: "https://cdn.example/x.png", width: 1080, height: 1080 },
+    });
     assert.equal(calls().length, 1);
     assert.equal(calls()[0].postId, "post-1");
   });

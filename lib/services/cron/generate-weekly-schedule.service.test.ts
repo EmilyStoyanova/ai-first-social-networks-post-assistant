@@ -189,6 +189,7 @@ class Harness {
         notes: null,
         llmProvider: "mock",
         llmModel: "mock",
+        mediaUrl: null,
         createdAt: new Date(),
       },
       warnings: {

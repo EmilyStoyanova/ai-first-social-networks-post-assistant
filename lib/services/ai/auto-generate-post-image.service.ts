@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db/client";
 import {
   generatePostImageForActor,
   type GeneratePostImageResult,
+  type MediaDTO,
 } from "./generate-post-image.service";
 
 /**
@@ -21,7 +22,13 @@ import {
  */
 
 export type AutoGenerateImageOutcome =
-  | { status: "generated"; mediaId: string }
+  /**
+   * The pipeline has already attached this media to the post. It is returned so
+   * the caller can put the URL in its response — without it the generate API
+   * would answer with a post whose image exists in the DB but is invisible to
+   * the UI until a refetch, which reads as "not attached".
+   */
+  | { status: "generated"; media: MediaDTO }
   /** No image was attempted. All three reasons are normal, not errors. */
   | { status: "skipped"; reason: "disabled" | "already_has_media" | "no_image_prompt" }
   /** The pipeline ran and failed. The post is still fine. */
@@ -124,7 +131,7 @@ export async function autoGeneratePostImage(
     return { status: "failed", code: result.code, message: result.message };
   }
 
-  return { status: "generated", mediaId: result.media.id };
+  return { status: "generated", media: result.media };
 }
 
 function logFailure(postId: string, code: string, message?: string): void {
