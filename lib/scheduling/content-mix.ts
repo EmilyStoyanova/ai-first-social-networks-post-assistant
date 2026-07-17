@@ -16,8 +16,10 @@
  *
  * Two invariants drive every function here:
  *
- *   • Quotas are never reassigned. A source that runs out of articles simply
- *     under-fills its own quota; its posts are never handed to another source.
+ *   • A quota moves only when its own source says so. A source that runs out of
+ *     articles under-fills its quota and hands its posts to nobody — unless its
+ *     fallback policy is `use_another_source`, which transfers the unfilled
+ *     posts to the sources that can still write them. See applyFallbackTransfers.
  *   • An unconfigured mix is not a mix. When nothing is configured the scheduler
  *     falls back to the pre-v2-8 pooling behaviour, unchanged.
  *
@@ -62,7 +64,10 @@ export const FALLBACK_POLICIES = [
 export type FallbackPolicy = (typeof FALLBACK_POLICIES)[number];
 
 /** Policies with a real implementation today. See FALLBACK_POLICIES above. */
-export const IMPLEMENTED_FALLBACK_POLICIES = ["skip"] as const satisfies readonly FallbackPolicy[];
+export const IMPLEMENTED_FALLBACK_POLICIES = [
+  "skip",
+  "use_another_source",
+] as const satisfies readonly FallbackPolicy[];
 
 export const DEFAULT_FALLBACK_POLICY: FallbackPolicy = "skip";
 
@@ -217,7 +222,7 @@ export function validateContentMix(input: ValidateContentMixInput): MixValidatio
         valid: false,
         error: {
           code: "MIX_UNSUPPORTED_FALLBACK",
-          message: `Fallback policy "${quota.fallbackPolicy}" is not implemented yet. Only "skip" is supported.`,
+          message: `Fallback policy "${quota.fallbackPolicy}" is not implemented yet. Supported: ${IMPLEMENTED_FALLBACK_POLICIES.join(", ")}.`,
         },
       };
     }
@@ -279,8 +284,104 @@ export interface NextDueQuotaInput {
   exhausted: ReadonlySet<string | null>;
 }
 
+/** Company content is not an RSS quota, and only RSS quotas trade posts. */
+function isRssQuota(quota: MixQuota): boolean {
+  return quota.sourceId !== COMPANY_CONTENT_SOURCE_ID;
+}
+
+/** An exhausted RSS source whose policy hands its unfilled posts to others. */
+function donatesQuota(quota: MixQuota, exhausted: ReadonlySet<string | null>): boolean {
+  return (
+    isRssQuota(quota) &&
+    quota.fallbackPolicy === "use_another_source" &&
+    exhausted.has(quota.sourceId)
+  );
+}
+
+/**
+ * An RSS source that can absorb transferred posts: still has articles this run,
+ * and was given a quota of its own.
+ *
+ * A quota of 0 is a deliberate "generate nothing from this source", so it is not
+ * a recipient — a zero means the same thing whether it was typed as 0 or left
+ * unset (resolveContentMix maps both to 0), and overriding it would publish from
+ * a feed the owner switched off in all but name. Disabled sources cannot appear
+ * here at all: resolveContentMix drops them before a quota exists.
+ */
+function acceptsQuota(quota: MixQuota, exhausted: ReadonlySet<string | null>): boolean {
+  return isRssQuota(quota) && !exhausted.has(quota.sourceId) && quota.postsPerWeek > 0;
+}
+
+/**
+ * The quotas as they stand once exhausted sources have handed off their unfilled
+ * posts — the `use_another_source` fallback.
+ *
+ * The week's total is the promise this keeps: an RSS source that runs dry gives
+ * up exactly the posts it could not write, and those same posts are added to the
+ * sources that still have articles. Nothing is created and nothing is lost, so
+ * the mix total — and therefore the channel's weekly post count — is identical
+ * before and after. What changes is only *who* writes them.
+ *
+ * Deliberately excluded:
+ *
+ *   • Company content, as donor and as recipient. Mission posts do not run out
+ *     (they need no article), and a feed's shortfall must not quietly turn into
+ *     more brand copy than the owner asked for.
+ *   • Sources that are themselves exhausted — handing posts to a source with no
+ *     articles just moves the shortfall.
+ *
+ * A pool with no eligible recipient is left exactly where it is: the donor keeps
+ * its unfilled quota, which is the `skip` outcome, so the posts stay outstanding
+ * and the next run retries them once ingestion has fetched new articles.
+ *
+ * Recomputed from the stored quotas on every call rather than accumulated, so it
+ * stays a pure function of (quotas, generated, exhausted). That is what lets a
+ * cron run resume mid-week — the transfer is re-derived, never remembered — and
+ * what makes a recipient that later runs dry itself donate in turn.
+ */
+export function applyFallbackTransfers(input: NextDueQuotaInput): MixQuota[] {
+  const { quotas, generatedBySource, exhausted } = input;
+  const generatedFor = (quota: MixQuota) => generatedBySource.get(quota.sourceId) ?? 0;
+  const unfilled = (quota: MixQuota) => quota.postsPerWeek - generatedFor(quota);
+
+  const donorIds = new Set(
+    quotas.filter((q) => donatesQuota(q, exhausted) && unfilled(q) > 0).map((q) => q.sourceId)
+  );
+  if (donorIds.size === 0) return quotas.map((q) => ({ ...q }));
+
+  const recipients = quotas.filter((q) => acceptsQuota(q, exhausted));
+  if (recipients.length === 0) return quotas.map((q) => ({ ...q }));
+
+  const pool = quotas
+    .filter((q) => donorIds.has(q.sourceId))
+    .reduce((sum, q) => sum + unfilled(q), 0);
+
+  // Even split, with the indivisible remainder going to the earliest recipients
+  // in list order. Fairness here means equal shares, not shares proportional to
+  // quota: the point is to spread the extra load, and a proportional split would
+  // pile it onto whichever feed is already the busiest. List order comes from the
+  // stored source order, so the outcome is reproducible across runs.
+  const evenShare = Math.floor(pool / recipients.length);
+  const remainder = pool % recipients.length;
+  const bonusByRecipient = new Map(
+    recipients.map((q, index) => [q.sourceId, evenShare + (index < remainder ? 1 : 0)])
+  );
+
+  return quotas.map((quota) => {
+    // A donor keeps exactly what it managed to write, so its remaining is zero
+    // and the posts it gave up are not counted twice.
+    if (donorIds.has(quota.sourceId)) return { ...quota, postsPerWeek: generatedFor(quota) };
+    const bonus = bonusByRecipient.get(quota.sourceId);
+    if (bonus === undefined) return { ...quota };
+    return { ...quota, postsPerWeek: quota.postsPerWeek + bonus };
+  });
+}
+
 /**
  * Answers "which source is due next" — the scheduler's only source decision.
+ *
+ * Runs against the post-transfer quotas, so a `use_another_source` handoff shows
+ * up here as the recipient simply having a larger quota to work through.
  *
  * Picks the quota with the largest *fraction* of its own quota still outstanding,
  * not the largest absolute deficit. Ranking by absolute deficit would drain the
@@ -294,14 +395,15 @@ export interface NextDueQuotaInput {
  * run is reproducible — important because a 5-post week always spans several
  * cron runs (3 LLM calls per run) and must resume coherently.
  *
- * Returns null when every quota is either filled or exhausted. Exhausted quotas
- * are skipped, never redistributed: their deficit stays unfilled by design.
+ * Returns null when every quota is either filled or exhausted. An exhausted
+ * quota is always skipped; whether its deficit is left unfilled or passed on is
+ * its fallback policy's decision, already settled by applyFallbackTransfers.
  */
 export function nextDueQuota(input: NextDueQuotaInput): MixQuota | null {
   let best: MixQuota | null = null;
   let bestShare = 0;
 
-  for (const quota of input.quotas) {
+  for (const quota of applyFallbackTransfers(input)) {
     if (input.exhausted.has(quota.sourceId)) continue;
     if (quota.postsPerWeek <= 0) continue;
     const remaining = quota.postsPerWeek - (input.generatedBySource.get(quota.sourceId) ?? 0);
@@ -317,23 +419,39 @@ export function nextDueQuota(input: NextDueQuotaInput): MixQuota | null {
   return best;
 }
 
+/** What a save request asks of one source. */
+export interface MixSourcePatch {
+  postsPerWeek: number | null;
+  /** Omitted = keep the source's stored policy. */
+  fallbackPolicy?: string;
+}
+
 /**
- * The mix as it WOULD be after applying a submitted set of quotas.
+ * The mix as it WOULD be after applying a submitted set of patches.
  *
  * A request only carries the sources the client knew about, so anything it omits
  * must keep its stored quota rather than being cleared — otherwise a client with
- * a stale source list would silently wipe a quota it never displayed. Validation
- * then runs against this projection, so what is checked is exactly what is saved.
+ * a stale source list would silently wipe a quota it never displayed. The same
+ * holds field by field within a submitted source: an absent fallbackPolicy keeps
+ * the stored one, so a client that predates the policy selector cannot reset
+ * every source to the default just by saving a quota.
+ *
+ * Validation then runs against this projection, so what is checked is exactly
+ * what is saved.
  */
 export function projectMixSources(
   existing: readonly MixSourceInput[],
-  submitted: ReadonlyMap<string, number | null>
+  submitted: ReadonlyMap<string, MixSourcePatch>
 ): MixSourceInput[] {
-  return existing.map((source) =>
-    submitted.has(source.id)
-      ? { ...source, postsPerWeek: submitted.get(source.id) ?? null }
-      : source
-  );
+  return existing.map((source) => {
+    const patch = submitted.get(source.id);
+    if (!patch) return source;
+    return {
+      ...source,
+      postsPerWeek: patch.postsPerWeek,
+      fallbackPolicy: patch.fallbackPolicy ?? source.fallbackPolicy,
+    };
+  });
 }
 
 /**
@@ -349,11 +467,19 @@ export function findUnknownSourceId(
   return submittedIds.find((id) => !known.has(id)) ?? null;
 }
 
-/** Remaining posts per quota, for the UI and for run summaries. */
+/**
+ * Remaining posts per quota, for the UI and for run summaries.
+ *
+ * Measured against the post-transfer quotas so the totals tell the truth about
+ * the week: a source that donated its shortfall is not still owed those posts,
+ * and the recipient that took them on is. Pass the run's real `exhausted` set —
+ * an empty one asks "what is outstanding if nothing ran dry", which is a
+ * different question and will over-report.
+ */
 export function remainingByQuota(
   input: NextDueQuotaInput
 ): Array<{ sourceId: string | null; remaining: number }> {
-  return input.quotas.map((q) => ({
+  return applyFallbackTransfers(input).map((q) => ({
     sourceId: q.sourceId,
     remaining: Math.max(0, q.postsPerWeek - (input.generatedBySource.get(q.sourceId) ?? 0)),
   }));

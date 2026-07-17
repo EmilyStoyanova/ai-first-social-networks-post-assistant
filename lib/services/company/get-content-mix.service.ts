@@ -79,14 +79,64 @@ export async function getContentMix(
   return { success: true, mix };
 }
 
+// ─── Minimal DB interface for testability ─────────────────────────────────────
+// Same pattern as ToggleFeedItemDb: the real Prisma client satisfies this narrow
+// shape and unit tests inject a fake. `mock.module` is unavailable under
+// `npx tsx --test`, so injection is the only way to test the read model.
+
+export interface LoadContentMixDb {
+  company: {
+    findUnique: (args: {
+      where: { id: string };
+      select: { companyContentPostsPerWeek: true };
+    }) => Promise<{ companyContentPostsPerWeek: number | null } | null>;
+  };
+  contentSource: {
+    findMany: (args: {
+      where: { companyId: string };
+      orderBy: { createdAt: "asc" };
+      select: {
+        id: true;
+        name: true;
+        type: true;
+        enabled: true;
+        postsPerWeek: true;
+        fallbackPolicy: true;
+      };
+    }) => Promise<
+      Array<{
+        id: string;
+        name: string;
+        type: string;
+        enabled: boolean;
+        postsPerWeek: number | null;
+        fallbackPolicy: string;
+      }>
+    >;
+  };
+  channelConfig: {
+    findMany: (args: {
+      where: { companyId: string; enabled: true; postsPerWeek: { gt: number } };
+      select: { channel: true; postsPerWeek: true };
+    }) => Promise<Array<{ channel: string; postsPerWeek: number }>>;
+  };
+}
+
 /** Read model shared by the GET route and the save path's post-write response. */
 export async function loadContentMix(companyId: string): Promise<ContentMixDTO> {
+  return loadContentMixCore(prisma, companyId);
+}
+
+export async function loadContentMixCore(
+  db: LoadContentMixDb,
+  companyId: string
+): Promise<ContentMixDTO> {
   const [company, sources, channels] = await Promise.all([
-    prisma.company.findUnique({
+    db.company.findUnique({
       where: { id: companyId },
       select: { companyContentPostsPerWeek: true },
     }),
-    prisma.contentSource.findMany({
+    db.contentSource.findMany({
       where: { companyId },
       orderBy: { createdAt: "asc" },
       select: {
@@ -98,7 +148,7 @@ export async function loadContentMix(companyId: string): Promise<ContentMixDTO> 
         fallbackPolicy: true,
       },
     }),
-    prisma.channelConfig.findMany({
+    db.channelConfig.findMany({
       where: { companyId, enabled: true, postsPerWeek: { gt: 0 } },
       select: { channel: true, postsPerWeek: true },
     }),

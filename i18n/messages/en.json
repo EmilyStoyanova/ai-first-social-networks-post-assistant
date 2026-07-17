@@ -715,7 +715,10 @@
     "targetsDiffer": "Your enabled channels have different weekly targets ({detail}). One content mix is shared by every channel, so they must match.",
     "disabledHint": "Disabled sources take no part in the mix.",
     "unassigned": "Not set",
-    "exhaustedNote": "If a source runs out of articles its posts are skipped for that week — they are never moved to another source.",
+    "fallbackLabel": "If articles run out",
+    "fallbackSkip": "Skip missing posts",
+    "fallbackTransfer": "Transfer missing quota to another active source",
+    "fallbackHint": "Quota moves only to active sources that have a quota above 0 and unused articles left. If none qualify, the posts are skipped.",
     "ownersOnly": "Only company owners can change the content mix.",
     "appliesToChannels": "Applied to every enabled channel: {channels}."
   }

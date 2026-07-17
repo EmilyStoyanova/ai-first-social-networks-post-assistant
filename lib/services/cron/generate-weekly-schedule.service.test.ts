@@ -486,6 +486,179 @@ describe("generateWeeklySchedule — company-content quota", () => {
   });
 });
 
+// ─── Fallback: use_another_source ─────────────────────────────────────────────
+
+describe("generateWeeklySchedule — use_another_source", () => {
+  /** RSS A=3 (hands its quota on when dry) + RSS B=2, no mission posts. */
+  function transferHarness(aArticles: number, bArticles = 10) {
+    return new Harness(
+      [
+        {
+          id: "rss-a",
+          name: "RSS A",
+          enabled: true,
+          postsPerWeek: 3,
+          fallbackPolicy: "use_another_source",
+          articles: aArticles,
+        },
+        {
+          id: "rss-b",
+          name: "RSS B",
+          enabled: true,
+          postsPerWeek: 2,
+          fallbackPolicy: "skip",
+          articles: bArticles,
+        },
+      ],
+      0
+    );
+  }
+
+  it("keeps the weekly post count when a source runs dry", async () => {
+    // The brief's example end to end: A=3 and B=2 but only 1 article in A, so
+    // the week still publishes 5 posts — 1 from A, 4 from B.
+    const harness = transferHarness(1);
+    const summary = await runUntilSettled(harness);
+
+    assert.equal(harness.posts.length, 5);
+    assert.equal(harness.countFor("rss-a"), 1);
+    assert.equal(harness.countFor("rss-b"), 4);
+    assert.equal(summary.postsRemaining, 0);
+    assert.equal(summary.scheduleStatus, "ready", "a transferred week still finishes");
+  });
+
+  it("reports the dry source as exhausted even though its posts were written", async () => {
+    // exhaustedQuotas reports what ran dry, not what went unwritten — the run
+    // that hits the empty feed is the one that says so.
+    const harness = transferHarness(1);
+    const first = await generateWeeklySchedule(COMPANY_ID, harness.deps());
+    assert.equal(
+      first.exhaustedQuotas.some((q) => q.sourceId === "rss-a"),
+      true
+    );
+  });
+
+  it("falls short under 'skip' with the same articles — the policy is what differs", async () => {
+    const harness = transferHarness(1);
+    harness.sources[0].fallbackPolicy = "skip";
+    const summary = await runUntilSettled(harness);
+
+    assert.equal(harness.posts.length, 3, "A's 2 unwritten posts stay unwritten");
+    assert.equal(harness.countFor("rss-b"), 2, "B keeps exactly its own quota");
+    assert.equal(summary.scheduleStatus, "generating", "the week stays open for a retry");
+  });
+
+  it("still generates nothing beyond the mix total", async () => {
+    const harness = transferHarness(1);
+    await runUntilSettled(harness);
+    await generateWeeklySchedule(COMPANY_ID, harness.deps());
+    assert.equal(harness.posts.length, 5, "a settled week generates nothing further");
+  });
+
+  it("leaves the week open when no source can absorb the shortfall", async () => {
+    // Both feeds are dry, so there is nowhere to transfer to and the policy
+    // lands on its skip outcome: retry next run, once ingestion has run.
+    const harness = transferHarness(0, 0);
+    const summary = await runUntilSettled(harness);
+
+    assert.equal(harness.posts.length, 0);
+    assert.equal(summary.postsRemaining, 5, "the whole week is still owed");
+    assert.equal(summary.scheduleStatus, "generating");
+  });
+
+  it("absorbs only what the receiving source can actually write", async () => {
+    // A has 1 article and B has 3 for its topped-up quota of 4: 4 posts is all
+    // the week can honestly produce, and the run must not spin trying for more.
+    const harness = transferHarness(1, 3);
+    const summary = await runUntilSettled(harness);
+
+    assert.equal(harness.posts.length, 4);
+    assert.equal(summary.postsRemaining, 1);
+    assert.equal(summary.scheduleStatus, "generating");
+  });
+
+  it("never spills a dry RSS quota into company content", async () => {
+    // The mission quota is not a dumping ground for a feed's shortfall, even
+    // when the feed is explicitly configured to hand its posts on.
+    const harness = briefHarness({ aArticles: 0 });
+    harness.sources[0].fallbackPolicy = "use_another_source";
+    await runUntilSettled(harness);
+
+    assert.equal(harness.countFor(null), 1, "company content keeps exactly its own quota");
+    assert.equal(harness.countFor("rss-b"), 4, "RSS A's 3 posts went to the other feed");
+    assert.equal(harness.posts.length, 5);
+  });
+
+  it("balances the extra posts between two candidate sources", async () => {
+    const harness = new Harness(
+      [
+        {
+          id: "rss-a",
+          name: "RSS A",
+          enabled: true,
+          postsPerWeek: 2,
+          fallbackPolicy: "use_another_source",
+          articles: 0,
+        },
+        {
+          id: "rss-b",
+          name: "RSS B",
+          enabled: true,
+          postsPerWeek: 2,
+          fallbackPolicy: "skip",
+          articles: 10,
+        },
+        {
+          id: "rss-c",
+          name: "RSS C",
+          enabled: true,
+          postsPerWeek: 2,
+          fallbackPolicy: "skip",
+          articles: 10,
+        },
+      ],
+      0,
+      [{ channel: "facebook", postsPerWeek: 6 }]
+    );
+    await runUntilSettled(harness);
+
+    assert.equal(harness.posts.length, 6);
+    assert.equal(harness.countFor("rss-b"), 3, "B and C share A's quota evenly");
+    assert.equal(harness.countFor("rss-c"), 3);
+  });
+
+  it("never transfers to a disabled source", async () => {
+    // B is disabled, so it is not a candidate however many articles it holds:
+    // A's shortfall simply goes unwritten.
+    const harness = new Harness(
+      [
+        {
+          id: "rss-a",
+          name: "RSS A",
+          enabled: true,
+          postsPerWeek: 3,
+          fallbackPolicy: "use_another_source",
+          articles: 1,
+        },
+        {
+          id: "rss-b",
+          name: "RSS B",
+          enabled: false,
+          postsPerWeek: 2,
+          fallbackPolicy: "skip",
+          articles: 50,
+        },
+      ],
+      0
+    );
+    const summary = await runUntilSettled(harness);
+
+    assert.equal(harness.countFor("rss-b"), 0, "a disabled source never publishes");
+    assert.equal(harness.posts.length, 1);
+    assert.equal(summary.scheduleStatus, "generating");
+  });
+});
+
 // ─── Backward compatibility ───────────────────────────────────────────────────
 
 describe("generateWeeklySchedule — backward compatibility", () => {

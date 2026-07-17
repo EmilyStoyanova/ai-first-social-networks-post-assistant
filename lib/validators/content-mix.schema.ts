@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { MAX_POSTS_PER_CHANNEL_PER_WEEK } from "@/lib/scheduling/content-mix";
+import {
+  IMPLEMENTED_FALLBACK_POLICIES,
+  MAX_POSTS_PER_CHANNEL_PER_WEEK,
+} from "@/lib/scheduling/content-mix";
 
 /**
  * The whole distribution is submitted at once (v2-8).
@@ -20,12 +23,26 @@ const quotaValue = z
   .max(MAX_POSTS_PER_CHANNEL_PER_WEEK, `At most ${MAX_POSTS_PER_CHANNEL_PER_WEEK} posts per week.`)
   .nullable();
 
+/**
+ * What to do when this source runs out of articles mid-week.
+ *
+ * Sourced from IMPLEMENTED_FALLBACK_POLICIES rather than a literal list, so the
+ * API can never accept a policy the scheduler cannot honour: the column carries
+ * the wider v2-8 vocabulary (`use_company_profile`, `allow_reuse`) for phases
+ * that are not built yet, and those must stay unreachable until they are.
+ *
+ * Optional: an absent value keeps the source's stored policy. That is what lets
+ * a client submit quotas alone without resetting every policy to the default.
+ */
+const fallbackPolicyValue = z.enum(IMPLEMENTED_FALLBACK_POLICIES).optional();
+
 export const contentMixSchema = z.object({
   sources: z
     .array(
       z.object({
         sourceId: z.string().min(1),
         postsPerWeek: quotaValue,
+        fallbackPolicy: fallbackPolicyValue,
       })
     )
     .max(50),

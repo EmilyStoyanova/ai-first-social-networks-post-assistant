@@ -256,8 +256,10 @@ model ContentSource {
   postsPerWeek   Int?             @map("posts_per_week")
   // What to do when this source runs out of eligible articles mid-week. The
   // column carries the full v2-8 vocabulary (skip | use_another_source |
-  // use_company_profile | allow_reuse) so later phases need no migration, but
-  // only "skip" is implemented and validation rejects the others today.
+  // use_company_profile | allow_reuse) so later phases need no migration.
+  // Implemented: "skip" (leave the quota unfilled, retry next run) and
+  // "use_another_source" (hand the unwritten posts to sources that still have
+  // articles). Validation rejects the other two until they are built.
   fallbackPolicy String           @default("skip") @map("fallback_policy")
   createdAt     DateTime          @default(now()) @map("created_at")
 

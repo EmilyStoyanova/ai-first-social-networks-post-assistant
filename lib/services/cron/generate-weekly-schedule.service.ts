@@ -10,7 +10,6 @@ import {
   contentMixTotal,
   MAX_POSTS_PER_CHANNEL_PER_WEEK,
   nextDueQuota,
-  remainingByQuota,
   resolveContentMix,
   type MixQuota,
 } from "@/lib/scheduling/content-mix";
@@ -50,9 +49,12 @@ export interface WeeklyScheduleSummary {
   /** v2-8 — false when no content mix is configured and legacy pooling ran. */
   mixConfigured: boolean;
   /**
-   * v2-8 — quotas that ran out of eligible articles during this run. Their
-   * posts are deliberately NOT reassigned; the quota stays unfilled and is
-   * retried on the next run, by which time ingestion may have new articles.
+   * v2-8 — quotas that ran out of eligible articles during this run. What
+   * happens to their unwritten posts is the source's fallback policy: "skip"
+   * leaves the quota unfilled to be retried next run, once ingestion may have
+   * new articles; "use_another_source" hands the posts to a source that still
+   * has articles, so the week still hits its target. Either way the source is
+   * listed here — this reports what ran dry, not what was lost.
    * sourceId null = the company-content quota.
    */
   exhaustedQuotas: Array<{ channel: string; sourceId: string | null }>;
@@ -398,9 +400,11 @@ async function fillChannelPooled(
  *   • A post can only consume the quota it was drawn against, because the
  *     context is scoped before generation rather than attributed after it.
  *   • A source that runs dry is marked exhausted and skipped for the rest of the
- *     run; the loop keeps filling the other quotas. Its own quota is never
- *     handed to anyone else.
- *   • An exhausted quota still counts as remaining, so the schedule stays
+ *     run; the loop keeps filling the other quotas. Whether its unwritten posts
+ *     are dropped or passed to another source is its fallback policy's call, and
+ *     the loop needs no branch for it: nextDueQuota already answers in terms of
+ *     the post-transfer quotas.
+ *   • A quota left unfilled still counts as remaining, so the schedule stays
  *     "generating" and retries next run — by then ingestion may have fetched new
  *     articles. This mirrors what the pooled path already does on a dry pool.
  *
@@ -489,13 +493,16 @@ async function fillChannelFromMix(
     summary.postsGenerated++;
   }
 
-  // Exhausted quotas are counted as remaining on purpose: it keeps the schedule
-  // "generating" so a later run can retry once ingestion has new articles.
-  const remaining = remainingByQuota({
-    quotas,
-    generatedBySource,
-    exhausted: new Set(),
-  }).reduce((sum, r) => sum + r.remaining, 0);
-
-  summary.postsRemaining += remaining;
+  // What the week still owes, measured against the mix total rather than summed
+  // per quota — the same rule the pooled path above uses.
+  //
+  // Per-quota deficits cannot answer this once a transfer is in play: they clamp
+  // at zero, so a recipient that wrote 4 against a stored quota of 2 reports 0
+  // rather than -2, and the donor's untouched deficit of 2 is then counted as
+  // outstanding even though those posts exist. The mix total is invariant under
+  // transfer, so target-minus-written is the honest number.
+  //
+  // Posts still owed keep the schedule "generating" so a later run retries them,
+  // by which time ingestion may have fetched new articles.
+  summary.postsRemaining += Math.max(0, target - totalGenerated());
 }
