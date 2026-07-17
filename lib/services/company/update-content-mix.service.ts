@@ -4,7 +4,6 @@ import {
   projectMixSources,
   validateContentMix,
   type MixSourceInput,
-  type MixSourcePatch,
   type MixValidationCode,
 } from "@/lib/scheduling/content-mix";
 import type { ContentMixInput } from "@/lib/validators/content-mix.schema";
@@ -23,14 +22,9 @@ export type UpdateContentMixResult =
       message?: string;
     };
 
-/** The submitted patches, in the shape projectMixSources applies them. */
-function patchesFor(data: ContentMixInput): Map<string, MixSourcePatch> {
-  return new Map(
-    data.sources.map((s) => [
-      s.sourceId,
-      { postsPerWeek: s.postsPerWeek, fallbackPolicy: s.fallbackPolicy },
-    ])
-  );
+/** The submitted quotas, in the shape projectMixSources applies them. */
+function quotasFor(data: ContentMixInput): Map<string, number | null> {
+  return new Map(data.sources.map((s) => [s.sourceId, s.postsPerWeek]));
 }
 
 /**
@@ -40,22 +34,18 @@ function patchesFor(data: ContentMixInput): Map<string, MixSourcePatch> {
  * "what gets persisted", with none of the Prisma surface around it.
  *
  * Only submitted sources are written — a source the client omitted keeps its
- * stored row untouched rather than being rewritten with the values it already
- * has. Values come from the projection, so an omitted fallbackPolicy is written
- * back as the stored one rather than reset to the default.
+ * stored row untouched rather than being rewritten with the value it already
+ * has. `fallback_policy` is never written: quota transfer is unconditional, so
+ * the column is legacy and this path leaves whatever is in it alone.
  */
 export function planSourceWrites(
   existing: readonly MixSourceInput[],
   data: ContentMixInput
-): Array<{ id: string; postsPerWeek: number | null; fallbackPolicy: string }> {
+): Array<{ id: string; postsPerWeek: number | null }> {
   const submitted = new Set(data.sources.map((s) => s.sourceId));
-  return projectMixSources(existing, patchesFor(data))
+  return projectMixSources(existing, quotasFor(data))
     .filter((source) => submitted.has(source.id))
-    .map((source) => ({
-      id: source.id,
-      postsPerWeek: source.postsPerWeek,
-      fallbackPolicy: source.fallbackPolicy,
-    }));
+    .map((source) => ({ id: source.id, postsPerWeek: source.postsPerWeek }));
 }
 
 /**
@@ -82,7 +72,7 @@ export async function updateContentMix(
   const [existingSources, channels] = await Promise.all([
     prisma.contentSource.findMany({
       where: { companyId },
-      select: { id: true, name: true, enabled: true, postsPerWeek: true, fallbackPolicy: true },
+      select: { id: true, name: true, enabled: true, postsPerWeek: true },
     }),
     prisma.channelConfig.findMany({
       where: { companyId, enabled: true, postsPerWeek: { gt: 0 } },
@@ -102,7 +92,7 @@ export async function updateContentMix(
     };
   }
 
-  const projected = projectMixSources(existingSources, patchesFor(data));
+  const projected = projectMixSources(existingSources, quotasFor(data));
 
   const validation = validateContentMix({
     sources: projected,
@@ -119,7 +109,7 @@ export async function updateContentMix(
     ...writes.map((write) =>
       prisma.contentSource.update({
         where: { id: write.id },
-        data: { postsPerWeek: write.postsPerWeek, fallbackPolicy: write.fallbackPolicy },
+        data: { postsPerWeek: write.postsPerWeek },
       })
     ),
     prisma.company.update({
@@ -136,12 +126,10 @@ export async function updateContentMix(
     entityId: companyId,
     metadata: {
       companyContentPostsPerWeek: data.companyContentPostsPerWeek,
-      // The values actually written, not the ones submitted — an omitted policy
-      // is logged as the one that survived, so the log reads as what changed.
+      // The rows actually written, so the log reads as what changed.
       sources: writes.map((write) => ({
         sourceId: write.id,
         postsPerWeek: write.postsPerWeek,
-        fallbackPolicy: write.fallbackPolicy,
       })),
     },
   });

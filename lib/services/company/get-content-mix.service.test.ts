@@ -8,7 +8,6 @@ interface FakeSource {
   type: string;
   enabled: boolean;
   postsPerWeek: number | null;
-  fallbackPolicy: string;
 }
 
 function makeDb(
@@ -26,66 +25,64 @@ function makeDb(
 }
 
 function source(overrides: Partial<FakeSource> & { id: string }): FakeSource {
-  return {
-    name: overrides.id,
-    type: "rss",
-    enabled: true,
-    postsPerWeek: null,
-    fallbackPolicy: "skip",
-    ...overrides,
-  };
+  return { name: overrides.id, type: "rss", enabled: true, postsPerWeek: null, ...overrides };
 }
 
-describe("loadContentMixCore — fallbackPolicy", () => {
-  it("returns each source's stored policy so the editor opens on it", async () => {
+describe("loadContentMixCore", () => {
+  it("returns the stored distribution and the target it must hit", async () => {
     const dto = await loadContentMixCore(
-      makeDb([
-        source({ id: "rss-a", postsPerWeek: 3, fallbackPolicy: "use_another_source" }),
-        source({ id: "rss-b", postsPerWeek: 2 }),
-      ]),
+      makeDb([source({ id: "rss-a", postsPerWeek: 3 }), source({ id: "rss-b", postsPerWeek: 2 })]),
       "company-1"
     );
-    assert.equal(dto.sources.find((s) => s.id === "rss-a")?.fallbackPolicy, "use_another_source");
-    assert.equal(dto.sources.find((s) => s.id === "rss-b")?.fallbackPolicy, "skip");
-  });
 
-  it("returns the policy for disabled sources too", async () => {
-    // The UI hides them from the mix rows, but the value must survive a
-    // round-trip so re-enabling a source does not silently reset it.
-    const dto = await loadContentMixCore(
-      makeDb([
-        source({
-          id: "rss-a",
-          postsPerWeek: 3,
-          fallbackPolicy: "use_another_source",
-          enabled: false,
-        }),
-      ]),
-      "company-1"
-    );
-    assert.equal(dto.sources[0].fallbackPolicy, "use_another_source");
-  });
-
-  it("still reports the mix as valid when a source transfers its quota", async () => {
-    // use_another_source is implemented, so it must not trip the
-    // MIX_UNSUPPORTED_FALLBACK guard the way the unbuilt policies do.
-    const dto = await loadContentMixCore(
-      makeDb([
-        source({ id: "rss-a", postsPerWeek: 3, fallbackPolicy: "use_another_source" }),
-        source({ id: "rss-b", postsPerWeek: 2 }),
-      ]),
-      "company-1"
-    );
-    assert.equal(dto.validationError, null);
     assert.equal(dto.total, 5);
+    assert.equal(dto.weeklyTarget, 5);
+    assert.equal(dto.remaining, 0);
     assert.equal(dto.configured, true);
+    assert.equal(dto.validationError, null);
   });
 
-  it("surfaces a stored policy that has no implementation as a validation error", async () => {
+  it("exposes no fallback policy — transfer is not configurable", async () => {
+    // The column still exists for backwards compatibility. It must not reach the
+    // client, or a UI could imply a choice the scheduler no longer honours.
     const dto = await loadContentMixCore(
-      makeDb([source({ id: "rss-a", postsPerWeek: 5, fallbackPolicy: "allow_reuse" })]),
+      makeDb([source({ id: "rss-a", postsPerWeek: 5 })]),
       "company-1"
     );
-    assert.equal(dto.validationError?.code, "MIX_UNSUPPORTED_FALLBACK");
+    assert.deepEqual(Object.keys(dto.sources[0]).sort(), [
+      "enabled",
+      "id",
+      "name",
+      "postsPerWeek",
+      "type",
+    ]);
+  });
+
+  it("reports an unconfigured mix as legacy pooling", async () => {
+    const dto = await loadContentMixCore(makeDb([source({ id: "rss-a" })], null), "company-1");
+    assert.equal(dto.configured, false);
+    assert.equal(dto.total, 0);
+  });
+
+  it("surfaces a stored mix that no longer adds up", async () => {
+    // A channel budget can change after the mix was saved, so the read model has
+    // to be able to say the stored distribution is now invalid.
+    const dto = await loadContentMixCore(
+      makeDb([source({ id: "rss-a", postsPerWeek: 2 })]),
+      "company-1"
+    );
+    assert.equal(dto.validationError?.code, "MIX_TOTAL_MISMATCH");
+  });
+
+  it("keeps disabled sources in the list but out of the total", async () => {
+    const dto = await loadContentMixCore(
+      makeDb([
+        source({ id: "rss-a", postsPerWeek: 5 }),
+        source({ id: "rss-b", postsPerWeek: 9, enabled: false }),
+      ]),
+      "company-1"
+    );
+    assert.equal(dto.sources.length, 2, "the UI still lists them");
+    assert.equal(dto.total, 5, "a disabled source's stale quota never counts");
   });
 });

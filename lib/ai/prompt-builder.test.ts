@@ -34,7 +34,7 @@ function makeCtx(overrides: {
 
 describe("prompt-builder — Bulgarian content language", () => {
   it("instructs the LLM to write post text in Bulgarian", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({}), "bg");
+    const { systemPrompt } = buildPrompts(makeCtx({}), null, "bg");
     assert.ok(systemPrompt.includes("Bulgarian"), "system prompt should mention Bulgarian");
     assert.ok(
       systemPrompt.includes("text") && systemPrompt.includes("BG"),
@@ -43,7 +43,7 @@ describe("prompt-builder — Bulgarian content language", () => {
   });
 
   it("instructs imagePrompt to always be in English even when contentLanguage=bg", () => {
-    const { systemPrompt, userPrompt } = buildPrompts(makeCtx({}), "bg");
+    const { systemPrompt, userPrompt } = buildPrompts(makeCtx({}), null, "bg");
     const combined = systemPrompt + "\n" + userPrompt;
     assert.ok(
       combined.toLowerCase().includes("english"),
@@ -56,7 +56,7 @@ describe("prompt-builder — Bulgarian content language", () => {
   });
 
   it("imagePrompt English rule is present even when contentLanguage=en", () => {
-    const { systemPrompt, userPrompt } = buildPrompts(makeCtx({}), "en");
+    const { systemPrompt, userPrompt } = buildPrompts(makeCtx({}), null, "en");
     const combined = systemPrompt + "\n" + userPrompt;
     assert.ok(
       combined.toLowerCase().includes("english"),
@@ -67,7 +67,7 @@ describe("prompt-builder — Bulgarian content language", () => {
 
 describe("prompt-builder — Bulgarian language quality section", () => {
   it("includes the Bulgarian quality section when contentLanguage=bg", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({}), "bg");
+    const { systemPrompt } = buildPrompts(makeCtx({}), null, "bg");
     assert.ok(
       systemPrompt.includes("Bulgarian Language Quality"),
       "BG system prompt must include the quality section heading"
@@ -83,7 +83,7 @@ describe("prompt-builder — Bulgarian language quality section", () => {
   });
 
   it("includes the Bulgarian quality section when channel postingLanguage=bg (no contentLanguage override)", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({ postingLanguage: "bg" }));
+    const { systemPrompt } = buildPrompts(makeCtx({ postingLanguage: "bg" }), null);
     assert.ok(
       systemPrompt.includes("Bulgarian Language Quality"),
       "BG channel language must also trigger the quality section"
@@ -91,7 +91,7 @@ describe("prompt-builder — Bulgarian language quality section", () => {
   });
 
   it("omits the Bulgarian quality section for English generation", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({}), "en");
+    const { systemPrompt } = buildPrompts(makeCtx({}), null, "en");
     assert.ok(
       !systemPrompt.includes("Bulgarian Language Quality"),
       "EN system prompt must NOT include the BG quality section"
@@ -103,7 +103,7 @@ describe("prompt-builder — Bulgarian language quality section", () => {
   });
 
   it("omits the Bulgarian quality section when no contentLanguage override and channel is EN", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({ postingLanguage: "en" }));
+    const { systemPrompt } = buildPrompts(makeCtx({ postingLanguage: "en" }), null);
     assert.ok(
       !systemPrompt.includes("Bulgarian Language Quality"),
       "default EN channel must NOT include BG quality section"
@@ -111,7 +111,7 @@ describe("prompt-builder — Bulgarian language quality section", () => {
   });
 
   it("BG prompt retains the basic language directive in Writing Rules", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({}), "bg");
+    const { systemPrompt } = buildPrompts(makeCtx({}), null, "bg");
     assert.ok(
       systemPrompt.includes("Generate the post in Bulgarian."),
       "Writing Rules must still include the basic BG language directive"
@@ -119,7 +119,7 @@ describe("prompt-builder — Bulgarian language quality section", () => {
   });
 
   it("EN prompt Writing Rules language directive is unchanged", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({}), "en");
+    const { systemPrompt } = buildPrompts(makeCtx({}), null, "en");
     assert.ok(
       systemPrompt.includes("Generate the post in English."),
       "EN Writing Rules language directive must remain unchanged"
@@ -131,7 +131,7 @@ describe("prompt-builder — Bulgarian language quality section", () => {
   });
 
   it("BG quality section does not appear in the user prompt", () => {
-    const { userPrompt } = buildPrompts(makeCtx({}), "bg");
+    const { userPrompt } = buildPrompts(makeCtx({}), null, "bg");
     assert.ok(
       !userPrompt.includes("Bulgarian Language Quality"),
       "BG quality section must only appear in the system prompt, not the user prompt"
@@ -141,7 +141,7 @@ describe("prompt-builder — Bulgarian language quality section", () => {
 
 describe("prompt-builder — coreMessage", () => {
   it("defines coreMessage in the system prompt with its constraints", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({}), "en");
+    const { systemPrompt } = buildPrompts(makeCtx({}), null, "en");
     assert.ok(
       systemPrompt.includes("Core Message"),
       "system prompt must include the Core Message section"
@@ -161,7 +161,7 @@ describe("prompt-builder — coreMessage", () => {
   });
 
   it("includes coreMessage in the JSON format block of the user prompt", () => {
-    const { userPrompt } = buildPrompts(makeCtx({}), "en");
+    const { userPrompt } = buildPrompts(makeCtx({}), null, "en");
     const coreLine = userPrompt.split("\n").find((l) => l.includes('"coreMessage"'));
     assert.ok(coreLine, "JSON format block must include a coreMessage line");
     assert.ok(
@@ -171,7 +171,7 @@ describe("prompt-builder — coreMessage", () => {
   });
 
   it("instructs coreMessage to be written in the post language (BG)", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({}), "bg");
+    const { systemPrompt } = buildPrompts(makeCtx({}), null, "bg");
     // The Core Message section references the post language token (BG).
     const idx = systemPrompt.indexOf("Core Message");
     const section = systemPrompt.slice(idx);
@@ -209,7 +209,7 @@ describe("prompt-builder — channel policy (v2-3)", () => {
   ].join("\n");
 
   it("renders the Instagram channel block byte-identically to pre-v2-3", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({ channel: "instagram" }), "en");
+    const { systemPrompt } = buildPrompts(makeCtx({ channel: "instagram" }), null, "en");
     assert.ok(
       systemPrompt.includes(LEGACY_INSTAGRAM_BLOCK),
       "Instagram channel block changed — generation behaviour would change"
@@ -217,7 +217,7 @@ describe("prompt-builder — channel policy (v2-3)", () => {
   });
 
   it("renders the Facebook channel block byte-identically to pre-v2-3", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({ channel: "facebook" }), "en");
+    const { systemPrompt } = buildPrompts(makeCtx({ channel: "facebook" }), null, "en");
     assert.ok(
       systemPrompt.includes(LEGACY_FACEBOOK_BLOCK),
       "Facebook channel block changed — generation behaviour would change"
@@ -226,7 +226,7 @@ describe("prompt-builder — channel policy (v2-3)", () => {
 
   it("injects every hint fragment for the channel", () => {
     for (const channel of ["facebook", "linkedin", "instagram", "tiktok"] as const) {
-      const { systemPrompt } = buildPrompts(makeCtx({ channel }), "en");
+      const { systemPrompt } = buildPrompts(makeCtx({ channel }), null, "en");
       for (const hint of CHANNEL_POLICIES[channel].hints) {
         assert.ok(
           systemPrompt.includes(hint.promptFragment),
@@ -238,7 +238,7 @@ describe("prompt-builder — channel policy (v2-3)", () => {
 
   it("BLOCKING constraints contribute no prompt text — they block instead", () => {
     for (const channel of ["instagram", "tiktok"] as const) {
-      const { systemPrompt, userPrompt } = buildPrompts(makeCtx({ channel }), "en");
+      const { systemPrompt, userPrompt } = buildPrompts(makeCtx({ channel }), null, "en");
       const combined = systemPrompt + "\n" + userPrompt;
       for (const constraint of CHANNEL_POLICIES[channel].constraints) {
         assert.ok(
@@ -250,7 +250,7 @@ describe("prompt-builder — channel policy (v2-3)", () => {
   });
 
   it("an unknown channel yields no channel guidance rather than throwing", () => {
-    const { systemPrompt } = buildPrompts(makeCtx({ channel: "myspace" }), "en");
+    const { systemPrompt } = buildPrompts(makeCtx({ channel: "myspace" }), null, "en");
     assert.ok(systemPrompt.includes("## Channel: myspace"));
     assert.ok(systemPrompt.includes("Post language: EN"));
   });
@@ -258,7 +258,7 @@ describe("prompt-builder — channel policy (v2-3)", () => {
 
 describe("prompt-builder — imageRequired", () => {
   it("marks imagePrompt as REQUIRED in the JSON format when imageRequired=true", () => {
-    const { userPrompt } = buildPrompts(makeCtx({ imageRequired: true }));
+    const { userPrompt } = buildPrompts(makeCtx({ imageRequired: true }), null);
     // Extract the imagePrompt line from the JSON format block
     const imagePromptLine = userPrompt.split("\n").find((l) => l.includes('"imagePrompt"'));
     assert.ok(imagePromptLine, "JSON format block must include an imagePrompt line");
@@ -273,7 +273,7 @@ describe("prompt-builder — imageRequired", () => {
   });
 
   it("marks imagePrompt as optional in the JSON format when imageRequired=false", () => {
-    const { userPrompt } = buildPrompts(makeCtx({ imageRequired: false }));
+    const { userPrompt } = buildPrompts(makeCtx({ imageRequired: false }), null);
     const imagePromptLine = userPrompt.split("\n").find((l) => l.includes('"imagePrompt"'));
     assert.ok(imagePromptLine, "JSON format block must include an imagePrompt line");
     assert.ok(

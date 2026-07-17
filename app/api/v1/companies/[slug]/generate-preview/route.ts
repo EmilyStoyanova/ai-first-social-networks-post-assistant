@@ -4,6 +4,7 @@ import { auth } from "@/lib/auth";
 import { buildGenerationContext } from "@/lib/services/ai/build-generation-context.service";
 import { resolveGenerationAspect } from "@/lib/services/ai/resolve-generation-aspect.service";
 import { buildPrompts } from "@/lib/ai/prompt-builder";
+import { previewPrimaryItem } from "@/lib/ai/primary-feed-item";
 import { resolveLlmSelection } from "@/lib/services/ai/resolve-llm-selection.service";
 import { buildSupportedProvider } from "@/lib/ai/llm/supported-providers";
 import { prisma } from "@/lib/db/client";
@@ -152,6 +153,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
   });
   const snapshots = recentRows.map((r) => r.promptSnapshot as Record<string, unknown> | null);
 
+  // A preview reserves nothing, so there is no claim to read the primary from.
+  // Forecast the article a real generation would claim, and build the whole
+  // preview — aspect included — around that one item, so the preview cannot show
+  // an aspect for an article the real post would not be about.
+  const primaryItem = previewPrimaryItem(context.feedItems);
+
   // Get the provider for potential extraction (graceful no-op if unavailable).
   let selectedAspect: import("@/lib/ai/content-aspect").ContentAspect | undefined;
   try {
@@ -161,7 +168,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
         : buildSupportedProvider(selection.provider).instance;
 
     const aspectResult = await resolveGenerationAspect({
-      feedItems: context.feedItems,
+      primary: primaryItem,
       snapshots,
       provider,
     });
@@ -171,9 +178,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     selectedAspect = undefined;
   }
 
-  const { systemPrompt, userPrompt } = buildPrompts(context, parsed.data.contentLanguage, [], {
-    aspect: selectedAspect,
-  });
+  const { systemPrompt, userPrompt } = buildPrompts(
+    context,
+    primaryItem,
+    parsed.data.contentLanguage,
+    [],
+    { aspect: selectedAspect }
+  );
 
   return NextResponse.json({
     provider: selection.providerLabel,

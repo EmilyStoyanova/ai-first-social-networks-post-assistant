@@ -6,43 +6,42 @@ import { validateAspects, type ContentAspect } from "./content-aspect";
 // ─── Context fingerprint ───────────────────────────────────────────────────────
 
 /**
- * Derives a stable fingerprint from the set of feed items used as source content.
- * Returns null when there are no feed items (no meaningful source to mine aspects from).
+ * Derives a stable fingerprint for the aspect pool of ONE primary feed item.
+ * Returns null when there is no primary (a mission/brand post mines no aspects).
+ *
+ * Keyed to the primary alone, never to the set of items in context. A set-based
+ * fingerprint (all ids, sorted) was the source of a real production bug: it is
+ * identical for every post drawn from the same feed window, so post 2 — built
+ * around a different article — loaded post 1's pool and was handed an aspect
+ * mined from a third article. The post then discussed that article while the
+ * appended URL still pointed at its own. One article, one pool.
+ *
  * Source-type agnostic: all content sources produce FeedItems, so this works for
  * RSS, product pages, calendar events, and future source types equally.
  */
-export function buildContextFingerprint(feedItems: FeedItemContext[]): string | null {
-  if (feedItems.length === 0) return null;
-  const ids = feedItems
-    .map((f) => f.id)
-    .sort()
-    .join("|");
-  return createHash("sha256").update(ids).digest("hex").slice(0, 12);
+export function buildPrimaryFingerprint(primary: FeedItemContext | null): string | null {
+  if (!primary) return null;
+  return createHash("sha256").update(primary.id).digest("hex").slice(0, 12);
 }
 
 // ─── Extraction prompt ────────────────────────────────────────────────────────
 
 const CONTENT_PER_ITEM_LIMIT = 900;
-const TOTAL_CONTENT_LIMIT = 4000;
 
-function buildSourceContent(feedItems: FeedItemContext[]): string {
-  let budget = TOTAL_CONTENT_LIMIT;
-  const parts: string[] = [];
-
-  for (const item of feedItems) {
-    if (budget <= 0) break;
-    const title = item.title?.trim() ?? "";
-    const raw = item.content?.trim() ?? "";
-    const excerpt =
-      raw.length > CONTENT_PER_ITEM_LIMIT ? raw.slice(0, CONTENT_PER_ITEM_LIMIT) + "…" : raw;
-    const block = [title ? `**${title}**` : null, excerpt || null].filter(Boolean).join("\n");
-    if (!block) continue;
-    if (block.length > budget) break;
-    budget -= block.length + 10;
-    parts.push(block);
-  }
-
-  return parts.join("\n---\n");
+/**
+ * The primary article's text, and nothing else.
+ *
+ * Background items are deliberately excluded. An aspect is injected into the
+ * generation prompt as a MANDATORY constraint ("build this post around this
+ * focus, do NOT replace it"), so an aspect mined from a background article is an
+ * instruction to write about an article the post does not link to.
+ */
+function buildSourceContent(primary: FeedItemContext): string {
+  const title = primary.title?.trim() ?? "";
+  const raw = primary.content?.trim() ?? "";
+  const excerpt =
+    raw.length > CONTENT_PER_ITEM_LIMIT ? raw.slice(0, CONTENT_PER_ITEM_LIMIT) + "…" : raw;
+  return [title ? `**${title}**` : null, excerpt || null].filter(Boolean).join("\n");
 }
 
 // ─── Response parsing ─────────────────────────────────────────────────────────
@@ -63,17 +62,18 @@ function stripFences(raw: string): string {
 // ─── Extraction ───────────────────────────────────────────────────────────────
 
 /**
- * Calls the LLM provider to extract distinct content aspects from the feed items.
+ * Calls the LLM provider to extract distinct content aspects from the PRIMARY
+ * feed item — the one article the post will be written from and linked to.
  * existingFocuses are passed as exclusions so progressive extraction rounds
  * don't re-surface angles already in the pool.
  * Returns an empty array (non-throwing) if the response is unparseable.
  */
 export async function extractAspects(
   provider: ILlmProvider,
-  feedItems: FeedItemContext[],
+  primary: FeedItemContext,
   existingFocuses: string[]
 ): Promise<ContentAspect[]> {
-  const sourceContent = buildSourceContent(feedItems);
+  const sourceContent = buildSourceContent(primary);
   if (!sourceContent) return [];
 
   const exclusionBlock =

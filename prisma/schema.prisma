@@ -254,12 +254,14 @@ model ContentSource {
   // Content mix (v2-8) — how many of each channel's weekly posts must come from
   // this source. NULL = no quota assigned; see Company.companyContentPostsPerWeek.
   postsPerWeek   Int?             @map("posts_per_week")
-  // What to do when this source runs out of eligible articles mid-week. The
-  // column carries the full v2-8 vocabulary (skip | use_another_source |
-  // use_company_profile | allow_reuse) so later phases need no migration.
-  // Implemented: "skip" (leave the quota unfilled, retry next run) and
-  // "use_another_source" (hand the unwritten posts to sources that still have
-  // articles). Validation rejects the other two until they are built.
+  // LEGACY — retained for backwards compatibility, read by nothing.
+  //
+  // This once chose what happened when a source ran out of articles mid-week.
+  // The product decision is that the behaviour is not a choice: the unwritten
+  // posts always move to a source that still has articles (see
+  // transferExhaustedQuotas). Whatever a row holds here is ignored, no code path
+  // writes it, and it is absent from every type, DTO, and query. Kept only so
+  // dropping it can be a deliberate migration rather than a side effect.
   fallbackPolicy String           @default("skip") @map("fallback_policy")
   createdAt     DateTime          @default(now()) @map("created_at")
 

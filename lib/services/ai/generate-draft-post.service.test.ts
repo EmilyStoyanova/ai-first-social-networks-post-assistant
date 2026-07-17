@@ -52,7 +52,14 @@ interface RecentRow {
 
 function makeDeps(
   recentRows: RecentRow[] = [],
-  semanticGate: SemanticGate = ACCEPT_GATE
+  semanticGate: SemanticGate = ACCEPT_GATE,
+  /**
+   * Ids the reservation is allowed to win. Omit to let every candidate be
+   * claimed (the common case). Pass a subset to model a concurrent run that
+   * already took the earlier candidates, which is how the claim lands on an
+   * item that is NOT feedItems[0].
+   */
+  claimable?: ReadonlySet<string>
 ): {
   deps: GenerateDraftPostDeps;
   created: () => Prisma.PostUncheckedCreateInput | null;
@@ -85,8 +92,14 @@ function makeDeps(
         };
       },
     },
-    // Always grants the claim so the "generate" (article) path proceeds.
-    feedItem: { updateMany: async () => ({ count: 1 }) },
+    // Grants the claim so the "generate" (article) path proceeds. A count of 0
+    // is exactly what production returns when another run already claimed that
+    // row, which makes claimFeedItem move on to the next candidate.
+    feedItem: {
+      updateMany: async (args) => ({
+        count: !claimable || claimable.has(args.where.id) ? 1 : 0,
+      }),
+    },
   };
 
   return {
@@ -1084,6 +1097,170 @@ describe("generatePostFromContext — automatic image generation", () => {
     const result = await generatePostFromContext(ctx, "co-1", {}, deps);
 
     assert.ok(result.success, "a failed image must never fail the post");
+  });
+});
+
+// ─── Source binding: text, URL and reservation are one article ───────────────
+
+describe("generatePostFromContext — the post links to the article it was written from", () => {
+  let prevMockMode: string | undefined;
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  // The production report: a post about a university closure carrying the URL of
+  // an unrelated article from the same BBC feed.
+  const CLOSURE = {
+    id: "closure",
+    title: "University closes campus after funding cut",
+    content: "Students were told the campus will shut at the end of term.",
+    url: "https://news.example.com/university-closure",
+    publishedAt: null,
+  };
+  const WEATHER = {
+    id: "weather",
+    title: "Storm warning issued for the coast",
+    content: "Forecasters expect high winds through the weekend.",
+    url: "https://news.example.com/storm-warning",
+    publishedAt: null,
+  };
+
+  function linkingContext(feedItems: GenerationContext["feedItems"]): GenerationContext {
+    return makeContext({
+      feedItems,
+      hasArticleSources: true,
+      channel: { ...makeContext().channel, includeSourceLink: true },
+    });
+  }
+
+  it("binds every recorded value to the CLAIMED article when it is not feedItems[0]", async () => {
+    // A concurrent run already took the first candidate, so the reservation wins
+    // the second. This is the case a positional primary gets wrong: the post
+    // would be linked to whatever happened to sit at index 0.
+    const { deps, created } = makeDeps([], ACCEPT_GATE, new Set(["closure"]));
+    const result = await generatePostFromContext(
+      linkingContext([WEATHER, CLOSURE]),
+      "company-1",
+      {},
+      deps
+    );
+
+    assert.equal(result.success, true);
+    const data = created()!;
+    const snapshot = data.promptSnapshot as Record<string, unknown>;
+    const content = data.content as string;
+
+    // Post.primaryFeedItemId === the reserved item
+    assert.equal(data.primaryFeedItemId, "closure");
+    // promptSnapshot agrees with the column
+    assert.equal(snapshot.primaryFeedItemId, "closure");
+    // promptSnapshot.sourceUrl === the reserved item's url
+    assert.equal(snapshot.sourceUrl, CLOSURE.url);
+    assert.equal(snapshot.sourceTitle, CLOSURE.title);
+    // The URL actually appended to the post is that same url
+    assert.ok(content.endsWith(CLOSURE.url), "the appended URL is the claimed article's");
+  });
+
+  it("never lets a background article supply the URL", async () => {
+    const { deps, created } = makeDeps([], ACCEPT_GATE, new Set(["closure"]));
+    await generatePostFromContext(linkingContext([WEATHER, CLOSURE]), "company-1", {}, deps);
+
+    const data = created()!;
+    const content = data.content as string;
+    assert.ok(!content.includes(WEATHER.url), "the unclaimed article's URL must never appear");
+    assert.notEqual(data.primaryFeedItemId, "weather");
+    assert.notEqual((data.promptSnapshot as Record<string, unknown>).sourceUrl, WEATHER.url);
+  });
+
+  it("holds whichever article the reservation wins", async () => {
+    // Not an artefact of one ordering: each claim yields a self-consistent post.
+    for (const claimed of [WEATHER, CLOSURE]) {
+      const { deps, created } = makeDeps([], ACCEPT_GATE, new Set([claimed.id]));
+      await generatePostFromContext(linkingContext([WEATHER, CLOSURE]), "company-1", {}, deps);
+
+      const data = created()!;
+      const snapshot = data.promptSnapshot as Record<string, unknown>;
+      assert.equal(data.primaryFeedItemId, claimed.id);
+      assert.equal(snapshot.sourceUrl, claimed.url);
+      assert.ok((data.content as string).endsWith(claimed.url));
+    }
+  });
+
+  it("records the same article in the prompt it sent to the model", async () => {
+    // The last link in the chain: the model was told to write about the article
+    // whose URL we appended, not merely that the two ids match afterwards.
+    const { deps, created } = makeDeps([], ACCEPT_GATE, new Set(["closure"]));
+    await generatePostFromContext(linkingContext([WEATHER, CLOSURE]), "company-1", {}, deps);
+
+    const snapshot = created()!.promptSnapshot as Record<string, unknown>;
+    const userPrompt = snapshot.userPrompt as string;
+    const primaryIdx = userPrompt.indexOf("PRIMARY SOURCE ARTICLE");
+    const backgroundIdx = userPrompt.indexOf("Additional background context");
+
+    assert.ok(primaryIdx >= 0 && backgroundIdx > primaryIdx);
+    const closureIdx = userPrompt.indexOf(CLOSURE.title);
+    assert.ok(
+      closureIdx > primaryIdx && closureIdx < backgroundIdx,
+      "the claimed article is the PRIMARY SOURCE in the prompt"
+    );
+    assert.ok(
+      userPrompt.indexOf(WEATHER.title) > backgroundIdx,
+      "the unclaimed article is background only"
+    );
+  });
+
+  it("carries the binding through the transferred-quota path (v2-8)", async () => {
+    // A dry RSS-A hands its quota to RSS-B, so a run generates several posts in
+    // a row scoped to RSS-B. Each must link to its own article:
+    // this is the second and third of four posts from the same B window.
+    const bWindow = [
+      { ...CLOSURE, id: "b-1", url: "https://news.example.com/b-1" },
+      { ...WEATHER, id: "b-2", url: "https://news.example.com/b-2" },
+      { ...CLOSURE, id: "b-3", url: "https://news.example.com/b-3" },
+    ];
+
+    for (const claimedId of ["b-2", "b-3"]) {
+      const { deps, created } = makeDeps([], ACCEPT_GATE, new Set([claimedId]));
+      const result = await generatePostFromContext(
+        linkingContext(bWindow),
+        "company-1",
+        { contentSourceId: "rss-b" },
+        deps
+      );
+
+      assert.equal(result.success, true);
+      const data = created()!;
+      const claimed = bWindow.find((i) => i.id === claimedId)!;
+      assert.equal(data.contentSourceId, "rss-b", "the post is drawn against RSS-B's quota");
+      assert.equal(data.primaryFeedItemId, claimedId);
+      assert.equal((data.promptSnapshot as Record<string, unknown>).sourceUrl, claimed.url);
+      assert.ok((data.content as string).endsWith(claimed.url));
+    }
+  });
+
+  it("appends no URL for a mission post", async () => {
+    const { deps, created } = makeDeps();
+    await generatePostFromContext(
+      makeContext({
+        feedItems: [],
+        hasArticleSources: false,
+        channel: { ...makeContext().channel, includeSourceLink: true },
+      }),
+      "company-1",
+      {},
+      deps
+    );
+
+    const data = created()!;
+    const snapshot = data.promptSnapshot as Record<string, unknown>;
+    assert.equal(data.primaryFeedItemId, null);
+    assert.equal(snapshot.sourceUrl, null);
+    assert.ok(!(data.content as string).includes("https://news.example.com"));
   });
 });
 

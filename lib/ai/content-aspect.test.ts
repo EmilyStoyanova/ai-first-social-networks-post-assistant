@@ -11,7 +11,7 @@ import {
   selectRetryAspect,
   type ContentAspect,
 } from "./content-aspect";
-import { buildContextFingerprint, extractAspects } from "./aspect-extractor";
+import { buildPrimaryFingerprint, extractAspects } from "./aspect-extractor";
 import { loadAspectPoolData, allAspectsUsed, buildSnapshotAspectFields } from "./aspect-pool-store";
 import { buildPrompts } from "./prompt-builder";
 import type { GenerationContext } from "./types";
@@ -295,29 +295,37 @@ describe("selectRetryAspect — retry switches aspect", () => {
   });
 });
 
-// ─── 6. buildContextFingerprint ───────────────────────────────────────────────
+// ─── 6. buildPrimaryFingerprint ───────────────────────────────────────────────
 
-describe("buildContextFingerprint", () => {
-  it("returns null when feedItems is empty", () => {
-    assert.strictEqual(buildContextFingerprint([]), null);
+describe("buildPrimaryFingerprint", () => {
+  it("returns null when there is no primary", () => {
+    assert.strictEqual(buildPrimaryFingerprint(null), null);
   });
 
-  it("returns a 12-character hex string for non-empty feedItems", () => {
-    const fp = buildContextFingerprint(FEED_ITEMS);
+  it("returns a 12-character hex string for a primary item", () => {
+    const fp = buildPrimaryFingerprint(FEED_ITEMS[0]);
     assert.ok(fp !== null);
     assert.match(fp, /^[0-9a-f]{12}$/);
   });
 
-  it("returns the same fingerprint for the same set of items regardless of order", () => {
-    const fp1 = buildContextFingerprint(FEED_ITEMS);
-    const fp2 = buildContextFingerprint([...FEED_ITEMS].reverse());
-    assert.strictEqual(fp1, fp2);
+  it("gives every article its own pool — the regression this keying exists for", () => {
+    // The fingerprint used to hash the whole sorted item SET, so every post drawn
+    // from the same feed window shared one aspect pool. Post 2, built around a
+    // different article, loaded post 1's pool and was handed an aspect mined from
+    // a third article — it then wrote about that article while linking to its own.
+    assert.notStrictEqual(
+      buildPrimaryFingerprint(FEED_ITEMS[0]),
+      buildPrimaryFingerprint(FEED_ITEMS[1])
+    );
   });
 
-  it("returns a different fingerprint for a different set of items", () => {
-    const fp1 = buildContextFingerprint(FEED_ITEMS);
-    const fp2 = buildContextFingerprint([FEED_ITEMS[0]]);
-    assert.notStrictEqual(fp1, fp2);
+  it("does not change when the rest of the feed window changes", () => {
+    // The pool belongs to the article, not to whatever else happened to be
+    // ingested alongside it, so a later ingest cannot invalidate it.
+    assert.strictEqual(
+      buildPrimaryFingerprint(FEED_ITEMS[0]),
+      buildPrimaryFingerprint({ ...FEED_ITEMS[0] })
+    );
   });
 });
 
@@ -405,11 +413,38 @@ describe("extractAspects — exclusions passed to later round", async () => {
       },
     };
 
-    await extractAspects(provider, FEED_ITEMS, ["async error handling patterns"]);
+    await extractAspects(provider, FEED_ITEMS[0], ["async error handling patterns"]);
     assert.ok(
       capturedPrompt.includes("async error handling patterns"),
       "extraction prompt should include excluded focus"
     );
+  });
+
+  it("mines the PRIMARY article only — background content never reaches the prompt", () => {
+    // The production bug, at its root. Extraction used to receive every item in
+    // the feed window, so the pool mixed aspects from several articles. The
+    // selected aspect then reached generation as a MANDATORY "build the post
+    // around this focus" instruction — steering the model onto an article the
+    // post does not link to, while the URL stayed with the primary.
+    let capturedPrompt = "";
+    const provider: ILlmProvider = {
+      async generate(req: LlmRequest): Promise<LlmResponse> {
+        capturedPrompt = req.userPrompt;
+        return { text: "[]" };
+      },
+    };
+
+    return extractAspects(provider, FEED_ITEMS[0], []).then(() => {
+      assert.ok(
+        capturedPrompt.includes(FEED_ITEMS[0].title),
+        "the primary article's content must be mined"
+      );
+      assert.ok(
+        !capturedPrompt.includes(FEED_ITEMS[1].title),
+        "a background article must not contribute aspects"
+      );
+      assert.ok(!capturedPrompt.includes(FEED_ITEMS[1].content), "no background body text either");
+    });
   });
 });
 
@@ -427,7 +462,7 @@ describe("extractAspects — new aspects appended not replacing", async () => {
     ];
     const provider = makeProvider([aspectsJson(rawAspects)]);
 
-    const result = await extractAspects(provider, FEED_ITEMS, [existingFocus]);
+    const result = await extractAspects(provider, FEED_ITEMS[0], [existingFocus]);
     // Should only contain the genuinely new one
     assert.ok(result.every((a) => a.focus !== existingFocus));
     assert.ok(result.length <= 1);
@@ -461,7 +496,7 @@ describe("prompt-builder — visualConcept appears in imagePrompt instruction", 
       "Error Handling",
       "close-up of a cracked screen showing a stack trace error message on a dark background"
     );
-    const { userPrompt } = buildPrompts(CTX, "en", [], { aspect });
+    const { userPrompt } = buildPrompts(CTX, FEED_ITEMS[0], "en", [], { aspect });
     assert.ok(userPrompt.includes(aspect.focus), "userPrompt must contain the aspect focus");
   });
 
@@ -471,7 +506,7 @@ describe("prompt-builder — visualConcept appears in imagePrompt instruction", 
       "Error Handling",
       "close-up of a cracked screen showing a stack trace error message on a dark background"
     );
-    const { userPrompt } = buildPrompts(CTX, "en", [], { aspect });
+    const { userPrompt } = buildPrompts(CTX, FEED_ITEMS[0], "en", [], { aspect });
     assert.ok(
       userPrompt.includes(aspect.visualConcept),
       "userPrompt must contain the aspect visualConcept"
@@ -479,7 +514,7 @@ describe("prompt-builder — visualConcept appears in imagePrompt instruction", 
   });
 
   it("does not include aspect sections when no aspect is provided", () => {
-    const { userPrompt } = buildPrompts(CTX, "en", [], {});
+    const { userPrompt } = buildPrompts(CTX, FEED_ITEMS[0], "en", [], {});
     assert.ok(
       !userPrompt.includes("Content aspect"),
       "userPrompt must not include aspect section when no aspect is passed"
@@ -504,7 +539,7 @@ describe("extractAspects — first extraction on cache miss", async () => {
       },
     ];
     const provider = makeProvider([aspectsJson(rawAspects)]);
-    const aspects = await extractAspects(provider, FEED_ITEMS, []);
+    const aspects = await extractAspects(provider, FEED_ITEMS[0], []);
 
     assert.ok(aspects.length > 0, "should extract at least one aspect");
     for (const aspect of aspects) {
@@ -516,13 +551,13 @@ describe("extractAspects — first extraction on cache miss", async () => {
 
   it("returns empty array when provider returns invalid JSON", async () => {
     const provider = makeProvider(["not json at all"]);
-    const aspects = await extractAspects(provider, FEED_ITEMS, []);
+    const aspects = await extractAspects(provider, FEED_ITEMS[0], []);
     assert.strictEqual(aspects.length, 0);
   });
 
   it("returns empty array when provider returns empty array", async () => {
     const provider = makeProvider(["[]"]);
-    const aspects = await extractAspects(provider, FEED_ITEMS, []);
+    const aspects = await extractAspects(provider, FEED_ITEMS[0], []);
     assert.strictEqual(aspects.length, 0);
   });
 });
@@ -532,7 +567,7 @@ describe("extractAspects — first extraction on cache miss", async () => {
 describe("buildSnapshotAspectFields — stored fields are reconstructable", () => {
   it("round-trips through loadAspectPoolData correctly", () => {
     const a1 = makeAspect("async error handling reduces production crashes");
-    const FP = buildContextFingerprint(FEED_ITEMS)!;
+    const FP = buildPrimaryFingerprint(FEED_ITEMS[0])!;
     const fields = buildSnapshotAspectFields(FP, [a1], a1, 1) as unknown as Record<string, unknown>;
 
     const poolData = loadAspectPoolData([fields], FP);

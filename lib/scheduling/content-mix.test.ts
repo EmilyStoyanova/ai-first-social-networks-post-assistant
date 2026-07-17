@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  applyFallbackTransfers,
+  transferExhaustedQuotas,
   COMPANY_CONTENT_SOURCE_ID,
   contentMixTarget,
   contentMixTotal,
@@ -22,7 +22,6 @@ function source(overrides: Partial<MixSourceInput> & { id: string }): MixSourceI
     name: overrides.id,
     enabled: true,
     postsPerWeek: null,
-    fallbackPolicy: "skip",
     ...overrides,
   };
 }
@@ -57,9 +56,7 @@ describe("resolveContentMix", () => {
 
   it("treats a company-content quota alone as a configured mix", () => {
     const mix = resolveContentMix({ sources: [], companyContentPostsPerWeek: 5 });
-    assert.deepEqual(mix, [
-      { sourceId: COMPANY_CONTENT_SOURCE_ID, postsPerWeek: 5, fallbackPolicy: "skip" },
-    ]);
+    assert.deepEqual(mix, [{ sourceId: COMPANY_CONTENT_SOURCE_ID, postsPerWeek: 5 }]);
   });
 
   it("treats a company-content quota of 0 as configured, not as absent", () => {
@@ -75,9 +72,9 @@ describe("resolveContentMix", () => {
       companyContentPostsPerWeek: BRIEF_COMPANY_QUOTA,
     });
     assert.deepEqual(mix, [
-      { sourceId: "rss-a", postsPerWeek: 3, fallbackPolicy: "skip" },
-      { sourceId: "rss-b", postsPerWeek: 1, fallbackPolicy: "skip" },
-      { sourceId: COMPANY_CONTENT_SOURCE_ID, postsPerWeek: 1, fallbackPolicy: "skip" },
+      { sourceId: "rss-a", postsPerWeek: 3 },
+      { sourceId: "rss-b", postsPerWeek: 1 },
+      { sourceId: COMPANY_CONTENT_SOURCE_ID, postsPerWeek: 1 },
     ]);
     assert.equal(contentMixTotal(mix!), 5);
   });
@@ -103,14 +100,6 @@ describe("resolveContentMix", () => {
     });
     assert.equal(mix?.find((q) => q.sourceId === "rss-new")?.postsPerWeek, 0);
     assert.equal(contentMixTotal(mix!), 5);
-  });
-
-  it("falls back to the default policy for an unrecognized stored value", () => {
-    const mix = resolveContentMix({
-      sources: [source({ id: "rss-a", postsPerWeek: 1, fallbackPolicy: "nonsense" })],
-      companyContentPostsPerWeek: null,
-    });
-    assert.equal(mix?.[0].fallbackPolicy, "skip");
   });
 });
 
@@ -292,38 +281,14 @@ describe("validateContentMix — invalid totals", () => {
     assert.equal(result.valid, false);
     assert.equal(result.valid === false && result.error.code, "MIX_INVALID_VALUE");
   });
-
-  it("rejects a fallback policy that has no implementation yet", () => {
-    // The column accepts the wider vocabulary so a later phase needs no
-    // migration, but an unimplemented policy must never silently act as "skip".
-    const result = validateContentMix({
-      sources: [source({ id: "rss-a", postsPerWeek: 5, fallbackPolicy: "allow_reuse" })],
-      companyContentPostsPerWeek: 0,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
-    });
-    assert.equal(result.valid, false);
-    assert.equal(result.valid === false && result.error.code, "MIX_UNSUPPORTED_FALLBACK");
-  });
-
-  it("accepts use_another_source", () => {
-    const result = validateContentMix({
-      sources: [
-        source({ id: "rss-a", postsPerWeek: 3, fallbackPolicy: "use_another_source" }),
-        source({ id: "rss-b", postsPerWeek: 2 }),
-      ],
-      companyContentPostsPerWeek: 0,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
-    });
-    assert.equal(result.valid, true);
-  });
 });
 
 // ─── nextDueQuota ─────────────────────────────────────────────────────────────
 
 const BRIEF_QUOTAS: MixQuota[] = [
-  { sourceId: "rss-a", postsPerWeek: 3, fallbackPolicy: "skip" },
-  { sourceId: "rss-b", postsPerWeek: 1, fallbackPolicy: "skip" },
-  { sourceId: COMPANY_CONTENT_SOURCE_ID, postsPerWeek: 1, fallbackPolicy: "skip" },
+  { sourceId: "rss-a", postsPerWeek: 3 },
+  { sourceId: "rss-b", postsPerWeek: 1 },
+  { sourceId: COMPANY_CONTENT_SOURCE_ID, postsPerWeek: 1 },
 ];
 
 /** Replays a full week by repeatedly asking which source is due next. */
@@ -425,8 +390,8 @@ describe("nextDueQuota", () => {
 
   it("skips a quota of zero entirely", () => {
     const quotas: MixQuota[] = [
-      { sourceId: "rss-a", postsPerWeek: 5, fallbackPolicy: "skip" },
-      { sourceId: "rss-b", postsPerWeek: 0, fallbackPolicy: "skip" },
+      { sourceId: "rss-a", postsPerWeek: 5 },
+      { sourceId: "rss-b", postsPerWeek: 0 },
     ];
     assert.equal(drain(quotas).includes("rss-b"), false);
   });
@@ -435,21 +400,21 @@ describe("nextDueQuota", () => {
 // ─── nextDueQuota — exhausted sources ─────────────────────────────────────────
 
 describe("nextDueQuota — exhausted sources", () => {
-  it("skips an exhausted source and leaves its quota unfilled", () => {
-    // The core anti-reassignment guarantee: RSS A runs dry, so the week ends
-    // with 2 posts (RSS B + company), NOT with RSS A's 3 handed to someone else.
+  it("never picks an exhausted source, and still fills the week", () => {
+    // RSS A runs dry, so RSS B writes A's 3 posts on top of its own 1. The week
+    // still produces 5 — the whole point of transferring unconditionally.
     const order = drain(BRIEF_QUOTAS, new Set(["rss-a"]));
-    assert.deepEqual(order.sort(), ["rss-b", COMPANY_CONTENT_SOURCE_ID].sort());
-    assert.equal(order.includes("rss-a"), false);
+    assert.equal(order.length, 5);
+    assert.equal(order.includes("rss-a"), false, "a dry source is never asked again");
   });
 
-  it("does not reassign an exhausted source's quota to other sources", () => {
+  it("hands the dry source's quota to the other RSS source, never to company content", () => {
     const order = drain(BRIEF_QUOTAS, new Set(["rss-a"]));
-    assert.equal(order.filter((s) => s === "rss-b").length, 1, "rss-b keeps its own quota of 1");
+    assert.equal(order.filter((s) => s === "rss-b").length, 4, "rss-b takes its own 1 plus A's 3");
     assert.equal(
       order.filter((s) => s === COMPANY_CONTENT_SOURCE_ID).length,
       1,
-      "company content keeps its own quota of 1"
+      "company content keeps exactly its own quota of 1"
     );
   });
 
@@ -481,48 +446,31 @@ describe("nextDueQuota — exhausted sources", () => {
   });
 });
 
-// ─── applyFallbackTransfers — use_another_source ──────────────────────────────
+// ─── transferExhaustedQuotas ──────────────────────────────────────────────────
 
-/** Shorthand for an RSS quota that hands its shortfall on when it runs dry. */
-function handsOff(sourceId: string, postsPerWeek: number): MixQuota {
-  return { sourceId, postsPerWeek, fallbackPolicy: "use_another_source" };
-}
-
-/** Shorthand for an RSS quota that keeps its shortfall to itself. */
-function keeps(sourceId: string, postsPerWeek: number): MixQuota {
-  return { sourceId, postsPerWeek, fallbackPolicy: "skip" };
+/** Shorthand for an RSS quota. Every source hands its shortfall on when dry. */
+function quota(sourceId: string, postsPerWeek: number): MixQuota {
+  return { sourceId, postsPerWeek };
 }
 
 function quotaFor(quotas: readonly MixQuota[], sourceId: string | null): number {
   return quotas.find((q) => q.sourceId === sourceId)?.postsPerWeek ?? -1;
 }
 
-describe("applyFallbackTransfers", () => {
+describe("transferExhaustedQuotas", () => {
   it("changes nothing while every source still has articles", () => {
-    const quotas = [handsOff("rss-a", 3), keeps("rss-b", 2)];
+    const quotas = [quota("rss-a", 3), quota("rss-b", 2)];
     assert.deepEqual(
-      applyFallbackTransfers({ quotas, generatedBySource: counts(), exhausted: new Set() }),
+      transferExhaustedQuotas({ quotas, generatedBySource: counts(), exhausted: new Set() }),
       quotas
     );
-  });
-
-  it("leaves a 'skip' source's shortfall exactly where it is", () => {
-    // The pre-existing default must be untouched by this feature: opting in is
-    // the only way a quota ever moves.
-    const quotas = [keeps("rss-a", 3), keeps("rss-b", 2)];
-    const effective = applyFallbackTransfers({
-      quotas,
-      generatedBySource: counts([["rss-a", 1]]),
-      exhausted: new Set(["rss-a"]),
-    });
-    assert.deepEqual(effective, quotas);
   });
 
   it("hands an exhausted source's shortfall to the one source that can write it", () => {
     // The brief's example: RSS A=3 and RSS B=2, but A has only 1 article, so the
     // week must still produce 5 posts — as A=1, B=4.
-    const effective = applyFallbackTransfers({
-      quotas: [handsOff("rss-a", 3), keeps("rss-b", 2)],
+    const effective = transferExhaustedQuotas({
+      quotas: [quota("rss-a", 3), quota("rss-b", 2)],
       generatedBySource: counts([["rss-a", 1]]),
       exhausted: new Set(["rss-a"]),
     });
@@ -530,11 +478,11 @@ describe("applyFallbackTransfers", () => {
     assert.equal(quotaFor(effective, "rss-b"), 4);
   });
 
-  it("a recipient's own policy is irrelevant — it is the donor that decides", () => {
-    // rss-b above is a "skip" source and still received. Asserted explicitly
-    // because the opposite reading (both sides must opt in) is a tempting one.
-    const effective = applyFallbackTransfers({
-      quotas: [handsOff("rss-a", 2), keeps("rss-b", 1)],
+  it("transfers unconditionally — there is no per-source opt-out", () => {
+    // The product decision: a company that configured 5 posts a week wants 5
+    // posts a week, whichever feed happened to have articles left.
+    const effective = transferExhaustedQuotas({
+      quotas: [quota("rss-a", 2), quota("rss-b", 1)],
       generatedBySource: counts(),
       exhausted: new Set(["rss-a"]),
     });
@@ -544,14 +492,18 @@ describe("applyFallbackTransfers", () => {
   it("preserves the weekly total", () => {
     // The whole point of the feature, and the one property that must hold for
     // every arrangement of donors and recipients.
-    const quotas = [handsOff("rss-a", 3), handsOff("rss-b", 2), keeps("rss-c", 2)];
+    const quotas = [quota("rss-a", 3), quota("rss-b", 2), quota("rss-c", 2)];
     const generated = counts([["rss-a", 1]]);
     for (const exhausted of [
       new Set<string | null>(),
       new Set<string | null>(["rss-a"]),
       new Set<string | null>(["rss-a", "rss-b"]),
     ]) {
-      const effective = applyFallbackTransfers({ quotas, generatedBySource: generated, exhausted });
+      const effective = transferExhaustedQuotas({
+        quotas,
+        generatedBySource: generated,
+        exhausted,
+      });
       assert.equal(
         contentMixTotal(effective),
         contentMixTotal(quotas),
@@ -561,8 +513,8 @@ describe("applyFallbackTransfers", () => {
   });
 
   it("leaves a donor owing nothing — it keeps only what it wrote", () => {
-    const effective = applyFallbackTransfers({
-      quotas: [handsOff("rss-a", 3), keeps("rss-b", 2)],
+    const effective = transferExhaustedQuotas({
+      quotas: [quota("rss-a", 3), quota("rss-b", 2)],
       generatedBySource: counts([["rss-a", 2]]),
       exhausted: new Set(["rss-a"]),
     });
@@ -573,8 +525,8 @@ describe("applyFallbackTransfers", () => {
   it("splits the shortfall evenly between candidates instead of picking the first", () => {
     // RSS A runs dry; B and C both have articles, so they take one extra each —
     // not two for B and none for C.
-    const effective = applyFallbackTransfers({
-      quotas: [handsOff("rss-a", 2), keeps("rss-b", 2), keeps("rss-c", 2)],
+    const effective = transferExhaustedQuotas({
+      quotas: [quota("rss-a", 2), quota("rss-b", 2), quota("rss-c", 2)],
       generatedBySource: counts(),
       exhausted: new Set(["rss-a"]),
     });
@@ -585,8 +537,8 @@ describe("applyFallbackTransfers", () => {
   it("gives an indivisible remainder to the earliest candidates", () => {
     // 3 posts across 2 candidates cannot be even; 2/1 is as close as it gets,
     // and list order decides who takes the odd one so runs stay reproducible.
-    const effective = applyFallbackTransfers({
-      quotas: [handsOff("rss-a", 3), keeps("rss-b", 1), keeps("rss-c", 1)],
+    const effective = transferExhaustedQuotas({
+      quotas: [quota("rss-a", 3), quota("rss-b", 1), quota("rss-c", 1)],
       generatedBySource: counts(),
       exhausted: new Set(["rss-a"]),
     });
@@ -595,8 +547,8 @@ describe("applyFallbackTransfers", () => {
   });
 
   it("pools the shortfall of several donors before splitting it", () => {
-    const effective = applyFallbackTransfers({
-      quotas: [handsOff("rss-a", 2), handsOff("rss-b", 2), keeps("rss-c", 1), keeps("rss-d", 1)],
+    const effective = transferExhaustedQuotas({
+      quotas: [quota("rss-a", 2), quota("rss-b", 2), quota("rss-c", 1), quota("rss-d", 1)],
       generatedBySource: counts(),
       exhausted: new Set(["rss-a", "rss-b"]),
     });
@@ -605,20 +557,23 @@ describe("applyFallbackTransfers", () => {
   });
 
   it("never hands posts to a source that is itself out of articles", () => {
-    const effective = applyFallbackTransfers({
-      quotas: [handsOff("rss-a", 2), keeps("rss-b", 2), keeps("rss-c", 2)],
+    const effective = transferExhaustedQuotas({
+      quotas: [quota("rss-a", 2), quota("rss-b", 2), quota("rss-c", 2)],
       generatedBySource: counts(),
       exhausted: new Set(["rss-a", "rss-b"]),
     });
-    assert.equal(quotaFor(effective, "rss-b"), 2, "rss-b is dry and must not be topped up");
-    assert.equal(quotaFor(effective, "rss-c"), 4);
+    // rss-b is dry, so it is a donor rather than a recipient: it gives up its
+    // own 2 as well, and rss-c — the only source left with articles — takes all 6.
+    assert.equal(quotaFor(effective, "rss-b"), 0, "a dry source is never topped up");
+    assert.equal(quotaFor(effective, "rss-c"), 6);
+    assert.equal(contentMixTotal(effective), 6, "the week's total is still 6");
   });
 
   it("never hands posts to a source configured to write none", () => {
     // A quota of 0 means "not this feed". Treating it as spare capacity would
     // publish from a source the owner switched off in all but name.
-    const effective = applyFallbackTransfers({
-      quotas: [handsOff("rss-a", 2), keeps("rss-b", 0), keeps("rss-c", 2)],
+    const effective = transferExhaustedQuotas({
+      quotas: [quota("rss-a", 2), quota("rss-b", 0), quota("rss-c", 2)],
       generatedBySource: counts(),
       exhausted: new Set(["rss-a"]),
     });
@@ -631,7 +586,7 @@ describe("applyFallbackTransfers", () => {
     // sees them. Driven through resolveContentMix to prove the real path.
     const quotas = resolveContentMix({
       sources: [
-        source({ id: "rss-a", postsPerWeek: 3, fallbackPolicy: "use_another_source" }),
+        source({ id: "rss-a", postsPerWeek: 3 }),
         source({ id: "rss-b", postsPerWeek: 2, enabled: false }),
       ],
       companyContentPostsPerWeek: null,
@@ -640,7 +595,7 @@ describe("applyFallbackTransfers", () => {
       quotas?.some((q) => q.sourceId === "rss-b"),
       false
     );
-    const effective = applyFallbackTransfers({
+    const effective = transferExhaustedQuotas({
       quotas: quotas ?? [],
       generatedBySource: counts(),
       exhausted: new Set(["rss-a"]),
@@ -651,11 +606,11 @@ describe("applyFallbackTransfers", () => {
   it("never takes from or gives to company content", () => {
     // Mission posts do not run out, and a feed's shortfall must not silently
     // become more brand copy than the owner asked for.
-    const effective = applyFallbackTransfers({
+    const effective = transferExhaustedQuotas({
       quotas: [
-        handsOff("rss-a", 2),
-        keeps("rss-b", 2),
-        { sourceId: COMPANY_CONTENT_SOURCE_ID, postsPerWeek: 1, fallbackPolicy: "skip" },
+        quota("rss-a", 2),
+        quota("rss-b", 2),
+        { sourceId: COMPANY_CONTENT_SOURCE_ID, postsPerWeek: 1 },
       ],
       generatedBySource: counts(),
       exhausted: new Set(["rss-a", COMPANY_CONTENT_SOURCE_ID]),
@@ -665,8 +620,8 @@ describe("applyFallbackTransfers", () => {
   });
 
   it("leaves the shortfall unfilled when no candidate remains — the skip outcome", () => {
-    const quotas = [handsOff("rss-a", 3), handsOff("rss-b", 2)];
-    const effective = applyFallbackTransfers({
+    const quotas = [quota("rss-a", 3), quota("rss-b", 2)];
+    const effective = transferExhaustedQuotas({
       quotas,
       generatedBySource: counts(),
       exhausted: new Set(["rss-a", "rss-b"]),
@@ -687,7 +642,7 @@ describe("applyFallbackTransfers", () => {
     // The schedule can only flip to "ready" if the donor stops being owed the
     // posts it gave away.
     const remaining = remainingByQuota({
-      quotas: [handsOff("rss-a", 3), keeps("rss-b", 2)],
+      quotas: [quota("rss-a", 3), quota("rss-b", 2)],
       generatedBySource: counts([
         ["rss-a", 1],
         ["rss-b", 4],
@@ -701,8 +656,8 @@ describe("applyFallbackTransfers", () => {
   });
 
   it("does not mutate its input", () => {
-    const quotas = [handsOff("rss-a", 3), keeps("rss-b", 2)];
-    applyFallbackTransfers({
+    const quotas = [quota("rss-a", 3), quota("rss-b", 2)];
+    transferExhaustedQuotas({
       quotas,
       generatedBySource: counts([["rss-a", 1]]),
       exhausted: new Set(["rss-a"]),
@@ -713,15 +668,15 @@ describe("applyFallbackTransfers", () => {
 
   it("is deterministic — the same inputs always yield the same transfer", () => {
     const input = {
-      quotas: [handsOff("rss-a", 3), keeps("rss-b", 1), keeps("rss-c", 1)],
+      quotas: [quota("rss-a", 3), quota("rss-b", 1), quota("rss-c", 1)],
       generatedBySource: counts(),
       exhausted: new Set(["rss-a"]),
     };
-    assert.deepEqual(applyFallbackTransfers(input), applyFallbackTransfers(input));
+    assert.deepEqual(transferExhaustedQuotas(input), transferExhaustedQuotas(input));
   });
 });
 
-// ─── nextDueQuota — use_another_source ────────────────────────────────────────
+// ─── nextDueQuota — transferred quotas ────────────────────────────────────────
 
 /**
  * Replays a full week the way fillChannelFromMix does, with each source holding
@@ -752,14 +707,11 @@ function drainWithStock(
   return order;
 }
 
-describe("nextDueQuota — use_another_source", () => {
+describe("nextDueQuota — transferred quotas", () => {
   it("still hits the weekly post count when a source runs dry", () => {
     // RSS A=3 + RSS B=2 with only 1 article in A: the week owes 5 posts and
     // must deliver 5, as A=1 and B=4.
-    const order = drainWithStock(
-      [handsOff("rss-a", 3), keeps("rss-b", 2)],
-      new Map([["rss-a", 1]])
-    );
+    const order = drainWithStock([quota("rss-a", 3), quota("rss-b", 2)], new Map([["rss-a", 1]]));
     assert.equal(order.length, 5);
     assert.equal(order.filter((s) => s === "rss-a").length, 1);
     assert.equal(order.filter((s) => s === "rss-b").length, 4);
@@ -769,7 +721,7 @@ describe("nextDueQuota — use_another_source", () => {
     // RSS A is dry from the start; B and C both have plenty, so they finish
     // level rather than B absorbing all of A's quota.
     const order = drainWithStock(
-      [handsOff("rss-a", 2), keeps("rss-b", 2), keeps("rss-c", 2)],
+      [quota("rss-a", 2), quota("rss-b", 2), quota("rss-c", 2)],
       new Map([["rss-a", 0]])
     );
     assert.equal(order.length, 6);
@@ -781,7 +733,7 @@ describe("nextDueQuota — use_another_source", () => {
     // A is dry and B has only 3 articles for its now-4 quota: 4 posts is all the
     // week can honestly produce, and the loop must terminate rather than spin.
     const order = drainWithStock(
-      [handsOff("rss-a", 3), keeps("rss-b", 2)],
+      [quota("rss-a", 3), quota("rss-b", 2)],
       new Map([
         ["rss-a", 1],
         ["rss-b", 3],
@@ -790,19 +742,11 @@ describe("nextDueQuota — use_another_source", () => {
     assert.equal(order.length, 4);
   });
 
-  it("under 'skip' the same week falls short, unchanged", () => {
-    // The contrast that shows the policy is doing the work: identical stock,
-    // identical quotas, only the policy differs.
-    const order = drainWithStock([keeps("rss-a", 3), keeps("rss-b", 2)], new Map([["rss-a", 1]]));
-    assert.equal(order.length, 3);
-    assert.equal(order.filter((s) => s === "rss-b").length, 2);
-  });
-
   it("resumes mid-week from posts an earlier run already wrote", () => {
     // The cron budget is 3 LLM calls/run, so the transfer must be re-derived on
     // the next run from stored posts alone — it is never persisted.
     const due = nextDueQuota({
-      quotas: [handsOff("rss-a", 3), keeps("rss-b", 2)],
+      quotas: [quota("rss-a", 3), quota("rss-b", 2)],
       generatedBySource: counts([
         ["rss-a", 1],
         ["rss-b", 2],
@@ -822,8 +766,8 @@ describe("projectMixSources", () => {
     const projected = projectMixSources(
       BRIEF_SOURCES,
       new Map([
-        ["rss-a", { postsPerWeek: 4 }],
-        ["rss-b", { postsPerWeek: 0 }],
+        ["rss-a", 4],
+        ["rss-b", 0],
       ])
     );
     assert.equal(projected.find((s) => s.id === "rss-a")?.postsPerWeek, 4);
@@ -832,47 +776,18 @@ describe("projectMixSources", () => {
 
   it("leaves omitted sources on their stored quota", () => {
     // A client with a stale source list must not wipe a quota it never showed.
-    const projected = projectMixSources(BRIEF_SOURCES, new Map([["rss-a", { postsPerWeek: 4 }]]));
+    const projected = projectMixSources(BRIEF_SOURCES, new Map([["rss-a", 4]]));
     assert.equal(projected.find((s) => s.id === "rss-b")?.postsPerWeek, 1);
   });
 
   it("clears a quota when null is submitted", () => {
-    const projected = projectMixSources(
-      BRIEF_SOURCES,
-      new Map([["rss-a", { postsPerWeek: null }]])
-    );
+    const projected = projectMixSources(BRIEF_SOURCES, new Map([["rss-a", null]]));
     assert.equal(projected.find((s) => s.id === "rss-a")?.postsPerWeek, null);
   });
 
   it("does not mutate the input", () => {
-    projectMixSources(BRIEF_SOURCES, new Map([["rss-a", { postsPerWeek: 4 }]]));
+    projectMixSources(BRIEF_SOURCES, new Map([["rss-a", 4]]));
     assert.equal(BRIEF_SOURCES.find((s) => s.id === "rss-a")?.postsPerWeek, 3);
-  });
-
-  it("applies a submitted fallback policy", () => {
-    const projected = projectMixSources(
-      BRIEF_SOURCES,
-      new Map([["rss-a", { postsPerWeek: 3, fallbackPolicy: "use_another_source" }]])
-    );
-    assert.equal(projected.find((s) => s.id === "rss-a")?.fallbackPolicy, "use_another_source");
-  });
-
-  it("keeps the stored policy when a submitted source omits one", () => {
-    // A client that predates the policy selector submits quotas only. It must
-    // not reset every source to the default just by saving.
-    const stored = [source({ id: "rss-a", postsPerWeek: 3, fallbackPolicy: "use_another_source" })];
-    const projected = projectMixSources(stored, new Map([["rss-a", { postsPerWeek: 5 }]]));
-    assert.equal(projected[0].postsPerWeek, 5, "the quota still changes");
-    assert.equal(projected[0].fallbackPolicy, "use_another_source", "the policy survives");
-  });
-
-  it("keeps the stored policy for a source the request omits entirely", () => {
-    const stored = [
-      source({ id: "rss-a", postsPerWeek: 3 }),
-      source({ id: "rss-b", postsPerWeek: 1, fallbackPolicy: "use_another_source" }),
-    ];
-    const projected = projectMixSources(stored, new Map([["rss-a", { postsPerWeek: 4 }]]));
-    assert.equal(projected.find((s) => s.id === "rss-b")?.fallbackPolicy, "use_another_source");
   });
 });
 

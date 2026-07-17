@@ -66,7 +66,6 @@
     "MIX_CHANNEL_TARGETS_DIFFER": "All enabled channels must share the same weekly target to use one content mix.",
     "MIX_INVALID_VALUE": "Posts per week must be a whole number, zero or more.",
     "MIX_EXCEEDS_MAX": "The content mix exceeds the most posts a channel can generate in a week.",
-    "MIX_UNSUPPORTED_FALLBACK": "That fallback option isn't available yet.",
     "UNKNOWN_SOURCE": "That content source doesn't belong to this company."
   },
   "brand": {
@@ -715,10 +714,7 @@
     "targetsDiffer": "Your enabled channels have different weekly targets ({detail}). One content mix is shared by every channel, so they must match.",
     "disabledHint": "Disabled sources take no part in the mix.",
     "unassigned": "Not set",
-    "fallbackLabel": "If articles run out",
-    "fallbackSkip": "Skip missing posts",
-    "fallbackTransfer": "Transfer missing quota to another active source",
-    "fallbackHint": "Quota moves only to active sources that have a quota above 0 and unused articles left. If none qualify, the posts are skipped.",
+    "exhaustedNote": "If a source runs out of articles, its remaining posts move to another active source with a quota above 0 and unused articles left. If no source qualifies, those posts are skipped for the week.",
     "ownersOnly": "Only company owners can change the content mix.",
     "appliesToChannels": "Applied to every enabled channel: {channels}."
   }

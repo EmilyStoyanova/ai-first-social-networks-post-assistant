@@ -8,63 +8,35 @@ import type { ContentMixInput } from "@/lib/validators/content-mix.schema";
 // Prisma surface: the transaction below it is a direct map over its output.
 
 function stored(overrides: Partial<MixSourceInput> & { id: string }): MixSourceInput {
-  return {
-    name: overrides.id,
-    enabled: true,
-    postsPerWeek: null,
-    fallbackPolicy: "skip",
-    ...overrides,
-  };
+  return { name: overrides.id, enabled: true, postsPerWeek: null, ...overrides };
 }
 
 function request(sources: ContentMixInput["sources"]): ContentMixInput {
   return { sources, companyContentPostsPerWeek: 0 };
 }
 
-const STORED = [
-  stored({ id: "rss-a", postsPerWeek: 3 }),
-  stored({ id: "rss-b", postsPerWeek: 2, fallbackPolicy: "use_another_source" }),
-];
+const STORED = [stored({ id: "rss-a", postsPerWeek: 3 }), stored({ id: "rss-b", postsPerWeek: 2 })];
 
 describe("planSourceWrites", () => {
-  it("persists a submitted fallback policy", () => {
-    const writes = planSourceWrites(
-      STORED,
-      request([{ sourceId: "rss-a", postsPerWeek: 3, fallbackPolicy: "use_another_source" }])
-    );
-    assert.deepEqual(writes, [
-      { id: "rss-a", postsPerWeek: 3, fallbackPolicy: "use_another_source" },
-    ]);
-  });
-
-  it("persists the quota and the policy together", () => {
+  it("persists the submitted quotas", () => {
     const writes = planSourceWrites(
       STORED,
       request([
-        { sourceId: "rss-a", postsPerWeek: 1, fallbackPolicy: "use_another_source" },
-        { sourceId: "rss-b", postsPerWeek: 4, fallbackPolicy: "skip" },
+        { sourceId: "rss-a", postsPerWeek: 1 },
+        { sourceId: "rss-b", postsPerWeek: 4 },
       ])
     );
     assert.deepEqual(writes, [
-      { id: "rss-a", postsPerWeek: 1, fallbackPolicy: "use_another_source" },
-      { id: "rss-b", postsPerWeek: 4, fallbackPolicy: "skip" },
+      { id: "rss-a", postsPerWeek: 1 },
+      { id: "rss-b", postsPerWeek: 4 },
     ]);
   });
 
-  it("keeps the stored policy when the request omits it", () => {
-    // The compatibility case: a client that only knows about quotas must not
-    // silently reset rss-b from use_another_source back to skip.
-    const writes = planSourceWrites(
-      STORED,
-      request([
-        { sourceId: "rss-a", postsPerWeek: 2 },
-        { sourceId: "rss-b", postsPerWeek: 3 },
-      ])
-    );
-    assert.deepEqual(writes, [
-      { id: "rss-a", postsPerWeek: 2, fallbackPolicy: "skip" },
-      { id: "rss-b", postsPerWeek: 3, fallbackPolicy: "use_another_source" },
-    ]);
+  it("never writes a fallback policy", () => {
+    // The column is legacy: transfer is unconditional, so a save must leave
+    // whatever is stored in it alone rather than rewriting it.
+    const writes = planSourceWrites(STORED, request([{ sourceId: "rss-a", postsPerWeek: 1 }]));
+    assert.deepEqual(Object.keys(writes[0]).sort(), ["id", "postsPerWeek"]);
   });
 
   it("writes only the sources the request carried", () => {
@@ -77,11 +49,9 @@ describe("planSourceWrites", () => {
     );
   });
 
-  it("writes a cleared quota as null while keeping the policy", () => {
+  it("writes a cleared quota as null", () => {
     const writes = planSourceWrites(STORED, request([{ sourceId: "rss-b", postsPerWeek: null }]));
-    assert.deepEqual(writes, [
-      { id: "rss-b", postsPerWeek: null, fallbackPolicy: "use_another_source" },
-    ]);
+    assert.deepEqual(writes, [{ id: "rss-b", postsPerWeek: null }]);
   });
 
   it("writes nothing when no source was submitted", () => {
@@ -90,17 +60,7 @@ describe("planSourceWrites", () => {
     assert.deepEqual(planSourceWrites(STORED, request([])), []);
   });
 
-  it("can switch a policy back to skip", () => {
-    const writes = planSourceWrites(
-      STORED,
-      request([{ sourceId: "rss-b", postsPerWeek: 2, fallbackPolicy: "skip" }])
-    );
-    assert.equal(writes[0].fallbackPolicy, "skip");
-  });
-
-  it("ignores a stored source that is disabled only when it is not submitted", () => {
-    // Disabled sources keep their row; the mix UI never submits them, so they
-    // simply never appear in the write plan.
+  it("never writes a disabled source the request omits", () => {
     const withDisabled = [...STORED, stored({ id: "rss-c", postsPerWeek: 9, enabled: false })];
     const writes = planSourceWrites(
       withDisabled,

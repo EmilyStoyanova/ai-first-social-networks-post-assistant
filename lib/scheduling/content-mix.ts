@@ -16,10 +16,10 @@
  *
  * Two invariants drive every function here:
  *
- *   • A quota moves only when its own source says so. A source that runs out of
- *     articles under-fills its quota and hands its posts to nobody — unless its
- *     fallback policy is `use_another_source`, which transfers the unfilled
- *     posts to the sources that can still write them. See applyFallbackTransfers.
+ *   • The week hits its total. A source that runs out of articles hands its
+ *     unwritten posts to the sources that can still write them — always, with no
+ *     setting to opt out of. See transferExhaustedQuotas. Only when no source can
+ *     take them do the posts go unwritten.
  *   • An unconfigured mix is not a mix. When nothing is configured the scheduler
  *     falls back to the pre-v2-8 pooling behaviour, unchanged.
  *
@@ -48,48 +48,19 @@ export const COMPANY_CONTENT_SOURCE_ID = null;
 export const MAX_POSTS_PER_CHANNEL_PER_WEEK = 7;
 
 /**
- * The full fallback vocabulary the `fallback_policy` column is sized for, per
- * the v2-8 phase doc. Only the policies in IMPLEMENTED_FALLBACK_POLICIES are
- * accepted today — the column exists now so adding the rest later needs no
- * second migration, but an unimplemented value is REJECTED at validation rather
- * than silently behaving like "skip".
+ * A content source as the mix sees it.
+ *
+ * The `content_sources.fallback_policy` column is deliberately absent: quota
+ * transfer is unconditional, so nothing here reads it. The column survives in
+ * the database for backwards compatibility only and must not resurface in any
+ * type, DTO, or query.
  */
-export const FALLBACK_POLICIES = [
-  "skip",
-  "use_another_source",
-  "use_company_profile",
-  "allow_reuse",
-] as const;
-
-export type FallbackPolicy = (typeof FALLBACK_POLICIES)[number];
-
-/** Policies with a real implementation today. See FALLBACK_POLICIES above. */
-export const IMPLEMENTED_FALLBACK_POLICIES = [
-  "skip",
-  "use_another_source",
-] as const satisfies readonly FallbackPolicy[];
-
-export const DEFAULT_FALLBACK_POLICY: FallbackPolicy = "skip";
-
-export function isFallbackPolicy(value: unknown): value is FallbackPolicy {
-  return typeof value === "string" && (FALLBACK_POLICIES as readonly string[]).includes(value);
-}
-
-export function isImplementedFallbackPolicy(value: unknown): value is FallbackPolicy {
-  return (
-    typeof value === "string" &&
-    (IMPLEMENTED_FALLBACK_POLICIES as readonly string[]).includes(value)
-  );
-}
-
-/** A content source as the mix sees it. */
 export interface MixSourceInput {
   id: string;
   name: string;
   enabled: boolean;
   /** null = no quota assigned; see resolveContentMix. */
   postsPerWeek: number | null;
-  fallbackPolicy: string;
 }
 
 /** One resolved quota: "this source owes N posts per week per channel". */
@@ -97,7 +68,6 @@ export interface MixQuota {
   /** null = company-generated content (no RSS). */
   sourceId: string | null;
   postsPerWeek: number;
-  fallbackPolicy: FallbackPolicy;
 }
 
 export interface ResolveContentMixInput {
@@ -131,14 +101,12 @@ export function resolveContentMix(input: ResolveContentMixInput): MixQuota[] | n
   const quotas: MixQuota[] = enabled.map((s) => ({
     sourceId: s.id,
     postsPerWeek: s.postsPerWeek ?? 0,
-    fallbackPolicy: isFallbackPolicy(s.fallbackPolicy) ? s.fallbackPolicy : DEFAULT_FALLBACK_POLICY,
   }));
 
   if (input.companyContentPostsPerWeek !== null) {
     quotas.push({
       sourceId: COMPANY_CONTENT_SOURCE_ID,
       postsPerWeek: input.companyContentPostsPerWeek,
-      fallbackPolicy: DEFAULT_FALLBACK_POLICY,
     });
   }
 
@@ -160,9 +128,7 @@ export type MixValidationCode =
   /** A quota is negative or not a whole number. */
   | "MIX_INVALID_VALUE"
   /** The mix totals more than a channel may generate in a week. */
-  | "MIX_EXCEEDS_MAX"
-  /** A fallback policy that exists in the column vocabulary but has no implementation yet. */
-  | "MIX_UNSUPPORTED_FALLBACK";
+  | "MIX_EXCEEDS_MAX";
 
 export interface MixValidationError {
   code: MixValidationCode;
@@ -214,15 +180,6 @@ export function validateContentMix(input: ValidateContentMixInput): MixValidatio
         error: {
           code: "MIX_INVALID_VALUE",
           message: "Posts per week must be a whole number of zero or more.",
-        },
-      };
-    }
-    if (!isImplementedFallbackPolicy(quota.fallbackPolicy)) {
-      return {
-        valid: false,
-        error: {
-          code: "MIX_UNSUPPORTED_FALLBACK",
-          message: `Fallback policy "${quota.fallbackPolicy}" is not implemented yet. Supported: ${IMPLEMENTED_FALLBACK_POLICIES.join(", ")}.`,
         },
       };
     }
@@ -289,13 +246,9 @@ function isRssQuota(quota: MixQuota): boolean {
   return quota.sourceId !== COMPANY_CONTENT_SOURCE_ID;
 }
 
-/** An exhausted RSS source whose policy hands its unfilled posts to others. */
+/** An exhausted RSS source: its unwritten posts go to whoever can write them. */
 function donatesQuota(quota: MixQuota, exhausted: ReadonlySet<string | null>): boolean {
-  return (
-    isRssQuota(quota) &&
-    quota.fallbackPolicy === "use_another_source" &&
-    exhausted.has(quota.sourceId)
-  );
+  return isRssQuota(quota) && exhausted.has(quota.sourceId);
 }
 
 /**
@@ -314,13 +267,18 @@ function acceptsQuota(quota: MixQuota, exhausted: ReadonlySet<string | null>): b
 
 /**
  * The quotas as they stand once exhausted sources have handed off their unfilled
- * posts — the `use_another_source` fallback.
+ * posts.
  *
  * The week's total is the promise this keeps: an RSS source that runs dry gives
  * up exactly the posts it could not write, and those same posts are added to the
  * sources that still have articles. Nothing is created and nothing is lost, so
  * the mix total — and therefore the channel's weekly post count — is identical
  * before and after. What changes is only *who* writes them.
+ *
+ * This is unconditional. It was briefly a per-source setting; the product
+ * decision is that a company configuring "5 posts a week" wants 5 posts a week,
+ * and which feed had articles left on a given Tuesday is not something an owner
+ * should have to have an opinion about.
  *
  * Deliberately excluded:
  *
@@ -331,15 +289,16 @@ function acceptsQuota(quota: MixQuota, exhausted: ReadonlySet<string | null>): b
  *     articles just moves the shortfall.
  *
  * A pool with no eligible recipient is left exactly where it is: the donor keeps
- * its unfilled quota, which is the `skip` outcome, so the posts stay outstanding
- * and the next run retries them once ingestion has fetched new articles.
+ * its unfilled quota, so the posts stay outstanding and the next run retries them
+ * once ingestion has fetched new articles. The scheduler reports that outcome as
+ * NO_ELIGIBLE_SOURCE rather than letting the week quietly come up short.
  *
  * Recomputed from the stored quotas on every call rather than accumulated, so it
  * stays a pure function of (quotas, generated, exhausted). That is what lets a
  * cron run resume mid-week — the transfer is re-derived, never remembered — and
  * what makes a recipient that later runs dry itself donate in turn.
  */
-export function applyFallbackTransfers(input: NextDueQuotaInput): MixQuota[] {
+export function transferExhaustedQuotas(input: NextDueQuotaInput): MixQuota[] {
   const { quotas, generatedBySource, exhausted } = input;
   const generatedFor = (quota: MixQuota) => generatedBySource.get(quota.sourceId) ?? 0;
   const unfilled = (quota: MixQuota) => quota.postsPerWeek - generatedFor(quota);
@@ -380,8 +339,8 @@ export function applyFallbackTransfers(input: NextDueQuotaInput): MixQuota[] {
 /**
  * Answers "which source is due next" — the scheduler's only source decision.
  *
- * Runs against the post-transfer quotas, so a `use_another_source` handoff shows
- * up here as the recipient simply having a larger quota to work through.
+ * Runs against the post-transfer quotas, so a handoff shows up here as the
+ * recipient simply having a larger quota to work through.
  *
  * Picks the quota with the largest *fraction* of its own quota still outstanding,
  * not the largest absolute deficit. Ranking by absolute deficit would drain the
@@ -396,14 +355,14 @@ export function applyFallbackTransfers(input: NextDueQuotaInput): MixQuota[] {
  * cron runs (3 LLM calls per run) and must resume coherently.
  *
  * Returns null when every quota is either filled or exhausted. An exhausted
- * quota is always skipped; whether its deficit is left unfilled or passed on is
- * its fallback policy's decision, already settled by applyFallbackTransfers.
+ * quota is always skipped; where its unwritten posts went was already settled by
+ * transferExhaustedQuotas.
  */
 export function nextDueQuota(input: NextDueQuotaInput): MixQuota | null {
   let best: MixQuota | null = null;
   let bestShare = 0;
 
-  for (const quota of applyFallbackTransfers(input)) {
+  for (const quota of transferExhaustedQuotas(input)) {
     if (input.exhausted.has(quota.sourceId)) continue;
     if (quota.postsPerWeek <= 0) continue;
     const remaining = quota.postsPerWeek - (input.generatedBySource.get(quota.sourceId) ?? 0);
@@ -419,39 +378,23 @@ export function nextDueQuota(input: NextDueQuotaInput): MixQuota | null {
   return best;
 }
 
-/** What a save request asks of one source. */
-export interface MixSourcePatch {
-  postsPerWeek: number | null;
-  /** Omitted = keep the source's stored policy. */
-  fallbackPolicy?: string;
-}
-
 /**
- * The mix as it WOULD be after applying a submitted set of patches.
+ * The mix as it WOULD be after applying a submitted set of quotas.
  *
  * A request only carries the sources the client knew about, so anything it omits
  * must keep its stored quota rather than being cleared — otherwise a client with
- * a stale source list would silently wipe a quota it never displayed. The same
- * holds field by field within a submitted source: an absent fallbackPolicy keeps
- * the stored one, so a client that predates the policy selector cannot reset
- * every source to the default just by saving a quota.
- *
- * Validation then runs against this projection, so what is checked is exactly
- * what is saved.
+ * a stale source list would silently wipe a quota it never displayed. Validation
+ * then runs against this projection, so what is checked is exactly what is saved.
  */
 export function projectMixSources(
   existing: readonly MixSourceInput[],
-  submitted: ReadonlyMap<string, MixSourcePatch>
+  submitted: ReadonlyMap<string, number | null>
 ): MixSourceInput[] {
-  return existing.map((source) => {
-    const patch = submitted.get(source.id);
-    if (!patch) return source;
-    return {
-      ...source,
-      postsPerWeek: patch.postsPerWeek,
-      fallbackPolicy: patch.fallbackPolicy ?? source.fallbackPolicy,
-    };
-  });
+  return existing.map((source) =>
+    submitted.has(source.id)
+      ? { ...source, postsPerWeek: submitted.get(source.id) ?? null }
+      : source
+  );
 }
 
 /**
@@ -479,7 +422,7 @@ export function findUnknownSourceId(
 export function remainingByQuota(
   input: NextDueQuotaInput
 ): Array<{ sourceId: string | null; remaining: number }> {
-  return applyFallbackTransfers(input).map((q) => ({
+  return transferExhaustedQuotas(input).map((q) => ({
     sourceId: q.sourceId,
     remaining: Math.max(0, q.postsPerWeek - (input.generatedBySource.get(q.sourceId) ?? 0)),
   }));

@@ -1,5 +1,4 @@
 import type { FeedItemContext, GenerationContext } from "./types";
-import { selectPrimaryFeedItem } from "./primary-feed-item";
 import { type ContentAngle, ANGLE_INSTRUCTIONS } from "./content-angle";
 import {
   type PostPattern,
@@ -219,6 +218,7 @@ ${imagePromptLine},
 
 function buildUserPrompt(
   ctx: GenerationContext,
+  primary: FeedItemContext | null,
   contentLanguage?: string,
   recentPosts: RecentPostContext[] = [],
   diversity?: PromptDiversityHints
@@ -228,10 +228,10 @@ function buildUserPrompt(
   const lang = (contentLanguage ?? channel.postingLanguage).toUpperCase();
   const imageRequired = channel.imageRequired;
 
-  // One explicit primary feed item is selected here — the post must be built
-  // around it, and its URL (same item) is appended by the service afterwards.
-  // Any other feed items are provided only as clearly-separated background.
-  const primary = selectPrimaryFeedItem(feedItems);
+  // The primary is passed in, already resolved (see PrimarySelection): the same
+  // item whose URL the service appends and whose id the post records. Every
+  // other feed item is background only. Deriving it here from feedItems[0] would
+  // reintroduce the possibility of the prompt and the URL disagreeing.
 
   let feedSection = "";
   if (primary) {
@@ -284,10 +284,12 @@ function buildUserPrompt(
         ].join("\n")
       : "";
 
-  const intro =
-    feedItems.length === 0
-      ? `Create an original ${channelLabel} post for ${ctx.company.name}.\nWrite in ${lang}.`
-      : `Write a ${channelLabel} post for ${ctx.company.name}.`;
+  // Keyed off the primary, not the array: with no primary there is no feed
+  // section, so asking for a post "about" nothing would leave the model to
+  // invent a subject.
+  const intro = !primary
+    ? `Create an original ${channelLabel} post for ${ctx.company.name}.\nWrite in ${lang}.`
+    : `Write a ${channelLabel} post for ${ctx.company.name}.`;
 
   const { angle, pattern, recentTopics, aspect } = diversity ?? {};
 
@@ -480,14 +482,21 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+/**
+ * `primary` is the resolved PrimarySelection's item — the article this post is
+ * about. It is a required argument rather than something derived from `ctx`
+ * because the caller is the only place that knows which item the reservation
+ * actually claimed. Pass null for a mission/brand post.
+ */
 export function buildPrompts(
   ctx: GenerationContext,
+  primary: FeedItemContext | null,
   contentLanguage?: string,
   recentPosts: RecentPostContext[] = [],
   diversity?: PromptDiversityHints
 ): BuiltPrompts {
   return {
     systemPrompt: buildSystemPrompt(ctx, contentLanguage),
-    userPrompt: buildUserPrompt(ctx, contentLanguage, recentPosts, diversity),
+    userPrompt: buildUserPrompt(ctx, primary, contentLanguage, recentPosts, diversity),
   };
 }

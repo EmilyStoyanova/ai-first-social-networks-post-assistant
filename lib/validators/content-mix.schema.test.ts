@@ -9,55 +9,44 @@ function body(source: Record<string, unknown>) {
   };
 }
 
-describe("contentMixSchema — fallbackPolicy", () => {
-  it("accepts skip", () => {
-    const parsed = contentMixSchema.safeParse(body({ fallbackPolicy: "skip" }));
-    assert.equal(parsed.success, true);
-    assert.equal(parsed.data?.sources[0].fallbackPolicy, "skip");
-  });
-
-  it("accepts use_another_source", () => {
-    const parsed = contentMixSchema.safeParse(body({ fallbackPolicy: "use_another_source" }));
-    assert.equal(parsed.success, true);
-    assert.equal(parsed.data?.sources[0].fallbackPolicy, "use_another_source");
-  });
-
-  it("rejects a policy the scheduler cannot honour yet", () => {
-    // The column carries the wider v2-8 vocabulary for phases that are not
-    // built. Until they are, the API must not let one through — the scheduler
-    // would reject the saved mix and the company would stop generating.
-    for (const policy of ["use_company_profile", "allow_reuse"]) {
-      assert.equal(
-        contentMixSchema.safeParse(body({ fallbackPolicy: policy })).success,
-        false,
-        `${policy} must be rejected`
-      );
-    }
-  });
-
-  it("rejects an unknown policy", () => {
-    assert.equal(contentMixSchema.safeParse(body({ fallbackPolicy: "nonsense" })).success, false);
-    assert.equal(contentMixSchema.safeParse(body({ fallbackPolicy: "SKIP" })).success, false);
-    assert.equal(contentMixSchema.safeParse(body({ fallbackPolicy: 1 })).success, false);
-    assert.equal(contentMixSchema.safeParse(body({ fallbackPolicy: null })).success, false);
-  });
-
-  it("accepts a source with no policy at all", () => {
-    // Optional on purpose: a client may submit quotas alone, and an absent
-    // policy means "keep the stored one" rather than "reset to default".
+describe("contentMixSchema", () => {
+  it("accepts a distribution of quotas", () => {
     const parsed = contentMixSchema.safeParse(body({}));
     assert.equal(parsed.success, true);
-    assert.equal(parsed.data?.sources[0].fallbackPolicy, undefined);
+    assert.equal(parsed.data?.sources[0].postsPerWeek, 3);
+    assert.equal(parsed.data?.companyContentPostsPerWeek, 2);
   });
 
-  it("still rejects an invalid quota alongside a valid policy", () => {
+  it("accepts null to clear a quota", () => {
+    // null ("takes no part in the mix") is meaningfully different from 0
+    // ("contribute nothing"), so both must survive parsing.
+    const parsed = contentMixSchema.safeParse(body({ postsPerWeek: null }));
+    assert.equal(parsed.success, true);
+    assert.equal(parsed.data?.sources[0].postsPerWeek, null);
+  });
+
+  it("accepts a quota of zero", () => {
+    assert.equal(contentMixSchema.safeParse(body({ postsPerWeek: 0 })).success, true);
+  });
+
+  it("rejects a fractional or negative quota", () => {
+    assert.equal(contentMixSchema.safeParse(body({ postsPerWeek: 2.5 })).success, false);
+    assert.equal(contentMixSchema.safeParse(body({ postsPerWeek: -1 })).success, false);
+  });
+
+  it("rejects a quota above the per-channel weekly ceiling", () => {
+    assert.equal(contentMixSchema.safeParse(body({ postsPerWeek: 8 })).success, false);
+  });
+
+  it("ignores a fallbackPolicy a stale client still sends", () => {
+    // The selector is gone and transfer is unconditional. An old tab must not be
+    // rejected for it — the value is simply stripped and never reaches the DB.
+    const parsed = contentMixSchema.safeParse(body({ fallbackPolicy: "use_another_source" }));
+    assert.equal(parsed.success, true);
     assert.equal(
-      contentMixSchema.safeParse(body({ postsPerWeek: 2.5, fallbackPolicy: "skip" })).success,
-      false
-    );
-    assert.equal(
-      contentMixSchema.safeParse(body({ postsPerWeek: -1, fallbackPolicy: "skip" })).success,
-      false
+      "fallbackPolicy" in (parsed.data?.sources[0] ?? {}),
+      false,
+      "the field must not survive parsing"
     );
   });
 });

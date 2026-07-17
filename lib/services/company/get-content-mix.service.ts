@@ -15,7 +15,6 @@ export interface ContentMixSourceDTO {
   enabled: boolean;
   /** null = no quota assigned yet. */
   postsPerWeek: number | null;
-  fallbackPolicy: string;
 }
 
 export interface ContentMixDTO {
@@ -101,7 +100,6 @@ export interface LoadContentMixDb {
         type: true;
         enabled: true;
         postsPerWeek: true;
-        fallbackPolicy: true;
       };
     }) => Promise<
       Array<{
@@ -110,7 +108,6 @@ export interface LoadContentMixDb {
         type: string;
         enabled: boolean;
         postsPerWeek: number | null;
-        fallbackPolicy: string;
       }>
     >;
   };
@@ -145,7 +142,6 @@ export async function loadContentMixCore(
         type: true,
         enabled: true,
         postsPerWeek: true,
-        fallbackPolicy: true,
       },
     }),
     db.channelConfig.findMany({
@@ -177,7 +173,6 @@ export async function loadContentMixCore(
       type: s.type,
       enabled: s.enabled,
       postsPerWeek: s.postsPerWeek,
-      fallbackPolicy: s.fallbackPolicy,
     })),
     companyContentPostsPerWeek,
     weeklyTarget,

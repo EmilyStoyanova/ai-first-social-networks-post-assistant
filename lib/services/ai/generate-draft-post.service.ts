@@ -21,6 +21,7 @@ import { CONTENT_ANGLES, selectAngle, type ContentAngle } from "@/lib/ai/content
 import { selectPattern, isValidPostPattern, type PostPattern } from "@/lib/ai/post-pattern";
 import { buildTopicMemory, TOPIC_MEMORY_SIZE } from "@/lib/ai/topic-memory";
 import { resolvePostSourceLink } from "@/lib/ai/source-link";
+import { resolvePrimarySelection } from "@/lib/ai/primary-feed-item";
 import {
   planFeedItemUsage,
   releaseFeedItem,
@@ -433,25 +434,24 @@ export async function generatePostFromContext(
     return { success: false, code: "NO_FEED_ITEMS_AVAILABLE" };
   }
 
-  let claimedFeedItemId: string | null = null;
-  if (plan.action === "generate") {
-    claimedFeedItemId = plan.feedItemId;
-    // Promote the claimed article to primary so the prompt, aspect mining and
-    // appended source URL are all built around the reserved item.
-    const claimedId = plan.feedItemId;
-    const claimed = context.feedItems.find((f) => f.id === claimedId)!;
-    const others = context.feedItems.filter((f) => f.id !== claimedId);
-    context = { ...context, feedItems: [claimed, ...others] };
-  } else if (plan.action === "evergreen") {
+  // ── The primary article, decided ONCE ─────────────────────────────────────
+  // Everything downstream reads this object: the prompt's PRIMARY SOURCE block,
+  // the mined aspects, Post.primaryFeedItemId, the appended URL, and the
+  // promptSnapshot. Nothing re-derives it from context.feedItems or an index —
+  // two independent derivations is exactly how a post ends up discussing one
+  // article and linking to another.
+  const primary = resolvePrimarySelection(context.feedItems, plan);
+  const claimedFeedItemId = primary.claimedFeedItemId;
+
+  if (plan.action === "evergreen") {
     // Reusable prompt/calendar content. Restrict the context to evergreen items
-    // so the post is built purely around them — this also drops any article that
-    // was claimable at build time but raced away, so it can never leak in as the
-    // primary. primaryFeedItemId stays null, so the item is never consumed.
-    const evergreen = context.feedItems.filter((f) => !isConsumableItem(f));
-    context = { ...context, feedItems: evergreen };
+    // so the background can hold no article either — one may have been claimable
+    // when the context was built and raced away since, and a raced article must
+    // not even appear as background for a post that does not link to it.
+    context = { ...context, feedItems: context.feedItems.filter((f) => !isConsumableItem(f)) };
   }
-  // plan.action === "mission": no sources — primaryFeedItemId stays null and the
-  // existing no-source mission/brand post path is used.
+  // plan.action === "mission": no sources — primary.item is null and the existing
+  // no-source mission/brand post path is used.
 
   // Frees the claimed article if generation fails before the post is persisted.
   const releaseClaimedFeedItem = async () => {
@@ -467,7 +467,11 @@ export async function generatePostFromContext(
     fingerprint: aspectFingerprint,
     usedAspectIds,
   } = await resolveGenerationAspect({
-    feedItems: context.feedItems,
+    // Aspects are mined from the primary ALONE. An aspect reaches the prompt as a
+    // mandatory "build the post around this" constraint, so one mined from a
+    // background article would order the model to write about an article this
+    // post does not link to.
+    primary: primary.item,
     snapshots,
     provider,
   });
@@ -475,6 +479,7 @@ export async function generatePostFromContext(
   // ── Build prompts ─────────────────────────────────────────────────────────
   const { systemPrompt, userPrompt } = buildPrompts(
     context,
+    primary.item,
     contentLanguage,
     recentRows10.slice(0, 5).map((r) => ({ text: r.content })),
     {
@@ -623,12 +628,11 @@ export async function generatePostFromContext(
   };
 
   // ── Source link (v2-1) ────────────────────────────────────────────────────
-  // The URL is appended programmatically — never by the LLM. The primary feed
-  // item is selected BEFORE the prompt is built (buildPrompts uses the same
-  // selectPrimaryFeedItem) and the model is instructed to base the post on it,
-  // so the appended URL and the generated text always refer to the same article.
+  // The URL is appended programmatically — never by the LLM — and comes from the
+  // same PrimarySelection that built the prompt and the aspect, so the appended
+  // URL and the generated text refer to the same article by construction.
   const sourceLinkResult = resolvePostSourceLink({
-    feedItems: context.feedItems,
+    primary,
     text: parsed.text,
     manualOverride: options.includeSourceLinkOverride,
     channelDefault: context.channel.includeSourceLink,

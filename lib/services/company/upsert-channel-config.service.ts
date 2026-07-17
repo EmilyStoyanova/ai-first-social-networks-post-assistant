@@ -116,7 +116,7 @@ async function validateAgainstContentMix(
   const [sources, company, otherChannels] = await Promise.all([
     prisma.contentSource.findMany({
       where: { companyId },
-      select: { id: true, name: true, enabled: true, postsPerWeek: true, fallbackPolicy: true },
+      select: { id: true, name: true, enabled: true, postsPerWeek: true },
     }),
     prisma.company.findUnique({
       where: { id: companyId },

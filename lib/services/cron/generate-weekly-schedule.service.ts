@@ -49,15 +49,23 @@ export interface WeeklyScheduleSummary {
   /** v2-8 — false when no content mix is configured and legacy pooling ran. */
   mixConfigured: boolean;
   /**
-   * v2-8 — quotas that ran out of eligible articles during this run. What
-   * happens to their unwritten posts is the source's fallback policy: "skip"
-   * leaves the quota unfilled to be retried next run, once ingestion may have
-   * new articles; "use_another_source" hands the posts to a source that still
-   * has articles, so the week still hits its target. Either way the source is
-   * listed here — this reports what ran dry, not what was lost.
+   * v2-8 — quotas that ran out of eligible articles during this run. Their
+   * unwritten posts are handed to a source that still has articles, so running
+   * dry usually costs the week nothing. This reports what ran dry, not what was
+   * lost — see `shortfalls` for that.
    * sourceId null = the company-content quota.
    */
   exhaustedQuotas: Array<{ channel: string; sourceId: string | null }>;
+  /**
+   * v2-8 — channels that will finish short, and why. A shortfall means the
+   * transfer had nowhere to go: every RSS source with a quota was out of unused
+   * articles, so those posts cannot be written by anyone this run.
+   *
+   * Reported rather than silently absorbed, because "5 posts a week produced 3"
+   * is the kind of thing an operator has to be able to see. The posts stay
+   * outstanding and the next run retries them once ingestion has fetched more.
+   */
+  shortfalls: Array<{ channel: string; posts: number; reason: "NO_ELIGIBLE_SOURCE" }>;
 }
 
 /** Monday 00:00 UTC of the week after the given date. */
@@ -153,7 +161,6 @@ export interface GenerateWeeklyScheduleDb {
         name: true;
         enabled: true;
         postsPerWeek: true;
-        fallbackPolicy: true;
       };
     }) => Promise<
       Array<{
@@ -161,7 +168,6 @@ export interface GenerateWeeklyScheduleDb {
         name: string;
         enabled: boolean;
         postsPerWeek: number | null;
-        fallbackPolicy: string;
       }>
     >;
   };
@@ -235,6 +241,7 @@ export async function generateWeeklySchedule(
       failures: [],
       mixConfigured: false,
       exhaustedQuotas: [],
+      shortfalls: [],
     };
   }
 
@@ -256,6 +263,7 @@ export async function generateWeeklySchedule(
       failures: [],
       mixConfigured: false,
       exhaustedQuotas: [],
+      shortfalls: [],
     };
   }
 
@@ -270,7 +278,7 @@ export async function generateWeeklySchedule(
     }),
     db.contentSource.findMany({
       where: { companyId },
-      select: { id: true, name: true, enabled: true, postsPerWeek: true, fallbackPolicy: true },
+      select: { id: true, name: true, enabled: true, postsPerWeek: true },
     }),
     // Posts already generated for this schedule, carrying the channel AND source
     // so a run resuming mid-week knows which quota each existing post consumed.
@@ -294,6 +302,7 @@ export async function generateWeeklySchedule(
     failures: [],
     mixConfigured: quotas !== null,
     exhaustedQuotas: [],
+    shortfalls: [],
   };
 
   const budget: RunBudget = { remaining: MAX_GENERATIONS_PER_RUN };
@@ -504,5 +513,19 @@ async function fillChannelFromMix(
   //
   // Posts still owed keep the schedule "generating" so a later run retries them,
   // by which time ingestion may have fetched new articles.
-  summary.postsRemaining += Math.max(0, target - totalGenerated());
+  const owed = Math.max(0, target - totalGenerated());
+  summary.postsRemaining += owed;
+
+  // Say why the week came up short, rather than leaving an operator to infer it
+  // from a number. Owing posts while the budget still had room means nothing was
+  // due: every RSS quota was drained and the transfer had no eligible recipient.
+  // (Owing posts with the budget spent is just "more runs to come", not a
+  // shortfall — the next run continues.)
+  if (owed > 0 && budget.remaining > 0 && summary.failures.length === 0) {
+    summary.shortfalls.push({
+      channel: config.channel,
+      posts: owed,
+      reason: "NO_ELIGIBLE_SOURCE",
+    });
+  }
 }

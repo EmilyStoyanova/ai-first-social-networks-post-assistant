@@ -6,9 +6,7 @@
  * truncated, or otherwise modified.
  */
 
-import type { FeedItemContext } from "./types";
-import { selectPrimaryFeedItem } from "./primary-feed-item";
-import { isConsumableItem } from "./source-types";
+import type { PrimarySelection } from "./primary-feed-item";
 
 export type SourceLinkLevel = "manual" | "source" | "channel";
 
@@ -75,12 +73,13 @@ export function applySourceLink(
 }
 
 /**
- * Post-level source link resolution: selects the single primary feed item, then
- * derives the appended URL, the recorded title/id, and the source-link decision
- * from that SAME item. This is the single point that couples the primary source
- * to the appended URL — the generated post text (built around the same primary
- * item, see prompt-builder) and the URL can therefore never refer to different
- * articles.
+ * Post-level source link resolution.
+ *
+ * Takes the already-resolved PrimarySelection rather than the feed-item array:
+ * the URL, the recorded id, and the title all come from the one item the post
+ * was built around, so a background article can never supply the link. This used
+ * to re-derive the primary from `feedItems[0]`, which made "text and URL agree"
+ * a property two call sites had to keep in step rather than a fact.
  */
 export interface PostSourceLink {
   finalContent: string;
@@ -95,20 +94,19 @@ export type ResolvePostSourceLinkResult =
   { ok: true; data: PostSourceLink } | { ok: false; reason: "POST_TOO_LONG_WITH_URL" };
 
 export function resolvePostSourceLink(params: {
-  feedItems: readonly FeedItemContext[];
+  primary: PrimarySelection;
   text: string;
   manualOverride: boolean | undefined;
   channelDefault: boolean;
   maxTextLength: number | null;
 }): ResolvePostSourceLinkResult {
-  const { feedItems, text, manualOverride, channelDefault, maxTextLength } = params;
+  const { primary, text, manualOverride, channelDefault, maxTextLength } = params;
 
-  const primary = selectPrimaryFeedItem(feedItems);
-  // Only single-use article items carry an appendable source URL. Evergreen
-  // (prompt/calendar) primaries have synthetic urls like `prompt:<id>` that must
-  // never be appended, so they are treated as having no source link.
-  const linkable = primary && isConsumableItem(primary) ? primary : null;
-  const sourceUrl = linkable?.url ?? null;
+  // The selection already decided what is linkable: sourceUrl is non-null only
+  // for a claimed article. Evergreen and mission primaries resolve to null here
+  // and simply have no link to apply.
+  const { item, sourceUrl } = primary;
+  const linkable = sourceUrl !== null ? item : null;
 
   const { include, level } = resolveIncludeSourceLink(
     manualOverride,
@@ -124,7 +122,9 @@ export function resolvePostSourceLink(params: {
     data: {
       finalContent: applied.content,
       sourceUrl,
-      primaryFeedItemId: linkable?.id ?? null,
+      // The reserved id, not a re-lookup: this is the same value written to
+      // Post.primaryFeedItemId, so the column and the snapshot cannot drift.
+      primaryFeedItemId: primary.claimedFeedItemId,
       sourceTitle: linkable?.title ?? null,
       includeSourceLink: include,
       includeSourceLinkLevel: level,

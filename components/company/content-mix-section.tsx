@@ -18,44 +18,21 @@ interface Props {
   canManage: boolean;
 }
 
-interface Draft {
-  /** Quota inputs are held as strings so a field can be emptied while typing. */
-  quotas: Record<string, string>;
-  /** Fallback policy per source id. The company-content row has no policy. */
-  policies: Record<string, FallbackChoice>;
-}
+/** Quota inputs are held as strings so a field can be emptied while typing. */
+type Draft = Record<string, string>;
 
 /** Sentinel key for the company-content row; sources are keyed by their id. */
 const COMPANY_KEY = "__company__";
 
-/**
- * Only the two policies the scheduler implements are offered. The column also
- * carries `use_company_profile` and `allow_reuse` for v2-8 phases that are not
- * built; the API rejects them, so they must not appear here either.
- */
-const FALLBACK_CHOICES = ["skip", "use_another_source"] as const;
-type FallbackChoice = (typeof FALLBACK_CHOICES)[number];
-
-function toChoice(stored: string): FallbackChoice {
-  // A stored value outside the two offered here can only come from a direct DB
-  // edit, and the scheduler already refuses to run such a mix. Showing "skip"
-  // makes the control honest about what saving would do.
-  return (FALLBACK_CHOICES as readonly string[]).includes(stored)
-    ? (stored as FallbackChoice)
-    : "skip";
-}
-
 function toDraft(mix: ContentMixDTO): Draft {
-  const quotas: Record<string, string> = {
+  const draft: Draft = {
     [COMPANY_KEY]: mix.companyContentPostsPerWeek?.toString() ?? "",
   };
-  const policies: Record<string, FallbackChoice> = {};
   for (const source of mix.sources) {
     if (!source.enabled) continue;
-    quotas[source.id] = source.postsPerWeek?.toString() ?? "";
-    policies[source.id] = toChoice(source.fallbackPolicy);
+    draft[source.id] = source.postsPerWeek?.toString() ?? "";
   }
-  return { quotas, policies };
+  return draft;
 }
 
 /** "" → null (no quota). A non-numeric value → null so it reads as unassigned. */
@@ -82,20 +59,20 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
   // Live totals mirror the server's rule (sum of quotas vs the weekly target) so
   // the number on screen is the same one the API will check on save.
   const total = useMemo(() => {
-    let sum = parseQuota(draft.quotas[COMPANY_KEY]) ?? 0;
-    for (const source of enabledSources) sum += parseQuota(draft.quotas[source.id]) ?? 0;
+    let sum = parseQuota(draft[COMPANY_KEY]) ?? 0;
+    for (const source of enabledSources) sum += parseQuota(draft[source.id]) ?? 0;
     return sum;
   }, [draft, enabledSources]);
 
   const configured = useMemo(
     () =>
-      parseQuota(draft.quotas[COMPANY_KEY]) !== null ||
-      enabledSources.some((s) => parseQuota(draft.quotas[s.id]) !== null),
+      parseQuota(draft[COMPANY_KEY]) !== null ||
+      enabledSources.some((s) => parseQuota(draft[s.id]) !== null),
     [draft, enabledSources]
   );
 
   const unassigned = useMemo(
-    () => configured && enabledSources.some((s) => parseQuota(draft.quotas[s.id]) === null),
+    () => configured && enabledSources.some((s) => parseQuota(draft[s.id]) === null),
     [configured, draft, enabledSources]
   );
 
@@ -107,13 +84,7 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
   const canSave = canManage && dirty && !saving && (!configured || (balanced && !unassigned));
 
   function setValue(key: string, value: string) {
-    setDraft((prev) => ({ ...prev, quotas: { ...prev.quotas, [key]: value } }));
-    setSaved(false);
-    setError("");
-  }
-
-  function setPolicy(sourceId: string, value: FallbackChoice) {
-    setDraft((prev) => ({ ...prev, policies: { ...prev.policies, [sourceId]: value } }));
+    setDraft((prev) => ({ ...prev, [key]: value }));
     setSaved(false);
     setError("");
   }
@@ -129,10 +100,9 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
         body: JSON.stringify({
           sources: enabledSources.map((s) => ({
             sourceId: s.id,
-            postsPerWeek: parseQuota(draft.quotas[s.id]),
-            fallbackPolicy: draft.policies[s.id],
+            postsPerWeek: parseQuota(draft[s.id]),
           })),
-          companyContentPostsPerWeek: parseQuota(draft.quotas[COMPANY_KEY]),
+          companyContentPostsPerWeek: parseQuota(draft[COMPANY_KEY]),
         }),
       });
       if (!res.ok) {
@@ -151,25 +121,16 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
   }
 
   function handleClear() {
-    // Quotas only: an unconfigured mix never consults a fallback policy, so
-    // wiping the policies here would throw away a setting for no reason.
-    const quotas: Record<string, string> = { [COMPANY_KEY]: "" };
-    for (const source of enabledSources) quotas[source.id] = "";
-    setDraft((prev) => ({ ...prev, quotas }));
+    const cleared: Draft = { [COMPANY_KEY]: "" };
+    for (const source of enabledSources) cleared[source.id] = "";
+    setDraft(cleared);
     setSaved(false);
     setError("");
   }
 
-  const rows: Array<{ key: string; label: string; hint?: string; policy: boolean }> = [
-    ...enabledSources.map((s) => ({ key: s.id, label: s.name, policy: true })),
-    {
-      key: COMPANY_KEY,
-      label: t("companyContent"),
-      hint: t("companyContentHint"),
-      // Company content needs no article, so it cannot run out and takes no
-      // part in a transfer.
-      policy: false,
-    },
+  const rows: Array<{ key: string; label: string; hint?: string }> = [
+    ...enabledSources.map((s) => ({ key: s.id, label: s.name })),
+    { key: COMPANY_KEY, label: t("companyContent"), hint: t("companyContentHint") },
   ];
 
   return (
@@ -201,53 +162,32 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
       )}
 
       {/* Distribution rows */}
-      <div className="mt-4 space-y-3">
+      <div className="mt-4 space-y-2">
         {rows.map((row) => (
-          <div key={row.key}>
-            <div className="flex items-center gap-3">
-              <div className="min-w-0 flex-1">
-                <span className="text-fg block truncate text-sm">{row.label}</span>
-                {row.hint && <span className="text-fg-faint block text-xs">{row.hint}</span>}
-              </div>
-              {/* Dotted leader, as in the spec's sketch. */}
-              <span
-                aria-hidden="true"
-                className="border-border min-w-6 flex-1 border-b border-dotted"
-              />
-              <input
-                type="number"
-                min={0}
-                max={mix.maxPostsPerWeek}
-                inputMode="numeric"
-                aria-label={row.label}
-                placeholder={t("unassigned")}
-                disabled={!canManage || saving}
-                value={draft.quotas[row.key] ?? ""}
-                onChange={(e) => setValue(row.key, e.target.value)}
-                className={`${BASE} ${
-                  configured && parseQuota(draft.quotas[row.key]) === null ? INVALID : NORMAL
-                } w-24 text-right disabled:opacity-60`}
-              />
+          <div key={row.key} className="flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <span className="text-fg block truncate text-sm">{row.label}</span>
+              {row.hint && <span className="text-fg-faint block text-xs">{row.hint}</span>}
             </div>
-
-            {/* What to do when this source has no unused articles left. */}
-            {row.policy && (
-              <div className="mt-1 flex items-center gap-2 pl-0">
-                <label htmlFor={`fallback-${row.key}`} className="text-fg-faint shrink-0 text-xs">
-                  {t("fallbackLabel")}
-                </label>
-                <select
-                  id={`fallback-${row.key}`}
-                  disabled={!canManage || saving}
-                  value={draft.policies[row.key] ?? "skip"}
-                  onChange={(e) => setPolicy(row.key, e.target.value as FallbackChoice)}
-                  className={`${BASE} ${NORMAL} min-w-0 flex-1 text-xs disabled:opacity-60`}
-                >
-                  <option value="skip">{t("fallbackSkip")}</option>
-                  <option value="use_another_source">{t("fallbackTransfer")}</option>
-                </select>
-              </div>
-            )}
+            {/* Dotted leader, as in the spec's sketch. */}
+            <span
+              aria-hidden="true"
+              className="border-border min-w-6 flex-1 border-b border-dotted"
+            />
+            <input
+              type="number"
+              min={0}
+              max={mix.maxPostsPerWeek}
+              inputMode="numeric"
+              aria-label={row.label}
+              placeholder={t("unassigned")}
+              disabled={!canManage || saving}
+              value={draft[row.key] ?? ""}
+              onChange={(e) => setValue(row.key, e.target.value)}
+              className={`${BASE} ${
+                configured && parseQuota(draft[row.key]) === null ? INVALID : NORMAL
+              } w-24 text-right disabled:opacity-60`}
+            />
           </div>
         ))}
       </div>
@@ -288,7 +228,7 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
         </p>
       )}
 
-      <p className="text-fg-faint mt-3 text-xs">{t("fallbackHint")}</p>
+      <p className="text-fg-faint mt-3 text-xs">{t("exhaustedNote")}</p>
 
       {configured ? (
         mix.channelTargets.length > 1 && (
