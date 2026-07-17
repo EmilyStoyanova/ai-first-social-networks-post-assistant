@@ -216,6 +216,14 @@ export interface GeneratePostOptions {
   /** Weekly schedule this post belongs to (cron generation only). */
   scheduleId?: string;
   scheduledFor?: Date;
+  /**
+   * The content-mix quota this post is drawn against (v2-8): a source id, or
+   * null for the company-content (mission) quota. Passed explicitly rather than
+   * inferred from the claimed feed item, because an evergreen (prompt/calendar)
+   * post has no claimed item yet still belongs to its source's quota.
+   * Undefined outside the mix path (user flow, unconfigured companies).
+   */
+  contentSourceId?: string | null;
   /** Defaults to "draft" (user flow). Cron generation uses "pending_approval". */
   initialStatus?: "draft" | "pending_approval";
   /**
@@ -655,6 +663,10 @@ export async function generatePostFromContext(
       // The reserved source article. The DB unique index on this column is the
       // hard guarantee that one feed item never backs two posts.
       primaryFeedItemId: claimedFeedItemId,
+      // v2-8 — the quota this post consumed. Null both for mission posts and
+      // outside the mix path entirely; the scheduler only counts posts within
+      // the current schedule, so a legacy null can never be miscounted.
+      contentSourceId: options.contentSourceId ?? null,
       status: resolvedStatus,
       approvedAt,
       content: finalContent,

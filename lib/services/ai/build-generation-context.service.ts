@@ -31,13 +31,32 @@ export type BuildGenerationContextResult =
     };
 
 /**
+ * Which sources a generation may draw from (v2-8).
+ *
+ *   • pooled          — every enabled source, newest articles first. The
+ *                       pre-v2-8 behaviour, and still what the user-facing
+ *                       "Generate post" flow and unconfigured companies use.
+ *   • source          — exactly one content source, because a content-mix quota
+ *                       for it is due. Nothing else may leak into the context.
+ *   • company_content — no sources at all, forcing the mission/brand post path.
+ *
+ * A discriminated union rather than a nullable sourceId: "no source" and "any
+ * source" are opposites here, and null/undefined would not keep them apart.
+ */
+export type SourceScope =
+  { kind: "pooled" } | { kind: "source"; sourceId: string } | { kind: "company_content" };
+
+const POOLED: SourceScope = { kind: "pooled" };
+
+/**
  * System-level context builder — no RBAC. Used by the cron dispatcher, where
  * there is no acting user; user-facing callers go through
  * buildGenerationContext below.
  */
 export async function buildGenerationContextForCompany(
   companyId: string,
-  rawChannel: string
+  rawChannel: string,
+  scope: SourceScope = POOLED
 ): Promise<BuildGenerationContextResult> {
   const channel = rawChannel.toLowerCase() as ValidChannel;
   if (!VALID_CHANNELS.includes(channel)) {
@@ -50,7 +69,7 @@ export async function buildGenerationContextForCompany(
   });
   if (!companyRow) return { success: false, code: "NOT_FOUND" };
 
-  return loadContext(companyId, channel, companyRow);
+  return loadContext(companyId, channel, companyRow, scope);
 }
 
 export async function buildGenerationContext(
@@ -114,8 +133,15 @@ async function loadContext(
     website: string | null;
     automationMode: string;
     defaultLang: string;
-  }
+  },
+  scope: SourceScope = POOLED
 ): Promise<BuildGenerationContextResult> {
+  // v2-8 — a company-content slot must produce a mission/brand post, so it gets
+  // an empty article window AND no article sources. That combination is exactly
+  // what makes planFeedItemUsage choose "mission", so the existing decision tree
+  // handles the new quota with no special case of its own.
+  const companyContentOnly = scope.kind === "company_content";
+
   // ── Parallel data load ────────────────────────────────────────────────────
   const [brand, channelConfig, feedItems, enabledSource] = await Promise.allSettled([
     prisma.brandGuidelines.findUnique({
@@ -139,37 +165,61 @@ async function loadContext(
         includeSourceLink: true,
       },
     }),
-    prisma.feedItem.findMany({
-      // usedInPost:false — one-post-per-article (Phase 0). Already-consumed
-      // articles are excluded so each generation draws from a fresh source and
-      // the same article is never rewritten twice. Evergreen (prompt/calendar)
-      // items are never marked used, so they always remain in this window.
-      where: { companyId, enabled: true, usedInPost: false, source: { enabled: true } },
-      orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
-      take: 5,
-      select: {
-        id: true,
-        title: true,
-        content: true,
-        url: true,
-        publishedAt: true,
-        // v2-4 — translated text is preferred over the original only when the
-        // translation completed; see resolveFeedItemContent below.
-        translatedTitle: true,
-        translatedContent: true,
-        translationStatus: true,
-        source: { select: { type: true, config: true } },
-      },
-    }),
+    // A company-content slot draws from no source at all — skip the query.
+    companyContentOnly
+      ? Promise.resolve([])
+      : prisma.feedItem.findMany({
+          // usedInPost:false — one-post-per-article (Phase 0). Already-consumed
+          // articles are excluded so each generation draws from a fresh source and
+          // the same article is never rewritten twice. Evergreen (prompt/calendar)
+          // items are never marked used, so they always remain in this window.
+          where: {
+            companyId,
+            enabled: true,
+            usedInPost: false,
+            source: { enabled: true },
+            // v2-8 — when a specific source's quota is due, the window is restricted
+            // to that source so a post can only ever consume the quota it was drawn
+            // against. Without this the pooled window could hand RSS B's article to
+            // RSS A's slot, silently reassigning the quota.
+            ...(scope.kind === "source" ? { sourceId: scope.sourceId } : {}),
+          },
+          orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
+          take: 5,
+          select: {
+            id: true,
+            title: true,
+            content: true,
+            url: true,
+            publishedAt: true,
+            // v2-4 — translated text is preferred over the original only when the
+            // translation completed; see resolveFeedItemContent below.
+            translatedTitle: true,
+            translatedContent: true,
+            translationStatus: true,
+            source: { select: { type: true, config: true } },
+          },
+        }),
     // Does the company have an ARTICLE source (rss/product_page) configured at
     // all? Such a source with every article already used yields an empty
     // article window but must NOT fall back to a mission post — the caller skips
     // instead (Phase 0). Evergreen prompt/calendar sources are excluded here on
     // purpose: they never force a skip.
-    prisma.contentSource.findFirst({
-      where: { companyId, enabled: true, type: { in: [...CONSUMABLE_SOURCE_TYPES] } },
-      select: { id: true },
-    }),
+    //
+    // v2-8 — scoped to the one source when its quota is due, so "are there
+    // articles left" is asked about that source alone; and forced to "no" for a
+    // company-content slot, which is the mission path by definition.
+    companyContentOnly
+      ? Promise.resolve(null)
+      : prisma.contentSource.findFirst({
+          where: {
+            companyId,
+            enabled: true,
+            type: { in: [...CONSUMABLE_SOURCE_TYPES] },
+            ...(scope.kind === "source" ? { id: scope.sourceId } : {}),
+          },
+          select: { id: true },
+        }),
   ]);
 
   const brandData = brand.status === "fulfilled" ? brand.value : null;

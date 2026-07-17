@@ -51,6 +51,14 @@ export const API_ERROR_CODES = [
   "POST_TOO_LONG_WITH_URL",
   "CANNOT_GENERATE_UNIQUE_POST",
   "NO_FEED_ITEMS_AVAILABLE",
+  // Content mix (v2-8) — a rejected generation distribution.
+  "MIX_TOTAL_MISMATCH",
+  "MIX_SOURCE_UNASSIGNED",
+  "MIX_CHANNEL_TARGETS_DIFFER",
+  "MIX_INVALID_VALUE",
+  "MIX_EXCEEDS_MAX",
+  "MIX_UNSUPPORTED_FALLBACK",
+  "UNKNOWN_SOURCE",
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];

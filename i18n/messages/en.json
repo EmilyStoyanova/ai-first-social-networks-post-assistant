@@ -59,7 +59,14 @@
     "POST_TOO_LONG_WITH_URL": "The post plus the source link exceeds the channel's character limit. Generate again or shorten the post.",
     "CANNOT_GENERATE_UNIQUE_POST": "Couldn't create a post different enough from recent ones. Try again later or add fresh source material.",
     "NO_FEED_ITEMS_AVAILABLE": "No RSS articles are available to write about right now. Click \"Ingest\" on a content source to fetch the latest articles, or add a new RSS source.",
-    "UNKNOWN": "Something went wrong. Please try again."
+    "UNKNOWN": "Something went wrong. Please try again.",
+    "MIX_TOTAL_MISMATCH": "The content mix doesn't add up to the weekly target. Adjust the numbers until nothing is left over.",
+    "MIX_SOURCE_UNASSIGNED": "Every enabled source needs a posts-per-week value once a content mix is set up.",
+    "MIX_CHANNEL_TARGETS_DIFFER": "All enabled channels must share the same weekly target to use one content mix.",
+    "MIX_INVALID_VALUE": "Posts per week must be a whole number, zero or more.",
+    "MIX_EXCEEDS_MAX": "The content mix exceeds the most posts a channel can generate in a week.",
+    "MIX_UNSUPPORTED_FALLBACK": "That fallback option isn't available yet.",
+    "UNKNOWN_SOURCE": "That content source doesn't belong to this company."
   },
   "brand": {
     "title": "AI-First Social Networks",
@@ -682,5 +689,30 @@
     "deactivateError": "Failed to deactivate provider.",
     "setDefaultError": "Failed to set default provider.",
     "providerUpdateError": "Failed to update provider."
+  },
+  "contentMix": {
+    "title": "Content mix",
+    "description": "Decide where each week's posts come from.",
+    "weeklyTarget": "Weekly target",
+    "postsCount": "{count, plural, one {# post} other {# posts}}",
+    "companyContent": "Company content",
+    "companyContentHint": "Written from your mission and brand description, with no article behind them.",
+    "remaining": "Remaining",
+    "over": "Over by {count}",
+    "balanced": "Balanced",
+    "save": "Save content mix",
+    "saving": "Saving…",
+    "saved": "Content mix saved.",
+    "reset": "Reset",
+    "clear": "Clear mix",
+    "clearHint": "Clearing every value returns to drawing posts from any available source.",
+    "unconfigured": "No content mix set. Posts are drawn from whichever source has a fresh article.",
+    "noTarget": "Enable a channel with a weekly target to set up a content mix.",
+    "targetsDiffer": "Your enabled channels have different weekly targets ({detail}). One content mix is shared by every channel, so they must match.",
+    "disabledHint": "Disabled sources take no part in the mix.",
+    "unassigned": "Not set",
+    "exhaustedNote": "If a source runs out of articles its posts are skipped for that week — they are never moved to another source.",
+    "ownersOnly": "Only company owners can change the content mix.",
+    "appliesToChannels": "Applied to every enabled channel: {channels}."
   }
 }

@@ -1,10 +1,32 @@
 # v2-8 — Content Mix Scheduling Rules
 
+> **⚠️ Superseded in part — implemented 2026-07-16.** Two product decisions taken at
+> implementation time override this document. It is kept for the reasoning behind
+> the deferred parts; **`lib/scheduling/content-mix.ts` is the source of truth**
+> for what actually ships.
+>
+> 1. **Scheduling unit: "one shared recipe", not Model B.** Quotas are company-wide
+>    (`ContentSource.postsPerWeek`, `Company.companyContentPostsPerWeek`) and the same
+>    distribution is applied to every enabled channel — so all enabled channels must
+>    share one `postsPerWeek`. The `company_mix_rules` / `schedule_allocations` tables
+>    below were **not** created; four additive columns cover it. This resolves open
+>    Product Decision #7 in the v2 plan.
+> 2. **Fallback policies: "skip now, policies later".** `ContentSource.fallbackPolicy`
+>    carries the full vocabulary below so a later phase needs no migration, but only
+>    `skip` is implemented and validation **rejects** the others rather than silently
+>    treating them as skip. The reuse-eligibility algorithm and the
+>    `FeedItem.lastUsedAt` / `usageCount` columns are **deferred**.
+>
+> Still accurate below: the sum-validation rule, and the reuse algorithm as a spec for
+> whoever implements `allow_reuse`.
+
 ## Goal
 
 Let owners define per-channel source allocations for the weekly post budget. When rules are defined, the scheduler draws from specific sources in defined proportions. When no rules exist, existing source-pooling behaviour is preserved unchanged.
 
 ## Scheduling Unit
+
+> **Superseded — see the banner above. Shipped as one company-wide recipe applied to every channel.**
 
 **Model B (default):** Rules are defined per channel. Each allocation specifies "N posts from source X on channel Y per week."
 
@@ -13,6 +35,21 @@ This means the same article may generate separate posts for Facebook and LinkedI
 _(Model A — unique content topics with per-channel variants — deferred unless product explicitly requests it.)_
 
 ## Schema Changes
+
+> **Superseded — not implemented.** What actually shipped (migration
+> `20260716040000_add_content_mix_distribution`) is four additive fields:
+>
+> ```prisma
+> model Company       { companyContentPostsPerWeek Int? @map("company_content_posts_per_week") }
+> model ContentSource { postsPerWeek Int? @map("posts_per_week")
+>                       fallbackPolicy String @default("skip") @map("fallback_policy") }
+> model Post          { contentSourceId String? @map("content_source_id") } // null = company content
+> ```
+>
+> `Post.contentSourceId` is not in the original design but is required: evergreen and
+> mission posts both leave `primaryFeedItemId` null, so source attribution cannot
+> otherwise be derived. NULL vs 0 is meaningful in both quota columns — NULL means "no
+> mix", which is what preserves the legacy pooling path.
 
 ```prisma
 model CompanyMixRule {
@@ -130,6 +167,12 @@ Rules that do not sum to `postsPerWeek` are rejected at save time. API returns `
 
 ## Fallback Policies
 
+> **Only `skip` is implemented.** The column accepts the vocabulary below so a later
+> phase needs no migration; anything other than `skip` is rejected at validation with
+> `MIX_UNSUPPORTED_FALLBACK`. Note `use_another_source` conflicts with the shipped
+> requirement that quotas are never reassigned — revisit that tension before
+> implementing it.
+
 | Policy                | Behaviour when source runs out of eligible items                          |
 | --------------------- | ------------------------------------------------------------------------- |
 | `skip`                | Do not generate a post for this slot; leave budget unfilled               |
@@ -138,6 +181,10 @@ Rules that do not sum to `postsPerWeek` are rejected at save time. API returns `
 | `allow_reuse`         | Reuse an eligible previously-used feed item (see reuse eligibility below) |
 
 ## Reuse Eligibility (when `allow_reuse`)
+
+> **Deferred — not implemented.** Retained as the spec for whoever adds `allow_reuse`.
+> Requires the `FeedItem.lastUsedAt` / `usageCount` columns above, which were also
+> deferred.
 
 An item is eligible for reuse only if it passes **all** of the following:
 

@@ -1,0 +1,360 @@
+/**
+ * Content mix — generation distribution (v2-8).
+ *
+ * Lets an owner say exactly where next week's posts come from:
+ *
+ *   Weekly target: 5
+ *     RSS A ............ 3
+ *     RSS B ............ 1
+ *     Company content .. 1
+ *
+ * The mix is a single company-wide *recipe* that is applied to every enabled
+ * channel (the "one shared recipe" model): each enabled channel fills its weekly
+ * budget following the same distribution. That is why every enabled channel must
+ * share the same `postsPerWeek` — the recipe has one total, so it cannot satisfy
+ * two different channel budgets at once.
+ *
+ * Two invariants drive every function here:
+ *
+ *   • Quotas are never reassigned. A source that runs out of articles simply
+ *     under-fills its own quota; its posts are never handed to another source.
+ *   • An unconfigured mix is not a mix. When nothing is configured the scheduler
+ *     falls back to the pre-v2-8 pooling behaviour, unchanged.
+ *
+ * Everything in this module is pure — no Prisma, no I/O — so the scheduler's
+ * distribution logic is unit-testable without a database.
+ */
+
+/**
+ * The company-generated-content quota (mission/brand posts written without any
+ * RSS article) is modelled as a quota whose source id is null. Named so call
+ * sites read as intent rather than as a bare null check.
+ */
+export const COMPANY_CONTENT_SOURCE_ID = null;
+
+/**
+ * Hard per-channel weekly ceiling, as a cost guard. Pre-v2-8 the scheduler
+ * applied this silently (`Math.min(postsPerWeek, 7)`), which a mix cannot do:
+ * capping a 10-post distribution at 7 would have to drop 3 posts from *someone's*
+ * quota, and choosing whose is exactly the silent reassignment this feature
+ * exists to prevent. So a mix must fit under the ceiling, and validation says so
+ * out loud (MIX_EXCEEDS_MAX) instead of truncating.
+ *
+ * Lives here rather than in the scheduler because it is a rule about the
+ * distribution; the scheduler imports it for the legacy path too.
+ */
+export const MAX_POSTS_PER_CHANNEL_PER_WEEK = 7;
+
+/**
+ * The full fallback vocabulary the `fallback_policy` column is sized for, per
+ * the v2-8 phase doc. Only the policies in IMPLEMENTED_FALLBACK_POLICIES are
+ * accepted today — the column exists now so adding the rest later needs no
+ * second migration, but an unimplemented value is REJECTED at validation rather
+ * than silently behaving like "skip".
+ */
+export const FALLBACK_POLICIES = [
+  "skip",
+  "use_another_source",
+  "use_company_profile",
+  "allow_reuse",
+] as const;
+
+export type FallbackPolicy = (typeof FALLBACK_POLICIES)[number];
+
+/** Policies with a real implementation today. See FALLBACK_POLICIES above. */
+export const IMPLEMENTED_FALLBACK_POLICIES = ["skip"] as const satisfies readonly FallbackPolicy[];
+
+export const DEFAULT_FALLBACK_POLICY: FallbackPolicy = "skip";
+
+export function isFallbackPolicy(value: unknown): value is FallbackPolicy {
+  return typeof value === "string" && (FALLBACK_POLICIES as readonly string[]).includes(value);
+}
+
+export function isImplementedFallbackPolicy(value: unknown): value is FallbackPolicy {
+  return (
+    typeof value === "string" &&
+    (IMPLEMENTED_FALLBACK_POLICIES as readonly string[]).includes(value)
+  );
+}
+
+/** A content source as the mix sees it. */
+export interface MixSourceInput {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** null = no quota assigned; see resolveContentMix. */
+  postsPerWeek: number | null;
+  fallbackPolicy: string;
+}
+
+/** One resolved quota: "this source owes N posts per week per channel". */
+export interface MixQuota {
+  /** null = company-generated content (no RSS). */
+  sourceId: string | null;
+  postsPerWeek: number;
+  fallbackPolicy: FallbackPolicy;
+}
+
+export interface ResolveContentMixInput {
+  sources: readonly MixSourceInput[];
+  companyContentPostsPerWeek: number | null;
+}
+
+/**
+ * Builds the quota list from stored config, or returns null when no quota has
+ * been configured at all.
+ *
+ * A null result is the backward-compatibility signal: the company predates v2-8
+ * (or has deliberately cleared its mix), so the caller must use the legacy
+ * pooled-source behaviour. This is what makes "default behaviour matches the
+ * current implementation until users configure quotas" true by construction.
+ *
+ * Disabled sources are excluded entirely — a disabled source generates nothing,
+ * so a stale quota on one must not distort the mix. An *enabled* source with a
+ * null quota contributes 0 and is never generated from; that is a
+ * partially-configured mix, which validateContentMix rejects at save time (see
+ * MIX_SOURCE_UNASSIGNED). It can still be reached at generation time when a
+ * source is added after the mix was saved, and resolving it to 0 keeps the
+ * scheduler deterministic instead of silently re-pooling.
+ */
+export function resolveContentMix(input: ResolveContentMixInput): MixQuota[] | null {
+  const enabled = input.sources.filter((s) => s.enabled);
+  const configured =
+    input.companyContentPostsPerWeek !== null || enabled.some((s) => s.postsPerWeek !== null);
+  if (!configured) return null;
+
+  const quotas: MixQuota[] = enabled.map((s) => ({
+    sourceId: s.id,
+    postsPerWeek: s.postsPerWeek ?? 0,
+    fallbackPolicy: isFallbackPolicy(s.fallbackPolicy) ? s.fallbackPolicy : DEFAULT_FALLBACK_POLICY,
+  }));
+
+  if (input.companyContentPostsPerWeek !== null) {
+    quotas.push({
+      sourceId: COMPANY_CONTENT_SOURCE_ID,
+      postsPerWeek: input.companyContentPostsPerWeek,
+      fallbackPolicy: DEFAULT_FALLBACK_POLICY,
+    });
+  }
+
+  return quotas;
+}
+
+/** Total posts per channel per week the mix accounts for. */
+export function contentMixTotal(quotas: readonly MixQuota[]): number {
+  return quotas.reduce((sum, q) => sum + q.postsPerWeek, 0);
+}
+
+export type MixValidationCode =
+  /** Quotas do not add up to the weekly target. */
+  | "MIX_TOTAL_MISMATCH"
+  /** An enabled source has no quota while the rest of the mix is configured. */
+  | "MIX_SOURCE_UNASSIGNED"
+  /** Enabled channels disagree on postsPerWeek, so one recipe cannot serve them all. */
+  | "MIX_CHANNEL_TARGETS_DIFFER"
+  /** A quota is negative or not a whole number. */
+  | "MIX_INVALID_VALUE"
+  /** The mix totals more than a channel may generate in a week. */
+  | "MIX_EXCEEDS_MAX"
+  /** A fallback policy that exists in the column vocabulary but has no implementation yet. */
+  | "MIX_UNSUPPORTED_FALLBACK";
+
+export interface MixValidationError {
+  code: MixValidationCode;
+  /** English, for logs and API consumers. The UI localizes off `code`. */
+  message: string;
+}
+
+export type MixValidationResult = { valid: true } | { valid: false; error: MixValidationError };
+
+export interface ValidateContentMixInput extends ResolveContentMixInput {
+  /** Enabled channels only, with their weekly budget. */
+  channelTargets: ReadonlyArray<{ channel: string; postsPerWeek: number }>;
+}
+
+/**
+ * Validates a whole mix at once.
+ *
+ * Whole-mix validation is deliberate: quotas are only ever meaningful together.
+ * Editing one source's quota in isolation would have to pass through an invalid
+ * intermediate total (3→2 breaks the sum before the compensating edit lands), so
+ * there is no per-field save path — the UI and the API both submit the complete
+ * distribution.
+ *
+ * An unconfigured mix is always valid (it means "use legacy pooling"). A mix
+ * with no enabled channels is also valid: there is no target to compare against
+ * yet, and configuring the mix before turning a channel on is legitimate.
+ */
+export function validateContentMix(input: ValidateContentMixInput): MixValidationResult {
+  const quotas = resolveContentMix(input);
+  if (quotas === null) return { valid: true };
+
+  const enabledSources = input.sources.filter((s) => s.enabled);
+
+  const unassigned = enabledSources.find((s) => s.postsPerWeek === null);
+  if (unassigned) {
+    return {
+      valid: false,
+      error: {
+        code: "MIX_SOURCE_UNASSIGNED",
+        message: `Source "${unassigned.name}" has no posts-per-week value. Every enabled source needs one once a content mix is configured.`,
+      },
+    };
+  }
+
+  for (const quota of quotas) {
+    if (!Number.isInteger(quota.postsPerWeek) || quota.postsPerWeek < 0) {
+      return {
+        valid: false,
+        error: {
+          code: "MIX_INVALID_VALUE",
+          message: "Posts per week must be a whole number of zero or more.",
+        },
+      };
+    }
+    if (!isImplementedFallbackPolicy(quota.fallbackPolicy)) {
+      return {
+        valid: false,
+        error: {
+          code: "MIX_UNSUPPORTED_FALLBACK",
+          message: `Fallback policy "${quota.fallbackPolicy}" is not implemented yet. Only "skip" is supported.`,
+        },
+      };
+    }
+  }
+
+  const total = contentMixTotal(quotas);
+  if (total > MAX_POSTS_PER_CHANNEL_PER_WEEK) {
+    return {
+      valid: false,
+      error: {
+        code: "MIX_EXCEEDS_MAX",
+        message: `Content mix totals ${total} posts but a channel can generate at most ${MAX_POSTS_PER_CHANNEL_PER_WEEK} per week.`,
+      },
+    };
+  }
+
+  if (input.channelTargets.length === 0) return { valid: true };
+
+  const targets = [...new Set(input.channelTargets.map((c) => c.postsPerWeek))];
+  if (targets.length > 1) {
+    const detail = input.channelTargets.map((c) => `${c.channel}=${c.postsPerWeek}`).join(", ");
+    return {
+      valid: false,
+      error: {
+        code: "MIX_CHANNEL_TARGETS_DIFFER",
+        message: `A content mix is one recipe shared by every enabled channel, so all enabled channels must have the same posts-per-week. Got: ${detail}.`,
+      },
+    };
+  }
+
+  const target = targets[0];
+  if (total !== target) {
+    return {
+      valid: false,
+      error: {
+        code: "MIX_TOTAL_MISMATCH",
+        message: `Content mix totals ${total} posts but the weekly target is ${target}.`,
+      },
+    };
+  }
+
+  return { valid: true };
+}
+
+/**
+ * The weekly target a validated mix implies, or null when it is unconfigured.
+ * Once a mix exists it IS the budget — see nextDueQuota.
+ */
+export function contentMixTarget(input: ResolveContentMixInput): number | null {
+  const quotas = resolveContentMix(input);
+  return quotas === null ? null : contentMixTotal(quotas);
+}
+
+export interface NextDueQuotaInput {
+  quotas: readonly MixQuota[];
+  /** Posts already generated this week for this channel, keyed by source id (null = company content). */
+  generatedBySource: ReadonlyMap<string | null, number>;
+  /** Sources that ran out of eligible articles during this run. */
+  exhausted: ReadonlySet<string | null>;
+}
+
+/**
+ * Answers "which source is due next" — the scheduler's only source decision.
+ *
+ * Picks the quota with the largest *fraction* of its own quota still outstanding,
+ * not the largest absolute deficit. Ranking by absolute deficit would drain the
+ * biggest source first (3/1/1 → A,A,A,B,C, i.e. one feed all of Mon–Wed);
+ * ranking by fraction spreads the sources across the week (3/1/1 → A,B,C,A,A)
+ * while producing exactly the same totals. Slot times come from the post's index
+ * within the channel (see slotFor), so this ordering is what the reader actually
+ * sees day to day.
+ *
+ * Ties break on the quota's position in the list, so the order is stable and a
+ * run is reproducible — important because a 5-post week always spans several
+ * cron runs (3 LLM calls per run) and must resume coherently.
+ *
+ * Returns null when every quota is either filled or exhausted. Exhausted quotas
+ * are skipped, never redistributed: their deficit stays unfilled by design.
+ */
+export function nextDueQuota(input: NextDueQuotaInput): MixQuota | null {
+  let best: MixQuota | null = null;
+  let bestShare = 0;
+
+  for (const quota of input.quotas) {
+    if (input.exhausted.has(quota.sourceId)) continue;
+    if (quota.postsPerWeek <= 0) continue;
+    const remaining = quota.postsPerWeek - (input.generatedBySource.get(quota.sourceId) ?? 0);
+    if (remaining <= 0) continue;
+    const share = remaining / quota.postsPerWeek;
+    // Strictly greater keeps the first quota in list order on a tie.
+    if (share > bestShare) {
+      best = quota;
+      bestShare = share;
+    }
+  }
+
+  return best;
+}
+
+/**
+ * The mix as it WOULD be after applying a submitted set of quotas.
+ *
+ * A request only carries the sources the client knew about, so anything it omits
+ * must keep its stored quota rather than being cleared — otherwise a client with
+ * a stale source list would silently wipe a quota it never displayed. Validation
+ * then runs against this projection, so what is checked is exactly what is saved.
+ */
+export function projectMixSources(
+  existing: readonly MixSourceInput[],
+  submitted: ReadonlyMap<string, number | null>
+): MixSourceInput[] {
+  return existing.map((source) =>
+    submitted.has(source.id)
+      ? { ...source, postsPerWeek: submitted.get(source.id) ?? null }
+      : source
+  );
+}
+
+/**
+ * The first submitted id that is not one of this company's sources, or null.
+ * Unknown ids are rejected rather than ignored: silently dropping one would save
+ * a distribution the user did not ask for.
+ */
+export function findUnknownSourceId(
+  existing: readonly MixSourceInput[],
+  submittedIds: readonly string[]
+): string | null {
+  const known = new Set(existing.map((s) => s.id));
+  return submittedIds.find((id) => !known.has(id)) ?? null;
+}
+
+/** Remaining posts per quota, for the UI and for run summaries. */
+export function remainingByQuota(
+  input: NextDueQuotaInput
+): Array<{ sourceId: string | null; remaining: number }> {
+  return input.quotas.map((q) => ({
+    sourceId: q.sourceId,
+    remaining: Math.max(0, q.postsPerWeek - (input.generatedBySource.get(q.sourceId) ?? 0)),
+  }));
+}

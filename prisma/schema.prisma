@@ -114,6 +114,12 @@ model Company {
   website              String?
   automationMode       AutomationMode @default(semi_automated) @map("automation_mode")
   defaultLang          String         @default("en") @map("default_language")
+  // Content mix (v2-8) — weekly quota for posts written from the company's own
+  // mission/brand knowledge, with no RSS article behind them. NULL means "no
+  // quota configured"; together with a NULL on every ContentSource.postsPerWeek
+  // it means this company has no content mix and keeps the pre-v2-8 pooling
+  // behaviour. NULL and 0 are NOT the same: 0 means "no mission posts".
+  companyContentPostsPerWeek Int?     @map("company_content_posts_per_week")
   createdBy            String         @map("created_by")
   lastCronProcessedAt  DateTime?      @map("last_cron_processed_at")
   createdAt            DateTime       @default(now()) @map("created_at")
@@ -239,10 +245,19 @@ model ContentSource {
   config        Json
   enabled       Boolean           @default(true)
   lastFetchedAt DateTime?         @map("last_fetched_at")
+  // Content mix (v2-8) — how many of each channel's weekly posts must come from
+  // this source. NULL = no quota assigned; see Company.companyContentPostsPerWeek.
+  postsPerWeek   Int?             @map("posts_per_week")
+  // What to do when this source runs out of eligible articles mid-week. The
+  // column carries the full v2-8 vocabulary (skip | use_another_source |
+  // use_company_profile | allow_reuse) so later phases need no migration, but
+  // only "skip" is implemented and validation rejects the others today.
+  fallbackPolicy String           @default("skip") @map("fallback_policy")
   createdAt     DateTime          @default(now()) @map("created_at")
 
   company   Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
   feedItems FeedItem[]
+  posts     Post[]
 
   @@map("content_sources")
 }
@@ -336,6 +351,12 @@ model Post {
   // The single source article this post was generated from (V2 one-post-per-article).
   // @unique gives a DB-level guarantee that a feed item is never reused across posts.
   primaryFeedItemId String?      @unique @map("primary_feed_item_id")
+  // The content-mix quota this post was drawn against (v2-8). NULL = company
+  // content (mission/brand post, no RSS). This cannot be derived from
+  // primaryFeedItemId: evergreen (prompt/calendar) posts and mission posts BOTH
+  // leave that null, so without this column the scheduler could not tell which
+  // quota a generated post consumed.
+  contentSourceId  String?       @map("content_source_id")
   channel          SocialChannel
   content          String
   language         String        @default("en")
@@ -370,6 +391,10 @@ model Post {
   company         Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
   schedule        WeeklySchedule? @relation(fields: [scheduleId], references: [id])
   primaryFeedItem FeedItem?      @relation(fields: [primaryFeedItemId], references: [id])
+  // SetNull, not Cascade: deleting a source must never delete posts already
+  // written from it. The post then reads as company content for quota counting,
+  // which only affects the current week — a deleted source has no quota anyway.
+  contentSource   ContentSource? @relation(fields: [contentSourceId], references: [id], onDelete: SetNull)
   mediaAsset  MediaAsset?     @relation(fields: [mediaAssetId], references: [id])
   generatedBy User?           @relation("PostGenerator", fields: [generatedById], references: [id])
   approvedBy  User?           @relation("PostApprover", fields: [approvedById], references: [id])
@@ -380,6 +405,9 @@ model Post {
   @@index([companyId, status])
   @@index([scheduledFor])
   @@index([retryCount, status])
+  // Backs the scheduler's per-run "what has this week generated so far, and from
+  // which source" count. Every cron run does this before generating.
+  @@index([scheduleId, channel, contentSourceId])
   @@map("posts")
 }
 

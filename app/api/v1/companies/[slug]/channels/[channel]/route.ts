@@ -58,6 +58,14 @@ export async function PUT(request: Request, context: Context) {
           },
           { status: 403 }
         );
+      default:
+        // v2-8 — the edit is valid in itself but would contradict the saved
+        // content mix (e.g. a weekly budget the quotas no longer add up to).
+        // The specific code lets the UI say which rule broke.
+        return Response.json(
+          { error: { code: result.code, message: result.message ?? "Invalid content mix." } },
+          { status: 422 }
+        );
     }
   }
 

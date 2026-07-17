@@ -19,6 +19,7 @@ import {
   type ChannelConfigItem,
 } from "@/lib/services/company/list-channel-configs.service";
 import { listContentSources } from "@/lib/services/company/list-content-sources.service";
+import { getContentMix } from "@/lib/services/company/get-content-mix.service";
 import { hasEnabledFeedItems } from "@/lib/services/company/list-feed-items.service";
 import { listPosts } from "@/lib/services/company/list-posts.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
@@ -29,6 +30,7 @@ import { BufferConnectionCard } from "@/components/company/buffer-connection-car
 import { SetupChecklist } from "@/components/company/setup-checklist";
 import { ChannelConfigSection } from "@/components/company/channel-config-section";
 import { ContentSourcesSection } from "@/components/company/content-sources-section";
+import { ContentMixSection } from "@/components/company/content-mix-section";
 import { GeneratedPostsSection } from "@/components/company/generated-posts-section";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
@@ -77,6 +79,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   let brandGuidelines: Awaited<ReturnType<typeof getBrandGuidelines>> | null = null;
   let channelConfigs: Awaited<ReturnType<typeof listChannelConfigs>> | null = null;
   let contentSources: Awaited<ReturnType<typeof listContentSources>> | null = null;
+  let contentMix: Awaited<ReturnType<typeof getContentMix>> | null = null;
   let membersResult: Awaited<ReturnType<typeof listMembers>> | null = null;
 
   if (activeTab === "overview") {
@@ -98,7 +101,10 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   }
 
   if (activeTab === "sources") {
-    contentSources = await listContentSources(slug, session.user.id, session.user.isGlobalAdmin);
+    [contentSources, contentMix] = await Promise.all([
+      listContentSources(slug, session.user.id, session.user.isGlobalAdmin),
+      getContentMix(slug, session.user.id, session.user.isGlobalAdmin),
+    ]);
   }
 
   if (activeTab === "team") {
@@ -119,6 +125,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
 
   const initialPosts = postsData?.success ? postsData.posts : [];
   const sources = contentSources?.success ? contentSources.sources : [];
+  const mix = contentMix?.success ? contentMix.mix : null;
   const members = membersResult?.success
     ? membersResult.members.map((m) => ({ ...m, joinedAt: m.joinedAt.toISOString() }))
     : [];
@@ -164,7 +171,15 @@ export default async function CompanyPage({ params, searchParams }: Props) {
 
           {/* ── Sources ────────────────────────────────────────────────── */}
           {activeTab === "sources" && (
-            <ContentSourcesSection slug={slug} initialSources={sources} canManage={canManage} />
+            <div className="space-y-8">
+              <ContentSourcesSection slug={slug} initialSources={sources} canManage={canManage} />
+              {/* The mix divides the weekly budget across the sources above, so
+                  it reads directly beneath them. Hidden until a source exists —
+                  there is nothing to distribute otherwise. */}
+              {mix && sources.length > 0 && (
+                <ContentMixSection slug={slug} initialMix={mix} canManage={canManage} />
+              )}
+            </div>
           )}
 
           {/* ── Team ───────────────────────────────────────────────────── */}

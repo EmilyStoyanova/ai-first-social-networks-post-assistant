@@ -14,6 +14,7 @@ export const AUDIT_ACTIONS = {
   POST_PUBLISHED: "POST_PUBLISHED",
   POST_PUBLISH_FAILED: "POST_PUBLISH_FAILED",
   MEDIA_ATTACHED: "MEDIA_ATTACHED",
+  CONTENT_MIX_UPDATED: "CONTENT_MIX_UPDATED",
 } as const;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
