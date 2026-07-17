@@ -14,6 +14,7 @@ export interface ChannelConfigItem {
   enabled: boolean;
   imageRequired: boolean;
   includeSourceLink: boolean;
+  autoGenerateImage: boolean;
   postingLanguage: string;
   postsPerDay: number;
   postsPerWeek: number;
@@ -30,6 +31,7 @@ const SELECT = {
   enabled: true,
   imageRequired: true,
   includeSourceLink: true,
+  autoGenerateImage: true,
   postingLanguage: true,
   postsPerDay: true,
   postsPerWeek: true,
@@ -75,6 +77,7 @@ export async function listChannelConfigs(
     enabled: row.enabled,
     imageRequired: row.imageRequired ?? false,
     includeSourceLink: row.includeSourceLink,
+    autoGenerateImage: row.autoGenerateImage,
     postingLanguage: row.postingLanguage,
     postsPerDay: row.postsPerDay,
     postsPerWeek: row.postsPerWeek,

@@ -373,6 +373,9 @@
     "includeSourceLink": "Source link",
     "includeSourceLinkLabel": "Include source link by default",
     "includeSourceLinkHelp": "When a post is generated from an RSS article, the article URL is appended to the end of the post.",
+    "autoGenerateImage": "Automatic image",
+    "autoGenerateImageLabel": "Generate an image automatically",
+    "autoGenerateImageHelp": "Every new post on this channel gets an AI image right away, with no need to click Generate image. If it fails, the post is still created and you can add an image manually.",
     "saveError": "Failed to save.",
     "companyDefaultHelp": "This channel uses the automation mode configured for the company.",
     "effectiveMode": "Current effective mode: {mode}"

@@ -140,6 +140,7 @@ class Harness {
         automationModeOverride: null,
         maxTextLength: null,
         includeSourceLink: false,
+        autoGenerateImage: false,
       },
       feedItems,
       hasArticleSources: feedItems.length > 0,

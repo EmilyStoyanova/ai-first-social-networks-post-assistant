@@ -29,6 +29,7 @@ function makeCtx(feedItems: FeedItemContext[]): GenerationContext {
       automationModeOverride: null,
       maxTextLength: null,
       includeSourceLink: true,
+      autoGenerateImage: false,
     },
     feedItems,
     hasArticleSources: feedItems.length > 0,

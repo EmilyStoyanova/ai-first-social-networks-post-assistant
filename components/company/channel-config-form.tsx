@@ -15,6 +15,7 @@ export interface ChannelFormPayload {
   language: "en" | "bg";
   imageRequired: boolean;
   includeSourceLink: boolean;
+  autoGenerateImage: boolean;
   automationModeOverride: "semi_automated" | "fully_automated" | null;
   postingWindows: PostingWindow[];
 }
@@ -68,6 +69,7 @@ export function ChannelConfigForm({
   );
   const [imageRequired, setImageRequired] = useState(initialConfig.imageRequired);
   const [includeSourceLink, setIncludeSourceLink] = useState(initialConfig.includeSourceLink);
+  const [autoGenerateImage, setAutoGenerateImage] = useState(initialConfig.autoGenerateImage);
   const [automationOverride, setAutomationOverride] = useState<string>(
     initialConfig.automationModeOverride ?? ""
   );
@@ -82,6 +84,7 @@ export function ChannelConfigForm({
       language,
       imageRequired,
       includeSourceLink,
+      autoGenerateImage,
       automationModeOverride:
         automationOverride === "semi_automated" || automationOverride === "fully_automated"
           ? automationOverride
@@ -197,6 +200,20 @@ export function ChannelConfigForm({
           <span className="text-fg-muted text-sm font-medium">{t("includeSourceLinkLabel")}</span>
         </label>
         <p className="text-fg-faint mt-1 ml-7 text-xs">{t("includeSourceLinkHelp")}</p>
+      </div>
+
+      {/* Generate an image automatically with every new post */}
+      <div>
+        <label className="flex cursor-pointer items-center gap-3">
+          <input
+            type="checkbox"
+            checked={autoGenerateImage}
+            onChange={(e) => setAutoGenerateImage(e.target.checked)}
+            className="border-border-strong text-status-success-dot focus:ring-accent h-4 w-4 rounded"
+          />
+          <span className="text-fg-muted text-sm font-medium">{t("autoGenerateImageLabel")}</span>
+        </label>
+        <p className="text-fg-faint mt-1 ml-7 text-xs">{t("autoGenerateImageHelp")}</p>
       </div>
 
       {/* Posting windows */}

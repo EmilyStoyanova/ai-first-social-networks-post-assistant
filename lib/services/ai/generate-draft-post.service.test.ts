@@ -6,6 +6,7 @@ import { generatePostFromContext } from "./generate-draft-post.service";
 import type { GenerateDraftPostDb, GenerateDraftPostDeps } from "./generate-draft-post.service";
 import type { EmbedPostInput } from "./embed-post.service";
 import type { SemanticCalibrationInput } from "./semantic-calibration.service";
+import type { AutoGenerateImageInput } from "./auto-generate-post-image.service";
 import type { SemanticGate } from "@/lib/ai/generate-with-retry";
 import type { GenerationContext } from "@/lib/ai/types";
 
@@ -35,6 +36,7 @@ function makeContext(overrides: Partial<GenerationContext> = {}): GenerationCont
       automationModeOverride: null,
       maxTextLength: null,
       includeSourceLink: false,
+      autoGenerateImage: false,
     },
     feedItems: [],
     hasArticleSources: false,
@@ -56,10 +58,12 @@ function makeDeps(
   created: () => Prisma.PostUncheckedCreateInput | null;
   embedded: () => EmbedPostInput | null;
   calibrated: () => SemanticCalibrationInput | null;
+  autoImaged: () => AutoGenerateImageInput | null;
 } {
   let createdData: Prisma.PostUncheckedCreateInput | null = null;
   let embeddedInput: EmbedPostInput | null = null;
   let calibrationInput: SemanticCalibrationInput | null = null;
+  let autoImageInput: AutoGenerateImageInput | null = null;
 
   const db: GenerateDraftPostDb = {
     post: {
@@ -97,6 +101,11 @@ function makeDeps(
       recordCalibration: async (input) => {
         calibrationInput = input;
       },
+      // Captured so no test reaches the real image pipeline.
+      autoImage: async (input) => {
+        autoImageInput = input;
+        return { status: "skipped", reason: "disabled" };
+      },
       // Default: accept (no semantic history) so these Phase 1.1/1.2 tests are
       // unaffected by the Phase 1.4 gate. Overridable for gate-specific tests.
       semanticGate,
@@ -107,6 +116,7 @@ function makeDeps(
     created: () => createdData,
     embedded: () => embeddedInput,
     calibrated: () => calibrationInput,
+    autoImaged: () => autoImageInput,
   };
 }
 
@@ -957,6 +967,84 @@ describe("generatePostFromContext — unavailable providers do not switch silent
     assert.equal(result.success, false);
     if (!result.success) assert.equal(result.code, "PROVIDER_CONFIG_MISSING");
     assert.equal(created(), null, "an unavailable preferred provider is never swapped");
+  });
+});
+
+describe("generatePostFromContext — automatic image generation", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  it("passes the channel setting through as enabled when the channel opts in", async () => {
+    const { deps, autoImaged } = makeDeps();
+    const ctx = makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", { generatedById: "u-1" }, deps);
+
+    assert.ok(result.success);
+    assert.equal(autoImaged()?.enabled, true);
+    assert.equal(autoImaged()?.companyId, "co-1");
+    assert.equal(autoImaged()?.generatedById, "u-1");
+  });
+
+  it("passes enabled: false when the channel has not opted in", async () => {
+    const { deps, autoImaged } = makeDeps();
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(autoImaged()?.enabled, false);
+  });
+
+  it("leaves generatedById undefined for a cron generation", async () => {
+    const { deps, autoImaged } = makeDeps();
+    const ctx = makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+    });
+
+    await generatePostFromContext(ctx, "co-1", { scheduleId: "sched-1" }, deps);
+
+    assert.equal(autoImaged()?.enabled, true);
+    assert.equal(autoImaged()?.generatedById, undefined);
+  });
+
+  it("targets the post that was just created", async () => {
+    const { deps, autoImaged, created } = makeDeps();
+    const ctx = makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.ok(created());
+    assert.equal(autoImaged()?.postId, result.post.id);
+  });
+
+  it("still returns a successful post when image generation throws", async () => {
+    const { deps } = makeDeps();
+    // Harsher than production: autoGeneratePostImage swallows its own errors, so
+    // this proves generation survives even if that contract is ever broken.
+    deps.autoImage = async () => {
+      throw new Error("image provider exploded");
+    };
+    const ctx = makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success, "a failed image must never fail the post");
   });
 });
 

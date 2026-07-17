@@ -111,6 +111,7 @@ export function ChannelConfigCard({
           language: data.language,
           imageRequired: data.imageRequired,
           includeSourceLink: data.includeSourceLink,
+          autoGenerateImage: data.autoGenerateImage,
           automationModeOverride: data.automationModeOverride,
           postingWindows: data.postingWindows,
         }),
@@ -194,6 +195,12 @@ export function ChannelConfigCard({
               <dt className="text-fg-muted">{t("includeSourceLink")}</dt>
               <dd className="text-fg font-medium">
                 {config.includeSourceLink ? t("yes") : t("no")}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between">
+              <dt className="text-fg-muted">{t("autoGenerateImage")}</dt>
+              <dd className="text-fg font-medium">
+                {config.autoGenerateImage ? t("yes") : t("no")}
               </dd>
             </div>
             <div className="flex items-start justify-between">

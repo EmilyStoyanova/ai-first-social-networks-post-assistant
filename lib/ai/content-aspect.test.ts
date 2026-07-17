@@ -82,6 +82,7 @@ const CTX: GenerationContext = {
     automationModeOverride: null,
     maxTextLength: null,
     includeSourceLink: false,
+    autoGenerateImage: false,
   },
   feedItems: FEED_ITEMS,
   hasArticleSources: true,

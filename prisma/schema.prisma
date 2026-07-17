@@ -193,6 +193,12 @@ model ChannelConfig {
   postingWindows         Json?           @map("posting_windows")
   automationModeOverride AutomationMode? @map("automation_mode_override")
   includeSourceLink      Boolean         @default(false) @map("include_source_link")
+  // When true, a post generated for this channel gets an AI image immediately,
+  // with no "Generate image" click. Opt-in (default false) so existing channels
+  // keep the manual-only behaviour and never start spending image credits from
+  // a migration alone. Independent of `imageRequired`, which only validates that
+  // an image is present and never produces one.
+  autoGenerateImage      Boolean         @default(false) @map("auto_generate_image")
   updatedAt              DateTime        @updatedAt @map("updated_at")
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)

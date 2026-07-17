@@ -40,6 +40,8 @@ export interface ChannelContext {
   maxTextLength: number | null;
   /** Channel default for appending the source article URL (v2-1). */
   includeSourceLink: boolean;
+  /** Generate an AI image for the post as soon as it is created, with no user click. */
+  autoGenerateImage: boolean;
 }
 
 export interface FeedItemContext {

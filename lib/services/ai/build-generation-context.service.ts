@@ -163,6 +163,7 @@ async function loadContext(
         automationModeOverride: true,
         maxTextLength: true,
         includeSourceLink: true,
+        autoGenerateImage: true,
       },
     }),
     // A company-content slot draws from no source at all — skip the query.
@@ -255,6 +256,9 @@ async function loadContext(
       automationModeOverride: channelConfigData?.automationModeOverride ?? null,
       maxTextLength: channelConfigData?.maxTextLength ?? null,
       includeSourceLink: channelConfigData?.includeSourceLink ?? false,
+      // Unlike `imageRequired`, this has no per-channel default: a company that
+      // never configured this channel has not opted in, so no auto generation.
+      autoGenerateImage: channelConfigData?.autoGenerateImage ?? false,
     },
     // Resolving translation HERE — the single place feed rows become generation
     // input — means every downstream consumer (prompt builder, aspect mining,

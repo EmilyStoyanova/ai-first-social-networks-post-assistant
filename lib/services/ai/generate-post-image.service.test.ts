@@ -7,13 +7,18 @@ import { IMAGE_STYLE_INSTRUCTIONS } from "@/lib/ai/image/image-style";
 
 type CreateArgs = Parameters<GeneratePostImageDb["mediaAsset"]["create"]>[0];
 
+/** The manual actor used by the pre-existing style tests. */
+const USER_ACTOR = { kind: "user", userId: "u-1", isGlobalAdmin: false } as const;
+
 function makeDeps(): {
   deps: GeneratePostImageDeps;
   created: () => CreateArgs["data"] | null;
   generatedPrompt: () => string | null;
+  membershipChecked: () => boolean;
 } {
   let createdData: CreateArgs["data"] | null = null;
   let prompt: string | null = null;
+  let checkedMembership = false;
 
   const provider: IImageProvider = {
     async generate(p) {
@@ -38,7 +43,10 @@ function makeDeps(): {
       update: async () => ({}),
     },
     companyMember: {
-      findFirst: async () => ({ role: "owner" }),
+      findFirst: async () => {
+        checkedMembership = true;
+        return { role: "owner" };
+      },
     },
     mediaAsset: {
       create: async (args) => {
@@ -57,27 +65,51 @@ function makeDeps(): {
     deps: { db, getProvider: () => provider },
     created: () => createdData,
     generatedPrompt: () => prompt,
+    membershipChecked: () => checkedMembership,
   };
 }
 
 describe("generatePostImageCore — image style persistence", () => {
   it("saves the selected style on the MediaAsset", async () => {
     const { deps, created } = makeDeps();
-    const result = await generatePostImageCore("post-1", "u-1", false, "realistic", deps);
+    const result = await generatePostImageCore("post-1", USER_ACTOR, "realistic", deps);
     assert.ok(result.success);
     assert.equal(created()?.imageStyle, "realistic");
   });
 
   it("stores null when no style is selected", async () => {
     const { deps, created } = makeDeps();
-    const result = await generatePostImageCore("post-1", "u-1", false, undefined, deps);
+    const result = await generatePostImageCore("post-1", USER_ACTOR, undefined, deps);
     assert.ok(result.success);
     assert.equal(created()?.imageStyle, null);
   });
 
   it("threads the style into the generated prompt", async () => {
     const { deps, generatedPrompt } = makeDeps();
-    await generatePostImageCore("post-1", "u-1", false, "animated", deps);
+    await generatePostImageCore("post-1", USER_ACTOR, "animated", deps);
     assert.ok(generatedPrompt()?.includes(IMAGE_STYLE_INSTRUCTIONS.animated));
+  });
+});
+
+describe("generatePostImageCore — actor", () => {
+  it("re-checks membership for a non-admin user", async () => {
+    const { deps, membershipChecked } = makeDeps();
+    await generatePostImageCore("post-1", USER_ACTOR, undefined, deps);
+    assert.equal(membershipChecked(), true);
+  });
+
+  it("skips the membership check for a system actor and attributes the asset to it", async () => {
+    const { deps, membershipChecked, created } = makeDeps();
+    const result = await generatePostImageCore(
+      "post-1",
+      { kind: "system", attributeToUserId: "creator-9" },
+      undefined,
+      deps
+    );
+
+    assert.ok(result.success);
+    // A cron run has no user whose membership could be checked.
+    assert.equal(membershipChecked(), false);
+    assert.equal(created()?.uploadedBy, "creator-9");
   });
 });

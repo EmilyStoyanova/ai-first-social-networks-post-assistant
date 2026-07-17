@@ -29,6 +29,7 @@ export const upsertChannelConfigSchema = z.object({
   language: z.enum(["en", "bg"]),
   imageRequired: z.boolean(),
   includeSourceLink: z.boolean().optional().default(false),
+  autoGenerateImage: z.boolean().optional().default(false),
   automationModeOverride: z.enum(["semi_automated", "fully_automated"]).nullable().optional(),
   postingWindows: z.array(postingWindowSchema).optional(),
 });

@@ -24,6 +24,8 @@ function makeCtx(overrides: {
       automationModeOverride: null,
       maxTextLength: null,
       includeSourceLink: false,
+      // Not read by the prompt builder — image generation happens after the post.
+      autoGenerateImage: false,
     },
     feedItems: [],
     hasArticleSources: false,

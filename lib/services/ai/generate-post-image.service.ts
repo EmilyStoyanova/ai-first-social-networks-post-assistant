@@ -13,6 +13,28 @@ export interface MediaDTO {
   height: number;
 }
 
+/**
+ * Who is asking for the image.
+ *
+ * `user` is the manual path: a real person clicked "Generate image", so their
+ * membership is re-checked here.
+ *
+ * `system` is automatic generation. There is deliberately no `isGlobalAdmin`
+ * escape hatch: authorization for that path is the channel's
+ * `autoGenerateImage` setting plus the fact that the post was just created by
+ * an already-authorized actor, so re-checking membership would be redundant —
+ * and impossible for a cron run, which has no user at all. The id is used ONLY
+ * to satisfy `MediaAsset.uploadedBy` (a required FK), never as a grant.
+ */
+export type ImageGenerationActor =
+  | { kind: "user"; userId: string; isGlobalAdmin: boolean }
+  | { kind: "system"; attributeToUserId: string };
+
+/** The user id recorded as `MediaAsset.uploadedBy` for this actor. */
+function actorUserId(actor: ImageGenerationActor): string {
+  return actor.kind === "user" ? actor.userId : actor.attributeToUserId;
+}
+
 export type GeneratePostImageResult =
   | { success: true; media: MediaDTO }
   | {
@@ -74,8 +96,7 @@ export interface GeneratePostImageDeps {
 
 export async function generatePostImageCore(
   postId: string,
-  userId: string,
-  isGlobalAdmin: boolean,
+  actor: ImageGenerationActor,
   imageStyle: ImageStyle | undefined,
   deps: GeneratePostImageDeps
 ): Promise<GeneratePostImageResult> {
@@ -97,9 +118,9 @@ export async function generatePostImageCore(
 
   if (!post) return { success: false, code: "NOT_FOUND" };
 
-  if (!isGlobalAdmin) {
+  if (actor.kind === "user" && !actor.isGlobalAdmin) {
     const membership = await db.companyMember.findFirst({
-      where: { companyId: post.companyId, userId },
+      where: { companyId: post.companyId, userId: actor.userId },
       select: { role: true },
     });
     if (!membership) return { success: false, code: "NOT_FOUND" };
@@ -154,7 +175,7 @@ export async function generatePostImageCore(
       generatedBy: "ai",
       aiPrompt: prompt,
       imageStyle: imageStyle ?? null,
-      uploadedBy: userId,
+      uploadedBy: actorUserId(actor),
     },
     select: { id: true, url: true, width: true, height: true },
   });
@@ -177,16 +198,26 @@ export async function generatePostImageCore(
 
 // ─── Public API (uses real Prisma + configured provider) ──────────────────────
 
+/** Runs the pipeline for any actor. The single production entry point. */
+export async function generatePostImageForActor(
+  postId: string,
+  actor: ImageGenerationActor,
+  imageStyle?: ImageStyle
+): Promise<GeneratePostImageResult> {
+  return generatePostImageCore(postId, actor, imageStyle, {
+    db: prisma,
+    getProvider: getImageProvider,
+  });
+}
+
+/** The manual path: a user clicked "Generate image". Signature unchanged. */
 export async function generatePostImage(
   postId: string,
   userId: string,
   isGlobalAdmin: boolean,
   imageStyle?: ImageStyle
 ): Promise<GeneratePostImageResult> {
-  return generatePostImageCore(postId, userId, isGlobalAdmin, imageStyle, {
-    db: prisma,
-    getProvider: getImageProvider,
-  });
+  return generatePostImageForActor(postId, { kind: "user", userId, isGlobalAdmin }, imageStyle);
 }
 
 function logImageProviderFailure(err: ImageProviderError): void {

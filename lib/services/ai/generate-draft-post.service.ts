@@ -28,6 +28,11 @@ import {
 } from "@/lib/ai/feed-item-reservation";
 import { isConsumableItem } from "@/lib/ai/source-types";
 import { embedPost, type EmbedPostInput, type EmbedPostOutcome } from "./embed-post.service";
+import {
+  autoGeneratePostImage,
+  type AutoGenerateImageInput,
+  type AutoGenerateImageOutcome,
+} from "./auto-generate-post-image.service";
 import { createSemanticGate } from "./semantic-gate.service";
 import {
   recordSemanticCalibration,
@@ -185,6 +190,8 @@ export interface GenerateDraftPostDeps {
   auditLog?: typeof createAuditLog;
   /** Best-effort semantic embedding (Phase 1.2). Injected in tests. */
   embed?: (input: EmbedPostInput) => Promise<EmbedPostOutcome>;
+  /** Best-effort automatic image generation. Injected in tests. */
+  autoImage?: (input: AutoGenerateImageInput) => Promise<AutoGenerateImageOutcome>;
   /** Best-effort semantic-gate calibration write (Phase 1.5). Injected in tests. */
   recordCalibration?: (input: SemanticCalibrationInput) => Promise<void>;
   /**
@@ -298,6 +305,7 @@ export async function generatePostFromContext(
   const db: GenerateDraftPostDb = deps.db ?? prisma;
   const auditLog = deps.auditLog ?? createAuditLog;
   const embed = deps.embed ?? embedPost;
+  const autoImage = deps.autoImage ?? autoGeneratePostImage;
   const recordCalibration = deps.recordCalibration ?? recordSemanticCalibration;
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
@@ -806,6 +814,30 @@ export async function generatePostFromContext(
   } catch (err) {
     console.error(
       `[embed] Post ${post.id} embedding failed (non-fatal):`,
+      err instanceof Error ? err.message : err
+    );
+  }
+
+  // ── Automatic image generation ────────────────────────────────────────────
+  // Runs for every caller of this function — the generate route AND cron — so
+  // the channel setting is honoured on both paths from one place. Best-effort
+  // by the same rule as embedding: autoGeneratePostImage never throws, and a
+  // failed image leaves a perfectly good post that can still be illustrated
+  // manually. Placed after embedding so a slow image provider cannot delay the
+  // cheap DB work above.
+  // The try/catch is belt-and-braces: autoGeneratePostImage already swallows its
+  // own failures, but the post is already committed at this point, so nothing
+  // thrown here may be allowed to turn a saved post into a failed generation.
+  try {
+    await autoImage({
+      postId: post.id,
+      companyId,
+      enabled: context.channel.autoGenerateImage,
+      generatedById,
+    });
+  } catch (err) {
+    console.error(
+      `[auto-image] Post ${post.id} auto image generation failed (non-fatal):`,
       err instanceof Error ? err.message : err
     );
   }
