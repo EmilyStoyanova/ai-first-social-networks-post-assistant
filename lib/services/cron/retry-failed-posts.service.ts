@@ -49,6 +49,7 @@ export async function retryFailedPosts(companyId: string): Promise<RetryFailedSu
       hashtags: true,
       retryCount: true,
       updatedAt: true,
+      mediaAssetId: true,
       mediaAsset: { select: { url: true } },
     },
   });

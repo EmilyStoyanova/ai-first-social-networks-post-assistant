@@ -7,6 +7,7 @@ import {
   BufferInvalidProfileError,
 } from "@/lib/buffer/buffer-errors";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
+import { checkBlockingConstraints, type PolicyViolation } from "@/lib/ai/channel-policy";
 
 const MOCK_BUFFER_POST_ID = "mock-buffer-post";
 
@@ -38,6 +39,13 @@ export type PublishPostResult =
         | "INVALID_PROFILE"
         | "BUFFER_API_ERROR";
       message?: string;
+    }
+  /** A verified platform constraint (v2-3) rejected the post before Buffer was called. */
+  | {
+      success: false;
+      code: "POLICY_VIOLATION";
+      message: string;
+      violations: PolicyViolation[];
     };
 
 export async function publishPost(
@@ -52,8 +60,10 @@ export async function publishPost(
     select: {
       companyId: true,
       status: true,
+      channel: true,
       content: true,
       hashtags: true,
+      mediaAssetId: true,
       mediaAsset: { select: { url: true } },
     },
   });
@@ -75,6 +85,22 @@ export async function publishPost(
       success: false,
       code: "INVALID_STATUS",
       message: `Only draft or approved posts can be published. Current status: ${post.status.toUpperCase()}.`,
+    };
+  }
+
+  // Verified platform constraints (v2-3) — checked before any publish path,
+  // including mock mode, because a violation is a property of the post itself
+  // rather than of Buffer.
+  const violations = checkBlockingConstraints({
+    channel: post.channel,
+    mediaAssetId: post.mediaAssetId,
+  });
+  if (violations.length > 0) {
+    return {
+      success: false,
+      code: "POLICY_VIOLATION",
+      message: violations.map((v) => v.description).join(" "),
+      violations,
     };
   }
 

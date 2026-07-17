@@ -1,5 +1,15 @@
 # v2-7 — Engagement Analytics
 
+> **BLOCKED — do not start. The v2-6 spike (2026-07-17) returned ABANDON.**
+> Buffer's API has the per-post metrics this phase needs, but reading them requires the
+> `insights:read` scope, which Buffer does not grant to OAuth App Clients — the
+> authorization server rejects the request with `invalid_scope` before user consent, so
+> re-authorization cannot fix it. No table, migration, cron step, or UI should be built.
+> The provisional schema below is also known to be wrong in specifics (no common
+> denominator across channels; `Int?` columns conflate "unsupported" with zero).
+> See [v2-6 findings](./v2-6-buffer-analytics-spike.md#findings), including the one
+> unverified question (Personal API Key) that could reopen this phase.
+
 > **Prerequisite:** v2-6 spike must be completed and findings documented before any schema or code work begins.
 
 ## Goal

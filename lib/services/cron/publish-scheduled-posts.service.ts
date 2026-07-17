@@ -45,6 +45,7 @@ export async function publishScheduledPosts(companyId: string): Promise<PublishS
       channel: true,
       content: true,
       hashtags: true,
+      mediaAssetId: true,
       mediaAsset: { select: { url: true } },
     },
   });

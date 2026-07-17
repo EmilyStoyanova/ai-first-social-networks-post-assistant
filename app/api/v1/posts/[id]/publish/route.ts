@@ -111,6 +111,19 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           },
           { status: 502 }
         );
+      case "POLICY_VIOLATION":
+        // 422: the post is well-formed but violates a verified platform
+        // constraint. Buffer was never called.
+        return NextResponse.json(
+          {
+            error: {
+              code: "POLICY_VIOLATION",
+              message: result.message,
+              violations: result.violations,
+            },
+          },
+          { status: 422 }
+        );
     }
   }
 

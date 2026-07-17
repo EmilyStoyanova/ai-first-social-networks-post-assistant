@@ -8,6 +8,7 @@ import {
   CTA_INSTRUCTIONS,
 } from "./post-pattern";
 import type { ContentAspect } from "./content-aspect";
+import { getChannelPolicy } from "./channel-policy";
 
 export interface BuiltPrompts {
   systemPrompt: string;
@@ -36,35 +37,21 @@ const CHANNEL_LABELS: Record<string, string> = {
   tiktok: "TikTok",
 };
 
-const CHANNEL_RULES: Record<string, string> = {
-  facebook: [
-    "Write a conversational, engaging post.",
-    "Ideal length: 40–250 characters. Maximum: 500 characters.",
-    "Emojis are welcome but use sparingly.",
-    "Include 1–3 relevant hashtags at the end if they add value.",
-  ].join("\n"),
-  linkedin: [
-    "Write a professional, thought-leadership post.",
-    "Ideal length: 150–300 characters. Maximum: 700 characters.",
-    "Avoid excessive emojis. Use at most one per post.",
-    "End with 3–5 relevant professional hashtags.",
-    "Use a hook in the first line to stop the scroll.",
-  ].join("\n"),
-  instagram: [
-    "Write a visual-first, energetic caption.",
-    "First 125 characters must be compelling (shown before 'more').",
-    "Use emojis freely to enhance the message.",
-    "Include 5–10 relevant hashtags at the end on a new line.",
-    "Maximum caption length: 400 characters (excluding hashtags).",
-  ].join("\n"),
-  tiktok: [
-    "Write an extremely short, punchy caption.",
-    "Maximum 150 characters including hashtags.",
-    "Use trendy, conversational language.",
-    "Include a clear call to action.",
-    "End with 2–3 trending hashtags.",
-  ].join("\n"),
-};
+/**
+ * Channel guidance comes from CHANNEL_POLICIES (v2-3) — this file holds no
+ * platform claims of its own. Only WARNING/SUGGESTION hints reach the prompt;
+ * BLOCKING constraints are enforced at publish time and contribute no text
+ * (a constraint blocks, it does not advise).
+ *
+ * Fragments are joined in hint order with no added decoration, which keeps the
+ * rendered block byte-identical to the pre-v2-3 CHANNEL_RULES text — the
+ * refactor changes where the guidance lives, never what the model receives.
+ */
+function buildChannelHintBlock(channel: string): string {
+  const policy = getChannelPolicy(channel);
+  if (!policy) return "";
+  return policy.hints.map((h) => h.promptFragment).join("\n");
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -115,7 +102,7 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
   const channelSection = section(
     `Channel: ${channelLabel}`,
     lines(
-      CHANNEL_RULES[channel.channel] ?? "",
+      buildChannelHintBlock(channel.channel),
       `Image required: ${channel.imageRequired ? "Yes — describe visual context." : "No."}`,
       `Post language: ${lang}`
     )

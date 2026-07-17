@@ -59,6 +59,7 @@
     "POST_TOO_LONG_WITH_URL": "The post plus the source link exceeds the channel's character limit. Generate again or shorten the post.",
     "CANNOT_GENERATE_UNIQUE_POST": "Couldn't create a post different enough from recent ones. Try again later or add fresh source material.",
     "NO_FEED_ITEMS_AVAILABLE": "No RSS articles are available to write about right now. Click \"Ingest\" on a content source to fetch the latest articles, or add a new RSS source.",
+    "POLICY_VIOLATION": "This post doesn't meet the requirements for this channel.",
     "UNKNOWN": "Something went wrong. Please try again.",
     "MIX_TOTAL_MISMATCH": "The content mix doesn't add up to the weekly target. Adjust the numbers until nothing is left over.",
     "MIX_SOURCE_UNASSIGNED": "Every enabled source needs a posts-per-week value once a content mix is set up.",

@@ -1,17 +1,21 @@
+import type { SocialChannel } from "@prisma/client";
 import { prisma } from "@/lib/db/client";
 import type { BufferClient } from "@/lib/buffer/buffer-client";
 import { BufferTokenExpiredError } from "@/lib/buffer/buffer-errors";
 import { buildPostText } from "@/lib/services/buffer/publish-post.service";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
+import { checkBlockingConstraints } from "@/lib/ai/channel-policy";
 
 export const MOCK_BUFFER_POST_ID = "mock-buffer-post";
 
 /** The post fields the cron sender needs. */
 export interface SendablePost {
   id: string;
-  channel: string;
+  channel: SocialChannel;
   content: string;
   hashtags: string[];
+  /** Required by the v2-3 policy check; `mediaAsset` alone cannot express it. */
+  mediaAssetId: string | null;
   mediaAsset: { url: string } | null;
 }
 
@@ -24,6 +28,20 @@ export async function sendPostToBuffer(
   post: SendablePost,
   profileId: string
 ): Promise<SendOutcome> {
+  // Verified platform constraints (v2-3). This is the single choke point every
+  // cron publish path funnels through, so the check belongs here rather than in
+  // each caller. A violation is permanent — retrying cannot fix a missing
+  // image — but it still flows through the normal failure path so the owner
+  // sees the reason in lastError.
+  const violations = checkBlockingConstraints(post);
+  if (violations.length > 0) {
+    return {
+      ok: false,
+      message: violations.map((v) => v.description).join(" "),
+      tokenExpired: false,
+    };
+  }
+
   try {
     const result = await client.publishUpdate(
       [profileId],

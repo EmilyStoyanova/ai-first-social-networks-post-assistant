@@ -51,6 +51,8 @@ export const API_ERROR_CODES = [
   "POST_TOO_LONG_WITH_URL",
   "CANNOT_GENERATE_UNIQUE_POST",
   "NO_FEED_ITEMS_AVAILABLE",
+  // Channel policy (v2-3) — a verified platform constraint blocked the publish.
+  "POLICY_VIOLATION",
   // Content mix (v2-8) — a rejected generation distribution.
   "MIX_TOTAL_MISMATCH",
   "MIX_SOURCE_UNASSIGNED",
@@ -70,7 +72,14 @@ const KNOWN_CODES: ReadonlySet<string> = new Set(API_ERROR_CODES);
  * validation error Buffer returned) that a generic translation would hide.
  * For these, the detail is appended after the translated label.
  */
-const DETAIL_CODES: ReadonlySet<string> = new Set(["BUFFER_API_ERROR", "UPLOAD_FAILED"]);
+const DETAIL_CODES: ReadonlySet<string> = new Set([
+  "BUFFER_API_ERROR",
+  "UPLOAD_FAILED",
+  // The violated constraint's description names WHICH requirement failed —
+  // a generic label would hide it. Before v2-3 this same guidance reached the
+  // user as BUFFER_API_ERROR detail, so keeping it preserves the behaviour.
+  "POLICY_VIOLATION",
+]);
 
 export interface ApiErrorShape {
   code?: string;

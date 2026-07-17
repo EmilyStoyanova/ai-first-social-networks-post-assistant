@@ -137,6 +137,13 @@ export class BufferClient {
       if (!profile) throw new BufferInvalidProfileError();
       const service = profile.service.toLowerCase();
 
+      // Deliberately kept after v2-3 moved policy into lib/ai/channel-policy.ts,
+      // which is the source of truth for OUR channels. This guard is not a
+      // duplicate of it: it keys off the service Buffer reports for the target
+      // profile, so it still fires when Post.channel disagrees with the profile
+      // actually being published to — a real, observed data condition that a
+      // Post.channel-based check cannot see. Last line of defence at the API
+      // boundary; the policy layer rejects long before this.
       if (service === "instagram" && !options?.mediaUrl) {
         throw new BufferApiError(
           "Instagram posts require at least one image or video. Attach an image to the post before publishing."
