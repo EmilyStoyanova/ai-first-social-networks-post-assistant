@@ -51,6 +51,8 @@ export const API_ERROR_CODES = [
   "POST_TOO_LONG_WITH_URL",
   "CANNOT_GENERATE_UNIQUE_POST",
   "NO_FEED_ITEMS_AVAILABLE",
+  // Manual generation — the RSS source picked in the form ran dry (or went away).
+  "SELECTED_SOURCE_UNAVAILABLE",
   // Channel policy (v2-3) — a verified platform constraint blocked the publish.
   "POLICY_VIOLATION",
   // Content mix (v2-8) — a rejected generation distribution.

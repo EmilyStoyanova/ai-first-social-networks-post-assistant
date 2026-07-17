@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { GeneratePostForm } from "./generate-post-form";
 import { GeneratedPostCard } from "./generated-post-card";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
+import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
 
 interface Props {
   slug: string;
@@ -16,6 +17,7 @@ interface Props {
   canApprove: boolean;
   bufferConnected: boolean;
   hasRssFeedItems: boolean;
+  contentSources: GenerationSourceOption[];
 }
 
 export function GeneratedPostsSection({
@@ -26,6 +28,7 @@ export function GeneratedPostsSection({
   canApprove,
   bufferConnected,
   hasRssFeedItems,
+  contentSources,
 }: Props) {
   const t = useTranslations("posts");
   const [posts, setPosts] = useState<PostItem[]>(initialPosts);
@@ -44,6 +47,7 @@ export function GeneratedPostsSection({
         slug={slug}
         onGenerated={handleGenerated}
         hasRssFeedItems={hasRssFeedItems}
+        contentSources={contentSources}
       />
 
       {posts.length === 0 ? (

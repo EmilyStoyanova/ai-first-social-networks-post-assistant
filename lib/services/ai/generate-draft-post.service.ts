@@ -28,6 +28,11 @@ import {
   type FeedItemReservationDb,
 } from "@/lib/ai/feed-item-reservation";
 import { isConsumableItem } from "@/lib/ai/source-types";
+import {
+  isSelectedSourceUsable,
+  toSourceScope,
+  type ManualContentSourceSelection,
+} from "@/lib/ai/manual-content-source";
 import { embedPost, type EmbedPostInput, type EmbedPostOutcome } from "./embed-post.service";
 import {
   autoGeneratePostImage,
@@ -135,7 +140,12 @@ export type GenerateDraftPostResult =
         | "CANNOT_GENERATE_UNIQUE_POST"
         // Source articles existed but every one was already claimed (concurrent
         // run / exhausted pool). Not an error — callers skip cleanly.
-        | "NO_FEED_ITEMS_AVAILABLE";
+        | "NO_FEED_ITEMS_AVAILABLE"
+        // Manual generation only: the RSS source picked in the form can no longer
+        // back a post (its articles ran out, or it was disabled/deleted between
+        // the form rendering and the click). Never a silent fallback — an
+        // explicit pick that cannot be honoured is reported, not substituted.
+        | "SELECTED_SOURCE_UNAVAILABLE";
       message?: string;
       /** Set only for CANNOT_GENERATE_UNIQUE_POST — which guard forced the abort. */
       reason?: UniquenessFailureReason;
@@ -270,12 +280,40 @@ export async function generateDraftPost(
   options: Pick<
     GeneratePostOptions,
     "contentLanguage" | "includeSourceLinkOverride" | "llmConfigId"
-  > = {}
+  > & {
+    /**
+     * The form's "Content source" choice. Omitted = company rules, i.e. the
+     * pooled behaviour this flow has always had.
+     */
+    contentSource?: ManualContentSourceSelection;
+  } = {}
 ): Promise<GenerateDraftPostResult> {
-  // Build context (also validates auth/access)
-  const contextResult = await buildGenerationContext(slug, rawChannel, userId, isGlobalAdmin);
+  const selection: ManualContentSourceSelection = options.contentSource ?? {
+    kind: "company_rules",
+  };
+
+  // Build context (also validates auth/access). The scope narrows the article
+  // window to the chosen source — or to nothing at all for a mission post.
+  const contextResult = await buildGenerationContext(
+    slug,
+    rawChannel,
+    userId,
+    isGlobalAdmin,
+    toSourceScope(selection)
+  );
   if (!contextResult.success) {
     return { success: false, code: contextResult.code };
+  }
+
+  // Fail before spending an LLM call when the picked source has nothing left to
+  // write about. The window is already scoped to it, so this also catches a
+  // source disabled or deleted since the form loaded.
+  if (!isSelectedSourceUsable(selection, contextResult.context.feedItems)) {
+    return {
+      success: false,
+      code: "SELECTED_SOURCE_UNAVAILABLE",
+      message: "No new articles are available for the selected source.",
+    };
   }
 
   // Load the user's saved preference only when the form did not send an explicit
@@ -289,13 +327,27 @@ export async function generateDraftPost(
     preferredLlmConfigId = user?.preferredLlmConfigId ?? null;
   }
 
-  return generatePostFromContext(contextResult.context, contextResult.companyId, {
+  const result = await generatePostFromContext(contextResult.context, contextResult.companyId, {
     contentLanguage: options.contentLanguage,
     includeSourceLinkOverride: options.includeSourceLinkOverride,
     llmConfigId: options.llmConfigId,
     preferredLlmConfigId,
     generatedById: userId,
   });
+
+  // The guard above found articles, but a concurrent run claimed the last of them
+  // before this one could. For a specific-source pick that is the same story the
+  // guard tells — the source has nothing left — so it gets the same answer rather
+  // than the pooled "no articles anywhere" message, which would be untrue.
+  if (!result.success && result.code === "NO_FEED_ITEMS_AVAILABLE" && selection.kind === "source") {
+    return {
+      success: false,
+      code: "SELECTED_SOURCE_UNAVAILABLE",
+      message: "No new articles are available for the selected source.",
+    };
+  }
+
+  return result;
 }
 
 /**

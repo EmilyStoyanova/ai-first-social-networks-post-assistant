@@ -21,6 +21,7 @@ import {
 import { listContentSources } from "@/lib/services/company/list-content-sources.service";
 import { getContentMix } from "@/lib/services/company/get-content-mix.service";
 import { hasEnabledFeedItems } from "@/lib/services/company/list-feed-items.service";
+import { listGenerationSources } from "@/lib/services/company/list-generation-sources.service";
 import { listPosts } from "@/lib/services/company/list-posts.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
@@ -91,12 +92,14 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   }
 
   let rssFeedItemsAvailable = false;
+  let generationSources: Awaited<ReturnType<typeof listGenerationSources>> | null = null;
 
   if (activeTab === "posts") {
-    [postsData, bufferConnection, rssFeedItemsAvailable] = await Promise.all([
+    [postsData, bufferConnection, rssFeedItemsAvailable, generationSources] = await Promise.all([
       listPosts(slug, session.user.id, session.user.isGlobalAdmin),
       getBufferConnection(company.id),
       hasEnabledFeedItems(company.id),
+      listGenerationSources(slug, session.user.id, session.user.isGlobalAdmin),
     ]);
   }
 
@@ -124,6 +127,8 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   const bufferParam = typeof sp.buffer === "string" ? sp.buffer : null;
 
   const initialPosts = postsData?.success ? postsData.posts : [];
+  // An empty list simply leaves the dropdown with its two non-RSS choices.
+  const generationSourceOptions = generationSources?.success ? generationSources.sources : [];
   const sources = contentSources?.success ? contentSources.sources : [];
   const mix = contentMix?.success ? contentMix.mix : null;
   const members = membersResult?.success
@@ -166,6 +171,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
               canApprove={canManage}
               bufferConnected={bufferConnection.connected}
               hasRssFeedItems={rssFeedItemsAvailable}
+              contentSources={generationSourceOptions}
             />
           )}
 

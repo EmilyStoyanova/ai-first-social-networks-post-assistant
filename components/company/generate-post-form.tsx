@@ -7,6 +7,8 @@ import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { GenerationWarnings } from "@/lib/services/ai/generate-draft-post.service";
+import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
+import { COMPANY_MISSION_VALUE, COMPANY_RULES_VALUE } from "@/lib/ai/manual-content-source";
 
 const CHANNELS = [
   { value: "FACEBOOK", label: "Facebook" },
@@ -51,15 +53,20 @@ interface Props {
   onGenerated: (post: PostItem) => void;
   /** Whether generation is based on an RSS feed item — gates the source-link override. */
   hasRssFeedItems: boolean;
+  /** Enabled RSS sources offered in the "Content source" dropdown. */
+  contentSources: GenerationSourceOption[];
 }
 
-export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems }: Props) {
+export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSources }: Props) {
   const t = useTranslations("posts.generate");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
   const [channel, setChannel] = useState<Channel>("FACEBOOK");
   const [contentLanguage, setContentLanguage] = useState<"en" | "bg">("en");
   const [sourceLinkOverride, setSourceLinkOverride] = useState<SourceLinkOverride>("inherit");
+  // The "Content source" choice: a sentinel, or an RSS source id. Defaults to
+  // company rules, which is the behaviour the form has always had.
+  const [contentSource, setContentSource] = useState<string>(COMPANY_RULES_VALUE);
   // Empty string = "System default (auto)"; otherwise an LlmConfig id (v2-5).
   const [llmConfigId, setLlmConfigId] = useState("");
   const [availableLlms, setAvailableLlms] = useState<AvailableLlm[]>([]);
@@ -119,6 +126,7 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems }: Props) 
           ...(hasRssFeedItems && sourceLinkOverride !== "inherit"
             ? { includeSourceLink: sourceLinkOverride === "include" }
             : {}),
+          contentSource,
           // Omit entirely when "System default" is selected so the server keeps
           // its env-var default provider path unchanged (v2-5).
           ...(llmConfigId ? { llmConfigId } : {}),
@@ -204,6 +212,34 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems }: Props) 
           >
             <option value="en">{t("contentLanguageEN")}</option>
             <option value="bg">{t("contentLanguageBG")}</option>
+          </select>
+        </div>
+
+        <div className="min-w-[200px]">
+          <label
+            htmlFor="generate-content-source"
+            className="text-fg-muted mb-1.5 block text-sm font-medium"
+          >
+            {t("contentSource")}
+          </label>
+          <select
+            id="generate-content-source"
+            value={contentSource}
+            onChange={(e) => setContentSource(e.target.value)}
+            disabled={generating}
+            className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <option value={COMPANY_RULES_VALUE}>{t("contentSourceCompanyRules")}</option>
+            {contentSources.map((source) => (
+              // A dry source stays listed but unpickable, so it reads as "this
+              // feed has nothing new" rather than "this feed is gone".
+              <option key={source.id} value={source.id} disabled={!source.hasAvailableArticles}>
+                {source.hasAvailableArticles
+                  ? source.name
+                  : `${source.name} ${t("contentSourceNoArticles")}`}
+              </option>
+            ))}
+            <option value={COMPANY_MISSION_VALUE}>{t("contentSourceCompanyMission")}</option>
           </select>
         </div>
 

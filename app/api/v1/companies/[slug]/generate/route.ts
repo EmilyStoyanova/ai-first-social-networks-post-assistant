@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/lib/auth";
 import { generateDraftPost } from "@/lib/services/ai/generate-draft-post.service";
+import { parseManualContentSource } from "@/lib/ai/manual-content-source";
 
 const bodySchema = z.object({
   channel: z
@@ -13,6 +14,9 @@ const bodySchema = z.object({
   includeSourceLink: z.boolean().optional(),
   // Explicit per-generation LLM config (v2-5); omitted = env-var default provider.
   llmConfigId: z.string().min(1).optional(),
+  // "Content source" choice: a sentinel (company rules / company mission) or an
+  // RSS source id. Omitted = company rules, the long-standing pooled behaviour.
+  contentSource: z.string().min(1).optional(),
 });
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -59,6 +63,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
       contentLanguage: parsed.data.contentLanguage,
       includeSourceLinkOverride: parsed.data.includeSourceLink,
       llmConfigId: parsed.data.llmConfigId,
+      contentSource: parseManualContentSource(parsed.data.contentSource),
     }
   );
 
@@ -168,6 +173,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
               code: "NO_FEED_ITEMS_AVAILABLE",
               message:
                 "No unused source articles are available to generate from right now. Ingest a content source to fetch new articles, or add an RSS source.",
+            },
+          },
+          { status: 409 }
+        );
+      case "SELECTED_SOURCE_UNAVAILABLE":
+        // 409, matching its sibling NO_FEED_ITEMS_AVAILABLE: the request is
+        // well-formed, the world changed under it.
+        return NextResponse.json(
+          {
+            error: {
+              code: "SELECTED_SOURCE_UNAVAILABLE",
+              message: result.message ?? "No new articles are available for the selected source.",
             },
           },
           { status: 409 }

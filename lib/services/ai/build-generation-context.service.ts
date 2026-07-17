@@ -34,10 +34,11 @@ export type BuildGenerationContextResult =
  * Which sources a generation may draw from (v2-8).
  *
  *   • pooled          — every enabled source, newest articles first. The
- *                       pre-v2-8 behaviour, and still what the user-facing
- *                       "Generate post" flow and unconfigured companies use.
+ *                       pre-v2-8 behaviour, and still what unconfigured
+ *                       companies and the manual flow's default choice use.
  *   • source          — exactly one content source, because a content-mix quota
- *                       for it is due. Nothing else may leak into the context.
+ *                       for it is due, or a manual generation picked it.
+ *                       Nothing else may leak into the context.
  *   • company_content — no sources at all, forcing the mission/brand post path.
  *
  * A discriminated union rather than a nullable sourceId: "no source" and "any
@@ -76,7 +77,9 @@ export async function buildGenerationContext(
   slug: string,
   rawChannel: string,
   userId: string,
-  isGlobalAdmin: boolean
+  isGlobalAdmin: boolean,
+  /** Manual "Content source" choice; defaults to the pooled (pre-existing) behaviour. */
+  scope: SourceScope = POOLED
 ): Promise<BuildGenerationContextResult> {
   // Normalise channel
   const channel = rawChannel.toLowerCase() as ValidChannel;
@@ -122,7 +125,7 @@ export async function buildGenerationContext(
     companyRow = membership.company;
   }
 
-  return loadContext(companyId, channel, companyRow);
+  return loadContext(companyId, channel, companyRow, scope);
 }
 
 async function loadContext(
