@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   POST_STATUS_FILTERS,
   DEFAULT_POST_STATUS_FILTER,
+  PENDING_APPROVAL_FILTER,
+  pendingApprovalsHref,
   resolvePostStatusFilter,
   matchesPostStatusFilter,
   filterPostsByStatus,
@@ -95,8 +97,23 @@ describe("status mapping", () => {
     assert.equal(matchesPostStatusFilter("PUBLISHED", "approved"), false);
   });
 
-  it("drafts include posts waiting for approval", () => {
-    assert.deepEqual(visibleUnder("draft"), ["DRAFT", "PENDING_APPROVAL"]);
+  it("drafts exclude posts already submitted for approval", () => {
+    // Phase 4c: the two used to share a bucket. Now "Drafts" means work nobody
+    // has been asked to look at, and a submitted post has left it.
+    assert.deepEqual(visibleUnder("draft"), ["DRAFT"]);
+  });
+
+  it("pending approval is exactly the approval queue", () => {
+    // This filter replaced the Approvals tab, so it must show what that queue
+    // showed — listPosts(…, "pending_approval") — and nothing else.
+    assert.deepEqual(visibleUnder("pending_approval"), ["PENDING_APPROVAL"]);
+  });
+
+  it("pending approval excludes posts already approved or rejected", () => {
+    // The queue is what still needs a decision; a decided post has left it.
+    assert.equal(matchesPostStatusFilter("APPROVED", "pending_approval"), false);
+    assert.equal(matchesPostStatusFilter("REJECTED", "pending_approval"), false);
+    assert.equal(matchesPostStatusFilter("DRAFT", "pending_approval"), false);
   });
 
   it("drafts exclude rejected posts", () => {
@@ -127,7 +144,7 @@ describe("status mapping", () => {
     // listPosts uppercases, but a caller holding a Prisma row should not get a
     // silently empty grid.
     assert.equal(matchesPostStatusFilter("published", "published"), true);
-    assert.equal(matchesPostStatusFilter("pending_approval", "draft"), true);
+    assert.equal(matchesPostStatusFilter("pending_approval", "pending_approval"), true);
   });
 
   it("does not mutate the list it is given", () => {
@@ -172,6 +189,30 @@ describe("buildPostStatusQuery — URL update", () => {
       const params = new URLSearchParams(buildPostStatusQuery("", filter));
       assert.equal(resolvePostStatusFilter(params.get("status") ?? undefined), filter);
     }
+  });
+});
+
+describe("pendingApprovalsHref — the retired Approvals tab's replacement", () => {
+  it("points at the Posts page filtered to the approval queue", () => {
+    assert.equal(pendingApprovalsHref("acme"), "/companies/acme/posts?status=pending_approval");
+  });
+
+  it("produces a link that resolves back to the pending filter", () => {
+    // Guards the redirect contract end to end: if the param name or the filter
+    // key ever drifts apart, the old /approval URLs land on an unfiltered grid.
+    const query = pendingApprovalsHref("acme").split("?")[1];
+    const raw = new URLSearchParams(query).get("status") ?? undefined;
+    assert.equal(resolvePostStatusFilter(raw), PENDING_APPROVAL_FILTER);
+  });
+
+  it("counts the same posts the approval queue used to list", () => {
+    // The Posts tab badge and the filter chip both read this predicate, which
+    // is what keeps the two counts from disagreeing (§9.4).
+    const pending = filterPostsByStatus(POSTS, PENDING_APPROVAL_FILTER);
+    assert.deepEqual(
+      pending.map((p) => p.status),
+      ["PENDING_APPROVAL"]
+    );
   });
 });
 

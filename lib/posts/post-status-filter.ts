@@ -3,18 +3,31 @@ import type { PostStatusValue } from "./post-actions";
 /**
  * The status filter above the posts grid.
  *
- * Four choices deliberately cover seven statuses, because the grid's question is
- * "where is this post in the workflow?" rather than "what is its exact enum
- * value?" — the StatusBadge on each card already answers the second.
+ * Five choices cover seven statuses, because the grid's question is "where is
+ * this post in the workflow?" rather than "what is its exact enum value?" — the
+ * StatusBadge on each card already answers the second.
  *
  * The groupings are not invented here; each mirrors a boundary the services
  * already draw (see the notes on FILTER_STATUSES below). Nothing in this file
  * introduces a new status constant: PostStatusValue in ./post-actions remains
  * the single client-side list, and it is the compile-time check that every
  * status below is real.
+ *
+ * Phase 4c split the former "draft" bucket into DRAFT and PENDING_APPROVAL.
+ * Until then the two shared a filter on the argument that the difference was
+ * "only who is waiting", which the badge already showed. That argument held
+ * while a dedicated Approvals tab existed to answer "what is waiting on me?".
+ * The tab is gone and this filter inherited its job, so the distinction is now
+ * the whole point: `pending_approval` is the approval queue.
  */
 
-export const POST_STATUS_FILTERS = ["all", "published", "approved", "draft"] as const;
+export const POST_STATUS_FILTERS = [
+  "all",
+  "draft",
+  "pending_approval",
+  "approved",
+  "published",
+] as const;
 
 export type PostStatusFilter = (typeof POST_STATUS_FILTERS)[number];
 
@@ -23,6 +36,18 @@ export const DEFAULT_POST_STATUS_FILTER: PostStatusFilter = "all";
 
 /** The query-string key this filter reads and writes. */
 export const POST_STATUS_PARAM = "status";
+
+/**
+ * The approval queue's filter, named so the Posts tab badge, the dashboard's
+ * pending-work rows, and the retired /approval(s) redirects all point at the
+ * same view without spelling the string out four times.
+ */
+export const PENDING_APPROVAL_FILTER: PostStatusFilter = "pending_approval";
+
+/** The path a caller should link to for a company's approval queue. */
+export function pendingApprovalsHref(slug: string): string {
+  return `/companies/${slug}/posts?${POST_STATUS_PARAM}=${PENDING_APPROVAL_FILTER}`;
+}
 
 const FILTER_STATUSES: Record<Exclude<PostStatusFilter, "all">, readonly PostStatusValue[]> = {
   /**
@@ -40,17 +65,20 @@ const FILTER_STATUSES: Record<Exclude<PostStatusFilter, "all">, readonly PostSta
   approved: ["APPROVED"],
 
   /**
-   * PENDING_APPROVAL counts as a draft. The status model treats the two as one
-   * bucket wherever the distinction would matter: resolvePostActions reports
-   * `approvalPending` for both (approval is still outstanding), and
-   * post-editor.service.ts lets both be edited. The difference between them is
-   * only who is waiting, which the badge on the card shows.
+   * Work nobody has been asked to look at yet.
    *
    * REJECTED is excluded: rejection does not reset the post to draft (see
    * rejectPost), so an owner's decision would otherwise be hidden inside a
    * bucket labelled "work in progress".
    */
-  draft: ["DRAFT", "PENDING_APPROVAL"],
+  draft: ["DRAFT"],
+
+  /**
+   * The approval queue, and the only filter with a count outside this grid —
+   * the Posts tab badge reads it (§9.1). Both surfaces derive from this one
+   * predicate so a badge can never promise a post the filter then hides.
+   */
+  pending_approval: ["PENDING_APPROVAL"],
 };
 
 /**

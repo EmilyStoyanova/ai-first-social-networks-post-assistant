@@ -1,16 +1,12 @@
 import { Fragment } from "react";
 import { getTranslations } from "next-intl/server";
 import type { CompanyDetails } from "@/lib/services/company/get-company.service";
-import { CompanyWorkspaceNav } from "./company-workspace-nav";
-
-interface Stats {
-  pendingApprovals?: number;
-}
+import { countPendingApprovals } from "@/lib/services/company/count-pending-approvals.service";
+import { CompanyWorkspaceNav, type WorkspaceTab } from "./company-workspace-nav";
 
 interface Props {
   company: CompanyDetails;
   activeTab: string;
-  stats?: Stats;
 }
 
 function cleanUrl(url: string): string {
@@ -21,18 +17,31 @@ function cleanUrl(url: string): string {
   }
 }
 
-export async function CompanyWorkspaceHeader({ company, activeTab, stats }: Props) {
+export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
   const t = await getTranslations("workspace");
   const { slug } = company;
 
-  // Seven tabs (§9.1). Team is not one of them — it is rare-touch configuration
-  // and reached through the Settings sub-navigation, which Phase 4b built to
-  // hold it. The set is closed: a new tab needs a frequency argument, not just
-  // a new feature.
-  const tabs = [
+  // Sourced here rather than passed in, so the badge is identical on every
+  // workspace page without eight callers each deciding whether to compute it.
+  // One source, one number — which is what §9.4 asks for now that the filter
+  // chip on Posts shows the same count.
+  const pendingApprovals = await countPendingApprovals(company.id);
+
+  // Six tabs (§9.1). Team is not one of them — it is rare-touch configuration
+  // reached through the Settings sub-navigation, which Phase 4b built to hold
+  // it. Approvals is no longer one either: Phase 4c folded the queue into a
+  // Posts filter, so approving happens where the posts already are. Its count
+  // badge came with it, because the pull signal was the tab's real job and
+  // Principle 4 still needs somewhere to put it.
+  const tabs: WorkspaceTab[] = [
     { key: "overview", label: t("tabs.overview"), href: `/companies/${slug}` },
-    { key: "posts", label: t("tabs.posts"), href: `/companies/${slug}/posts` },
-    { key: "approvals", label: t("tabs.approval"), href: `/companies/${slug}/approvals` },
+    {
+      key: "posts",
+      label: t("tabs.posts"),
+      href: `/companies/${slug}/posts`,
+      count: pendingApprovals,
+      countLabel: t("pendingApprovalsLabel", { count: pendingApprovals }),
+    },
     { key: "media", label: t("tabs.media"), href: `/companies/${slug}/media` },
     { key: "sources", label: t("tabs.sources"), href: `/companies/${slug}/sources` },
     { key: "settings", label: t("tabs.settings"), href: `/companies/${slug}/settings` },
@@ -65,12 +74,9 @@ export async function CompanyWorkspaceHeader({ company, activeTab, stats }: Prop
     });
   }
 
-  if (stats?.pendingApprovals != null && stats.pendingApprovals > 0) {
-    metaItems.push({
-      key: "pending",
-      node: <span>{stats.pendingApprovals} pending</span>,
-    });
-  }
+  // No "N pending" meta item — the Posts tab badge above states the same
+  // number, and two renderings of one count in one header is the disagreement
+  // §9.4 warns about waiting to happen.
 
   return (
     <div>

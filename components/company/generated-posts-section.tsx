@@ -3,12 +3,13 @@
 import { useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { FileText } from "lucide-react";
+import { CheckSquare2, FileText } from "lucide-react";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { GeneratePostForm } from "./generate-post-form";
 import { GeneratedPostCard } from "./generated-post-card";
 import { PostStatusFilterBar } from "./post-status-filter-bar";
 import {
+  PENDING_APPROVAL_FILTER,
   POST_STATUS_FILTERS,
   POST_STATUS_PARAM,
   buildPostStatusQuery,
@@ -82,6 +83,22 @@ export function GeneratedPostsSection({
   }
 
   /**
+   * A card owns its own status while an action is in flight, but the list owns
+   * the counts — so an approve/reject/submit has to land here too. Without it
+   * the card's badge would flip while the post stayed in "Pending approval"
+   * with a count that never moved, which is exactly the disagreement §9.4
+   * forbids now that the Posts tab badge reads the same numbers.
+   *
+   * `router.refresh()` re-renders the server component behind the tab badge.
+   * The local update above has already repainted the grid, so the refresh is
+   * reconciliation, not the thing the user is waiting on.
+   */
+  function handleStatusChange(id: string, newStatus: string) {
+    setPosts((prev) => prev.map((p) => (p.id === id ? { ...p, status: newStatus } : p)));
+    router.refresh();
+  }
+
+  /**
    * Filter in place. The grid re-renders from state immediately; the URL catches
    * up separately so the view stays shareable and survives a reload.
    *
@@ -134,11 +151,23 @@ export function GeneratedPostsSection({
           description={t("noPostsDesc")}
         />
       ) : emptyState === "no-matches" ? (
-        <EmptyState
-          icon={<FileText className="h-5 w-5" />}
-          title={t("filters.noMatchesTitle")}
-          description={t("filters.noMatchesDesc")}
-        />
+        /* An empty approval queue is good news, not a failed search — it is the
+           end of the review loop, and the generic "no posts with this status /
+           widen your filter" would read as an error on the one filter where
+           zero is the goal. */
+        statusFilter === PENDING_APPROVAL_FILTER ? (
+          <EmptyState
+            icon={<CheckSquare2 className="h-5 w-5" />}
+            title={t("filters.noPendingTitle")}
+            description={t("filters.noPendingDesc")}
+          />
+        ) : (
+          <EmptyState
+            icon={<FileText className="h-5 w-5" />}
+            title={t("filters.noMatchesTitle")}
+            description={t("filters.noMatchesDesc")}
+          />
+        )
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
           {visiblePosts.map((post) => (
@@ -150,6 +179,7 @@ export function GeneratedPostsSection({
               role={role}
               bufferConnected={bufferConnected}
               onDelete={handleDelete}
+              onStatusChange={handleStatusChange}
               // A post generated after page load has no metrics row yet, so it
               // falls back to the disabled/pending state rather than crashing.
               metrics={postMetrics[post.id] ?? disabledMetrics()}

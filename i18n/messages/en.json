@@ -206,13 +206,13 @@
     "tabs": {
       "overview": "Overview",
       "posts": "Posts",
-      "approval": "Approval",
       "media": "Media",
       "sources": "Sources",
       "team": "Team",
       "settings": "Brand Setup",
       "activity": "Activity"
     },
+    "pendingApprovalsLabel": "{count, plural, one {# post awaiting approval} other {# posts awaiting approval}}",
     "setupHint": "Start here — fill in your brand identity, then connect Buffer and configure your channels. The AI uses this information when generating posts."
   },
   "companyPage": {
@@ -480,11 +480,14 @@
     "filters": {
       "label": "Filter by status",
       "all": "All posts",
-      "published": "Published",
-      "approved": "Approved",
       "draft": "Drafts",
+      "pending_approval": "Pending approval",
+      "approved": "Approved",
+      "published": "Published",
       "noMatchesTitle": "No posts with this status",
-      "noMatchesDesc": "Select All posts to see the rest."
+      "noMatchesDesc": "Select All posts to see the rest.",
+      "noPendingTitle": "Nothing waiting for approval",
+      "noPendingDesc": "Posts submitted for approval show up here. Nothing needs your decision right now."
     },
     "noPostsTitle": "No AI-generated posts yet",
     "noPostsDesc": "Choose a channel above and click Generate Draft to create your first post.",
@@ -543,15 +546,6 @@
       "uniqueErrorJaccardDuplicate": "After {attempts} attempts the wording stayed too close to a recent post. Add new source material or try again later.",
       "uniqueErrorGeneric": "We couldn't create a post different enough from recent ones after {attempts} attempts. Add new source material or try again later."
     }
-  },
-  "approval": {
-    "title": "Approval Queue",
-    "description": "{count, plural, one {# post} other {# posts}} pending approval",
-    "all": "All",
-    "noPending": "No posts pending approval",
-    "noPendingDesc": "When posts are submitted for approval they will appear here.",
-    "noFilter": "No posts match the filter",
-    "noFilterDesc": "Try selecting a different channel."
   },
   "auditLog": {
     "title": "Audit Log",

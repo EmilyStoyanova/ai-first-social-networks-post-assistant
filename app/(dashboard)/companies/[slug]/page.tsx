@@ -1,14 +1,7 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
-import {
-  CheckSquare2,
-  ClipboardList,
-  Image as ImageIcon,
-  Pencil,
-  Radio,
-  Settings2,
-} from "lucide-react";
+import { ClipboardList, Image as ImageIcon, Pencil, Radio, Settings2 } from "lucide-react";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { getBrandGuidelines } from "@/lib/services/company/get-brand-guidelines.service";
@@ -110,18 +103,15 @@ async function OverviewTab({
 
   const formattedDate = formatDateLong(company.createdAt);
 
+  // The Approval card left in Phase 4c along with the tab — approving happens
+  // on Posts now, and a card pointing at a filtered view of the card beside it
+  // would be a third route to one page.
   const PRIMARY_CARDS = [
     {
       icon: Pencil,
       label: tWs("tabs.posts"),
       desc: tPage("modules.postsDesc"),
       href: `/companies/${slug}/posts`,
-    },
-    {
-      icon: CheckSquare2,
-      label: tWs("tabs.approval"),
-      desc: tPage("modules.approvalQueueDesc"),
-      href: `/companies/${slug}/approvals`,
     },
   ];
 

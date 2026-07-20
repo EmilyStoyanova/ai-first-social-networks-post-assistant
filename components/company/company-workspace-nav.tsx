@@ -4,6 +4,14 @@ export interface WorkspaceTab {
   key: string;
   label: string;
   href: string;
+  /**
+   * Optional count beside the label. Exactly one tab carries one (§9.1) —
+   * Posts, for pending approvals. One badge is a signal; five are wallpaper.
+   * Zero is not rendered: a badge saying "0" is a pull signal for nothing.
+   */
+  count?: number;
+  /** Full-sentence accessible name for the count, e.g. "4 posts awaiting approval". */
+  countLabel?: string;
 }
 
 interface Props {
@@ -33,6 +41,17 @@ export function CompanyWorkspaceNav({ tabs, activeTab }: Props) {
                 ].join(" ")}
               >
                 {tab.label}
+                {tab.count != null && tab.count > 0 && (
+                  <span
+                    className={[
+                      "ml-1.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-xs font-semibold tabular-nums",
+                      isActive ? "bg-fg text-bg" : "bg-surface-subtle text-fg-muted",
+                    ].join(" ")}
+                  >
+                    <span aria-hidden="true">{tab.count}</span>
+                    <span className="sr-only">{tab.countLabel ?? String(tab.count)}</span>
+                  </span>
+                )}
               </Link>
             </li>
           );

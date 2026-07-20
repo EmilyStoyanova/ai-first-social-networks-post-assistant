@@ -9,6 +9,7 @@ import {
   isSetupComplete,
 } from "@/lib/services/dashboard/get-setup-statuses.service";
 import { getUserLlmSettings } from "@/lib/services/user/get-user-llm-settings.service";
+import { pendingApprovalsHref } from "@/lib/posts/post-status-filter";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { LlmPreferenceCard } from "@/components/user/llm-preference-card";
 import { Button } from "@/components/ui/Button";
@@ -176,7 +177,7 @@ export default async function DashboardPage() {
                             </p>
                           </div>
                           <Link
-                            href={`/companies/${c.slug}/approvals`}
+                            href={pendingApprovalsHref(c.slug)}
                             className="text-accent hover:text-fg shrink-0 text-xs font-medium transition-colors"
                           >
                             {t("pendingWork.reviewQueue")} →
