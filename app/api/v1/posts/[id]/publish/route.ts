@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/lib/auth";
-import { publishPost } from "@/lib/services/buffer/publish-post.service";
+import { approveAndPublishPost } from "@/lib/services/buffer/publish-post.service";
 
 const bodySchema = z.object({
   profileId: z.string().min(1),
@@ -42,7 +42,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
   }
 
-  const result = await publishPost(
+  const result = await approveAndPublishPost(
     id,
     parsed.data.profileId,
     session.user.id,

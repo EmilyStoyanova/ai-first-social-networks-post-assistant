@@ -15,6 +15,7 @@ import { EditPostModal } from "./edit-post-modal";
 import { PostActivityModal } from "./post-activity-modal";
 import { ImagePickerModal, type GalleryMediaItem } from "@/components/media/ImagePickerModal";
 import { formatDateTime } from "@/lib/i18n/format-date";
+import { resolvePostActions, type PostRole } from "@/lib/posts/post-actions";
 
 type BadgeVariant =
   "owner" | "editor" | "comingSoon" | "success" | "warning" | "danger" | "neutral" | "readonly";
@@ -30,8 +31,8 @@ interface Props {
   slug: string;
   post: PostItem;
   canDelete: boolean;
-  canPublish: boolean;
-  canApprove: boolean;
+  /** Drives which workflow actions the card offers — see lib/posts/post-actions.ts. */
+  role: PostRole;
   bufferConnected: boolean;
   onDelete: (id: string) => void;
   onStatusChange?: (id: string, newStatus: string) => void;
@@ -41,8 +42,7 @@ export function GeneratedPostCard({
   slug,
   post,
   canDelete,
-  canPublish,
-  canApprove,
+  role,
   bufferConnected,
   onDelete,
   onStatusChange,
@@ -53,12 +53,8 @@ export function GeneratedPostCard({
 
   // ── Approval state ────────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
-  const [approving, setApproving] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [approvalError, setApprovalError] = useState("");
-  // Tracks if the current user manually approved in this session, so the
-  // auto-approved banner doesn't appear after a same-session approval.
-  const [approvedByUser, setApprovedByUser] = useState(false);
 
   // ── Delete state ──────────────────────────────────────────────────────────
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -103,6 +99,8 @@ export function GeneratedPostCard({
     variant: "neutral" as BadgeVariant,
   };
 
+  const actions = resolvePostActions({ role, status: localStatus, bufferConnected });
+
   const isDraft = localStatus === "DRAFT";
   const isPendingApproval = localStatus === "PENDING_APPROVAL";
   const isApproved = localStatus === "APPROVED";
@@ -146,25 +144,6 @@ export function GeneratedPostCard({
       setApprovalError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setSubmitting(false);
-    }
-  }
-
-  async function handleApprove() {
-    setApproving(true);
-    setApprovalError("");
-    try {
-      const res = await fetch(`/api/v1/posts/${post.id}/approve`, { method: "POST" });
-      if (!res.ok) {
-        const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(apiError(json.error));
-      }
-      setLocalStatus("APPROVED");
-      setApprovedByUser(true);
-      onStatusChange?.(post.id, "APPROVED");
-    } catch (err) {
-      setApprovalError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
-    } finally {
-      setApproving(false);
     }
   }
 
@@ -301,6 +280,9 @@ export function GeneratedPostCard({
       setPublishedAt(json.publishedAt);
       setPublishedPostUrl(json.publishedPostUrl ?? null);
       setPublishOpen(false);
+      // Clears the card from the approval queue — for an owner this publish was
+      // also the approval, so there is nothing left pending.
+      onStatusChange?.(post.id, "SENT_TO_BUFFER");
     } catch (err) {
       setPublishError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
@@ -415,14 +397,14 @@ export function GeneratedPostCard({
       )}
 
       {/* Auto-approved info — shown when the post was approved automatically (no human approver) */}
-      {isApproved && post.approvedById === null && !approvedByUser && (
+      {isApproved && post.approvedById === null && (
         <Alert variant="info" role="status" className="mb-3">
           {t("autoApprovedInfo")}
         </Alert>
       )}
 
       {/* Publish panel */}
-      {publishOpen && isApproved && (
+      {publishOpen && (
         <div className="rounded-control border-status-info-dot/30 bg-status-info-bg mb-3 border px-4 py-3">
           <p className="text-status-info-fg mb-2 text-xs font-semibold">
             {t("publishPanel.title")}
@@ -510,8 +492,8 @@ export function GeneratedPostCard({
           </Button>
         )}
 
-        {/* Submit for approval — draft only, any member */}
-        {isDraft && (
+        {/* Submit for approval — an editor's hand-off to an owner */}
+        {actions.submitForApproval && (
           <Button
             variant="secondary"
             size="sm"
@@ -522,26 +504,21 @@ export function GeneratedPostCard({
           </Button>
         )}
 
-        {/* Approve / Reject — pending only, owner/admin */}
-        {isPendingApproval && canApprove && (
-          <>
-            <Button variant="primary" size="sm" loading={approving} onClick={handleApprove}>
-              {approving ? t("approving") : t("approve")}
-            </Button>
-            <Button variant="danger" size="sm" loading={rejecting} onClick={handleReject}>
-              {rejecting ? t("rejecting") : t("reject")}
-            </Button>
-          </>
-        )}
-
-        {/* Publish to Buffer — approved only */}
-        {canPublish && bufferConnected && isApproved && !publishOpen && (
-          <Button variant="secondary" size="sm" onClick={handleOpenPublish}>
-            {t("publishToBuffer")}
+        {/* The owner's single primary action — approves on the way out when needed */}
+        {actions.approveAndPublish && !publishOpen && (
+          <Button variant="primary" size="sm" onClick={handleOpenPublish}>
+            {actions.approvalPending ? t("approveAndPublish") : t("publishToBuffer")}
           </Button>
         )}
-        {canPublish && !bufferConnected && isApproved && (
+        {actions.connectBufferHint && (
           <span className="text-fg-faint text-xs">{t("connectBufferToPublish")}</span>
+        )}
+
+        {/* Reject — a real editorial decision on someone else's submission */}
+        {actions.reject && (
+          <Button variant="danger" size="sm" loading={rejecting} onClick={handleReject}>
+            {rejecting ? t("rejecting") : t("reject")}
+          </Button>
         )}
 
         {/* Open post — shown when a public URL is available */}
@@ -598,7 +575,7 @@ export function GeneratedPostCard({
           postId={post.id}
           initialContent={localText}
           initialHashtags={localHashtags}
-          canRestore={canApprove}
+          canRestore={role === "owner"}
           onClose={() => setEditOpen(false)}
           onSaved={handlePostSaved}
         />

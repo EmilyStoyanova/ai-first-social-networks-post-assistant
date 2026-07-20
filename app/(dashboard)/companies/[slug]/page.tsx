@@ -72,7 +72,6 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   const tNav = await getTranslations("navigation");
   const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
   const canDelete = canManage;
-  const canPublish = canManage;
 
   // ── Per-tab data fetching ─────────────────────────────────────────────────
   let postsData: Awaited<ReturnType<typeof listPosts>> | null = null;
@@ -167,8 +166,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
               slug={slug}
               initialPosts={initialPosts}
               canDelete={canDelete}
-              canPublish={canPublish}
-              canApprove={canManage}
+              role={canManage ? "owner" : "editor"}
               bufferConnected={bufferConnection.connected}
               hasRssFeedItems={rssFeedItemsAvailable}
               contentSources={generationSourceOptions}

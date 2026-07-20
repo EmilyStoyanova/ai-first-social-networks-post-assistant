@@ -57,8 +57,7 @@ export default async function ApprovalQueuePage({ params }: Props) {
           <ApprovalQueueSection
             slug={slug}
             initialPosts={pendingPosts}
-            canApprove={canManage}
-            canPublish={canManage}
+            role={canManage ? "owner" : "editor"}
             bufferConnected={bufferConnection.connected}
           />
         </div>

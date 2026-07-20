@@ -8,13 +8,13 @@ import { GeneratePostForm } from "./generate-post-form";
 import { GeneratedPostCard } from "./generated-post-card";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
+import type { PostRole } from "@/lib/posts/post-actions";
 
 interface Props {
   slug: string;
   initialPosts: PostItem[];
   canDelete: boolean;
-  canPublish: boolean;
-  canApprove: boolean;
+  role: PostRole;
   bufferConnected: boolean;
   hasRssFeedItems: boolean;
   contentSources: GenerationSourceOption[];
@@ -24,8 +24,7 @@ export function GeneratedPostsSection({
   slug,
   initialPosts,
   canDelete,
-  canPublish,
-  canApprove,
+  role,
   bufferConnected,
   hasRssFeedItems,
   contentSources,
@@ -64,8 +63,7 @@ export function GeneratedPostsSection({
               slug={slug}
               post={post}
               canDelete={canDelete}
-              canPublish={canPublish}
-              canApprove={canApprove}
+              role={role}
               bufferConnected={bufferConnected}
               onDelete={handleDelete}
             />

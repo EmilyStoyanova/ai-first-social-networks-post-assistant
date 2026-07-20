@@ -6,24 +6,18 @@ import { CheckSquare2 } from "lucide-react";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { GeneratedPostCard } from "./generated-post-card";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
+import type { PostRole } from "@/lib/posts/post-actions";
 
 const CHANNELS = ["FACEBOOK", "LINKEDIN", "INSTAGRAM", "TIKTOK"] as const;
 
 interface Props {
   slug: string;
   initialPosts: PostItem[];
-  canApprove: boolean;
-  canPublish: boolean;
+  role: PostRole;
   bufferConnected: boolean;
 }
 
-export function ApprovalQueueSection({
-  slug,
-  initialPosts,
-  canApprove,
-  canPublish,
-  bufferConnected,
-}: Props) {
+export function ApprovalQueueSection({ slug, initialPosts, role, bufferConnected }: Props) {
   const t = useTranslations("approval");
   const [posts, setPosts] = useState<PostItem[]>(initialPosts);
   const [channelFilter, setChannelFilter] = useState<string>("ALL");
@@ -87,8 +81,7 @@ export function ApprovalQueueSection({
               slug={slug}
               post={post}
               canDelete={false}
-              canPublish={canPublish}
-              canApprove={canApprove}
+              role={role}
               bufferConnected={bufferConnected}
               onDelete={() => {}}
               onStatusChange={handleStatusChange}
