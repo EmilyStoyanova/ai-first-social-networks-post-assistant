@@ -20,7 +20,7 @@ export async function SetupChecklist({
   hasEnabledChannel,
 }: Props) {
   const t = await getTranslations("setupChecklist");
-  const base = `/companies/${slug}?tab=settings`;
+  const base = `/companies/${slug}/settings`;
 
   const allRequiredDone = bufferConnected && profilesSynced && hasEnabledChannel;
 
@@ -29,7 +29,7 @@ export async function SetupChecklist({
       <Card className="px-6 py-5">
         <p className="text-fg text-sm">{t("readyTitle")}</p>
         <div className="mt-3">
-          <Button href={`/companies/${slug}?tab=posts`} size="sm">
+          <Button href={`/companies/${slug}/posts`} size="sm">
             {t("generateFirst")}
           </Button>
         </div>

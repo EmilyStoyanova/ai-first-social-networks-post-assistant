@@ -142,15 +142,15 @@ describe("buildPostStatusQuery — URL update", () => {
     assert.equal(buildPostStatusQuery("", "published"), "status=published");
   });
 
-  it("keeps the active tab, so filtering does not navigate away", () => {
-    const query = buildPostStatusQuery("tab=posts", "approved");
+  it("leaves a parameter it does not own untouched", () => {
+    const query = buildPostStatusQuery("highlight=abc123", "approved");
     const params = new URLSearchParams(query);
-    assert.equal(params.get("tab"), "posts");
+    assert.equal(params.get("highlight"), "abc123");
     assert.equal(params.get("status"), "approved");
   });
 
   it("replaces a previous selection rather than appending one", () => {
-    const query = buildPostStatusQuery("tab=posts&status=draft", "published");
+    const query = buildPostStatusQuery("status=draft", "published");
     assert.deepEqual(new URLSearchParams(query).getAll("status"), ["published"]);
   });
 
@@ -161,15 +161,15 @@ describe("buildPostStatusQuery — URL update", () => {
   });
 
   it("preserves unrelated params it does not own", () => {
-    const query = buildPostStatusQuery("tab=posts&buffer=connected", "draft");
+    const query = buildPostStatusQuery("buffer=connected&highlight=abc123", "draft");
     const params = new URLSearchParams(query);
     assert.equal(params.get("buffer"), "connected");
-    assert.equal(params.get("tab"), "posts");
+    assert.equal(params.get("highlight"), "abc123");
   });
 
   it("round-trips through resolvePostStatusFilter", () => {
     for (const filter of POST_STATUS_FILTERS) {
-      const params = new URLSearchParams(buildPostStatusQuery("tab=posts", filter));
+      const params = new URLSearchParams(buildPostStatusQuery("", filter));
       assert.equal(resolvePostStatusFilter(params.get("status") ?? undefined), filter);
     }
   });

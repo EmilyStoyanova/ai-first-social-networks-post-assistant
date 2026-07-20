@@ -176,7 +176,7 @@ export default async function DashboardPage() {
                             </p>
                           </div>
                           <Link
-                            href={`/companies/${c.slug}/approval`}
+                            href={`/companies/${c.slug}/approvals`}
                             className="text-accent hover:text-fg shrink-0 text-xs font-medium transition-colors"
                           >
                             {t("pendingWork.reviewQueue")} →

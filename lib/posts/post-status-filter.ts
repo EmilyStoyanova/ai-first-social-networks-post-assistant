@@ -91,8 +91,12 @@ export function filterPostsByStatus<T extends { status: string }>(
 
 /**
  * The query string for a given filter, preserving everything else already in
- * the URL — `tab=posts` above all, without which switching filters would throw
- * the user back to the overview tab.
+ * the URL.
+ *
+ * Before Phase 4a the parameter that mattered was `tab=posts`, without which
+ * switching filters threw the user back to the overview. Posts is its own route
+ * now, but the preservation rule stands: the caller pairs this with the current
+ * pathname, and any other parameter on it belongs to someone else.
  */
 export function buildPostStatusQuery(
   current: URLSearchParams | string,

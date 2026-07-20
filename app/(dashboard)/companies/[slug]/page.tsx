@@ -12,41 +12,19 @@ import {
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { getBrandGuidelines } from "@/lib/services/company/get-brand-guidelines.service";
-import { listMembers } from "@/lib/services/company/list-members.service";
 import { getBufferConnection } from "@/lib/services/buffer/get-buffer-connection.service";
-import {
-  getAnalyticsKeyStatus,
-  type AnalyticsKeyStatus,
-} from "@/lib/services/analytics/manage-analytics-key.service";
-import {
-  getPostMetricsForPosts,
-  type PostMetricsView,
-} from "@/lib/services/analytics/get-post-metrics.service";
 import {
   listChannelConfigs,
   type ChannelConfigItem,
 } from "@/lib/services/company/list-channel-configs.service";
-import { listContentSources } from "@/lib/services/company/list-content-sources.service";
-import { getContentMix } from "@/lib/services/company/get-content-mix.service";
-import { hasEnabledFeedItems } from "@/lib/services/company/list-feed-items.service";
-import { listGenerationSources } from "@/lib/services/company/list-generation-sources.service";
-import { listPosts } from "@/lib/services/company/list-posts.service";
-import { resolvePostStatusFilter } from "@/lib/posts/post-status-filter";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
-import { BrandGuidelinesForm } from "@/components/company/brand-guidelines-form";
-import { CompanyMembers } from "@/components/company/company-members";
-import { BufferConnectionCard } from "@/components/company/buffer-connection-card";
-import { AnalyticsKeyCard } from "@/components/company/analytics-key-card";
 import { SetupChecklist } from "@/components/company/setup-checklist";
-import { ChannelConfigSection } from "@/components/company/channel-config-section";
-import { ContentSourcesSection } from "@/components/company/content-sources-section";
-import { ContentMixSection } from "@/components/company/content-mix-section";
-import { GeneratedPostsSection } from "@/components/company/generated-posts-section";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { Section } from "@/components/ui/Section";
 import { formatDateLong } from "@/lib/i18n/format-date";
+import { resolveLegacyTabRedirect } from "@/lib/companies/legacy-tab-redirect";
 import Link from "next/link";
 
 interface Props {
@@ -59,114 +37,28 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   return { title: `${slug} – AI-First Post Assistant` };
 }
 
-const MAIN_TABS = ["overview", "posts", "sources", "team", "settings"] as const;
-type MainTab = (typeof MAIN_TABS)[number];
-
-function resolveTab(raw: string | string[] | undefined): MainTab {
-  if (typeof raw === "string" && (MAIN_TABS as readonly string[]).includes(raw)) {
-    return raw as MainTab;
-  }
-  return "overview";
-}
-
 export default async function CompanyPage({ params, searchParams }: Props) {
   const session = await auth();
   if (!session) redirect("/login");
 
   const [{ slug }, sp] = await Promise.all([params, searchParams]);
-  const activeTab = resolveTab(sp.tab);
+
+  // Until Phase 4a the workspace tabs were `?tab=` query parameters on this
+  // page. Bookmarks and shared links still carry them, so they are translated
+  // into their route here rather than silently landing on the overview.
+  const legacyDestination = resolveLegacyTabRedirect(slug, sp);
+  if (legacyDestination) redirect(legacyDestination);
 
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
   const tNav = await getTranslations("navigation");
-  const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
-  const canDelete = canManage;
 
-  // ── Per-tab data fetching ─────────────────────────────────────────────────
-  let postsData: Awaited<ReturnType<typeof listPosts>> | null = null;
-  let bufferConnection: Awaited<ReturnType<typeof getBufferConnection>> | null = null;
-  let brandGuidelines: Awaited<ReturnType<typeof getBrandGuidelines>> | null = null;
-  let channelConfigs: Awaited<ReturnType<typeof listChannelConfigs>> | null = null;
-  let contentSources: Awaited<ReturnType<typeof listContentSources>> | null = null;
-  let contentMix: Awaited<ReturnType<typeof getContentMix>> | null = null;
-  let membersResult: Awaited<ReturnType<typeof listMembers>> | null = null;
-
-  if (activeTab === "overview") {
-    [brandGuidelines, bufferConnection, channelConfigs] = await Promise.all([
-      getBrandGuidelines(company.id),
-      getBufferConnection(company.id),
-      listChannelConfigs(slug, session.user.id, session.user.isGlobalAdmin),
-    ]);
-  }
-
-  let rssFeedItemsAvailable = false;
-  let generationSources: Awaited<ReturnType<typeof listGenerationSources>> | null = null;
-
-  // Engagement metrics for the post cards (v2-7), keyed by post id. Loaded once
-  // for the whole tab rather than per card.
-  let postMetrics: Map<string, PostMetricsView> = new Map();
-
-  if (activeTab === "posts") {
-    [postsData, bufferConnection, rssFeedItemsAvailable, generationSources] = await Promise.all([
-      listPosts(slug, session.user.id, session.user.isGlobalAdmin),
-      getBufferConnection(company.id),
-      hasEnabledFeedItems(company.id),
-      listGenerationSources(slug, session.user.id, session.user.isGlobalAdmin),
-    ]);
-
-    const analyticsStatus = await getAnalyticsKeyStatus(
-      slug,
-      session.user.id,
-      session.user.isGlobalAdmin
-    );
-    // An editor gets FORBIDDEN from the key-status service (it is owner-scoped),
-    // which must not hide metrics from them — only the ability to manage the key.
-    // Treat an unreadable status as "not configured" and let the cards say so.
-    const analyticsEnabled = analyticsStatus.success && analyticsStatus.data.configured;
-
-    postMetrics = await getPostMetricsForPosts(
-      company.id,
-      postsData?.success ? postsData.posts.map((p) => p.id) : [],
-      analyticsEnabled
-    );
-  }
-
-  if (activeTab === "sources") {
-    [contentSources, contentMix] = await Promise.all([
-      listContentSources(slug, session.user.id, session.user.isGlobalAdmin),
-      getContentMix(slug, session.user.id, session.user.isGlobalAdmin),
-    ]);
-  }
-
-  if (activeTab === "team") {
-    membersResult = await listMembers(slug, session.user.id, session.user.isGlobalAdmin);
-  }
-
-  let analyticsKeyStatus: Awaited<ReturnType<typeof getAnalyticsKeyStatus>> | null = null;
-
-  if (activeTab === "settings") {
-    const bufferParam = typeof sp.buffer === "string" ? sp.buffer : null;
-    [brandGuidelines, bufferConnection, channelConfigs, analyticsKeyStatus] = await Promise.all([
-      getBrandGuidelines(company.id),
-      getBufferConnection(company.id),
-      listChannelConfigs(slug, session.user.id, session.user.isGlobalAdmin),
-      getAnalyticsKeyStatus(slug, session.user.id, session.user.isGlobalAdmin),
-    ]);
-    void bufferParam; // captured below where needed
-  }
-
-  const bufferParam = typeof sp.buffer === "string" ? sp.buffer : null;
-
-  const initialPosts = postsData?.success ? postsData.posts : [];
-  // An empty list simply leaves the dropdown with its two non-RSS choices.
-  const generationSourceOptions = generationSources?.success ? generationSources.sources : [];
-  const sources = contentSources?.success ? contentSources.sources : [];
-  const mix = contentMix?.success ? contentMix.mix : null;
-  const members = membersResult?.success
-    ? membersResult.members.map((m) => ({ ...m, joinedAt: m.joinedAt.toISOString() }))
-    : [];
-  const configs = channelConfigs?.success ? channelConfigs.configs : [];
+  const [brandGuidelines, bufferConnection, channelConfigs] = await Promise.all([
+    getBrandGuidelines(company.id),
+    getBufferConnection(company.id),
+    listChannelConfigs(slug, session.user.id, session.user.isGlobalAdmin),
+  ]);
 
   return (
     <DashboardLayout
@@ -178,87 +70,16 @@ export default async function CompanyPage({ params, searchParams }: Props) {
       breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
       <div>
-        <CompanyWorkspaceHeader company={company} activeTab={activeTab} />
+        <CompanyWorkspaceHeader company={company} activeTab="overview" />
 
         <div className="mt-8">
-          {/* ── Overview ───────────────────────────────────────────────── */}
-          {activeTab === "overview" && (
-            <OverviewTab
-              company={company}
-              slug={slug}
-              canManage={canManage}
-              brandGuidelines={brandGuidelines}
-              bufferConnection={bufferConnection}
-              channelConfigs={channelConfigs?.success ? channelConfigs.configs : []}
-            />
-          )}
-
-          {/* ── Posts ──────────────────────────────────────────────────── */}
-          {activeTab === "posts" && bufferConnection && (
-            <GeneratedPostsSection
-              postMetrics={Object.fromEntries(postMetrics)}
-              canManageAnalyticsKey={canManage}
-              // Parsed here so the first paint already honours a shared link;
-              // an unrecognized value falls back to "all" rather than an empty grid.
-              initialStatusFilter={resolvePostStatusFilter(sp.status)}
-              slug={slug}
-              initialPosts={initialPosts}
-              canDelete={canDelete}
-              role={canManage ? "owner" : "editor"}
-              bufferConnected={bufferConnection.connected}
-              hasRssFeedItems={rssFeedItemsAvailable}
-              contentSources={generationSourceOptions}
-            />
-          )}
-
-          {/* ── Sources ────────────────────────────────────────────────── */}
-          {activeTab === "sources" && (
-            <div className="space-y-8">
-              <ContentSourcesSection slug={slug} initialSources={sources} canManage={canManage} />
-              {/* The mix divides the weekly budget across the sources above, so
-                  it reads directly beneath them. Hidden until a source exists —
-                  there is nothing to distribute otherwise. */}
-              {mix && sources.length > 0 && (
-                <ContentMixSection slug={slug} initialMix={mix} canManage={canManage} />
-              )}
-            </div>
-          )}
-
-          {/* ── Team ───────────────────────────────────────────────────── */}
-          {activeTab === "team" && (
-            <CompanyMembers
-              slug={slug}
-              initialMembers={members}
-              currentUserEmail={session.user.email}
-              canManage={canManage}
-            />
-          )}
-
-          {/* ── Settings ───────────────────────────────────────────────── */}
-          {activeTab === "settings" && bufferConnection !== null && (
-            <SettingsTab
-              slug={slug}
-              brandGuidelines={brandGuidelines}
-              bufferConnection={bufferConnection}
-              channelConfigs={configs}
-              company={company}
-              canManage={canManage}
-              bufferParam={bufferParam}
-              // An editor cannot read key status (the service is owner-scoped);
-              // the card then renders its read-only "not configured" state.
-              analyticsKeyStatus={
-                analyticsKeyStatus?.success
-                  ? analyticsKeyStatus.data
-                  : {
-                      bufferConnected: bufferConnection.connected,
-                      configured: false,
-                      last4: null,
-                      addedAt: null,
-                      lastValidAt: null,
-                    }
-              }
-            />
-          )}
+          <OverviewTab
+            company={company}
+            slug={slug}
+            brandGuidelines={brandGuidelines}
+            bufferConnection={bufferConnection}
+            channelConfigs={channelConfigs?.success ? channelConfigs.configs : []}
+          />
         </div>
       </div>
     </DashboardLayout>
@@ -270,7 +91,6 @@ export default async function CompanyPage({ params, searchParams }: Props) {
 interface OverviewTabProps {
   company: Awaited<ReturnType<typeof getCompany>>;
   slug: string;
-  canManage: boolean;
   brandGuidelines: Awaited<ReturnType<typeof getBrandGuidelines>> | null;
   bufferConnection: Awaited<ReturnType<typeof getBufferConnection>> | null;
   channelConfigs: ChannelConfigItem[];
@@ -295,13 +115,13 @@ async function OverviewTab({
       icon: Pencil,
       label: tWs("tabs.posts"),
       desc: tPage("modules.postsDesc"),
-      href: `/companies/${slug}?tab=posts`,
+      href: `/companies/${slug}/posts`,
     },
     {
       icon: CheckSquare2,
       label: tWs("tabs.approval"),
       desc: tPage("modules.approvalQueueDesc"),
-      href: `/companies/${slug}/approval`,
+      href: `/companies/${slug}/approvals`,
     },
   ];
 
@@ -316,19 +136,19 @@ async function OverviewTab({
       icon: Radio,
       label: tWs("tabs.sources"),
       desc: tPage("sections.contentSourcesDesc"),
-      href: `/companies/${slug}?tab=sources`,
+      href: `/companies/${slug}/sources`,
     },
     {
       icon: ClipboardList,
       label: tWs("tabs.activity"),
       desc: tPage("modules.auditLogDesc"),
-      href: `/companies/${slug}/audit-log`,
+      href: `/companies/${slug}/activity`,
     },
     {
       icon: Settings2,
       label: tWs("tabs.settings"),
       desc: tPage("modules.channelsDesc"),
-      href: `/companies/${slug}?tab=settings`,
+      href: `/companies/${slug}/settings`,
     },
   ];
 
@@ -422,79 +242,6 @@ async function OverviewTab({
             ))}
           </div>
         </div>
-      </Section>
-    </div>
-  );
-}
-
-// ── Settings tab ─────────────────────────────────────────────────────────────
-
-interface SettingsTabProps {
-  slug: string;
-  brandGuidelines: Awaited<ReturnType<typeof getBrandGuidelines>>;
-  bufferConnection: Awaited<ReturnType<typeof getBufferConnection>>;
-  channelConfigs: ChannelConfigItem[];
-  company: Awaited<ReturnType<typeof getCompany>>;
-  canManage: boolean;
-  bufferParam: string | null;
-  analyticsKeyStatus: AnalyticsKeyStatus;
-}
-
-async function SettingsTab({
-  slug,
-  brandGuidelines,
-  bufferConnection,
-  channelConfigs,
-  company,
-  canManage,
-  bufferParam,
-  analyticsKeyStatus,
-}: SettingsTabProps) {
-  const t = await getTranslations("companyPage");
-
-  return (
-    <div className="space-y-10">
-      <Section id="brand" title={t("sections.brand")}>
-        <BrandGuidelinesForm
-          slug={slug}
-          initialValues={brandGuidelines}
-          initialAutomationMode={company?.automationMode ?? "semi_automated"}
-          role={company?.role ?? null}
-          isGlobalAdmin={false}
-        />
-      </Section>
-
-      <Section id="buffer" title={t("sections.integrations")}>
-        <BufferConnectionCard
-          slug={slug}
-          initialConnection={{
-            connected: bufferConnection.connected,
-            bufferUserId: bufferConnection.bufferUserId,
-            connectedAt: bufferConnection.connectedAt?.toISOString() ?? null,
-          }}
-          canManage={canManage}
-          bufferParam={bufferParam}
-        />
-
-        {/* Analytics key — its own card because it is a different credential with
-            a different lifecycle, and removing it must not read as affecting
-            publishing. */}
-        <AnalyticsKeyCard slug={slug} canManage={canManage} initialStatus={analyticsKeyStatus} />
-      </Section>
-
-      <Section
-        id="channels"
-        title={t("sections.channels")}
-        description={t("sections.channelsDesc")}
-      >
-        <ChannelConfigSection
-          slug={slug}
-          initialConfigs={channelConfigs}
-          canManage={canManage}
-          bufferConnected={bufferConnection.connected}
-          lastSyncedAt={bufferConnection.lastProfileSyncAt?.toISOString() ?? null}
-          companyAutomationMode={company?.automationMode ?? "semi_automated"}
-        />
       </Section>
     </div>
   );
