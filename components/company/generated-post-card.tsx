@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/Badge";
 import { StatusBadge, type PostStatusValue } from "@/components/ui/StatusBadge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { LinkifiedText } from "@/components/ui/LinkifiedText";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { BufferProfileItem } from "@/lib/services/buffer/list-buffer-profiles.service";
 import { EditPostModal } from "./edit-post-modal";
@@ -302,7 +303,9 @@ export function GeneratedPostCard({
       </div>
 
       {/* Post text */}
-      <p className="text-fg mb-4 flex-1 text-sm leading-relaxed whitespace-pre-line">{localText}</p>
+      <p className="text-fg mb-4 flex-1 text-sm leading-relaxed whitespace-pre-line">
+        <LinkifiedText text={localText} />
+      </p>
 
       {/* Hashtags */}
       {localHashtags.length > 0 && (
