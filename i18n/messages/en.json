@@ -477,6 +477,15 @@
       "PUBLISHED": "Published",
       "FAILED": "Failed"
     },
+    "filters": {
+      "label": "Filter by status",
+      "all": "All posts",
+      "published": "Published",
+      "approved": "Approved",
+      "draft": "Drafts",
+      "noMatchesTitle": "No posts with this status",
+      "noMatchesDesc": "Select All posts to see the rest."
+    },
     "noPostsTitle": "No AI-generated posts yet",
     "noPostsDesc": "Choose a channel above and click Generate Draft to create your first post.",
     "imageAlt": "AI-generated image",

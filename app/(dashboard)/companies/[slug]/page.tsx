@@ -31,6 +31,7 @@ import { getContentMix } from "@/lib/services/company/get-content-mix.service";
 import { hasEnabledFeedItems } from "@/lib/services/company/list-feed-items.service";
 import { listGenerationSources } from "@/lib/services/company/list-generation-sources.service";
 import { listPosts } from "@/lib/services/company/list-posts.service";
+import { resolvePostStatusFilter } from "@/lib/posts/post-status-filter";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
 import { BrandGuidelinesForm } from "@/components/company/brand-guidelines-form";
@@ -197,6 +198,9 @@ export default async function CompanyPage({ params, searchParams }: Props) {
             <GeneratedPostsSection
               postMetrics={Object.fromEntries(postMetrics)}
               canManageAnalyticsKey={canManage}
+              // Parsed here so the first paint already honours a shared link;
+              // an unrecognized value falls back to "all" rather than an empty grid.
+              initialStatusFilter={resolvePostStatusFilter(sp.status)}
               slug={slug}
               initialPosts={initialPosts}
               canDelete={canDelete}
