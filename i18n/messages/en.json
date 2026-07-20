@@ -753,6 +753,7 @@
     "confirmRemove": "Remove the analytics key?",
     "keySavedFor": "Key verified and saved for {organization}.",
     "ownersOnly": "Only company owners can manage the analytics key.",
+    "ownersOnlyStatus": "Only company owners can see whether the analytics key is set up.",
     "reactions": "reactions",
     "comments": "comments",
     "shares": "shares",

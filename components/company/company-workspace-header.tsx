@@ -25,17 +25,16 @@ export async function CompanyWorkspaceHeader({ company, activeTab, stats }: Prop
   const t = await getTranslations("workspace");
   const { slug } = company;
 
-  // Every tab is a real route (Phase 4a). Team already lives under /settings
-  // because that is its destination in §2.2, but it keeps its place in this bar
-  // until Phase 4b builds the Settings sub-navigation to hold it — moving the
-  // route and moving the tab are separate changes, and only the first is 4a's.
+  // Seven tabs (§9.1). Team is not one of them — it is rare-touch configuration
+  // and reached through the Settings sub-navigation, which Phase 4b built to
+  // hold it. The set is closed: a new tab needs a frequency argument, not just
+  // a new feature.
   const tabs = [
     { key: "overview", label: t("tabs.overview"), href: `/companies/${slug}` },
     { key: "posts", label: t("tabs.posts"), href: `/companies/${slug}/posts` },
     { key: "approvals", label: t("tabs.approval"), href: `/companies/${slug}/approvals` },
     { key: "media", label: t("tabs.media"), href: `/companies/${slug}/media` },
     { key: "sources", label: t("tabs.sources"), href: `/companies/${slug}/sources` },
-    { key: "team", label: t("tabs.team"), href: `/companies/${slug}/settings/team` },
     { key: "settings", label: t("tabs.settings"), href: `/companies/${slug}/settings` },
     { key: "activity", label: t("tabs.activity"), href: `/companies/${slug}/activity` },
   ];

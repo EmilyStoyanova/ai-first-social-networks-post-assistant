@@ -31,12 +31,18 @@ export async function GET(request: Request) {
     session.user.isGlobalAdmin
   );
 
+  // Both outcomes land on the Integrations settings page, because that is where
+  // BufferConnectionCard renders the ?buffer= alert. Before Phase 4b these went
+  // to `/companies/{slug}`, which shows no Buffer card at all — so the result of
+  // every connect attempt, success or failure, was silently discarded.
   if (!result.success) {
     const destination = result.slug
-      ? `/companies/${result.slug}?buffer=error`
+      ? `/companies/${result.slug}/settings/buffer?buffer=error`
       : "/dashboard?buffer=error";
     return redirectClearingPkce(new URL(destination, request.url));
   }
 
-  return redirectClearingPkce(new URL(`/companies/${result.slug}?buffer=connected`, request.url));
+  return redirectClearingPkce(
+    new URL(`/companies/${result.slug}/settings/buffer?buffer=connected`, request.url)
+  );
 }

@@ -37,11 +37,15 @@ export async function SetupChecklist({
     );
   }
 
+  // Each step deep-links to its Settings sub-page (§2.4). These were `#brand`,
+  // `#buffer` and `#channels` anchors on the single Settings scroll until
+  // Phase 4b split it — a fragment now lands on a page that no longer holds
+  // that section, so they address the sub-page directly.
   const steps = [
     {
       label: t("item1Label"),
       hint: t("item1Hint"),
-      href: `${base}#brand`,
+      href: `${base}/brand`,
       linkLabel: t("item1Link"),
       done: brandDescribed,
       required: false,
@@ -49,7 +53,7 @@ export async function SetupChecklist({
     {
       label: t("item2Label"),
       hint: t("item2Hint"),
-      href: `${base}#buffer`,
+      href: `${base}/buffer`,
       linkLabel: t("item2Link"),
       done: bufferConnected,
       required: true,
@@ -57,7 +61,7 @@ export async function SetupChecklist({
     {
       label: t("item3Label"),
       hint: t("item3Hint"),
-      href: `${base}#channels`,
+      href: `${base}/channels`,
       linkLabel: t("item3Link"),
       done: profilesSynced,
       required: true,
@@ -65,7 +69,7 @@ export async function SetupChecklist({
     {
       label: t("item4Label"),
       hint: t("item4Hint"),
-      href: `${base}#channels`,
+      href: `${base}/channels`,
       linkLabel: t("item4Link"),
       done: hasEnabledChannel,
       required: true,

@@ -25,6 +25,17 @@ interface Props {
   slug: string;
   initialStatus: AnalyticsKeyStatus;
   canManage: boolean;
+  /**
+   * Whether `initialStatus` reflects the stored key at all.
+   *
+   * The status service is owner-scoped and answers FORBIDDEN to editors, so for
+   * them the caller has nothing real to pass. False means "this is a placeholder
+   * — say the status is hidden", never "the key is not configured": showing an
+   * editor a Disabled badge on a company whose analytics work fine reports a
+   * permission limit as a setup problem, and sends them looking for a setting
+   * they will never find.
+   */
+  canReadStatus?: boolean;
 }
 
 /**
@@ -39,7 +50,7 @@ interface Props {
  * never returned, so the field always starts empty and the stored key is
  * represented only by its last 4 characters.
  */
-export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
+export function AnalyticsKeyCard({ slug, initialStatus, canManage, canReadStatus = true }: Props) {
   const router = useRouter();
   const t = useTranslations("analytics");
   const tCommon = useTranslations("common");
@@ -194,9 +205,13 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
       <Card className="px-6 py-6">
         <div className="mb-1 flex items-center justify-between gap-4">
           <h2 className="text-fg text-sm font-semibold">{t("title")}</h2>
-          <Badge variant={status.configured ? "success" : "neutral"}>
-            {status.configured ? t("enabled") : t("disabled")}
-          </Badge>
+          {/* No badge when the status is unreadable — an enabled/disabled pill
+              would be a claim this viewer's permissions cannot support. */}
+          {canReadStatus && (
+            <Badge variant={status.configured ? "success" : "neutral"}>
+              {status.configured ? t("enabled") : t("disabled")}
+            </Badge>
+          )}
         </div>
 
         <p className="text-fg-muted mb-4 text-sm leading-relaxed">{t("description")}</p>
@@ -212,9 +227,13 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
           </Alert>
         )}
 
-        {/* Buffer itself must be connected first — analytics read metrics for posts
-          published through it, so there is nothing to read without a connection. */}
-        {!status.bufferConnected ? (
+        {!canReadStatus ? (
+          /* An editor. The key's state is genuinely unknown here, so the card
+             says so and stops — no badge, no details, no "not configured". */
+          <p className="text-fg-muted text-xs">{t("ownersOnlyStatus")}</p>
+        ) : /* Buffer itself must be connected first — analytics read metrics for posts
+          published through it, so there is nothing to read without a connection. */
+        !status.bufferConnected ? (
           <Alert variant="info">{t("connectBufferFirst")}</Alert>
         ) : (
           <>
