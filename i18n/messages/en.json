@@ -759,6 +759,18 @@
     "disabledOnCardAction": "Add a Buffer key",
     "pendingOnCard": "Waiting for the first metrics sync.",
     "noDataOnCard": "Buffer has not reported any metrics for this post.",
-    "forbiddenOnCard": "This analytics key does not cover the Buffer account this post was published from."
+    "forbiddenOnCard": "This analytics key does not cover the Buffer account this post was published from.",
+    "syncNow": "Sync now",
+    "syncing": "Syncing…",
+    "syncDone": "Updated {updated} of {examined} posts.",
+    "syncNoPosts": "No published posts to sync yet.",
+    "syncNoDataYet": "Checked {examined} posts — Buffer has no metrics for them yet. It updates once a day, so try again tomorrow.",
+    "syncAllForbidden": "This key does not cover the Buffer account these posts were published from.",
+    "syncSkipped": {
+      "NO_KEY": "No analytics key is configured.",
+      "INVALID_KEY": "Buffer rejected the key. It may have been revoked — add it again.",
+      "INSUFFICIENT_SCOPE": "This key cannot read analytics. Check that it is a Personal API Key.",
+      "RATE_LIMITED": "Buffer is rate limiting requests. Try again in a few minutes."
+    }
   }
 }

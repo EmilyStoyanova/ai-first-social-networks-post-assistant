@@ -27,6 +27,16 @@ export interface SyncPostMetricsOptions {
   companyId: string;
   /** Max posts per run. Each costs exactly one Buffer request. */
   limit?: number;
+  /**
+   * Re-read posts already synced today.
+   *
+   * The cron leaves this false: Buffer refreshes metrics once daily, so a second
+   * automatic pass would return identical data and spend quota for nothing.
+   * A manual "sync now" sets it true — otherwise a first run that legitimately
+   * came back empty (Buffer had not ingested the posts yet) would make every
+   * retry that day a no-op, which reads as the button being broken.
+   */
+  force?: boolean;
   /** Injected in tests. */
   client?: BufferAnalyticsClient;
   now?: Date;
@@ -94,7 +104,9 @@ export async function syncPostMetrics(
       companyId,
       bufferUpdateId: { not: null },
       status: { in: [...SYNCABLE_STATUSES] },
-      OR: [{ metrics: { is: null } }, { metrics: { collectedAt: { lt: today } } }],
+      ...(options.force
+        ? {}
+        : { OR: [{ metrics: { is: null } }, { metrics: { collectedAt: { lt: today } } }] }),
     },
     select: { id: true, bufferUpdateId: true },
     orderBy: [{ publishedAt: "desc" }],

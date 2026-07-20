@@ -91,6 +91,59 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
     }
   }
 
+  const [syncing, setSyncing] = useState(false);
+
+  /**
+   * Pulls metrics immediately rather than waiting for the nightly cron, which
+   * processes one company per run and could otherwise leave a new key showing
+   * nothing for days.
+   */
+  async function handleSync() {
+    setSyncing(true);
+    setError("");
+    setSuccess("");
+    try {
+      const res = await fetch(`/api/v1/companies/${slug}/analytics/sync`, { method: "POST" });
+      const json = (await res.json()) as {
+        data?: {
+          skipped: boolean;
+          reason?: string;
+          examined: number;
+          updated: number;
+          noData: number;
+          forbidden: number;
+        };
+        error?: { message?: string };
+      };
+
+      if (!res.ok || !json.data) {
+        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
+      }
+
+      const d = json.data;
+      if (d.skipped) {
+        // A skipped run is not a crash — say which of the four causes it was.
+        setError(t(`syncSkipped.${d.reason ?? "NO_KEY"}`));
+      } else if (d.examined === 0) {
+        setSuccess(t("syncNoPosts"));
+      } else if (d.updated === 0 && d.forbidden > 0) {
+        setSuccess(t("syncAllForbidden"));
+      } else if (d.updated === 0) {
+        // Buffer ingests once a day, so a post published hours ago genuinely has
+        // nothing yet. Distinguish that from a failure.
+        setSuccess(t("syncNoDataYet", { examined: d.examined }));
+      } else {
+        setSuccess(t("syncDone", { updated: d.updated, examined: d.examined }));
+        // Metrics render server-side, so the cards only pick up new numbers on reload.
+        setTimeout(() => window.location.reload(), 1200);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   const showForm = canManage && (!status.configured || editing);
 
   return (
@@ -197,6 +250,9 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
 
                 {status.configured && !editing && !confirmRemove && (
                   <>
+                    <Button variant="primary" loading={syncing} onClick={handleSync}>
+                      {syncing ? t("syncing") : t("syncNow")}
+                    </Button>
                     <Button variant="secondary" onClick={() => setEditing(true)}>
                       {t("replaceKey")}
                     </Button>
