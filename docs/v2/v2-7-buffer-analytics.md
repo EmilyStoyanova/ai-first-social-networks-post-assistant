@@ -1,14 +1,17 @@
 # v2-7 — Engagement Analytics
 
-> **BLOCKED — do not start. The v2-6 spike (2026-07-17) returned ABANDON.**
-> Buffer's API has the per-post metrics this phase needs, but reading them requires the
-> `insights:read` scope, which Buffer does not grant to OAuth App Clients — the
-> authorization server rejects the request with `invalid_scope` before user consent, so
-> re-authorization cannot fix it. No table, migration, cron step, or UI should be built.
-> The provisional schema below is also known to be wrong in specifics (no common
-> denominator across channels; `Int?` columns conflate "unsupported" with zero).
-> See [v2-6 findings](./v2-6-buffer-analytics-spike.md#findings), including the one
-> unverified question (Personal API Key) that could reopen this phase.
+> **UNBLOCKED 2026-07-20 — building on a per-company Buffer Personal API Key.**
+> The v2-6 spike's one open question was answered by live probe: a Personal API Key **does**
+> grant `insights:read`. OAuth still owns publishing; the key is analytics-read only.
+> The `insights:read` OAuth scope remains unobtainable — that finding is unchanged.
+>
+> **The provisional schema below is superseded.** It is kept for history only. Live data
+> contradicts the spike's per-channel matrix (see
+> [Verified findings](./v2-6-buffer-analytics-spike.md#verified-findings-2026-07-20)), and
+> `Int?` columns still conflate "unsupported" with zero. The shipped design stores a metric
+> only when its type is present in Buffer's response array, keys channel off Buffer's
+> `channelService` rather than `Post.channel`, and preserves the raw array in a `Json`
+> column.
 
 > **Prerequisite:** v2-6 spike must be completed and findings documented before any schema or code work begins.
 

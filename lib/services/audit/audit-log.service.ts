@@ -15,6 +15,9 @@ export const AUDIT_ACTIONS = {
   POST_PUBLISH_FAILED: "POST_PUBLISH_FAILED",
   MEDIA_ATTACHED: "MEDIA_ATTACHED",
   CONTENT_MIX_UPDATED: "CONTENT_MIX_UPDATED",
+  // v2-7 analytics. The key itself is never logged — only its last 4 characters.
+  ANALYTICS_KEY_SET: "ANALYTICS_KEY_SET",
+  ANALYTICS_KEY_REMOVED: "ANALYTICS_KEY_REMOVED",
 } as const;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────

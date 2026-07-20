@@ -1,11 +1,13 @@
 # v2-6 — Buffer Analytics Spike
 
-> **Status: COMPLETE — executed 2026-07-17 against the live Buffer API.**
-> **Decision: ABANDON v2-7 for this release.** Buffer's API exposes exactly the per-post
-> metrics v2-7 wants, keyed by the `bufferUpdateId` we already store — but reading them
-> requires the `insights:read` scope, which Buffer does **not** grant to OAuth App Clients
-> like ours. Verified end-to-end: the API demands the scope, and the authorization server
-> refuses to issue it. See [Findings](#findings).
+> **Status: SUPERSEDED IN PART — 2026-07-20.** The ABANDON decision below was correct for the
+> OAuth flow and is unchanged: `insights:read` is not obtainable by an OAuth App Client.
+> But the spike's one explicitly-unverified question — _does a Personal API Key actually
+> grant `insights:read`?_ — has now been answered **YES** by live probe.
+> **v2-7 is unblocked and building.** Several per-channel claims below, drawn from Buffer's
+> Help Center rather than observation, are contradicted by real data.
+> **Read [Verified findings (2026-07-20)](#verified-findings-2026-07-20) before trusting any
+> matrix in this document.**
 
 ## Goal
 
@@ -569,3 +571,80 @@ implementation.
 `insights:read` (Option B), and is per-company key entry acceptable given the ToS concern? If
 yes, v2-7 becomes viable with the revised architecture above. That check is cheap and should
 precede any further v2-7 planning.
+
+---
+
+## Verified findings (2026-07-20)
+
+_Executed against the live Buffer API with a **Personal API Key**, read-only, over the 9 posts
+carrying a `bufferUpdateId`. This section answers the question the original spike left open and
+**overrides the Help-Center-derived matrix above** wherever the two disagree._
+
+### The gating question: answered
+
+**A Personal API Key grants `insights:read`.** Every `post.metrics` selection that previously
+returned `null` + `INSUFFICIENT_SCOPE` now returns populated metric arrays. `aggregatedPostMetrics`
+also succeeds. The OAuth finding is unchanged — the key is a _separate_ credential used only for
+analytics reads; publishing continues through OAuth untouched.
+
+### Observed metric availability — supersedes the matrix above
+
+Derived from metric types actually present in the response arrays, not from documentation:
+
+| Metric           | Facebook | Instagram | Note                                             |
+| ---------------- | -------- | --------- | ------------------------------------------------ |
+| `reactions`      | ✅       | ✅        |                                                  |
+| `comments`       | ✅       | ✅        |                                                  |
+| `shares`         | ✅       | ✅        |                                                  |
+| `engagementRate` | ✅       | ✅        | **native on both** — spike claimed LinkedIn-only |
+| `impressions`    | ✅       | ❌        | **reverse of the spike's matrix**                |
+| `reach`          | ❌       | ✅        | **reverse of the spike's matrix**                |
+| `clicks`         | ✅       | ❌        | works — spike called it contested                |
+| `views`          | ❌       | ✅        |                                                  |
+| `saves`          | ❌       | ✅        |                                                  |
+| `follows`        | ❌       | ✅        |                                                  |
+
+LinkedIn and TikTok remain unobserved — no post has been published to either.
+
+### Engagement rate is native, but the denominators still differ
+
+Both networks return a native `engagementRate`, so nothing needs deriving. They are **not
+computed on the same basis**, so the spike's non-comparability warning stands:
+
+- Facebook `6a54ed64`: `clicks 1 / impressions 8` = **12.5%** → denominator is impressions
+- Instagram `6a4f855f`: `reactions 1 / reach 1` = **100%** → denominator is reach
+
+Present the native value with an explicit denominator label. Do not blend across channels.
+
+### Three failure modes, all distinct
+
+1. **`FORBIDDEN`** — `"Account is not allowed to perform this action"` at path `["post"]`,
+   `data.post = null`. Observed for both "AI за стартиращ бизнес" posts: they belong to a Buffer
+   account this key does not cover. **Keys are per-company and one key cannot span the estate** —
+   the 4 companies span 3 Buffer accounts. This is a first-class UI state, not an error.
+2. **`metrics: null` with no error** — post `6a4ce2b8` (Instagram) has `metricsUpdatedAt`
+   set to 2026-07-07 yet returns no metrics. Ingested but nothing reported. Treat as "no data",
+   never as zeros.
+3. **Genuine zeros** — most posts report `reactions: 0`. Indistinguishable from "unsupported" by
+   value alone, which is why **presence in the array is the availability signal**. Facebook arrays
+   never contain `reach`; Instagram arrays never contain `impressions`.
+
+### `Post.channel` is confirmed unreliable
+
+All 9 posts are stored `channel = facebook`; Buffer reports `channelService = instagram` for two
+(`6a4f855f`, `6a4ce2b8`). The spike flagged this as incidental — it is now load-bearing. Metrics
+must be attributed using Buffer's `channelService`.
+
+### Aggregation surface for weekly/monthly rollups
+
+`aggregatedPostMetrics` works and returned, for a 30-day window: `postCount 8`, `reactions 1`,
+`comments 0`, `engagementRate 5.66%`, `impressions 104`, `shares 0`. It is **organization**-scoped;
+per-company rollups require passing that company's `channelIds` in the filter. Note the baseline
+trio caveat above still applies — metrics beyond `postCount`/`reactions`/`comments` appear only
+when every channel in the filter supports them.
+
+### Rate limits
+
+Unchanged and comfortable: `100-in-15min`, `250-in-1day`, `3000-in-30days`. The 9-post probe cost
+~11 requests. Metrics refresh once daily (several Facebook posts share the ingestion timestamp
+`2026-07-19T14:37:19Z`), so syncing more than daily returns identical data.

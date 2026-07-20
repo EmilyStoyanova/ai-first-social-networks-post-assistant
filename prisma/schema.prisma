@@ -59,6 +59,25 @@ enum PostStatus {
   failed
 }
 
+// Outcome of the last attempt to read a post's metrics from Buffer (v2-7).
+// These are genuinely different states, not shades of "error", and the UI
+// distinguishes them — see lib/services/analytics/sync-post-metrics.service.ts.
+enum MetricSyncStatus {
+  // Metrics returned and stored.
+  ok
+  // Buffer answered, but reported no metrics for this post. Observed on a post
+  // Buffer had already ingested (metricsUpdatedAt set) that still returned none.
+  // Explicitly NOT zeros.
+  no_data
+  // The configured Personal API Key belongs to a different Buffer organization
+  // than this post. Verified live: FORBIDDEN at path ["post"], data.post = null.
+  forbidden
+  // Buffer does not recognise the stored bufferUpdateId (deleted post, wrong org).
+  not_found
+  // Network failure, rate limit, or any unexpected Buffer response.
+  error
+}
+
 enum LlmProvider {
   claude
   openai
@@ -216,6 +235,23 @@ model BufferConnection {
   refreshTokenEnc String?   @map("refresh_token_enc")
   tokenExpiresAt    DateTime? @map("token_expires_at")
   lastProfileSyncAt DateTime? @map("last_profile_sync_at")
+
+  // ── Analytics credential (v2-7) ────────────────────────────────────────────
+  // A Buffer *Personal API Key*, entirely separate from the OAuth tokens above.
+  // Buffer refuses the `insights:read` scope to OAuth App Clients, so reading
+  // metrics requires this key; publishing continues to use the OAuth token and is
+  // unaffected. NULL = analytics disabled for this company (the expected default).
+  // A key is scoped to ONE Buffer organization, so it is per-company by necessity:
+  // posts owned by another Buffer account return FORBIDDEN.
+  analyticsKeyEnc         String?   @map("analytics_key_enc")
+  // Last 4 characters, stored in clear for UI display. The raw key is never
+  // returned to a client — this is the only part that ever leaves the server.
+  analyticsKeyLast4       String?   @map("analytics_key_last4")
+  analyticsKeyAddedAt     DateTime? @map("analytics_key_added_at")
+  // Stamped on every successful metrics call, so the UI can show a key that has
+  // silently stopped working (Personal API Keys are revocable and never expire).
+  analyticsKeyLastValidAt DateTime? @map("analytics_key_last_valid_at")
+
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
 
@@ -411,6 +447,8 @@ model Post {
   rejectedBy  User?           @relation("PostRejecter", fields: [rejectedById], references: [id])
   versions    PostVersion[]
   semantics   PostSemantics?
+  metrics         PostMetric?
+  metricSnapshots PostMetricSnapshot[]
 
   @@index([companyId, status])
   @@index([scheduledFor])
@@ -419,6 +457,117 @@ model Post {
   // which source" count. Every cron run does this before generating.
   @@index([scheduleId, channel, contentSourceId])
   @@map("posts")
+}
+
+// ─── Post analytics (v2-7) ────────────────────────────────────────────────────
+// Engagement metrics read from Buffer with a per-company Personal API Key.
+//
+// Two rules govern every column here, both learned from live data (see
+// docs/v2/v2-6-buffer-analytics-spike.md#verified-findings-2026-07-20):
+//
+//  1. NULL means "the network did not report this metric"; 0 means a real zero.
+//     Buffer's `value` is a non-null Float that DEFAULTS TO 0 for unsupported
+//     metrics, so the value alone cannot distinguish the two. Availability is
+//     signalled by the metric type's PRESENCE in the response array — a column is
+//     written only when its type appears there. Facebook never returns `reach`;
+//     Instagram never returns `impressions` or `clicks`.
+//  2. The channel here is BUFFER's `channelService`, never Post.channel. All 9
+//     published posts are stored channel=facebook while Buffer reports instagram
+//     for two of them, so attributing by our own column misfiles the metrics.
+
+model PostMetric {
+  id        String @id @default(uuid())
+  postId    String @unique @map("post_id")
+  // Denormalized so company-level weekly/monthly rollups never need to join posts.
+  companyId String @map("company_id")
+
+  // Buffer's own view of which network this went to — authoritative. Kept as a
+  // plain String rather than the SocialChannel enum because it is Buffer's
+  // vocabulary, and an unrecognised service must be storable rather than crash.
+  channelService String? @map("channel_service")
+
+  // Cross-network metrics.
+  reactions Int?
+  comments  Int?
+  shares    Int?
+  // Facebook only, in observed data.
+  impressions Int?
+  clicks      Int?
+  // Instagram only, in observed data.
+  reach     Int?
+  views     Int?
+  saves     Int?
+  follows   Int?
+
+  // Buffer's NATIVE engagement rate as a percentage — never derived by us.
+  // Present on both Facebook and Instagram, but computed on different
+  // denominators (FB: impressions, IG: reach), so it is not comparable across
+  // channels. engagementRateDenominator records which one, and the UI labels it
+  // rather than presenting a blended figure.
+  engagementRate            Float?  @map("engagement_rate")
+  engagementRateDenominator String? @map("engagement_rate_denominator")
+
+  // The untouched metrics array as Buffer returned it. Buffer has 16 metric types
+  // and may add more; this preserves anything the columns above do not model,
+  // without a migration.
+  raw Json?
+
+  // Buffer's own ingestion timestamp (it refreshes metrics once daily, so values
+  // lag the network by up to ~24h). Distinct from collectedAt, which is when WE
+  // read them.
+  metricsUpdatedAt DateTime? @map("metrics_updated_at")
+  collectedAt      DateTime  @map("collected_at")
+
+  syncStatus MetricSyncStatus @default(ok) @map("sync_status")
+  syncError  String?          @map("sync_error")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  // Drives the cron's "least recently synced first" selection.
+  @@index([companyId, collectedAt])
+  @@map("post_metrics")
+}
+
+// Append-only history. Buffer returns cumulative lifetime totals with no
+// time-series surface of its own, so day-over-day movement exists ONLY if we
+// snapshot it ourselves — and it cannot be backfilled later.
+//
+// This is also the substrate for the weekly/monthly company aggregation that
+// comes next: (companyId, snapshotAt) lets a rollup job sum a period directly,
+// and channelService lets it segment by network without touching Post.
+model PostMetricSnapshot {
+  id             String  @id @default(uuid())
+  postId         String  @map("post_id")
+  companyId      String  @map("company_id")
+  channelService String? @map("channel_service")
+
+  reactions   Int?
+  comments    Int?
+  shares      Int?
+  impressions Int?
+  clicks      Int?
+  reach       Int?
+  views       Int?
+  saves       Int?
+  follows     Int?
+
+  engagementRate            Float?  @map("engagement_rate")
+  engagementRateDenominator String? @map("engagement_rate_denominator")
+
+  snapshotAt DateTime @map("snapshot_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([postId, snapshotAt(sort: Desc)])
+  @@index([companyId, snapshotAt])
+  // One snapshot per post per sync. Makes the daily cron idempotent: a re-run on
+  // the same day updates rather than inflating history with duplicate rows.
+  @@unique([postId, snapshotAt])
+  @@map("post_metric_snapshots")
 }
 
 // ─── Semantic memory (Phase 1.2) ──────────────────────────────────────────────

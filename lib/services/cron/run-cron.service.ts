@@ -7,6 +7,7 @@ import { autoApprovePosts } from "./auto-approve-posts.service";
 import { publishScheduledPosts } from "./publish-scheduled-posts.service";
 import { retryFailedPosts } from "./retry-failed-posts.service";
 import { backfillEmbeddings } from "./backfill-embeddings.service";
+import { syncPostMetrics } from "@/lib/services/analytics/sync-post-metrics.service";
 
 export interface CronRunSummary {
   runId: string;
@@ -24,7 +25,8 @@ export interface CronRunSummary {
  * Steps (per implementation plan, Phase 8):
  *   1. record start   2. fetch feeds   2b. translate feed items (v2-4)
  *   3. generate weekly schedule   4. auto-approve   5. send to Buffer
- *   6. retry failed   7. backfill embeddings   8. record completion
+ *   6. retry failed   7. backfill embeddings   8. sync Buffer metrics (v2-7)
+ *   9. record completion
  */
 export async function runCron(): Promise<CronRunSummary> {
   const run = await prisma.cronRun.create({
@@ -78,6 +80,15 @@ export async function runCron(): Promise<CronRunSummary> {
     // Step 7 — backfill semantic embeddings for this company's pending posts
     // (Phase 1.2). Best-effort; skips cleanly when no embedding provider is set.
     actions.backfillEmbeddings = await backfillEmbeddings({ companyId: company.id, limit: 25 });
+
+    // Step 8 — sync Buffer engagement metrics (v2-7). LAST on purpose: it is the
+    // only step whose omission costs nothing that cannot be recovered next run,
+    // so it is the right thing to lose if the 60s budget runs out. Skips itself
+    // cleanly when no Personal API Key is configured, which is the default.
+    // Buffer refreshes metrics once daily, so the batch is small by design —
+    // re-reading sooner returns identical data and spends the shared 250/day
+    // request budget that publishing also draws on.
+    actions.syncMetrics = await syncPostMetrics({ companyId: company.id, limit: 15 });
 
     await completeRun(run.id, actions);
     return {

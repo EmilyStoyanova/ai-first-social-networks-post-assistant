@@ -9,6 +9,10 @@ import { GeneratedPostCard } from "./generated-post-card";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
 import type { PostRole } from "@/lib/posts/post-actions";
+import {
+  disabledMetrics,
+  type PostMetricsView,
+} from "@/lib/services/analytics/get-post-metrics.service";
 
 interface Props {
   slug: string;
@@ -18,6 +22,10 @@ interface Props {
   bufferConnected: boolean;
   hasRssFeedItems: boolean;
   contentSources: GenerationSourceOption[];
+  /** Engagement metrics by post id (v2-7). Loaded server-side for the whole tab. */
+  postMetrics: Record<string, PostMetricsView>;
+  /** Owners see the "add a key" nudge on the disabled state. */
+  canManageAnalyticsKey: boolean;
 }
 
 export function GeneratedPostsSection({
@@ -28,6 +36,8 @@ export function GeneratedPostsSection({
   bufferConnected,
   hasRssFeedItems,
   contentSources,
+  postMetrics,
+  canManageAnalyticsKey,
 }: Props) {
   const t = useTranslations("posts");
   const [posts, setPosts] = useState<PostItem[]>(initialPosts);
@@ -66,6 +76,10 @@ export function GeneratedPostsSection({
               role={role}
               bufferConnected={bufferConnected}
               onDelete={handleDelete}
+              // A post generated after page load has no metrics row yet, so it
+              // falls back to the disabled/pending state rather than crashing.
+              metrics={postMetrics[post.id] ?? disabledMetrics()}
+              canManageAnalyticsKey={canManageAnalyticsKey}
             />
           ))}
         </div>

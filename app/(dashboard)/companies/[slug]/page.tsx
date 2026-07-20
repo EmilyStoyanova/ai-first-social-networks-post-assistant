@@ -15,6 +15,14 @@ import { getBrandGuidelines } from "@/lib/services/company/get-brand-guidelines.
 import { listMembers } from "@/lib/services/company/list-members.service";
 import { getBufferConnection } from "@/lib/services/buffer/get-buffer-connection.service";
 import {
+  getAnalyticsKeyStatus,
+  type AnalyticsKeyStatus,
+} from "@/lib/services/analytics/manage-analytics-key.service";
+import {
+  getPostMetricsForPosts,
+  type PostMetricsView,
+} from "@/lib/services/analytics/get-post-metrics.service";
+import {
   listChannelConfigs,
   type ChannelConfigItem,
 } from "@/lib/services/company/list-channel-configs.service";
@@ -28,6 +36,7 @@ import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-h
 import { BrandGuidelinesForm } from "@/components/company/brand-guidelines-form";
 import { CompanyMembers } from "@/components/company/company-members";
 import { BufferConnectionCard } from "@/components/company/buffer-connection-card";
+import { AnalyticsKeyCard } from "@/components/company/analytics-key-card";
 import { SetupChecklist } from "@/components/company/setup-checklist";
 import { ChannelConfigSection } from "@/components/company/channel-config-section";
 import { ContentSourcesSection } from "@/components/company/content-sources-section";
@@ -93,6 +102,10 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   let rssFeedItemsAvailable = false;
   let generationSources: Awaited<ReturnType<typeof listGenerationSources>> | null = null;
 
+  // Engagement metrics for the post cards (v2-7), keyed by post id. Loaded once
+  // for the whole tab rather than per card.
+  let postMetrics: Map<string, PostMetricsView> = new Map();
+
   if (activeTab === "posts") {
     [postsData, bufferConnection, rssFeedItemsAvailable, generationSources] = await Promise.all([
       listPosts(slug, session.user.id, session.user.isGlobalAdmin),
@@ -100,6 +113,22 @@ export default async function CompanyPage({ params, searchParams }: Props) {
       hasEnabledFeedItems(company.id),
       listGenerationSources(slug, session.user.id, session.user.isGlobalAdmin),
     ]);
+
+    const analyticsStatus = await getAnalyticsKeyStatus(
+      slug,
+      session.user.id,
+      session.user.isGlobalAdmin
+    );
+    // An editor gets FORBIDDEN from the key-status service (it is owner-scoped),
+    // which must not hide metrics from them — only the ability to manage the key.
+    // Treat an unreadable status as "not configured" and let the cards say so.
+    const analyticsEnabled = analyticsStatus.success && analyticsStatus.data.configured;
+
+    postMetrics = await getPostMetricsForPosts(
+      company.id,
+      postsData?.success ? postsData.posts.map((p) => p.id) : [],
+      analyticsEnabled
+    );
   }
 
   if (activeTab === "sources") {
@@ -113,12 +142,15 @@ export default async function CompanyPage({ params, searchParams }: Props) {
     membersResult = await listMembers(slug, session.user.id, session.user.isGlobalAdmin);
   }
 
+  let analyticsKeyStatus: Awaited<ReturnType<typeof getAnalyticsKeyStatus>> | null = null;
+
   if (activeTab === "settings") {
     const bufferParam = typeof sp.buffer === "string" ? sp.buffer : null;
-    [brandGuidelines, bufferConnection, channelConfigs] = await Promise.all([
+    [brandGuidelines, bufferConnection, channelConfigs, analyticsKeyStatus] = await Promise.all([
       getBrandGuidelines(company.id),
       getBufferConnection(company.id),
       listChannelConfigs(slug, session.user.id, session.user.isGlobalAdmin),
+      getAnalyticsKeyStatus(slug, session.user.id, session.user.isGlobalAdmin),
     ]);
     void bufferParam; // captured below where needed
   }
@@ -163,6 +195,8 @@ export default async function CompanyPage({ params, searchParams }: Props) {
           {/* ── Posts ──────────────────────────────────────────────────── */}
           {activeTab === "posts" && bufferConnection && (
             <GeneratedPostsSection
+              postMetrics={Object.fromEntries(postMetrics)}
+              canManageAnalyticsKey={canManage}
               slug={slug}
               initialPosts={initialPosts}
               canDelete={canDelete}
@@ -206,6 +240,19 @@ export default async function CompanyPage({ params, searchParams }: Props) {
               company={company}
               canManage={canManage}
               bufferParam={bufferParam}
+              // An editor cannot read key status (the service is owner-scoped);
+              // the card then renders its read-only "not configured" state.
+              analyticsKeyStatus={
+                analyticsKeyStatus?.success
+                  ? analyticsKeyStatus.data
+                  : {
+                      bufferConnected: bufferConnection.connected,
+                      configured: false,
+                      last4: null,
+                      addedAt: null,
+                      lastValidAt: null,
+                    }
+              }
             />
           )}
         </div>
@@ -386,6 +433,7 @@ interface SettingsTabProps {
   company: Awaited<ReturnType<typeof getCompany>>;
   canManage: boolean;
   bufferParam: string | null;
+  analyticsKeyStatus: AnalyticsKeyStatus;
 }
 
 async function SettingsTab({
@@ -396,6 +444,7 @@ async function SettingsTab({
   company,
   canManage,
   bufferParam,
+  analyticsKeyStatus,
 }: SettingsTabProps) {
   const t = await getTranslations("companyPage");
 
@@ -422,6 +471,11 @@ async function SettingsTab({
           canManage={canManage}
           bufferParam={bufferParam}
         />
+
+        {/* Analytics key — its own card because it is a different credential with
+            a different lifecycle, and removing it must not read as affecting
+            publishing. */}
+        <AnalyticsKeyCard slug={slug} canManage={canManage} initialStatus={analyticsKeyStatus} />
       </Section>
 
       <Section

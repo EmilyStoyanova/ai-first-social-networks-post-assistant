@@ -17,6 +17,8 @@ import { PostActivityModal } from "./post-activity-modal";
 import { ImagePickerModal, type GalleryMediaItem } from "@/components/media/ImagePickerModal";
 import { formatDateTime } from "@/lib/i18n/format-date";
 import { resolvePostActions, type PostRole } from "@/lib/posts/post-actions";
+import { PostMetricsStrip } from "./post-metrics-strip";
+import type { PostMetricsView } from "@/lib/services/analytics/get-post-metrics.service";
 
 type BadgeVariant =
   "owner" | "editor" | "comingSoon" | "success" | "warning" | "danger" | "neutral" | "readonly";
@@ -37,6 +39,10 @@ interface Props {
   bufferConnected: boolean;
   onDelete: (id: string) => void;
   onStatusChange?: (id: string, newStatus: string) => void;
+  /** Engagement metrics for this post (v2-7). Optional so callers that do not
+   *  show analytics (the approval queue) need not thread it through. */
+  metrics?: PostMetricsView;
+  canManageAnalyticsKey?: boolean;
 }
 
 export function GeneratedPostCard({
@@ -47,6 +53,8 @@ export function GeneratedPostCard({
   bufferConnected,
   onDelete,
   onStatusChange,
+  metrics,
+  canManageAnalyticsKey = false,
 }: Props) {
   const t = useTranslations("posts");
   const tCommon = useTranslations("common");
@@ -562,6 +570,12 @@ export function GeneratedPostCard({
             </Button>
           ))}
       </div>
+
+      {/* Engagement metrics (v2-7) — only for posts that actually reached Buffer.
+          A post that was never published has no Buffer counterpart to measure. */}
+      {metrics && (isSentToBuffer || localStatus === "PUBLISHED") && (
+        <PostMetricsStrip metrics={metrics} canManageKey={canManageAnalyticsKey} slug={slug} />
+      )}
 
       {/* View Activity — always available */}
       <div className="border-border mt-3 border-t pt-3">
