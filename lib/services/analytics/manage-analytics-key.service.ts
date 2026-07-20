@@ -8,6 +8,8 @@ import {
 } from "@/lib/buffer/buffer-analytics-errors";
 import { checkBufferAccess } from "@/lib/services/buffer/_access";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
+import { runForcedMetricsSync } from "./trigger-metrics-sync.service";
+import type { SyncPostMetricsSummary } from "./sync-post-metrics.service";
 
 /**
  * Owner-facing management of a company's Buffer Personal API Key (v2-7).
@@ -40,8 +42,34 @@ type Failure =
       message: string;
     };
 
+/**
+ * Outcome of the automatic first sync that follows a successful save.
+ *
+ * `null` means the sync threw — Buffer was unreachable, rate limiting, or
+ * similar. That is deliberately NOT a save failure: the key was validated and
+ * stored, and the UI warns rather than reporting the whole operation as failed.
+ */
+export type InitialSyncOutcome = SyncPostMetricsSummary | null;
+
 export type SetAnalyticsKeyResult =
-  { success: true; data: AnalyticsKeyStatus & { organizationName: string } } | Failure;
+  | {
+      success: true;
+      data: AnalyticsKeyStatus & { organizationName: string; sync: InitialSyncOutcome };
+    }
+  | Failure;
+
+/**
+ * Seams for tests. The real implementations are the defaults, so production
+ * callers pass nothing — matching PublishPostDeps in the Buffer publish service.
+ */
+export interface SetAnalyticsKeyDeps {
+  /** Validates a raw key against Buffer. */
+  validateKey?: (key: string) => Promise<{ organizationId: string; organizationName: string }>;
+  /** The shared forced sync. Never reimplemented here. */
+  syncMetrics?: (companyId: string) => Promise<SyncPostMetricsSummary>;
+  auditLog?: typeof createAuditLog;
+  access?: typeof checkBufferAccess;
+}
 
 export type DeleteAnalyticsKeyResult = { success: true } | Failure;
 
@@ -67,20 +95,37 @@ function statusFrom(connection: {
 }
 
 /**
- * Validates a Personal API Key against Buffer and stores it only if it works.
+ * Validates a Personal API Key against Buffer, stores it only if it works, and
+ * then immediately pulls the company's metrics.
  *
  * The connection test is not advisory — it gates the write. A key that
  * authenticates but lacks `insights:read` is rejected too, because it would save
  * cleanly and then fail on every subsequent sync, which reads to an owner as
  * "analytics are broken" rather than "this key is wrong".
+ *
+ * The first sync runs here rather than waiting for the cron because the cron
+ * handles one company per daily run: a freshly configured key could otherwise
+ * show nothing for days, which looks like a broken feature rather than a
+ * scheduled one. It is a forced sync so the "already synced today" guard cannot
+ * suppress it.
+ *
+ * Ordering matters: the key is committed BEFORE the sync is attempted, so a
+ * transient Buffer failure can never cost the user a validated key.
  */
 export async function setAnalyticsKey(
   slug: string,
   rawKey: string,
   userId: string,
-  isGlobalAdmin: boolean
+  isGlobalAdmin: boolean,
+  deps: SetAnalyticsKeyDeps = {}
 ): Promise<SetAnalyticsKeyResult> {
-  const access = await checkBufferAccess(slug, userId, isGlobalAdmin);
+  const checkAccess = deps.access ?? checkBufferAccess;
+  const auditLog = deps.auditLog ?? createAuditLog;
+  const syncMetrics = deps.syncMetrics ?? runForcedMetricsSync;
+  const validateKey =
+    deps.validateKey ?? ((key: string) => new BufferAnalyticsClient(key).validateKey());
+
+  const access = await checkAccess(slug, userId, isGlobalAdmin);
   if (!access.ok) return { success: false, code: access.error };
 
   const key = rawKey.trim();
@@ -108,9 +153,10 @@ export async function setAnalyticsKey(
   }
 
   // ── Test before storing ────────────────────────────────────────────────────
+  // An invalid key returns here, so nothing is written and no sync is attempted.
   let organizationName: string;
   try {
-    organizationName = (await new BufferAnalyticsClient(key).validateKey()).organizationName;
+    organizationName = (await validateKey(key)).organizationName;
   } catch (err) {
     if (err instanceof AnalyticsScopeError) {
       return {
@@ -151,7 +197,7 @@ export async function setAnalyticsKey(
     },
   });
 
-  await createAuditLog({
+  await auditLog({
     companyId: access.companyId,
     userId,
     action: AUDIT_ACTIONS.ANALYTICS_KEY_SET,
@@ -161,7 +207,22 @@ export async function setAnalyticsKey(
     metadata: { organizationName, last4: key.slice(-4) },
   });
 
-  return { success: true, data: { ...statusFrom(updated), organizationName } };
+  // ── First sync ─────────────────────────────────────────────────────────────
+  // Everything above is already committed. A failure here is reported alongside
+  // a successful save, never instead of one — the user keeps a working key and
+  // can retry with "sync now".
+  let sync: InitialSyncOutcome = null;
+  try {
+    sync = await syncMetrics(access.companyId);
+  } catch (err) {
+    console.error(
+      `[analytics] Initial metrics sync failed for company ${access.companyId}: ${
+        err instanceof Error ? err.message : "unknown error"
+      }`
+    );
+  }
+
+  return { success: true, data: { ...statusFrom(updated), organizationName, sync } };
 }
 
 /** Removes the key and disables analytics. Stored metrics are left intact. */

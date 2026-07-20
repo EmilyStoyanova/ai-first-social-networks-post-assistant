@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
@@ -8,6 +9,17 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { formatDate } from "@/lib/i18n/format-date";
 import type { AnalyticsKeyStatus } from "@/lib/services/analytics/manage-analytics-key.service";
+
+/** The sync summary both the save and the sync endpoints return. */
+interface SyncSummary {
+  skipped: boolean;
+  reason?: string;
+  examined: number;
+  updated: number;
+  noData: number;
+  forbidden: number;
+  failed: number;
+}
 
 interface Props {
   slug: string;
@@ -28,6 +40,7 @@ interface Props {
  * represented only by its last 4 characters.
  */
 export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
+  const router = useRouter();
   const t = useTranslations("analytics");
   const tCommon = useTranslations("common");
 
@@ -51,7 +64,10 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
         body: JSON.stringify({ key: keyInput }),
       });
       const json = (await res.json()) as {
-        data?: AnalyticsKeyStatus & { organizationName: string };
+        data?: AnalyticsKeyStatus & {
+          organizationName: string;
+          sync: SyncSummary | null;
+        };
         error?: { message?: string };
       };
 
@@ -63,9 +79,21 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
       }
 
       setStatus(json.data);
-      setSuccess(t("keySavedFor", { organization: json.data.organizationName }));
       setKeyInput("");
       setEditing(false);
+
+      const saved = t("keySavedFor", { organization: json.data.organizationName });
+      const outcome = describeSync(json.data.sync);
+
+      // The key is stored either way — a sync problem is a warning appended to a
+      // successful save, never a failed save (requirement: keep the valid key).
+      if (outcome.kind === "warning") {
+        setSuccess(saved);
+        setError(outcome.message);
+      } else {
+        setSuccess(`${saved} ${outcome.message}`);
+        if (outcome.refresh) router.refresh();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
@@ -94,9 +122,9 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
   const [syncing, setSyncing] = useState(false);
 
   /**
-   * Pulls metrics immediately rather than waiting for the nightly cron, which
-   * processes one company per run and could otherwise leave a new key showing
-   * nothing for days.
+   * Manual retry / refresh. No longer required for initial setup — saving a key
+   * already runs this same forced sync server-side — but it stays for re-reading
+   * after Buffer's daily ingestion has caught up.
    */
   async function handleSync() {
     setSyncing(true);
@@ -105,14 +133,7 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
     try {
       const res = await fetch(`/api/v1/companies/${slug}/analytics/sync`, { method: "POST" });
       const json = (await res.json()) as {
-        data?: {
-          skipped: boolean;
-          reason?: string;
-          examined: number;
-          updated: number;
-          noData: number;
-          forbidden: number;
-        };
+        data?: SyncSummary;
         error?: { message?: string };
       };
 
@@ -120,28 +141,50 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
         throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
       }
 
-      const d = json.data;
-      if (d.skipped) {
-        // A skipped run is not a crash — say which of the four causes it was.
-        setError(t(`syncSkipped.${d.reason ?? "NO_KEY"}`));
-      } else if (d.examined === 0) {
-        setSuccess(t("syncNoPosts"));
-      } else if (d.updated === 0 && d.forbidden > 0) {
-        setSuccess(t("syncAllForbidden"));
-      } else if (d.updated === 0) {
-        // Buffer ingests once a day, so a post published hours ago genuinely has
-        // nothing yet. Distinguish that from a failure.
-        setSuccess(t("syncNoDataYet", { examined: d.examined }));
-      } else {
-        setSuccess(t("syncDone", { updated: d.updated, examined: d.examined }));
-        // Metrics render server-side, so the cards only pick up new numbers on reload.
-        setTimeout(() => window.location.reload(), 1200);
+      const outcome = describeSync(json.data);
+      if (outcome.kind === "warning") setError(outcome.message);
+      else {
+        setSuccess(outcome.message);
+        if (outcome.refresh) router.refresh();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setSyncing(false);
     }
+  }
+
+  /**
+   * Single interpretation of a sync summary, shared by the automatic first sync
+   * and the manual button so the two can never drift apart.
+   *
+   * A null summary means the sync threw server-side; the key is still saved.
+   */
+  function describeSync(sync: SyncSummary | null): {
+    kind: "success" | "warning";
+    message: string;
+    refresh?: boolean;
+  } {
+    if (sync === null) return { kind: "warning", message: t("syncFailedAfterSave") };
+    if (sync.skipped) {
+      return { kind: "warning", message: t(`syncSkipped.${sync.reason ?? "NO_KEY"}`) };
+    }
+    if (sync.examined === 0) return { kind: "success", message: t("syncNoPosts") };
+    if (sync.updated === 0 && sync.forbidden > 0) {
+      return { kind: "success", message: t("syncAllForbidden") };
+    }
+    if (sync.updated === 0) {
+      // Buffer ingests once a day, so a post published hours ago genuinely has
+      // nothing yet. That is not a failure.
+      return { kind: "success", message: t("syncNoDataYet", { examined: sync.examined }) };
+    }
+    return {
+      kind: "success",
+      message: t("syncDone", { updated: sync.updated, examined: sync.examined }),
+      // Metrics render server-side; refresh re-runs the page's data fetch without
+      // discarding this card's state the way a full reload would.
+      refresh: true,
+    };
   }
 
   const showForm = canManage && (!status.configured || editing);
@@ -231,7 +274,7 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage }: Props) {
                     onClick={handleSave}
                   >
                     {/* Saving runs a real Buffer call before storing anything. */}
-                    {saving ? t("verifying") : t("verifyAndSave")}
+                    {saving ? t("savingAndSyncing") : t("verifyAndSave")}
                   </Button>
                 )}
 

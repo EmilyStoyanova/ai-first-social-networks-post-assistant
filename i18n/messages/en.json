@@ -771,6 +771,8 @@
       "INVALID_KEY": "Buffer rejected the key. It may have been revoked — add it again.",
       "INSUFFICIENT_SCOPE": "This key cannot read analytics. Check that it is a Personal API Key.",
       "RATE_LIMITED": "Buffer is rate limiting requests. Try again in a few minutes."
-    }
+    },
+    "savingAndSyncing": "Saving and syncing…",
+    "syncFailedAfterSave": "The key was saved, but metrics could not be synced yet. Use “Sync now” to retry."
   }
 }
