@@ -1,15 +1,10 @@
 import { NextResponse } from "next/server";
 import { verifyCronRequest } from "@/lib/security/cron-auth";
-import { runCron } from "@/lib/services/cron/run-cron.service";
-
-// DEPRECATED (v2-9): the combined one-company-per-run pipeline. Superseded by the split
-// crons /api/v1/internal/cron/ingest and /api/v1/internal/cron/generate, which vercel.json
-// now schedules instead. Retained for manual/backwards-compatible invocation only — do NOT
-// schedule it alongside the generation cron, as both advance Company.lastCronProcessedAt.
+import { runIngestionCron } from "@/lib/services/cron/run-ingestion-cron.service";
 
 // Cron work must never be cached or statically optimized.
 export const dynamic = "force-dynamic";
-// Allow the full Vercel Hobby function budget for LLM + Buffer calls.
+// Allow the full Vercel Hobby function budget for feed fetch + translation LLM calls.
 export const maxDuration = 60;
 
 async function handle(request: Request) {
@@ -32,7 +27,7 @@ async function handle(request: Request) {
     );
   }
 
-  const summary = await runCron();
+  const summary = await runIngestionCron();
 
   if (summary.status === "failed") {
     return NextResponse.json(
