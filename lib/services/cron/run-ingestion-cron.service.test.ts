@@ -109,6 +109,24 @@ describe("runIngestionCron — batching", () => {
       assert.equal(typeof s[k], "number", `${k} should be a number`);
     }
   });
+
+  it("returns a per-phase timing breakdown", async () => {
+    const h = harness({ selectStaleSources: async () => [source("a", "c1")] });
+    const s = await runIngestionCron(h.deps);
+    for (const k of [
+      "sourceSelectionMs",
+      "sourceIngestionMs",
+      "translationMs",
+      "databaseWritesMs",
+      "cleanupMs",
+      "totalMs",
+    ] as const) {
+      assert.equal(typeof s.timings[k], "number", `timings.${k} should be a number`);
+      assert.ok(s.timings[k] >= 0, `timings.${k} should be >= 0`);
+    }
+    // durationMs mirrors the measured total.
+    assert.equal(s.durationMs, s.timings.totalMs);
+  });
 });
 
 describe("runIngestionCron — fairness (processes in the order the selector returns)", () => {
@@ -261,6 +279,37 @@ describe("runIngestionCron — time budget (Hobby-safe)", () => {
     assert.equal(s.examined, 1);
     assert.equal(s.succeeded, 1);
     assert.deepEqual(h.ingested, ["a"]);
+  });
+
+  it("does NOT mark timedOut when the deadline passed but no work remained", async () => {
+    // Deadline is already crossed by the time Phase B is reached, but there is nothing
+    // stale and nothing to translate — so nothing was interrupted.
+    const h = harness({
+      timeBudgetMs: 50_000,
+      now: steppingClock(0, 60_000),
+      selectStaleSources: async () => [],
+      selectTranslationCompanies: async () => [],
+    });
+
+    const s = await runIngestionCron(h.deps);
+
+    assert.equal(s.examined, 0);
+    assert.equal(s.timedOut, false);
+  });
+
+  it("marks timedOut when translation work is left unprocessed at the deadline", async () => {
+    // Over budget by Phase B, and companies ARE pending → genuine interruption.
+    const h = harness({
+      timeBudgetMs: 50_000,
+      now: steppingClock(0, 60_000),
+      selectStaleSources: async () => [],
+      selectTranslationCompanies: async () => ["c1", "c2"],
+    });
+
+    const s = await runIngestionCron(h.deps);
+
+    assert.equal(s.timedOut, true);
+    assert.equal(s.translation.companiesProcessed, 0); // c1 abandoned before translating
   });
 
   it("passes a live, callable shouldStop hook into each source (mid-feed stop wiring)", async () => {

@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { prisma } from "@/lib/db/client";
 import { Prisma } from "@prisma/client";
 import {
@@ -32,6 +33,27 @@ export interface StaleSourceRow extends IngestableSource {
   lastFetchedAt: Date | null;
 }
 
+/**
+ * Wall-clock time (ms) spent in each major phase — surfaced so an operator can see the
+ * bottleneck directly instead of inferring it. Measured on a real clock, independent of
+ * the injectable `now()` that drives the deadline, so timings stay accurate in production
+ * and don't perturb deterministic budget tests. Sum of the phases ≈ totalMs.
+ */
+export interface IngestionTimings {
+  /** selectStaleSources — picking the batch. */
+  sourceSelectionMs: number;
+  /** All runSourceIngestion calls — feed fetch + article extraction + upserts. */
+  sourceIngestionMs: number;
+  /** selectTranslationCompanies + all translate calls. */
+  translationMs: number;
+  /** Cron-level DB writes: createRun + the per-source CAS claims. */
+  databaseWritesMs: number;
+  /** Wrap-up: the remaining-backlog count. (finishRun, the record write, is excluded.) */
+  cleanupMs: number;
+  /** Total measured wall-clock of the run. */
+  totalMs: number;
+}
+
 export interface IngestionCronSummary {
   runId: string;
   status: "completed" | "failed";
@@ -46,8 +68,10 @@ export interface IngestionCronSummary {
   skipped: number;
   /** Stale sources still awaiting ingestion after this run — the continuation backlog. */
   remaining: number;
-  /** Wall-clock duration of the run. */
+  /** Wall-clock duration of the run (equals timings.totalMs). */
   durationMs: number;
+  /** Per-phase wall-clock breakdown — the bottleneck at a glance. */
+  timings: IngestionTimings;
   itemsCreated: number;
   itemsUpdated: number;
   sourceFailures: Array<{ sourceId: string; companyId: string; message: string }>;
@@ -182,6 +206,7 @@ function toActions(summary: IngestionCronSummary): Record<string, unknown> {
     skipped: summary.skipped,
     remaining: summary.remaining,
     durationMs: summary.durationMs,
+    timings: summary.timings,
     itemsCreated: summary.itemsCreated,
     itemsUpdated: summary.itemsUpdated,
     sourceFailures: summary.sourceFailures,
@@ -230,7 +255,27 @@ export async function runIngestionCron(
   const shouldStop = () => now().getTime() >= deadlineMs;
   const staleBefore = new Date(startMs - staleAfterMs);
 
-  const run = await createRun();
+  // Real-clock timing, deliberately separate from the injectable `now()` used for the
+  // deadline — accurate in production, and it never perturbs deterministic budget tests.
+  const runStart = performance.now();
+  const timings: IngestionTimings = {
+    sourceSelectionMs: 0,
+    sourceIngestionMs: 0,
+    translationMs: 0,
+    databaseWritesMs: 0,
+    cleanupMs: 0,
+    totalMs: 0,
+  };
+  async function timed<T>(bucket: keyof IngestionTimings, fn: () => Promise<T>): Promise<T> {
+    const t = performance.now();
+    try {
+      return await fn();
+    } finally {
+      timings[bucket] += Math.round(performance.now() - t);
+    }
+  }
+
+  const run = await timed("databaseWritesMs", () => createRun());
   const summary: IngestionCronSummary = {
     runId: run.id,
     status: "completed",
@@ -241,6 +286,7 @@ export async function runIngestionCron(
     skipped: 0,
     remaining: 0,
     durationMs: 0,
+    timings,
     itemsCreated: 0,
     itemsUpdated: 0,
     sourceFailures: [],
@@ -251,26 +297,33 @@ export async function runIngestionCron(
 
   try {
     // ── Phase A — ingest stale sources ──────────────────────────────────────
-    const sources = await selectStaleSources(maxSources, staleBefore);
+    const sources = await timed("sourceSelectionMs", () =>
+      selectStaleSources(maxSources, staleBefore)
+    );
 
     for (const source of sources) {
       if (overBudget()) {
+        // A source we were about to process is abandoned → genuine interruption.
         summary.timedOut = true;
         break;
       }
 
       summary.examined++;
-      const won = await claimSource(source.id, source.lastFetchedAt);
+      const won = await timed("databaseWritesMs", () =>
+        claimSource(source.id, source.lastFetchedAt)
+      );
       if (!won) {
         summary.skipped++;
         continue;
       }
 
       try {
-        const { created, updated } = await ingestSource(
-          { id: source.id, type: source.type, name: source.name, config: source.config },
-          source.companyId,
-          { shouldStop }
+        const { created, updated } = await timed("sourceIngestionMs", () =>
+          ingestSource(
+            { id: source.id, type: source.type, name: source.name, config: source.config },
+            source.companyId,
+            { shouldStop }
+          )
         );
         summary.succeeded++;
         summary.itemsCreated += created;
@@ -286,36 +339,42 @@ export async function runIngestionCron(
     }
 
     // ── Phase B — drain translation queue ───────────────────────────────────
-    if (overBudget()) {
-      summary.timedOut = true;
-    } else {
-      const companies = await selectTranslationCompanies(maxTranslationCompanies);
-      for (const companyId of companies) {
-        if (overBudget()) {
-          summary.timedOut = true;
-          break;
-        }
-        try {
-          const t = await translate({ companyId });
-          summary.translation.companiesProcessed++;
-          summary.translation.translated += t.translated;
-          summary.translation.failed += t.failed;
-          summary.translation.skipped += t.skipped;
-        } catch (err) {
-          summary.translationFailures.push({ companyId, message: message(err) });
-        }
+    // Always ask what is pending (a cheap indexed query), THEN let the per-company
+    // deadline check decide. timedOut is set only when a company with real pending work
+    // is abandoned — never merely because the clock passed the deadline with nothing left
+    // to do. (When already over budget, the first loop check breaks before any translate
+    // call, so no translation work happens either way — behavior is unchanged.)
+    const companies = await timed("translationMs", () =>
+      selectTranslationCompanies(maxTranslationCompanies)
+    );
+    for (const companyId of companies) {
+      if (overBudget()) {
+        // A company with pending translations is abandoned → genuine interruption.
+        summary.timedOut = true;
+        break;
+      }
+      try {
+        const t = await timed("translationMs", () => translate({ companyId }));
+        summary.translation.companiesProcessed++;
+        summary.translation.translated += t.translated;
+        summary.translation.failed += t.failed;
+        summary.translation.skipped += t.skipped;
+      } catch (err) {
+        summary.translationFailures.push({ companyId, message: message(err) });
       }
     }
 
-    summary.remaining = await countRemainingStale(staleBefore);
-    summary.durationMs = now().getTime() - startMs;
+    summary.remaining = await timed("cleanupMs", () => countRemainingStale(staleBefore));
+    timings.totalMs = Math.round(performance.now() - runStart);
+    summary.durationMs = timings.totalMs;
     await finishRun(run.id, toActions(summary));
     return summary;
   } catch (err) {
     const msg = message(err);
     summary.status = "failed";
     summary.error = msg;
-    summary.durationMs = now().getTime() - startMs;
+    timings.totalMs = Math.round(performance.now() - runStart);
+    summary.durationMs = timings.totalMs;
     await failRun(run.id, toActions(summary), msg);
     return summary;
   }
