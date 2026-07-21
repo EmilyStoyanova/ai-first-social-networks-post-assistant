@@ -213,7 +213,8 @@
       "activity": "Activity"
     },
     "pendingApprovalsLabel": "{count, plural, one {# post awaiting approval} other {# posts awaiting approval}}",
-    "setupHint": "Start here — fill in your brand identity, then connect Buffer and configure your channels. The AI uses this information when generating posts."
+    "setupHint": "Start here — fill in your brand identity, then connect Buffer and configure your channels. The AI uses this information when generating posts.",
+    "generatePost": "Generate post"
   },
   "companyPage": {
     "sections": {
@@ -250,7 +251,53 @@
     "website": "Website",
     "noWebsite": "No website configured.",
     "role": "Your role",
-    "created": "Created"
+    "created": "Created",
+    "kpis": {
+      "postsThisMonth": "Posts this month",
+      "pendingApproval": "Pending approval",
+      "published": "Published",
+      "connectedChannels": "Connected channels",
+      "rssSources": "RSS sources",
+      "vsLastMonth": "vs. last month",
+      "reviewAndApprove": "Review and approve",
+      "ofTotalChannels": "{total, plural, =0 {No channels configured} one {of # configured} other {of # configured}}",
+      "withNewContent": "{count, plural, =0 {No new content} one {# with new content} other {# with new content}}"
+    },
+    "upcoming": {
+      "title": "Upcoming posts",
+      "viewAll": "View all posts",
+      "empty": "Nothing scheduled or awaiting approval.",
+      "notScheduled": "Not scheduled"
+    },
+    "performance": {
+      "title": "Performance",
+      "viewPosts": "View published posts",
+      "notConfigured": "Analytics are not connected.",
+      "notConfiguredOwnerHint": "Add a Buffer analytics key in Settings → Buffer to collect metrics.",
+      "noData": "No metrics collected yet.",
+      "scopeNote": "{channel} totals across {count, plural, one {# published post} other {# published posts}}. Metrics are not comparable between channels, so they are never combined.",
+      "metrics": {
+        "impressions": "Impressions",
+        "reach": "Reach",
+        "reactions": "Reactions",
+        "comments": "Comments",
+        "shares": "Shares",
+        "clicks": "Clicks"
+      }
+    },
+    "sources": {
+      "title": "RSS sources",
+      "viewAll": "View all sources",
+      "empty": "No RSS sources yet.",
+      "newContent": "{count, plural, one {# new} other {# new}}",
+      "noNewContent": "No new content",
+      "neverFetched": "Never fetched"
+    },
+    "activity": {
+      "title": "Recent activity",
+      "viewAll": "View all activity",
+      "empty": "No activity recorded yet."
+    }
   },
   "setupChecklist": {
     "title": "Getting Started",

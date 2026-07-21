@@ -1,7 +1,14 @@
 @import "tailwindcss";
 
 /*
- * Design tokens — Direction A "The Reading Room" (UI_REDESIGN_SPEC.md §6).
+ * Design tokens — Direction A "The Reading Room", softened in v2.2
+ * (UI_REDESIGN_SPEC.md §6 and Visual Identity).
+ *
+ * v2.2 kept the palette, typography and spacing rhythm of Direction A and
+ * changed only its shape language: larger radii, a resting card shadow, and
+ * accent tints for icon tiles. The colour identity is untouched — every tint
+ * below is an existing status colour or the accent.
+ *
  * Components consume tokens only; no ad-hoc hex/px in component code.
  */
 
@@ -53,15 +60,38 @@
   --spacing-label: 0.375rem; /* label → input */
   --spacing-inline: 0.5rem; /* icon ↔ text, badge ↔ title */
 
-  /* ---------- 6.4 Radius ---------- */
-  --radius-control: 0.25rem; /* 4px — controls & badges */
-  --radius-card: 0.375rem; /* 6px — cards */
-  --radius-panel: 0.625rem; /* 10px — modals / panels */
+  /* ---------- 6.4 Radius (v2.2) ---------- */
+  --radius-control: 0.5rem; /* 8px — controls & badges */
+  --radius-card: 0.875rem; /* 14px — cards */
+  --radius-panel: 1rem; /* 16px — modals / panels */
+  --radius-pill: 9999px; /* pills, avatars, icon tiles */
 
-  /* ---------- 6.4 Elevation — floating layers only ---------- */
-  --shadow-sm: 0 1px 2px 0 rgb(33 30 27 / 0.06); /* interactive-card hover */
+  /* ---------- 6.4 Elevation (v2.2) ----------
+   * Cards now carry a resting shadow. Kept low-contrast and tight so the
+   * surface still reads as paper on the warm ground rather than as a floating
+   * chip — elevation separates cards from the background, it does not stack
+   * them into layers. Max one level of nesting still applies (Principle 11). */
+  --shadow-card: 0 1px 2px 0 rgb(33 30 27 / 0.04); /* card at rest */
+  --shadow-sm: 0 2px 8px -2px rgb(33 30 27 / 0.08); /* interactive-card hover */
   --shadow-md: 0 4px 12px -2px rgb(33 30 27 / 0.1); /* dropdown / popover */
   --shadow-lg: 0 12px 32px -8px rgb(33 30 27 / 0.18); /* modal / side panel */
+
+  /* ---------- 6.2 Accent tints (v2.2) ----------
+   * Icon-tile backgrounds for KPI and section headers. Every value is drawn
+   * from the existing status map or the accent — no new hues enter the
+   * palette, so the product's colour identity is unchanged and the status
+   * language keeps its meaning. Tiles are decorative-adjacent: they identify a
+   * metric, they never encode state. State remains the StatusBadge's job. */
+  --color-tile-accent-bg: #e7ecf2;
+  --color-tile-accent-fg: #3e5c76;
+  --color-tile-warning-bg: #fbefdc;
+  --color-tile-warning-fg: #b45309;
+  --color-tile-success-bg: #dff0e4;
+  --color-tile-success-fg: #166534;
+  --color-tile-info-bg: #e8eef9;
+  --color-tile-info-fg: #1e40af;
+  --color-tile-neutral-bg: #efedea;
+  --color-tile-neutral-fg: #57534e;
 
   /* ---------- 6.9 Motion ---------- */
   --duration-fast: 120ms; /* hovers, fades */

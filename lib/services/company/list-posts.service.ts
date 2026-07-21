@@ -14,6 +14,8 @@ export interface PostItem {
   mediaUrl?: string | null;
   approvedById: string | null;
   publishedPostUrl: string | null;
+  /** When the post is due to go out. Null for drafts that were never scheduled. */
+  scheduledFor: string | null;
   createdAt: string;
 }
 
@@ -33,6 +35,7 @@ const SELECT = {
   llmModel: true,
   approvedById: true,
   publishedPostUrl: true,
+  scheduledFor: true,
   createdAt: true,
   mediaAsset: { select: { url: true } },
 } as const;
@@ -51,6 +54,7 @@ function toItem(r: {
   approvedById: string | null;
   publishedPostUrl: string | null;
   mediaAsset: { url: string } | null;
+  scheduledFor: Date | null;
   createdAt: Date;
 }): PostItem {
   return {
@@ -67,6 +71,7 @@ function toItem(r: {
     approvedById: r.approvedById,
     publishedPostUrl: r.publishedPostUrl,
     mediaUrl: r.mediaAsset?.url ?? null,
+    scheduledFor: r.scheduledFor?.toISOString() ?? null,
     createdAt: r.createdAt.toISOString(),
   };
 }

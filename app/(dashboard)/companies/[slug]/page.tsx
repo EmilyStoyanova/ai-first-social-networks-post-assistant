@@ -1,24 +1,26 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
-import { ClipboardList, Image as ImageIcon, Pencil, Radio, Settings2 } from "lucide-react";
+import { CheckCircle2, Clock, FileText, Radio, Users } from "lucide-react";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { getBrandGuidelines } from "@/lib/services/company/get-brand-guidelines.service";
 import { getBufferConnection } from "@/lib/services/buffer/get-buffer-connection.service";
-import {
-  listChannelConfigs,
-  type ChannelConfigItem,
-} from "@/lib/services/company/list-channel-configs.service";
+import { listChannelConfigs } from "@/lib/services/company/list-channel-configs.service";
+import { listContentSources } from "@/lib/services/company/list-content-sources.service";
+import { getOverviewData } from "@/lib/services/company/get-overview-data.service";
+import { getAnalyticsKeyStatus } from "@/lib/services/analytics/manage-analytics-key.service";
+import { listCompanyAuditLogs } from "@/lib/services/audit/audit-log.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
 import { SetupChecklist } from "@/components/company/setup-checklist";
-import { Badge } from "@/components/ui/Badge";
-import { Card } from "@/components/ui/Card";
-import { Section } from "@/components/ui/Section";
-import { formatDateLong } from "@/lib/i18n/format-date";
+import { OverviewStatCard } from "@/components/company/overview-stat-card";
+import { OverviewUpcoming } from "@/components/company/overview-upcoming";
+import { OverviewPerformance } from "@/components/company/overview-performance";
+import { OverviewSources, type OverviewSourceRow } from "@/components/company/overview-sources";
+import { OverviewActivity } from "@/components/company/overview-activity";
 import { resolveLegacyTabRedirect } from "@/lib/companies/legacy-tab-redirect";
-import Link from "next/link";
+import { pendingApprovalsHref } from "@/lib/posts/post-status-filter";
 
 interface Props {
   params: Promise<{ slug: string }>;
@@ -28,6 +30,17 @@ interface Props {
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
   return { title: `${slug} – AI-First Post Assistant` };
+}
+
+/** RSS feeds show their host, which is what a user recognises a feed by. */
+function hostOf(config: Record<string, string | boolean>): string | null {
+  const url = typeof config.url === "string" ? config.url : null;
+  if (!url) return null;
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
 }
 
 export default async function CompanyPage({ params, searchParams }: Props) {
@@ -46,12 +59,53 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   if (!company) notFound();
 
   const tNav = await getTranslations("navigation");
+  const t = await getTranslations("overview");
+  const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
 
-  const [brandGuidelines, bufferConnection, channelConfigs] = await Promise.all([
+  const channelParam = Array.isArray(sp.channel) ? sp.channel[0] : sp.channel;
+
+  const [
+    brandGuidelines,
+    bufferConnection,
+    channelConfigs,
+    contentSources,
+    overview,
+    analyticsStatus,
+    activity,
+  ] = await Promise.all([
     getBrandGuidelines(company.id),
     getBufferConnection(company.id),
     listChannelConfigs(slug, session.user.id, session.user.isGlobalAdmin),
+    listContentSources(slug, session.user.id, session.user.isGlobalAdmin),
+    getOverviewData(company.id, channelParam),
+    getAnalyticsKeyStatus(slug, session.user.id, session.user.isGlobalAdmin),
+    listCompanyAuditLogs(company.id, { limit: 5 }),
   ]);
+
+  const configs = channelConfigs?.success ? channelConfigs.configs : [];
+  const sources = contentSources?.success ? contentSources.sources : [];
+
+  // The key-status service is owner-scoped and answers FORBIDDEN to an editor.
+  // That is a permission fact, not a setup fact, so it must not be read as
+  // "no key configured" — an editor still sees whatever metrics exist (§2.4).
+  const analyticsReadable = analyticsStatus.success;
+  const analyticsConfigured = analyticsReadable
+    ? analyticsStatus.data.configured
+    : overview.availableChannels.length > 0;
+
+  const rssRows: OverviewSourceRow[] = sources
+    .filter((s) => s.type === "rss")
+    .slice(0, 4)
+    .map((s) => ({
+      id: s.id,
+      name: s.name,
+      host: hostOf(s.config),
+      enabled: s.enabled,
+      newItemCount: overview.newItemsBySource[s.id] ?? 0,
+      lastFetchedAt: s.lastFetchedAt,
+    }));
+
+  const { kpis } = overview;
 
   return (
     <DashboardLayout
@@ -65,174 +119,77 @@ export default async function CompanyPage({ params, searchParams }: Props) {
       <div>
         <CompanyWorkspaceHeader company={company} activeTab="overview" />
 
-        <div className="mt-8">
-          <OverviewTab
-            company={company}
+        <div className="mt-8 space-y-6">
+          {/* Onboarding scaffold — disappears permanently once outgrown (§9.3). */}
+          <SetupChecklist
             slug={slug}
-            brandGuidelines={brandGuidelines}
-            bufferConnection={bufferConnection}
-            channelConfigs={channelConfigs?.success ? channelConfigs.configs : []}
+            brandDescribed={!!brandGuidelines?.companyDescription?.trim()}
+            bufferConnected={bufferConnection?.connected ?? false}
+            profilesSynced={!!bufferConnection?.lastProfileSyncAt}
+            hasEnabledChannel={configs.some((c) => c.enabled)}
           />
+
+          {/* KPI row — each tile routes into the work it counts (§9.3). */}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+            <OverviewStatCard
+              icon={FileText}
+              tone="accent"
+              label={t("kpis.postsThisMonth")}
+              value={kpis.postsThisMonth}
+              delta={kpis.postsThisMonthDelta}
+              hint={t("kpis.vsLastMonth")}
+              href={`/companies/${slug}/posts`}
+            />
+            <OverviewStatCard
+              icon={Clock}
+              tone="warning"
+              label={t("kpis.pendingApproval")}
+              value={kpis.pendingApproval}
+              hint={t("kpis.reviewAndApprove")}
+              href={pendingApprovalsHref(slug)}
+            />
+            <OverviewStatCard
+              icon={CheckCircle2}
+              tone="success"
+              label={t("kpis.published")}
+              value={kpis.published}
+              delta={kpis.publishedDelta}
+              hint={t("kpis.vsLastMonth")}
+              href={`/companies/${slug}/posts?status=published`}
+            />
+            <OverviewStatCard
+              icon={Users}
+              tone="info"
+              label={t("kpis.connectedChannels")}
+              value={kpis.connectedChannels}
+              hint={t("kpis.ofTotalChannels", { total: kpis.totalChannels })}
+              href={`/companies/${slug}/settings/channels`}
+            />
+            <OverviewStatCard
+              icon={Radio}
+              tone="neutral"
+              label={t("kpis.rssSources")}
+              value={kpis.rssSources}
+              hint={t("kpis.withNewContent", { count: kpis.rssSourcesWithNewContent })}
+              href={`/companies/${slug}/sources`}
+            />
+          </div>
+
+          {/* Two-column dashboard: work to do left, evidence right. */}
+          <div className="grid gap-6 lg:grid-cols-2">
+            <OverviewUpcoming slug={slug} posts={overview.upcoming} />
+            <OverviewPerformance
+              slug={slug}
+              performance={overview.performance}
+              availableChannels={overview.availableChannels}
+              analyticsConfigured={analyticsConfigured}
+              canManageKey={canManage}
+            />
+            <OverviewSources slug={slug} sources={rssRows} />
+            <OverviewActivity slug={slug} entries={activity} />
+          </div>
         </div>
       </div>
     </DashboardLayout>
-  );
-}
-
-// ── Overview tab ─────────────────────────────────────────────────────────────
-
-interface OverviewTabProps {
-  company: Awaited<ReturnType<typeof getCompany>>;
-  slug: string;
-  brandGuidelines: Awaited<ReturnType<typeof getBrandGuidelines>> | null;
-  bufferConnection: Awaited<ReturnType<typeof getBufferConnection>> | null;
-  channelConfigs: ChannelConfigItem[];
-}
-
-async function OverviewTab({
-  company,
-  slug,
-  brandGuidelines,
-  bufferConnection,
-  channelConfigs,
-}: OverviewTabProps) {
-  if (!company) return null;
-  const t = await getTranslations("overview");
-  const tPage = await getTranslations("companyPage");
-  const tWs = await getTranslations("workspace");
-
-  const formattedDate = formatDateLong(company.createdAt);
-
-  // The Approval card left in Phase 4c along with the tab — approving happens
-  // on Posts now, and a card pointing at a filtered view of the card beside it
-  // would be a third route to one page.
-  const PRIMARY_CARDS = [
-    {
-      icon: Pencil,
-      label: tWs("tabs.posts"),
-      desc: tPage("modules.postsDesc"),
-      href: `/companies/${slug}/posts`,
-    },
-  ];
-
-  const SECONDARY_CARDS = [
-    {
-      icon: ImageIcon,
-      label: tWs("tabs.media"),
-      desc: tPage("modules.mediaGalleryDesc"),
-      href: `/companies/${slug}/media`,
-    },
-    {
-      icon: Radio,
-      label: tWs("tabs.sources"),
-      desc: tPage("sections.contentSourcesDesc"),
-      href: `/companies/${slug}/sources`,
-    },
-    {
-      icon: ClipboardList,
-      label: tWs("tabs.activity"),
-      desc: tPage("modules.auditLogDesc"),
-      href: `/companies/${slug}/activity`,
-    },
-    {
-      icon: Settings2,
-      label: tWs("tabs.settings"),
-      desc: tPage("modules.channelsDesc"),
-      href: `/companies/${slug}/settings`,
-    },
-  ];
-
-  const brandDescribed = !!brandGuidelines?.companyDescription?.trim();
-  const bufferConnected = bufferConnection?.connected ?? false;
-  const profilesSynced = !!bufferConnection?.lastProfileSyncAt;
-  const hasEnabledChannel = channelConfigs.some((c) => c.enabled);
-
-  return (
-    <div className="space-y-8">
-      {/* Onboarding checklist — hidden once all required steps are done and user has visited */}
-      <SetupChecklist
-        slug={slug}
-        brandDescribed={brandDescribed}
-        bufferConnected={bufferConnected}
-        profilesSynced={profilesSynced}
-        hasEnabledChannel={hasEnabledChannel}
-      />
-
-      {/* Company metadata */}
-      <Card className="px-6 py-6">
-        <dl className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          <div>
-            <dt className="text-micro text-fg-faint">{t("name")}</dt>
-            <dd className="text-fg mt-1.5 text-sm font-semibold">{company.name}</dd>
-          </div>
-          <div>
-            <dt className="text-micro text-fg-faint">{t("slug")}</dt>
-            <dd className="text-fg-muted mt-1.5 font-mono text-sm">{company.slug}</dd>
-          </div>
-          <div>
-            <dt className="text-micro text-fg-faint">{t("website")}</dt>
-            <dd className="mt-1.5">
-              {company.website ? (
-                <a
-                  href={company.website}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-accent hover:text-fg text-sm transition-colors hover:underline"
-                >
-                  {company.website}
-                </a>
-              ) : (
-                <span className="text-fg-faint text-sm">{t("noWebsite")}</span>
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-micro text-fg-faint">{t("role")}</dt>
-            <dd className="mt-1.5">
-              {company.role && (
-                <Badge variant={company.role === "OWNER" ? "owner" : "editor"}>
-                  {company.role}
-                </Badge>
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt className="text-micro text-fg-faint">{t("created")}</dt>
-            <dd className="text-fg-muted mt-1.5 text-sm">{formattedDate}</dd>
-          </div>
-        </dl>
-      </Card>
-
-      {/* Quick access */}
-      <Section title={tPage("sections.modules")}>
-        <div className="space-y-3">
-          {/* Primary: Posts + Approval */}
-          <div className="grid gap-3 sm:grid-cols-2">
-            {PRIMARY_CARDS.map(({ icon: Icon, label, desc, href }) => (
-              <Link key={href} href={href}>
-                <Card variant="hover" className="px-6 py-6">
-                  <Icon className="text-fg-muted mb-4 h-6 w-6" aria-hidden />
-                  <h3 className="text-fg text-sm font-semibold">{label}</h3>
-                  <p className="text-fg-muted mt-1 text-sm leading-relaxed">{desc}</p>
-                </Card>
-              </Link>
-            ))}
-          </div>
-
-          {/* Secondary: Media, Sources, Activity, Settings */}
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {SECONDARY_CARDS.map(({ icon: Icon, label, desc, href }) => (
-              <Link key={href} href={href}>
-                <Card variant="hover" className="px-5 py-4">
-                  <Icon className="text-fg-faint mb-2.5 h-6 w-6" aria-hidden />
-                  <h3 className="text-fg-muted text-sm font-medium">{label}</h3>
-                  <p className="text-fg-faint mt-0.5 text-xs leading-snug">{desc}</p>
-                </Card>
-              </Link>
-            ))}
-          </div>
-        </div>
-      </Section>
-    </div>
   );
 }

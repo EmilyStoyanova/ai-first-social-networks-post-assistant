@@ -1,5 +1,16 @@
 import { Fragment } from "react";
+import Link from "next/link";
 import { getTranslations } from "next-intl/server";
+import {
+  Activity,
+  FileText,
+  Image as ImageIcon,
+  LayoutGrid,
+  Rss,
+  Settings2,
+  Sparkles,
+} from "lucide-react";
+import { RoleBadge } from "@/components/ui/RoleBadge";
 import type { CompanyDetails } from "@/lib/services/company/get-company.service";
 import { countPendingApprovals } from "@/lib/services/company/count-pending-approvals.service";
 import { CompanyWorkspaceNav, type WorkspaceTab } from "./company-workspace-nav";
@@ -34,18 +45,29 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
   // badge came with it, because the pull signal was the tab's real job and
   // Principle 4 still needs somewhere to put it.
   const tabs: WorkspaceTab[] = [
-    { key: "overview", label: t("tabs.overview"), href: `/companies/${slug}` },
+    { key: "overview", label: t("tabs.overview"), href: `/companies/${slug}`, icon: LayoutGrid },
     {
       key: "posts",
       label: t("tabs.posts"),
       href: `/companies/${slug}/posts`,
+      icon: FileText,
       count: pendingApprovals,
       countLabel: t("pendingApprovalsLabel", { count: pendingApprovals }),
     },
-    { key: "media", label: t("tabs.media"), href: `/companies/${slug}/media` },
-    { key: "sources", label: t("tabs.sources"), href: `/companies/${slug}/sources` },
-    { key: "settings", label: t("tabs.settings"), href: `/companies/${slug}/settings` },
-    { key: "activity", label: t("tabs.activity"), href: `/companies/${slug}/activity` },
+    { key: "media", label: t("tabs.media"), href: `/companies/${slug}/media`, icon: ImageIcon },
+    { key: "sources", label: t("tabs.sources"), href: `/companies/${slug}/sources`, icon: Rss },
+    {
+      key: "settings",
+      label: t("tabs.settings"),
+      href: `/companies/${slug}/settings`,
+      icon: Settings2,
+    },
+    {
+      key: "activity",
+      label: t("tabs.activity"),
+      href: `/companies/${slug}/activity`,
+      icon: Activity,
+    },
   ];
 
   type MetaItem = { key: string; node: React.ReactNode };
@@ -67,12 +89,8 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
     });
   }
 
-  if (company.role) {
-    metaItems.push({
-      key: "role",
-      node: <span className="capitalize">{company.role.toLowerCase()}</span>,
-    });
-  }
+  // No role meta item — the RoleBadge beside the title says it, and repeating
+  // it in the metadata line is the same fact twice in one header.
 
   // No "N pending" meta item — the Posts tab badge above states the same
   // number, and two renderings of one count in one header is the disagreement
@@ -80,22 +98,43 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
 
   return (
     <div>
-      <div>
-        <h1 className="text-display text-fg">{company.name}</h1>
-        {metaItems.length > 0 && (
-          <div className="text-fg-faint mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-            {metaItems.map((item, i) => (
-              <Fragment key={item.key}>
-                {i > 0 && (
-                  <span className="text-border select-none" aria-hidden="true">
-                    ·
-                  </span>
-                )}
-                {item.node}
-              </Fragment>
-            ))}
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-display text-fg">{company.name}</h1>
+            {company.role && (
+              <RoleBadge
+                role={company.role.toLowerCase() as "owner" | "editor"}
+                label={company.role}
+              />
+            )}
           </div>
-        )}
+          {metaItems.length > 0 && (
+            <div className="text-fg-faint mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              {metaItems.map((item, i) => (
+                <Fragment key={item.key}>
+                  {i > 0 && (
+                    <span className="text-border select-none" aria-hidden="true">
+                      ·
+                    </span>
+                  )}
+                  {item.node}
+                </Fragment>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* The workspace's one primary action, in the header's action slot so
+            it never floats over content (§9.3). Posts owns generation, so the
+            button routes there rather than opening a panel from any tab. */}
+        <Link
+          href={`/companies/${slug}/posts`}
+          className="bg-accent rounded-control duration-fast focus-visible:outline-accent inline-flex shrink-0 items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2"
+        >
+          <Sparkles className="h-4 w-4" aria-hidden="true" />
+          {t("generatePost")}
+        </Link>
       </div>
 
       <CompanyWorkspaceNav tabs={tabs} activeTab={activeTab} />

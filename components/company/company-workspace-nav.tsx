@@ -1,9 +1,12 @@
 import Link from "next/link";
+import type { LucideIcon } from "lucide-react";
 
 export interface WorkspaceTab {
   key: string;
   label: string;
   href: string;
+  /** Leading icon. Always paired with the label, never replacing it (§1.12). */
+  icon?: LucideIcon;
   /**
    * Optional count beside the label. Exactly one tab carries one (§9.1) —
    * Posts, for pending approvals. One badge is a signal; five are wallpaper.
@@ -25,21 +28,28 @@ export function CompanyWorkspaceNav({ tabs, activeTab }: Props) {
       className="border-border -mx-4 mt-5 overflow-x-auto border-b sm:-mx-6 lg:-mx-8"
       aria-label="Company workspace"
     >
-      <ul role="list" className="flex min-w-max px-4 sm:px-6 lg:px-8">
+      <ul role="list" className="flex min-w-max gap-1 px-4 sm:px-6 lg:px-8">
         {tabs.map((tab) => {
           const isActive = tab.key === activeTab;
+          const Icon = tab.icon;
           return (
             <li key={tab.key}>
               <Link
                 href={tab.href}
                 aria-current={isActive ? "page" : undefined}
                 className={[
-                  "inline-block border-b-2 px-3 pt-1.5 pb-3 text-sm font-medium whitespace-nowrap transition-colors",
+                  "duration-fast inline-flex items-center gap-2 border-b-2 px-3 pt-1.5 pb-3 text-sm font-medium whitespace-nowrap transition-colors",
                   isActive
-                    ? "border-fg text-fg"
+                    ? "border-accent text-fg"
                     : "text-fg-muted hover:border-border-strong hover:text-fg border-transparent",
                 ].join(" ")}
               >
+                {Icon && (
+                  <Icon
+                    className={`h-4 w-4 shrink-0 ${isActive ? "text-accent" : ""}`}
+                    aria-hidden="true"
+                  />
+                )}
                 {tab.label}
                 {tab.count != null && tab.count > 0 && (
                   <span

@@ -1,9 +1,19 @@
 # UI Redesign Specification — AI-First Social Networks Post Assistant
 
-> **Status:** v2.1 · 2026-07-20 · Official UI/UX blueprint for the redesign — reconciled with shipped code
+> **Status:** v2.2 · 2026-07-20 · Official UI/UX blueprint for the redesign — reconciled with shipped code
 > **Audience:** Frontend engineers and designers. This document is the single source of truth for every UX decision. Engineers implementing from this spec should not need to make UX decisions on their own.
 > **Scope:** Reorganization and redesign of the existing functionality only. No feature additions, no business-logic changes, no removals.
 > **Design direction:** An original design language derived from first principles — see _Design Philosophy_ below. No reference product is imitated; every decision must survive the five questions in that section. Approved visual identity: **Direction A — The Reading Room** (rationale in _Visual Identity_, concrete tokens in §6).
+
+### What changed in v2.2
+
+**The shape language softened; the identity did not change hands.** Larger radii (8/14/16 vs 4/6/10), a resting card shadow, accent tints behind KPI icon tiles, and an accent-filled page-level primary button. Direction A remains the identity: the palette, the two typefaces, the type roles, the spacing rhythm, the status map and the whitespace-first grouping are all untouched, and every new tint is an existing status colour or the accent — no hue entered the palette.
+
+**Why this is a real concession, recorded as one.** The Visual Identity section rejected Direction C partly because roundness and shadow are fashion and "fail the five-year test soonest". v2.2 moves a measured distance toward that language, and the risk is the one the spec already named. Two guardrails keep it from becoming Direction C: elevation stays at one low-contrast level and never stacks, and colour still carries meaning only through the status map — the tile tints identify a metric, never a state. If cards start nesting shadows or tints start meaning "bad", the concession has gone too far and should be walked back.
+
+**What did not change:** §6.1 typography, §6.2 palette and status map, §6.3 spacing, §6.6–6.9. Density, motion and the compact table mode are as specified in v2.0.
+
+Affected: Visual Identity (this note), §6.4, §6.5, §9.3 (Overview composition), §4.4.
 
 ### What changed in v2.1
 
@@ -1101,16 +1111,16 @@ Containers: sidebar fixed 240px; content max-width 1200px centered; reading and 
 ### 6.4 Surfaces & cards
 
 - The page is quiet paper: most content sits directly on `bg`, grouped by whitespace. A card is used only when something must read as _an object_ — a post, a company, an integration — never as general decoration.
-- **Card:** `surface` + 1px `border` hairline, radius 6, **no shadow at rest**. Interactive cards (CompanyCard, MediaCard): hover = `border-strong` + `shadow-sm`.
+- **Card (v2.2):** `surface` + 1px `border` hairline, radius 14, **`shadow-card` at rest** — a 4%-opacity 1px shadow that separates the card from the warm ground without stacking layers. Interactive cards (CompanyCard, MediaCard): hover = `border-strong` + `shadow-sm`.
 - **List mode:** rows separated by hairline rules and whitespace, no boxes — the default for settings summaries, Activity, and tables. Max one level of card nesting (Principle 11).
-- **Radius scale:** 4px controls & badges · 6px cards · 10px modals/panels · full for pills, dots, avatars.
-- **Elevation:** shadows exist only on floating layers — `shadow-sm` (interactive hover), `shadow-md` (dropdown/popover), `shadow-lg` (modal/side panel). Static content never casts a shadow.
+- **Radius scale (v2.2):** 8px controls & badges · 14px cards · 16px modals/panels · full for pills, dots, avatars, channel monograms.
+- **Elevation (v2.2):** `shadow-card` (card at rest) · `shadow-sm` (interactive hover) · `shadow-md` (dropdown/popover) · `shadow-lg` (modal/side panel). The v2.0 rule was "static content never casts a shadow"; cards now do, at one low-contrast level. Everything else is unchanged, and nesting is still capped at one level (Principle 11) — elevation separates a card from the page, it never builds a stack.
 - Dark mode is out of scope for v1; the semantic token names above are theme-ready so one can be added later without touching components.
 
 ### 6.5 Controls
 
 - **Buttons** — label 14/20 weight 600, radius 4, heights 36 (default) / 32 (compact) / 40 (auth):
-  - `primary` — **ink**: `fg` background, `bg` text. Exactly one per screen (Principle 2). Deliberately not accent-colored: the strongest _neutral_ on the page, so status colors keep the chroma spotlight.
+  - `primary` — ink (`fg` background, `bg` text) for in-page actions. **The page-level primary action uses `accent` (v2.2)** — one accent-filled button per screen, in the header action slot only. The v2.0 rule reserved accent for links and focus rings so status colours kept the chroma spotlight; that still holds everywhere else, and one button per page does not contend with a StatusBadge for meaning. Exactly one per screen either way (Principle 2).
   - `secondary` — `surface` + hairline border, `fg` text; hover `surface-subtle`.
   - `ghost` — transparent, `fg-muted` text; hover `surface-subtle`.
   - `danger` — #B91C1C solid, white text — only inside `ConfirmDialog` and the danger zone.
@@ -1321,9 +1331,14 @@ Nothing is dropped except the Overview metadata list (slug and creation date are
 ### 9.3 Overview composition rules
 
 - **SetupChecklist** renders only while `<5/5`; completion is computed (brand row exists & touched, Buffer connected, ≥1 channel enabled, ≥1 source, ≥1 post) — once all true it disappears forever (no "dismiss" needed, no setting stored).
-- **Stat row** (4 `StatsCard`s): Pending approvals → Posts filtered `pending_approval`; Scheduled this week → Posts filtered `approved+sent`; Published this week → Posts filtered `published`; Failed → Posts filtered `failed` (`tone=danger` when >0, hidden when 0 _and_ no failure in 7 days).
-- **This week**: posts with `scheduled_for` in the current ISO week, compact `PostCard` variant, max 7, "View all → Posts".
-- **Recent activity**: `ActivityTimeline` compact, last 5, "View all → Activity".
+- **Stat row (v2.2 — five cards).** Posts this month · Pending approval · Published · Connected channels · RSS sources. Each is a link into the work it counts, each carries a tinted icon tile identifying the metric, and the two month-over-month cards carry a delta chip. The v2.0 four-card row is superseded; its remaining targets are listed below.
+- _Superseded v2.0 stat row_ (4 `StatsCard`s): Pending approvals → Posts filtered `pending_approval`; Scheduled this week → Posts filtered `approved+sent`; Published this week → Posts filtered `published`; Failed → Posts filtered `failed` (`tone=danger` when >0, hidden when 0 _and_ no failure in 7 days).
+- **Two-column dashboard (v2.2).** Below the stat row, four panels in a 2×2 grid sharing one `OverviewPanel` shell (identical header, padding and footer link, so the eye can rely on the same furniture in every quadrant):
+  - **Upcoming posts** — pending-approval and approved posts ordered by `scheduled_for` (unscheduled last), max 5, each row: channel monogram, thumbnail, first line, date, StatusBadge. Replaces v2.0's "This week".
+  - **Performance** — one channel at a time, never blended (§2.6). No trend chart: metrics are per-post and no company-wide daily series exists to plot, so a chart would have to invent its history.
+  - **RSS sources** — max 4, each row: name, host, new-article indicator, last fetched.
+  - **Recent activity** — last 5 audit entries, icon + action + actor + relative time, with an exact `<time datetime>` retained for precision.
+- Channel markers in dense rows are **monograms, not brand icons**: Lucide ships marks for Facebook, Instagram and LinkedIn but none for TikTok, so an icon set would render three channels one way and the fourth another inside a single list.
 - The contextual primary action (§4.4) is rendered in the `PageHeader` actions slot — never floating.
 
 ### 9.4 Approval workflow inside the workspace
