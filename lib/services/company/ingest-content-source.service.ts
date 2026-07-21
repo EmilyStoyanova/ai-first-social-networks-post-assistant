@@ -117,6 +117,18 @@ export interface IngestableSource {
   config: unknown;
 }
 
+export interface RunSourceIngestionOptions {
+  /**
+   * Consulted before each RSS item's (slow) article extraction. Return true to
+   * stop processing further items this run and leave the rest for the next one —
+   * how the batched cron keeps a single large feed from overrunning the Vercel
+   * function limit. Omitted = process the whole feed (the original behavior).
+   * Deduplication is unaffected: unprocessed items are simply picked up next run
+   * and upserted by URL as before.
+   */
+  shouldStop?: () => boolean;
+}
+
 /**
  * System-level ingestion core — no RBAC. Fetches the source, upserts feed
  * items, and stamps lastFetchedAt. Throws on fetch/parse failure.
@@ -124,7 +136,8 @@ export interface IngestableSource {
  */
 export async function runSourceIngestion(
   source: IngestableSource,
-  companyId: string
+  companyId: string,
+  options?: RunSourceIngestionOptions
 ): Promise<{ created: number; updated: number }> {
   const sourceId = source.id;
   const config = source.config as Record<string, string>;
@@ -163,6 +176,10 @@ export async function runSourceIngestion(
     // repeated URL would upsert twice and be miscounted as an "update".
     const processed = new Set<string>();
     for (const item of items) {
+      // Out of time for this run — stop before starting another slow extraction.
+      // lastFetchedAt is still stamped below, so the remaining items are refetched
+      // (and deduped by URL) on a later run rather than lost.
+      if (options?.shouldStop?.()) break;
       if (!item.url) continue;
       if (processed.has(item.url)) continue;
       processed.add(item.url);

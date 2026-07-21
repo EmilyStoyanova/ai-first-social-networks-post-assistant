@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import {
   runSourceIngestion,
   type IngestableSource,
+  type RunSourceIngestionOptions,
 } from "@/lib/services/company/ingest-content-source.service";
 import { translateFeedItems, type TranslateFeedItemsSummary } from "./translate-feed-items.service";
 import { MAX_TRANSLATION_ATTEMPTS } from "@/lib/ai/feed-item-translation";
@@ -11,12 +12,17 @@ import { MAX_TRANSLATION_ATTEMPTS } from "@/lib/ai/feed-item-translation";
 
 /** Sources fetched within this window are fresh and skipped (matches the legacy cron). */
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000;
-/** Max sources ingested per run — bounds the batch so it stays inside the 60s budget. */
+/** Upper bound on sources examined per run — the deterministic batch cap. */
 const MAX_SOURCES_PER_RUN = 25;
 /** Max distinct companies whose translation queue is drained per run. */
 const MAX_TRANSLATION_COMPANIES_PER_RUN = 10;
-/** Stop starting new work past this; leaves headroom under Vercel's 60s function cap. */
-const SOFT_TIME_BUDGET_MS = 50_000;
+/**
+ * Wall-clock deadline for a run. 45s leaves ~15s headroom under Vercel's 60s cap for
+ * one in-flight article extraction (up to an 8s fetch + JSDOM parse) that was already
+ * started when the deadline was crossed. Checked BOTH between sources and, via
+ * shouldStop, between items within a source — a single large feed can no longer overrun.
+ */
+const SOFT_TIME_BUDGET_MS = 45_000;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -30,9 +36,18 @@ export interface IngestionCronSummary {
   runId: string;
   status: "completed" | "failed";
   kind: "ingestion";
-  sourcesProcessed: number;
+  /** Sources this run attempted (claim tried): examined = succeeded + failed + skipped. */
+  examined: number;
+  /** Sources claimed and ingested without throwing. */
+  succeeded: number;
+  /** Sources claimed whose ingestion threw (isolated — the batch continued). */
+  failed: number;
   /** Sources a concurrent run had already claimed (CAS lost) — the locking signal. */
-  sourcesClaimedElsewhere: number;
+  skipped: number;
+  /** Stale sources still awaiting ingestion after this run — the continuation backlog. */
+  remaining: number;
+  /** Wall-clock duration of the run. */
+  durationMs: number;
   itemsCreated: number;
   itemsUpdated: number;
   sourceFailures: Array<{ sourceId: string; companyId: string; message: string }>;
@@ -57,8 +72,11 @@ export interface IngestionCronDeps {
   claimSource?: (id: string, previousFetchedAt: Date | null) => Promise<boolean>;
   ingestSource?: (
     source: IngestableSource,
-    companyId: string
+    companyId: string,
+    options?: RunSourceIngestionOptions
   ) => Promise<{ created: number; updated: number }>;
+  /** How many stale sources still await ingestion (drives the `remaining` diagnostic). */
+  countRemainingStale?: (staleBefore: Date) => Promise<number>;
   selectTranslationCompanies?: (limit: number) => Promise<string[]>;
   translate?: (opts: { companyId: string }) => Promise<TranslateFeedItemsSummary>;
 }
@@ -103,15 +121,20 @@ async function defaultFailRun(
   });
 }
 
+/** enabled + stale (null or older than the cutoff) — the deterministic round-robin cursor. */
+function staleWhere(staleBefore: Date): Prisma.ContentSourceWhereInput {
+  return {
+    enabled: true,
+    OR: [{ lastFetchedAt: null }, { lastFetchedAt: { lt: staleBefore } }],
+  };
+}
+
 async function defaultSelectStaleSources(
   limit: number,
   staleBefore: Date
 ): Promise<StaleSourceRow[]> {
   return prisma.contentSource.findMany({
-    where: {
-      enabled: true,
-      OR: [{ lastFetchedAt: null }, { lastFetchedAt: { lt: staleBefore } }],
-    },
+    where: staleWhere(staleBefore),
     orderBy: [{ lastFetchedAt: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }],
     take: limit,
     select: { id: true, companyId: true, type: true, name: true, config: true, lastFetchedAt: true },
@@ -121,11 +144,16 @@ async function defaultSelectStaleSources(
 async function defaultClaimSource(id: string, previousFetchedAt: Date | null): Promise<boolean> {
   // Compare-and-swap on lastFetchedAt: only the run that still sees the value it read
   // wins the claim, so two overlapping runs can never ingest the same source at once.
+  // The claim also advances the cursor, so the next run continues past this source.
   const res = await prisma.contentSource.updateMany({
     where: { id, lastFetchedAt: previousFetchedAt },
     data: { lastFetchedAt: new Date() },
   });
   return res.count === 1;
+}
+
+async function defaultCountRemainingStale(staleBefore: Date): Promise<number> {
+  return prisma.contentSource.count({ where: staleWhere(staleBefore) });
 }
 
 async function defaultSelectTranslationCompanies(limit: number): Promise<string[]> {
@@ -148,8 +176,12 @@ async function defaultSelectTranslationCompanies(limit: number): Promise<string[
 function toActions(summary: IngestionCronSummary): Record<string, unknown> {
   return {
     kind: summary.kind,
-    sourcesProcessed: summary.sourcesProcessed,
-    sourcesClaimedElsewhere: summary.sourcesClaimedElsewhere,
+    examined: summary.examined,
+    succeeded: summary.succeeded,
+    failed: summary.failed,
+    skipped: summary.skipped,
+    remaining: summary.remaining,
+    durationMs: summary.durationMs,
     itemsCreated: summary.itemsCreated,
     itemsUpdated: summary.itemsUpdated,
     sourceFailures: summary.sourceFailures,
@@ -160,11 +192,17 @@ function toActions(summary: IngestionCronSummary): Record<string, unknown> {
 }
 
 /**
- * RSS ingestion cron (v2-9). Refreshes stale content sources across ALL companies in a
- * bounded, fairly-rotated batch, then drains the translation queue. Never generates
- * posts. Every source and every company is failure-isolated so one bad feed cannot stall
- * the run, and a per-source compare-and-swap on lastFetchedAt prevents concurrent runs
- * from double-processing.
+ * RSS ingestion cron (v2-9, Hobby-safe). Refreshes stale content sources across ALL
+ * companies in a bounded, oldest-first batch, then drains the translation queue. Never
+ * generates posts.
+ *
+ * Hobby-safety comes from a wall-clock deadline enforced at TWO granularities:
+ *   • between sources — stop claiming new sources once the budget is spent;
+ *   • within a source — `shouldStop` is passed into runSourceIngestion so a single large
+ *     feed stops between items instead of running all extractions to the timeout.
+ *
+ * Progress persists via the per-source CAS claim (which advances lastFetchedAt), so the
+ * next invocation resumes with the still-stale sources. Every source is failure-isolated.
  */
 export async function runIngestionCron(
   deps: IngestionCronDeps = {}
@@ -180,20 +218,29 @@ export async function runIngestionCron(
   const selectStaleSources = deps.selectStaleSources ?? defaultSelectStaleSources;
   const claimSource = deps.claimSource ?? defaultClaimSource;
   const ingestSource = deps.ingestSource ?? runSourceIngestion;
+  const countRemainingStale = deps.countRemainingStale ?? defaultCountRemainingStale;
   const selectTranslationCompanies =
     deps.selectTranslationCompanies ?? defaultSelectTranslationCompanies;
   const translate = deps.translate ?? translateFeedItems;
 
   const startMs = now().getTime();
-  const overBudget = () => now().getTime() - startMs >= timeBudgetMs;
+  const deadlineMs = startMs + timeBudgetMs;
+  const overBudget = () => now().getTime() >= deadlineMs;
+  // Passed into each source's item loop so it, too, stops at the deadline.
+  const shouldStop = () => now().getTime() >= deadlineMs;
+  const staleBefore = new Date(startMs - staleAfterMs);
 
   const run = await createRun();
   const summary: IngestionCronSummary = {
     runId: run.id,
     status: "completed",
     kind: "ingestion",
-    sourcesProcessed: 0,
-    sourcesClaimedElsewhere: 0,
+    examined: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    remaining: 0,
+    durationMs: 0,
     itemsCreated: 0,
     itemsUpdated: 0,
     sourceFailures: [],
@@ -204,7 +251,6 @@ export async function runIngestionCron(
 
   try {
     // ── Phase A — ingest stale sources ──────────────────────────────────────
-    const staleBefore = new Date(startMs - staleAfterMs);
     const sources = await selectStaleSources(maxSources, staleBefore);
 
     for (const source of sources) {
@@ -213,21 +259,24 @@ export async function runIngestionCron(
         break;
       }
 
+      summary.examined++;
       const won = await claimSource(source.id, source.lastFetchedAt);
       if (!won) {
-        summary.sourcesClaimedElsewhere++;
+        summary.skipped++;
         continue;
       }
 
       try {
         const { created, updated } = await ingestSource(
           { id: source.id, type: source.type, name: source.name, config: source.config },
-          source.companyId
+          source.companyId,
+          { shouldStop }
         );
-        summary.sourcesProcessed++;
+        summary.succeeded++;
         summary.itemsCreated += created;
         summary.itemsUpdated += updated;
       } catch (err) {
+        summary.failed++;
         summary.sourceFailures.push({
           sourceId: source.id,
           companyId: source.companyId,
@@ -258,12 +307,15 @@ export async function runIngestionCron(
       }
     }
 
+    summary.remaining = await countRemainingStale(staleBefore);
+    summary.durationMs = now().getTime() - startMs;
     await finishRun(run.id, toActions(summary));
     return summary;
   } catch (err) {
     const msg = message(err);
     summary.status = "failed";
     summary.error = msg;
+    summary.durationMs = now().getTime() - startMs;
     await failRun(run.id, toActions(summary), msg);
     return summary;
   }
