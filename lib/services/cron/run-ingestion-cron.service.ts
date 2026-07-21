@@ -18,12 +18,14 @@ const MAX_SOURCES_PER_RUN = 25;
 /** Max distinct companies whose translation queue is drained per run. */
 const MAX_TRANSLATION_COMPANIES_PER_RUN = 10;
 /**
- * Wall-clock deadline for a run. 45s leaves ~15s headroom under Vercel's 60s cap for
- * one in-flight article extraction (up to an 8s fetch + JSDOM parse) that was already
- * started when the deadline was crossed. Checked BOTH between sources and, via
- * shouldStop, between items within a source — a single large feed can no longer overrun.
+ * Wall-clock deadline for a run. 240s leaves ~60s of headroom under the route's 300s cap
+ * (Vercel Hobby + Fluid Compute) for in-flight work — an article extraction (up to an 8s
+ * fetch + JSDOM parse) or a translation LLM call — that was already running when the
+ * deadline was crossed. Enforced at three granularities: between sources, between items
+ * within a source (shouldStop into runSourceIngestion), and between translation items
+ * (shouldStop into translateFeedItems).
  */
-const SOFT_TIME_BUDGET_MS = 45_000;
+export const SOFT_TIME_BUDGET_MS = 240_000;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -102,7 +104,10 @@ export interface IngestionCronDeps {
   /** How many stale sources still await ingestion (drives the `remaining` diagnostic). */
   countRemainingStale?: (staleBefore: Date) => Promise<number>;
   selectTranslationCompanies?: (limit: number) => Promise<string[]>;
-  translate?: (opts: { companyId: string }) => Promise<TranslateFeedItemsSummary>;
+  translate?: (opts: {
+    companyId: string;
+    shouldStop?: () => boolean;
+  }) => Promise<TranslateFeedItemsSummary>;
 }
 
 // ─── Production defaults (real Prisma) ──────────────────────────────────────────
@@ -354,7 +359,7 @@ export async function runIngestionCron(
         break;
       }
       try {
-        const t = await timed("translationMs", () => translate({ companyId }));
+        const t = await timed("translationMs", () => translate({ companyId, shouldStop }));
         summary.translation.companiesProcessed++;
         summary.translation.translated += t.translated;
         summary.translation.failed += t.failed;

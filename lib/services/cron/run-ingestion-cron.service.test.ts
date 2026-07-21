@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   runIngestionCron,
+  SOFT_TIME_BUDGET_MS,
   type IngestionCronDeps,
   type StaleSourceRow,
 } from "./run-ingestion-cron.service";
@@ -262,6 +263,46 @@ describe("runIngestionCron — partial failure isolation", () => {
     assert.equal(s.translation.translated, 2);
     assert.equal(s.translationFailures.length, 1);
     assert.equal(s.translationFailures[0].companyId, "cBad");
+  });
+});
+
+describe("runIngestionCron — deadline value (Hobby + Fluid Compute)", () => {
+  it("defaults the soft deadline to 240s (60s headroom under the 300s route cap)", () => {
+    assert.equal(SOFT_TIME_BUDGET_MS, 240_000);
+  });
+
+  it("lets work proceed at 100s, well past the old 45s deadline", async () => {
+    const h = harness({
+      timeBudgetMs: undefined, // fall back to the production default (240s)
+      now: steppingClock(0, 100_000), // 100s per check: over the old 45s, under 240s
+      selectStaleSources: async () => [source("a", "c1"), source("b", "c1")],
+    });
+
+    const s = await runIngestionCron(h.deps);
+
+    assert.equal(s.examined, 2);
+    assert.equal(s.succeeded, 2);
+    assert.equal(s.timedOut, false);
+  });
+
+  it("passes a live shouldStop hook into each translation batch (between-item interruption)", async () => {
+    let probed: unknown;
+    const h = harness({
+      timeBudgetMs: 50_000,
+      now: () => new Date(1_000_000), // constant → within budget while processing
+      selectTranslationCompanies: async () => ["c1"],
+      translate: async (opts) => {
+        probed = opts.shouldStop;
+        return { scanned: 0, translated: 0, failed: 0, skipped: 0 };
+      },
+    });
+
+    await runIngestionCron(h.deps);
+
+    // translateFeedItems breaks its item loop on this hook, so a long batch stops between
+    // items instead of running to the timeout.
+    assert.equal(typeof probed, "function");
+    assert.equal((probed as () => boolean)(), false); // now(1_000_000) < deadline(1_050_000)
   });
 });
 

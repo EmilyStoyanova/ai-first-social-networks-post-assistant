@@ -151,4 +151,20 @@ describe("translateFeedItems", () => {
     const summary = await translateFeedItems({ companyId: "c1" }, deps);
     assert.deepEqual(summary, { scanned: 0, translated: 0, failed: 0, skipped: 0 });
   });
+
+  it("stops between items when shouldStop signals the deadline", async () => {
+    const deps = makeDeps([makeCandidate("a"), makeCandidate("b"), makeCandidate("c")]);
+    // Deadline reached after the first translation: the loop checks before each item.
+    const summary = await translateFeedItems(
+      { companyId: "c1", shouldStop: () => deps.calls.length >= 1 },
+      deps
+    );
+
+    assert.equal(deps.calls.length, 1, "must not translate past the deadline");
+    assert.equal(summary.translated, 1);
+    assert.deepEqual(
+      deps.calls.map((c) => c.id),
+      ["a"]
+    );
+  });
 });

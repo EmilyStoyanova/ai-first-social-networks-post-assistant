@@ -66,7 +66,7 @@ async function defaultFindCandidates(companyId: string, limit: number): Promise<
 }
 
 export async function translateFeedItems(
-  opts: { companyId: string; limit?: number },
+  opts: { companyId: string; limit?: number; shouldStop?: () => boolean },
   deps: TranslateFeedItemsDeps = {}
 ): Promise<TranslateFeedItemsSummary> {
   const limit = opts.limit ?? TRANSLATION_BATCH_SIZE;
@@ -90,6 +90,11 @@ export async function translateFeedItems(
   const companyLang = await loadCompanyLang(opts.companyId);
 
   for (const item of candidates) {
+    // Out of time for this run — checked before every slow translation so a large batch
+    // cannot overrun the function limit. Remaining items are picked up next run (they stay
+    // pending and are deduped by translation hash), so nothing is lost.
+    if (opts.shouldStop?.()) break;
+
     const cfg = resolveTranslationConfig(item.source.type, item.source.config, companyLang);
     // The source's translation was turned off after the item was queued.
     if (!cfg.enabled) {
