@@ -96,6 +96,58 @@ describe("parseFeedXml — RSS 2.0", () => {
   });
 });
 
+describe("parseFeedXml — HTML entity decoding", () => {
+  it("decodes numeric and named entities in titles", () => {
+    const xml = rssFeed(`
+      <item>
+        <title>Survive Your Startup&#8217;s &#8220;First&#8221; Inspections &amp; More&#8230;</title>
+        <link>https://example.com/a</link>
+        <description>Nothing here.</description>
+      </item>`);
+    const items = parseFeedXml(xml);
+
+    assert.equal(items[0].title, "Survive Your Startup’s “First” Inspections & More…");
+    assert.ok(!/&#|&amp;/.test(items[0].title ?? ""));
+  });
+
+  it("decodes entities inside a CDATA summary", () => {
+    const xml = rssFeed(`
+      <item>
+        <title>Plain</title>
+        <link>https://example.com/b</link>
+        <description><![CDATA[Cost &amp; value rose 5&#37; &#8212; a big jump.]]></description>
+      </item>`);
+    const items = parseFeedXml(xml);
+
+    assert.equal(items[0].summary, "Cost & value rose 5% — a big jump.");
+  });
+
+  it("decodes hex entities and leaves unknown named entities untouched", () => {
+    const xml = rssFeed(`
+      <item>
+        <title>Ma&#x00F1;ana &fakeentity; stays</title>
+        <link>https://example.com/c</link>
+      </item>`);
+    const items = parseFeedXml(xml);
+
+    assert.equal(items[0].title, "Mañana &fakeentity; stays");
+  });
+
+  it("does NOT decode the item URL (preserves the stored key)", () => {
+    // WordPress emits &#038; (= &) inside link query strings. Decoding the URL
+    // would change the (sourceId, url) key and orphan existing rows, so links
+    // must be left byte-for-byte as parsed.
+    const xml = rssFeed(`
+      <item>
+        <title>Query link</title>
+        <link>https://example.com/x?utm_source=rss&#038;utm_medium=rss</link>
+      </item>`);
+    const items = parseFeedXml(xml);
+
+    assert.equal(items[0].url, "https://example.com/x?utm_source=rss&#038;utm_medium=rss");
+  });
+});
+
 describe("parseFeedXml — Atom", () => {
   it("resolves the link from <entry><link href=.../> (alternate preferred)", () => {
     const xml = `<?xml version="1.0" encoding="utf-8"?>
