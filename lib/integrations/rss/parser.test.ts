@@ -1,0 +1,134 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { parseFeedXml } from "./parser";
+
+// ─── Fixtures ───────────────────────────────────────────────────────────────
+
+/** The Mailchimp form WordPress/StartupNation embeds inside every article body. */
+const MAILCHIMP_EMBED = `
+  <div id="mc_embed_signup">
+    <link href="//cdn-images.mailchimp.com/embedcode/classic-061523.css" rel="stylesheet" type="text/css"/>
+    <form action="https://startupnation.us1.list-manage.com/subscribe/post"></form>
+  </div>`;
+
+/** A StartupNation-style RSS 2.0 item whose body embeds the Mailchimp stylesheet. */
+function startupNationItem(slug: string, title: string): string {
+  return `
+  <item>
+    <title>${title}</title>
+    <link>https://startupnation.com/${slug}/</link>
+    <comments>https://startupnation.com/${slug}/#respond</comments>
+    <pubDate>Wed, 16 Jul 2025 12:00:00 +0000</pubDate>
+    <guid isPermaLink="false">https://startupnation.com/?p=${slug.length}</guid>
+    <description><![CDATA[A short summary for ${title}.]]></description>
+    <content:encoded><![CDATA[<p>Body of ${title}.</p>${MAILCHIMP_EMBED}]]></content:encoded>
+  </item>`;
+}
+
+function rssFeed(items: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+  <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel>
+      <title>StartupNation</title>
+      <link>https://startupnation.com</link>
+      <atom:link href="https://startupnation.com/feed/" rel="self" type="application/rss+xml"/>
+      ${items}
+    </channel>
+  </rss>`;
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+describe("parseFeedXml — RSS 2.0", () => {
+  it("resolves the link from the item's own <link>text</link>, ignoring embedded HTML", () => {
+    const xml = rssFeed(startupNationItem("start-your-business/mvp-on-a-budget", "MVP on a budget"));
+    const items = parseFeedXml(xml);
+
+    assert.equal(items.length, 1);
+    assert.equal(items[0].url, "https://startupnation.com/start-your-business/mvp-on-a-budget/");
+    assert.equal(items[0].title, "MVP on a budget");
+    // The Mailchimp stylesheet inside <content:encoded> must never win.
+    assert.ok(!/mailchimp/.test(items[0].url ?? ""));
+  });
+
+  it("keeps a plain RSS 2.0 item link working (no embedded content)", () => {
+    const xml = rssFeed(`
+      <item>
+        <title>Plain article</title>
+        <link>https://example.com/plain-article</link>
+        <description>Just a summary.</description>
+      </item>`);
+    const items = parseFeedXml(xml);
+
+    assert.equal(items.length, 1);
+    assert.equal(items[0].url, "https://example.com/plain-article");
+    assert.equal(items[0].summary, "Just a summary.");
+  });
+
+  it("gives distinct article URLs to items that share the same embedded stylesheet", () => {
+    const xml = rssFeed(
+      startupNationItem("grow/content-generic", "Why your content sounds generic") +
+        startupNationItem("manage/fire-too-slowly", "Why leaders fire too slowly") +
+        startupNationItem("start/product-market-fit", "Product-market fit expires")
+    );
+    const items = parseFeedXml(xml);
+
+    const urls = items.map((i) => i.url);
+    assert.deepEqual(urls, [
+      "https://startupnation.com/grow/content-generic/",
+      "https://startupnation.com/manage/fire-too-slowly/",
+      "https://startupnation.com/start/product-market-fit/",
+    ]);
+    // No collapse: 3 items → 3 distinct URLs.
+    assert.equal(new Set(urls).size, 3);
+  });
+
+  it("does not collapse a full 20-item StartupNation-style feed to 2 URLs", () => {
+    const items20 = Array.from({ length: 20 }, (_, i) =>
+      startupNationItem(`category-${i}/article-${i}`, `Article ${i}`)
+    ).join("");
+    const parsed = parseFeedXml(rssFeed(items20));
+
+    assert.equal(parsed.length, 20);
+    const distinct = new Set(parsed.map((p) => p.url));
+    assert.equal(distinct.size, 20, "expected 20 distinct article URLs, not a collapse");
+    assert.ok(![...distinct].some((u) => u?.includes("mailchimp")));
+  });
+});
+
+describe("parseFeedXml — Atom", () => {
+  it("resolves the link from <entry><link href=.../> (alternate preferred)", () => {
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+      <feed xmlns="http://www.w3.org/2005/Atom">
+        <title>Atom Example</title>
+        <entry>
+          <title>Atom post</title>
+          <link rel="self" href="https://example.com/atom/self"/>
+          <link rel="alternate" href="https://example.com/atom/post"/>
+          <updated>2025-07-16T12:00:00Z</updated>
+          <content type="html">&lt;p&gt;Body&lt;/p&gt;</content>
+        </entry>
+      </feed>`;
+    const items = parseFeedXml(xml);
+
+    assert.equal(items.length, 1);
+    // Prefers rel="alternate" over rel="self".
+    assert.equal(items[0].url, "https://example.com/atom/post");
+    assert.equal(items[0].title, "Atom post");
+  });
+
+  it("uses a rel-less Atom link (defaults to alternate)", () => {
+    const xml = `<?xml version="1.0" encoding="utf-8"?>
+      <feed xmlns="http://www.w3.org/2005/Atom">
+        <entry>
+          <title>Rel-less</title>
+          <link href="https://example.com/atom/relless"/>
+          <updated>2025-07-16T12:00:00Z</updated>
+        </entry>
+      </feed>`;
+    const items = parseFeedXml(xml);
+
+    assert.equal(items.length, 1);
+    assert.equal(items[0].url, "https://example.com/atom/relless");
+  });
+});

@@ -158,8 +158,14 @@ export async function runSourceIngestion(
 
   if (source.type === "rss") {
     const items = await parseFeed(config.url);
+    // A feed can legitimately surface the same resolved URL more than once in a
+    // single fetch. Each URL maps to one row, so process it once — otherwise a
+    // repeated URL would upsert twice and be miscounted as an "update".
+    const processed = new Set<string>();
     for (const item of items) {
       if (!item.url) continue;
+      if (processed.has(item.url)) continue;
+      processed.add(item.url);
       const extracted = await extractArticleContent(item.url);
       const content = extracted ?? item.summary;
       const outcome = await upsertFeedItem(
