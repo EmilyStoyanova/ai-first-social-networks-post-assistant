@@ -6,8 +6,6 @@ import {
   type IngestableSource,
   type RunSourceIngestionOptions,
 } from "@/lib/services/company/ingest-content-source.service";
-import { translateFeedItems, type TranslateFeedItemsSummary } from "./translate-feed-items.service";
-import { MAX_TRANSLATION_ATTEMPTS } from "@/lib/ai/feed-item-translation";
 
 // ─── Tunables ──────────────────────────────────────────────────────────────────
 
@@ -15,15 +13,12 @@ import { MAX_TRANSLATION_ATTEMPTS } from "@/lib/ai/feed-item-translation";
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000;
 /** Upper bound on sources examined per run — the deterministic batch cap. */
 const MAX_SOURCES_PER_RUN = 25;
-/** Max distinct companies whose translation queue is drained per run. */
-const MAX_TRANSLATION_COMPANIES_PER_RUN = 10;
 /**
  * Wall-clock deadline for a run. 240s leaves ~60s of headroom under the route's 300s cap
  * (Vercel Hobby + Fluid Compute) for in-flight work — an article extraction (up to an 8s
- * fetch + JSDOM parse) or a translation LLM call — that was already running when the
- * deadline was crossed. Enforced at three granularities: between sources, between items
- * within a source (shouldStop into runSourceIngestion), and between translation items
- * (shouldStop into translateFeedItems).
+ * fetch + JSDOM parse) — that was already running when the deadline was crossed. Enforced
+ * at two granularities: between sources, and between items within a source (shouldStop
+ * into runSourceIngestion). Translation is a separate cron (runTranslationCron).
  */
 export const SOFT_TIME_BUDGET_MS = 240_000;
 
@@ -46,8 +41,6 @@ export interface IngestionTimings {
   sourceSelectionMs: number;
   /** All runSourceIngestion calls — feed fetch + article extraction + upserts. */
   sourceIngestionMs: number;
-  /** selectTranslationCompanies + all translate calls. */
-  translationMs: number;
   /** Cron-level DB writes: createRun + the per-source CAS claims. */
   databaseWritesMs: number;
   /** Wrap-up: the remaining-backlog count. (finishRun, the record write, is excluded.) */
@@ -77,8 +70,6 @@ export interface IngestionCronSummary {
   itemsCreated: number;
   itemsUpdated: number;
   sourceFailures: Array<{ sourceId: string; companyId: string; message: string }>;
-  translation: { companiesProcessed: number; translated: number; failed: number; skipped: number };
-  translationFailures: Array<{ companyId: string; message: string }>;
   /** True when the soft time budget cut the run short — the rest resumes next run. */
   timedOut: boolean;
   error?: string;
@@ -88,7 +79,6 @@ export interface IngestionCronDeps {
   now?: () => Date;
   timeBudgetMs?: number;
   maxSources?: number;
-  maxTranslationCompanies?: number;
   staleAfterMs?: number;
   createRun?: () => Promise<{ id: string }>;
   finishRun?: (id: string, actions: Record<string, unknown>) => Promise<void>;
@@ -103,11 +93,6 @@ export interface IngestionCronDeps {
   ) => Promise<{ created: number; updated: number }>;
   /** How many stale sources still await ingestion (drives the `remaining` diagnostic). */
   countRemainingStale?: (staleBefore: Date) => Promise<number>;
-  selectTranslationCompanies?: (limit: number) => Promise<string[]>;
-  translate?: (opts: {
-    companyId: string;
-    shouldStop?: () => boolean;
-  }) => Promise<TranslateFeedItemsSummary>;
 }
 
 // ─── Production defaults (real Prisma) ──────────────────────────────────────────
@@ -166,7 +151,14 @@ async function defaultSelectStaleSources(
     where: staleWhere(staleBefore),
     orderBy: [{ lastFetchedAt: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }],
     take: limit,
-    select: { id: true, companyId: true, type: true, name: true, config: true, lastFetchedAt: true },
+    select: {
+      id: true,
+      companyId: true,
+      type: true,
+      name: true,
+      config: true,
+      lastFetchedAt: true,
+    },
   });
 }
 
@@ -185,21 +177,6 @@ async function defaultCountRemainingStale(staleBefore: Date): Promise<number> {
   return prisma.contentSource.count({ where: staleWhere(staleBefore) });
 }
 
-async function defaultSelectTranslationCompanies(limit: number): Promise<string[]> {
-  const rows = await prisma.feedItem.findMany({
-    where: {
-      source: { enabled: true },
-      translationStatus: { in: ["pending", "failed"] },
-      translationAttemptCount: { lt: MAX_TRANSLATION_ATTEMPTS },
-      OR: [{ translationNextRetryAt: null }, { translationNextRetryAt: { lte: new Date() } }],
-    },
-    select: { companyId: true },
-    distinct: ["companyId"],
-    take: limit,
-  });
-  return rows.map((r) => r.companyId);
-}
-
 // ─── Orchestrator ──────────────────────────────────────────────────────────────
 
 function toActions(summary: IngestionCronSummary): Record<string, unknown> {
@@ -215,21 +192,22 @@ function toActions(summary: IngestionCronSummary): Record<string, unknown> {
     itemsCreated: summary.itemsCreated,
     itemsUpdated: summary.itemsUpdated,
     sourceFailures: summary.sourceFailures,
-    translation: summary.translation,
-    translationFailures: summary.translationFailures,
     timedOut: summary.timedOut,
   };
 }
 
 /**
  * RSS ingestion cron (v2-9, Hobby-safe). Refreshes stale content sources across ALL
- * companies in a bounded, oldest-first batch, then drains the translation queue. Never
- * generates posts.
+ * companies in a bounded, oldest-first batch. Feed fetch, extraction and upserts only —
+ * translation runs in its own cron (runTranslationCron) and post generation in another
+ * (runGenerationCron). This cron never translates and never generates posts.
  *
  * Hobby-safety comes from a wall-clock deadline enforced at TWO granularities:
  *   • between sources — stop claiming new sources once the budget is spent;
  *   • within a source — `shouldStop` is passed into runSourceIngestion so a single large
  *     feed stops between items instead of running all extractions to the timeout.
+ * Translation is decoupled into runTranslationCron so a slow translation backlog can never
+ * starve ingestion of its time budget.
  *
  * Progress persists via the per-source CAS claim (which advances lastFetchedAt), so the
  * next invocation resumes with the still-stale sources. Every source is failure-isolated.
@@ -240,7 +218,6 @@ export async function runIngestionCron(
   const now = deps.now ?? (() => new Date());
   const timeBudgetMs = deps.timeBudgetMs ?? SOFT_TIME_BUDGET_MS;
   const maxSources = deps.maxSources ?? MAX_SOURCES_PER_RUN;
-  const maxTranslationCompanies = deps.maxTranslationCompanies ?? MAX_TRANSLATION_COMPANIES_PER_RUN;
   const staleAfterMs = deps.staleAfterMs ?? STALE_AFTER_MS;
   const createRun = deps.createRun ?? defaultCreateRun;
   const finishRun = deps.finishRun ?? defaultFinishRun;
@@ -249,9 +226,6 @@ export async function runIngestionCron(
   const claimSource = deps.claimSource ?? defaultClaimSource;
   const ingestSource = deps.ingestSource ?? runSourceIngestion;
   const countRemainingStale = deps.countRemainingStale ?? defaultCountRemainingStale;
-  const selectTranslationCompanies =
-    deps.selectTranslationCompanies ?? defaultSelectTranslationCompanies;
-  const translate = deps.translate ?? translateFeedItems;
 
   const startMs = now().getTime();
   const deadlineMs = startMs + timeBudgetMs;
@@ -266,7 +240,6 @@ export async function runIngestionCron(
   const timings: IngestionTimings = {
     sourceSelectionMs: 0,
     sourceIngestionMs: 0,
-    translationMs: 0,
     databaseWritesMs: 0,
     cleanupMs: 0,
     totalMs: 0,
@@ -295,13 +268,11 @@ export async function runIngestionCron(
     itemsCreated: 0,
     itemsUpdated: 0,
     sourceFailures: [],
-    translation: { companiesProcessed: 0, translated: 0, failed: 0, skipped: 0 },
-    translationFailures: [],
     timedOut: false,
   };
 
   try {
-    // ── Phase A — ingest stale sources ──────────────────────────────────────
+    // ── Ingest stale sources ─────────────────────────────────────────────────
     const sources = await timed("sourceSelectionMs", () =>
       selectStaleSources(maxSources, staleBefore)
     );
@@ -340,32 +311,6 @@ export async function runIngestionCron(
           companyId: source.companyId,
           message: message(err),
         });
-      }
-    }
-
-    // ── Phase B — drain translation queue ───────────────────────────────────
-    // Always ask what is pending (a cheap indexed query), THEN let the per-company
-    // deadline check decide. timedOut is set only when a company with real pending work
-    // is abandoned — never merely because the clock passed the deadline with nothing left
-    // to do. (When already over budget, the first loop check breaks before any translate
-    // call, so no translation work happens either way — behavior is unchanged.)
-    const companies = await timed("translationMs", () =>
-      selectTranslationCompanies(maxTranslationCompanies)
-    );
-    for (const companyId of companies) {
-      if (overBudget()) {
-        // A company with pending translations is abandoned → genuine interruption.
-        summary.timedOut = true;
-        break;
-      }
-      try {
-        const t = await timed("translationMs", () => translate({ companyId, shouldStop }));
-        summary.translation.companiesProcessed++;
-        summary.translation.translated += t.translated;
-        summary.translation.failed += t.failed;
-        summary.translation.skipped += t.skipped;
-      } catch (err) {
-        summary.translationFailures.push({ companyId, message: message(err) });
       }
     }
 

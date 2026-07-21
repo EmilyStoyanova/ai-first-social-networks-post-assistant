@@ -10,7 +10,14 @@ import {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function source(id: string, companyId: string, lastFetchedAt: Date | null = null): StaleSourceRow {
-  return { id, companyId, type: "rss", name: `src-${id}`, config: { url: `https://x/${id}` }, lastFetchedAt };
+  return {
+    id,
+    companyId,
+    type: "rss",
+    name: `src-${id}`,
+    config: { url: `https://x/${id}` },
+    lastFetchedAt,
+  };
 }
 
 /** A clock that advances by `stepMs` on every call — lets tests trip the time budget. */
@@ -39,8 +46,6 @@ function harness(overrides: Partial<IngestionCronDeps> = {}): Harness {
       return { created: 1, updated: 2 };
     },
     countRemainingStale: async () => 0,
-    selectTranslationCompanies: async () => [],
-    translate: async () => ({ scanned: 0, translated: 3, failed: 0, skipped: 0 }),
     ...overrides,
   };
   return state;
@@ -61,7 +66,10 @@ function memoryDb(nowFn: () => Date, initial: StaleSourceRow[]) {
     selectStaleSources: async (limit: number, staleBefore: Date): Promise<StaleSourceRow[]> =>
       rows
         .filter((r) => stale(r, staleBefore))
-        .sort((a, b) => (a.lastFetchedAt?.getTime() ?? -Infinity) - (b.lastFetchedAt?.getTime() ?? -Infinity))
+        .sort(
+          (a, b) =>
+            (a.lastFetchedAt?.getTime() ?? -Infinity) - (b.lastFetchedAt?.getTime() ?? -Infinity)
+        )
         .slice(0, limit)
         .map((r) => source(r.id, r.companyId, r.lastFetchedAt)),
     claimSource: async (id: string, prev: Date | null): Promise<boolean> => {
@@ -106,7 +114,14 @@ describe("runIngestionCron — batching", () => {
   it("returns the full diagnostics shape", async () => {
     const h = harness({ selectStaleSources: async () => [source("a", "c1")] });
     const s = await runIngestionCron(h.deps);
-    for (const k of ["examined", "succeeded", "failed", "skipped", "remaining", "durationMs"] as const) {
+    for (const k of [
+      "examined",
+      "succeeded",
+      "failed",
+      "skipped",
+      "remaining",
+      "durationMs",
+    ] as const) {
       assert.equal(typeof s[k], "number", `${k} should be a number`);
     }
   });
@@ -117,7 +132,6 @@ describe("runIngestionCron — batching", () => {
     for (const k of [
       "sourceSelectionMs",
       "sourceIngestionMs",
-      "translationMs",
       "databaseWritesMs",
       "cleanupMs",
       "totalMs",
@@ -133,7 +147,11 @@ describe("runIngestionCron — batching", () => {
 describe("runIngestionCron — fairness (processes in the order the selector returns)", () => {
   it("ingests sources oldest-first, in selector order", async () => {
     const h = harness({
-      selectStaleSources: async () => [source("old", "c1"), source("mid", "c1"), source("new", "c2")],
+      selectStaleSources: async () => [
+        source("old", "c1"),
+        source("mid", "c1"),
+        source("new", "c2"),
+      ],
     });
 
     await runIngestionCron(h.deps);
@@ -165,8 +183,6 @@ describe("runIngestionCron — cursor progression + continuation", () => {
       claimSource: db.claimSource,
       countRemainingStale: db.countRemainingStale,
       ingestSource: async () => ({ created: 1, updated: 0 }),
-      selectTranslationCompanies: async () => [],
-      translate: async () => ({ scanned: 0, translated: 0, failed: 0, skipped: 0 }),
     };
 
     // Run 1 — two oldest sources, two still remaining.
@@ -246,24 +262,6 @@ describe("runIngestionCron — partial failure isolation", () => {
     assert.match(s.sourceFailures[0].message, /feed 500/);
     assert.deepEqual(ingested, ["a", "c"]);
   });
-
-  it("isolates a failing translation company and keeps going", async () => {
-    const h = harness({
-      selectTranslationCompanies: async () => ["c1", "cBad", "c2"],
-      translate: async ({ companyId }) => {
-        if (companyId === "cBad") throw new Error("translate boom");
-        return { scanned: 1, translated: 1, failed: 0, skipped: 0 };
-      },
-    });
-
-    const s = await runIngestionCron(h.deps);
-
-    assert.equal(s.status, "completed");
-    assert.equal(s.translation.companiesProcessed, 2);
-    assert.equal(s.translation.translated, 2);
-    assert.equal(s.translationFailures.length, 1);
-    assert.equal(s.translationFailures[0].companyId, "cBad");
-  });
 });
 
 describe("runIngestionCron — deadline value (Hobby + Fluid Compute)", () => {
@@ -284,26 +282,6 @@ describe("runIngestionCron — deadline value (Hobby + Fluid Compute)", () => {
     assert.equal(s.succeeded, 2);
     assert.equal(s.timedOut, false);
   });
-
-  it("passes a live shouldStop hook into each translation batch (between-item interruption)", async () => {
-    let probed: unknown;
-    const h = harness({
-      timeBudgetMs: 50_000,
-      now: () => new Date(1_000_000), // constant → within budget while processing
-      selectTranslationCompanies: async () => ["c1"],
-      translate: async (opts) => {
-        probed = opts.shouldStop;
-        return { scanned: 0, translated: 0, failed: 0, skipped: 0 };
-      },
-    });
-
-    await runIngestionCron(h.deps);
-
-    // translateFeedItems breaks its item loop on this hook, so a long batch stops between
-    // items instead of running to the timeout.
-    assert.equal(typeof probed, "function");
-    assert.equal((probed as () => boolean)(), false); // now(1_000_000) < deadline(1_050_000)
-  });
 });
 
 describe("runIngestionCron — time budget (Hobby-safe)", () => {
@@ -323,34 +301,18 @@ describe("runIngestionCron — time budget (Hobby-safe)", () => {
   });
 
   it("does NOT mark timedOut when the deadline passed but no work remained", async () => {
-    // Deadline is already crossed by the time Phase B is reached, but there is nothing
-    // stale and nothing to translate — so nothing was interrupted.
+    // The deadline is already crossed, but there is nothing stale to ingest — so nothing
+    // was interrupted.
     const h = harness({
       timeBudgetMs: 50_000,
       now: steppingClock(0, 60_000),
       selectStaleSources: async () => [],
-      selectTranslationCompanies: async () => [],
     });
 
     const s = await runIngestionCron(h.deps);
 
     assert.equal(s.examined, 0);
     assert.equal(s.timedOut, false);
-  });
-
-  it("marks timedOut when translation work is left unprocessed at the deadline", async () => {
-    // Over budget by Phase B, and companies ARE pending → genuine interruption.
-    const h = harness({
-      timeBudgetMs: 50_000,
-      now: steppingClock(0, 60_000),
-      selectStaleSources: async () => [],
-      selectTranslationCompanies: async () => ["c1", "c2"],
-    });
-
-    const s = await runIngestionCron(h.deps);
-
-    assert.equal(s.timedOut, true);
-    assert.equal(s.translation.companiesProcessed, 0); // c1 abandoned before translating
   });
 
   it("passes a live, callable shouldStop hook into each source (mid-feed stop wiring)", async () => {
@@ -374,27 +336,34 @@ describe("runIngestionCron — time budget (Hobby-safe)", () => {
   });
 });
 
-describe("runIngestionCron — translation drain", () => {
-  it("drains up to maxTranslationCompanies distinct companies after ingestion", async () => {
-    let askedLimit = -1;
-    const translated: string[] = [];
+describe("runIngestionCron — no longer invokes translation", () => {
+  it("has no translation seam in its deps (translation is a separate cron)", () => {
+    const deps: IngestionCronDeps = {};
+    // Compile-time + runtime guarantee: ingestion cannot reach any translation surface.
+    assert.equal("translate" in deps, false);
+    assert.equal("selectTranslationCompanies" in deps, false);
+    assert.equal("maxTranslationCompanies" in deps, false);
+  });
+
+  it("never translates, even when items are pending — the summary has no translation field", async () => {
+    // A `translate` override is not a recognised seam anymore, so it can never fire.
+    let translateCalled = false;
     const h = harness({
-      maxTranslationCompanies: 4,
-      selectTranslationCompanies: async (limit) => {
-        askedLimit = limit;
-        return ["c1", "c2"];
-      },
-      translate: async ({ companyId }) => {
-        translated.push(companyId);
-        return { scanned: 2, translated: 2, failed: 0, skipped: 0 };
-      },
+      selectStaleSources: async () => [source("a", "c1")],
+      ...({
+        translate: async () => {
+          translateCalled = true;
+          return { scanned: 5, translated: 5, failed: 0, skipped: 0 };
+        },
+      } as Partial<IngestionCronDeps>),
     });
 
     const s = await runIngestionCron(h.deps);
 
-    assert.equal(askedLimit, 4);
-    assert.deepEqual(translated, ["c1", "c2"]);
-    assert.equal(s.translation.translated, 4);
+    assert.equal(translateCalled, false, "ingestion must not run translation");
+    assert.equal("translation" in s, false);
+    assert.equal("translationFailures" in s, false);
+    assert.equal(s.succeeded, 1);
   });
 });
 
