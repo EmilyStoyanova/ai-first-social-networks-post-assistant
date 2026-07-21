@@ -11,10 +11,13 @@ generation were coupled, so RSS freshness was also gated by that rotation.
 The pipeline is split into two orchestrators that share the **same underlying step
 services** (no business logic duplicated):
 
-| Cron | Route | Service | Suggested schedule |
-|------|-------|---------|--------------------|
-| RSS ingestion | `/api/v1/internal/cron/ingest` | `runIngestionCron` | every 2h (`0 */2 * * *`) |
-| Post generation | `/api/v1/internal/cron/generate` | `runGenerationCron` | hourly (`30 * * * *`) |
+| Cron            | Route                            | Service             | Schedule (Hobby: 1×/day) |
+| --------------- | -------------------------------- | ------------------- | ------------------------ |
+| RSS ingestion   | `/api/v1/internal/cron/ingest`   | `runIngestionCron`  | 05:00 UTC (`0 5 * * *`)  |
+| Post generation | `/api/v1/internal/cron/generate` | `runGenerationCron` | 06:00 UTC (`0 6 * * *`)  |
+
+Ingest is scheduled an hour before generate so each day's generation draws from freshly
+ingested content.
 
 Both routes: `maxDuration = 60`, `force-dynamic`, `CRON_SECRET` auth (`verifyCronRequest`).
 Both create a `CronRun` row and record `actionsTaken` (with a `kind` discriminator) for
@@ -25,8 +28,11 @@ diagnostics — identical to the old cron.
 > scheduled alongside the generation cron — both advance `Company.lastCronProcessedAt`.
 
 ### Vercel Hobby note
-Hobby plans cap crons at once/day. The 2h/hourly cadence assumes a Pro plan. On Hobby,
-set both to daily and rely on the bounded-batch + fair-rotation design to catch up.
+
+Hobby plans cap each cron at once/day, so both run daily (05:00/06:00 UTC) and rely on the
+bounded-batch + fair-rotation design to catch up over successive days. On Pro these can be
+raised to the originally intended cadence (ingest every 2h, generate hourly) with no code
+change — only the `schedule` strings in `vercel.json`.
 
 ## Ingestion cron — `runIngestionCron`
 
@@ -34,13 +40,14 @@ Responsibilities: refresh stale sources across all companies, drain the translat
 queue; **never generates posts**.
 
 Execution order:
+
 1. `createRun()` — CronRun (kind=`ingestion`).
 2. **Phase A — ingest stale sources.** Select up to `MAX_SOURCES_PER_RUN` (25) enabled
    sources whose `lastFetchedAt` is null or older than `STALE_AFTER_MS` (6h), **oldest
    first** (`lastFetchedAt asc nulls first`, then `createdAt asc`). For each, until the
    soft time budget (`SOFT_TIME_BUDGET_MS` = 50s) is hit:
    - **Claim (lock):** compare-and-swap `updateMany({ where:{ id, lastFetchedAt: prev },
-     data:{ lastFetchedAt: now } })`. `count===1` wins; `0` means a concurrent run already
+data:{ lastFetchedAt: now } })`. `count===1` wins; `0` means a concurrent run already
      took it → counted as `sourcesClaimedElsewhere`, skipped. This is the concurrency
      guard.
    - **Ingest:** `runSourceIngestion(source, companyId)` (reused verbatim — parsing,
@@ -65,12 +72,13 @@ auto-approve, publish, retry, backfill embeddings, sync metrics. Reuses the exac
 3–8 of the old `runCron`.
 
 Execution order:
+
 1. `createRun()` — CronRun (kind=`generation`).
 2. Select up to `MAX_COMPANIES_PER_RUN` companies **oldest first**
    (`lastCronProcessedAt asc nulls first`, then `createdAt asc`).
 3. For each, until the soft time budget is hit:
    - **Claim (lock):** CAS `updateMany({ where:{ id, lastCronProcessedAt: prev },
-     data:{ lastCronProcessedAt: now } })`. Loser → `companiesClaimedElsewhere`, skipped.
+data:{ lastCronProcessedAt: now } })`. Loser → `companiesClaimedElsewhere`, skipped.
    - **Process (steps 3–8, unchanged):** `generateWeeklySchedule` → `autoApprovePosts` →
      `publishScheduledPosts` → `retryFailedPosts` → `backfillEmbeddings` →
      `syncPostMetrics`.
@@ -78,6 +86,7 @@ Execution order:
 4. `finishRun()` / `failRun()`.
 
 Preserved behavior:
+
 - **pending_approval / fully_automated** unchanged — `generateWeeklySchedule` still writes
   posts as `pending_approval`; `autoApprovePosts` promotes only fully-automated channels.
 - **Content mix, schedules, channel policies, one-post-per-article** all live in
@@ -85,6 +94,7 @@ Preserved behavior:
   of which changed.
 
 ### Why no duplicate generation across concurrent runs
+
 1. Company-level CAS claim: two overlapping runs can't both process the same company.
 2. `generateWeeklySchedule` is idempotent — upserts the week, counts existing posts per
    schedule, resumes.
@@ -92,6 +102,7 @@ Preserved behavior:
    `Post.primaryFeedItemId` is the hard one-post-per-article guarantee.
 
 ## No schema change
+
 Ingestion keys off the existing `ContentSource.lastFetchedAt`; generation off the existing
 `Company.lastCronProcessedAt` (now used only by the generation cron). Both double as the
 optimistic-lock version column.
