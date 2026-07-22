@@ -1,0 +1,12 @@
+{
+  "name": "@app/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "External background job worker. Phase 1: infrastructure only — registration, heartbeat, lifecycle, graceful shutdown, and the polling framework. Does NOT yet claim or execute jobs.",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}
