@@ -94,6 +94,29 @@ enum CronStatus {
   failed
 }
 
+// ─── Background job queue (Phase 0) ───────────────────────────────────────────
+// Lifecycle of a queued unit of work. A closed, well-defined set, so it is an
+// enum (unlike Job.type, which is a plain string — see the Job model). Terminal
+// states are completed | failed | cancelled; only queued | active are "live".
+enum JobStatus {
+  queued
+  active
+  completed
+  failed
+  cancelled
+}
+
+// Health/lifecycle of a worker process, reported via heartbeat. `draining` is a
+// worker that has stopped claiming new jobs and is finishing in-flight work
+// during graceful shutdown; `stopped` is a clean exit.
+enum WorkerStatus {
+  starting
+  idle
+  busy
+  draining
+  stopped
+}
+
 // ─── Models ───────────────────────────────────────────────────────────────────
 
 model User {
@@ -667,6 +690,85 @@ model CronRun {
   error        String?
 
   @@map("cron_runs")
+}
+
+// A single unit of background work claimed and executed by an external worker
+// (Phase 0 — table only; nothing enqueues or executes jobs yet). Neon is the
+// source of truth; the queue is just this table.
+//
+// `type` is a PLAIN STRING, not an enum, on purpose: new job kinds must not need
+// a schema migration, and the payload is already untyped-at-the-DB Json validated
+// per-type in the service layer (mirrors AuditLog.action and translationStatus).
+// The closed lifecycle lives in JobStatus instead.
+model Job {
+  id      String    @id @default(uuid())
+  type    String
+  status  JobStatus @default(queued)
+  // Type-specific input. Validated with a per-type Zod schema at enqueue/dequeue.
+  payload Json
+
+  // Duplicate-active guard. At most one non-terminal job may share a dedupeKey,
+  // enforced by a PARTIAL UNIQUE index (WHERE status IN ('queued','active')) that
+  // Prisma cannot express — it lives only in the migration SQL. NULL opts out.
+  dedupeKey String? @map("dedupe_key")
+
+  // Higher runs first; manual/interactive work outranks cron fan-out.
+  priority Int @default(0)
+  // Scheduling/backoff gate: a job is claimable only once runAt <= now().
+  runAt    DateTime @default(now()) @map("run_at")
+
+  attempts    Int @default(0)
+  maxAttempts Int @default(5) @map("max_attempts")
+
+  // Lease — stale-lock recovery. A crashed worker leaves status=active with an
+  // expired leaseExpiresAt; the reaper requeues it. lockedBy is a worker name,
+  // deliberately NOT a FK so pruning a worker row never blocks or cascades a job.
+  lockedBy       String?   @map("locked_by")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+
+  lastError String? @map("last_error")
+  // Success/diagnostic output; reuses the existing *Summary shapes per job type.
+  result    Json?
+
+  // Linkage & observability (all optional — a job need not belong to a company).
+  companyId String? @map("company_id")
+  createdBy String? @map("created_by")
+  cronRunId String? @map("cron_run_id")
+
+  createdAt  DateTime  @default(now()) @map("created_at")
+  startedAt  DateTime? @map("started_at")
+  finishedAt DateTime? @map("finished_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, runAt, priority])
+  @@index([companyId])
+  @@index([cronRunId])
+  @@map("jobs")
+}
+
+// A worker process (Phase 0 — table only). One row per process, keyed by a stable
+// `name` (env WORKER_ID, else hostname:pid) so a restart updates its row rather
+// than orphaning it. lastHeartbeatAt drives liveness: a worker silent longer than
+// the lease TTL is treated as dead and its in-flight jobs are reclaimed.
+model Worker {
+  id              String       @id @default(uuid())
+  name            String       @unique
+  status          WorkerStatus @default(starting)
+  hostname        String?
+  pid             Int?
+  concurrency     Int          @default(1)
+  // Free-form process metadata (build sha, region, capabilities) — future-proof
+  // without a migration.
+  metadata        Json?
+  lastHeartbeatAt DateTime?    @map("last_heartbeat_at")
+  startedAt       DateTime     @default(now()) @map("started_at")
+  stoppedAt       DateTime?    @map("stopped_at")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  @@index([status])
+  @@index([lastHeartbeatAt])
+  @@map("workers")
 }
 
 model ApiKey {
