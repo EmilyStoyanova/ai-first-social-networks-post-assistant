@@ -11,16 +11,16 @@
  *
  * The worker is an ORCHESTRATOR ONLY: it manages the queue, claiming, retries,
  * diagnostics and persistence. All real work lives in the registered handlers,
- * which are thin adapters over the existing services. Phase 2 registers a single
- * dummy handler; RSS/generation are NOT migrated yet.
+ * which are thin adapters over the existing services. Registered so far: the
+ * dummy handler (Phase 2) and RSS ingestion (Phase 3). Translation, generation,
+ * image generation and manual generation are NOT migrated yet.
  *
  * Run from the repo root so the shared client and env resolve:
  *   npx tsx worker/src/index.ts
  */
 
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { config as loadEnv } from "dotenv";
+// MUST be first: loads .env before any import below can reach the Prisma client.
+import "./load-env";
 
 import { loadWorkerConfig } from "./config";
 import { createLogger } from "./logger";
@@ -29,13 +29,9 @@ import { PollingRunner } from "./runner";
 import { JobOrchestrator } from "./orchestrator";
 import { HandlerRegistry } from "./handler-registry";
 import { dummyHandler, DUMMY_JOB_TYPE } from "./dummy-handler";
+import { rssIngestionHandler, RSS_INGESTION_JOB_TYPE } from "./rss-ingestion-handler";
 import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
 import type { JobRecord } from "./job-store";
-
-// Load the repo-root .env regardless of the current working directory, so the
-// worker sees the same DATABASE_URL etc. as the Next app.
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-loadEnv({ path: path.join(repoRoot, ".env") });
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -62,7 +58,10 @@ async function main(): Promise<void> {
   });
 
   // The engine: queue management, claiming, orchestration, retries, diagnostics.
-  const handlers = new HandlerRegistry().register(DUMMY_JOB_TYPE, dummyHandler);
+  // Handlers are thin adapters over the existing services (orchestrator-only).
+  const handlers = new HandlerRegistry()
+    .register(DUMMY_JOB_TYPE, dummyHandler)
+    .register(RSS_INGESTION_JOB_TYPE, rssIngestionHandler);
   const orchestrator = new JobOrchestrator({
     store: createPrismaJobStore(prisma),
     registry: handlers,

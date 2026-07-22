@@ -46,6 +46,26 @@ echoes its payload and, on `{ "fail": true }`, throws to exercise retries. RSS
 and generation are **not** migrated yet. Real handlers (thin adapters over the
 existing services) arrive in Phase 3.
 
+## Phase 3 — RSS ingestion migrated
+
+The first real job type. `rss-ingestion-handler.ts` (type `rss-ingestion`) is a
+**thin adapter**: it calls the existing `runIngestionCron` service unchanged, maps
+its summary to compact job-result diagnostics (`processedSources`,
+`successfulSources`, `failedSources`, `durationMs`, …), and re-throws on a
+run-level failure so the queue's retry/terminal policy applies. No ingestion
+logic moved into `worker/`; per-source failures stay isolated inside the service
+(a completed run with `failedSources > 0` is not retried).
+
+The `ingest` cron route (`app/api/v1/internal/cron/ingest`) no longer runs
+ingestion inline — it authenticates as before, then enqueues **one** job via
+`enqueueJob` (`lib/services/queue/enqueue-job.service.ts`) with a stable
+`dedupeKey` (`cron:rss-ingestion`). The partial unique index
+`jobs_dedupe_active_key` makes an overlapping cron tick return
+`{ deduplicated: true }` instead of starting a second concurrent run.
+
+Translation, generation, image generation and manual generation are still on
+their own cron routes — **not** migrated yet.
+
 ## Run
 
 From the repo root (so the shared client and root `.env` resolve):
