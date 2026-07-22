@@ -185,6 +185,12 @@ export interface GenerateWeeklyScheduleDeps {
   generate?: typeof generatePostFromContext;
   /** Injected in tests so week boundaries are deterministic. */
   now?: () => Date;
+  /**
+   * Soft time-budget hook from the generation cron. Checked before each post's expensive
+   * LLM/image generation; when it returns true the fill loops stop between posts, leaving
+   * the schedule "generating" so the next run resumes. Defaults to never-stop.
+   */
+  shouldStop?: () => boolean;
 }
 
 /** Shared mutable generation budget for one cron run, across all channels. */
@@ -201,6 +207,8 @@ interface FillContext {
   summary: WeeklyScheduleSummary;
   buildContext: typeof buildGenerationContextForCompany;
   generate: typeof generatePostFromContext;
+  /** Soft deadline hook — stops the fill loop between posts at the cron time budget. */
+  shouldStop: () => boolean;
 }
 
 /**
@@ -222,6 +230,7 @@ export async function generateWeeklySchedule(
   const db: GenerateWeeklyScheduleDb = deps.db ?? prisma;
   const buildContext = deps.buildContext ?? buildGenerationContextForCompany;
   const generate = deps.generate ?? generatePostFromContext;
+  const shouldStop = deps.shouldStop ?? (() => false);
 
   const weekStart = nextWeekStart(deps.now ? deps.now() : new Date());
   const weekStartIso = weekStart.toISOString().slice(0, 10);
@@ -326,6 +335,7 @@ export async function generateWeeklySchedule(
       summary,
       buildContext,
       generate,
+      shouldStop,
     };
 
     if (quotas === null) {
@@ -364,6 +374,10 @@ async function fillChannelPooled(
   for (const count of generatedBySource.values()) have += count;
 
   while (have < target && budget.remaining > 0) {
+    // Soft deadline: stop between posts rather than starting another LLM/image generation
+    // past the cron time budget. What's unwritten stays "generating" and resumes next run.
+    if (fill.shouldStop()) break;
+
     const contextResult = await buildContext(companyId, config.channel);
     if (!contextResult.success) {
       summary.failures.push({ channel: config.channel, message: contextResult.code });
@@ -438,6 +452,10 @@ async function fillChannelFromMix(
   };
 
   while (budget.remaining > 0) {
+    // Soft deadline: stop between posts rather than starting another LLM/image generation
+    // past the cron time budget. What's unwritten stays "generating" and resumes next run.
+    if (fill.shouldStop()) break;
+
     // Defence in depth: validation rejects a mix above the ceiling, so this can
     // only fire on a mix stored before that rule existed.
     if (totalGenerated() >= MAX_POSTS_PER_CHANNEL_PER_WEEK) break;

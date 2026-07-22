@@ -4,8 +4,10 @@ import { runGenerationCron } from "@/lib/services/cron/run-generation-cron.servi
 
 // Cron work must never be cached or statically optimized.
 export const dynamic = "force-dynamic";
-// Allow the full Vercel Hobby function budget for LLM generation + Buffer calls.
-export const maxDuration = 60;
+// 300s (Vercel Hobby + Fluid Compute) for the LLM/image generation + Buffer calls. The
+// internal soft deadline stops work at 240s, leaving ~60s of response headroom so the
+// function returns its diagnostics well before this hard cap.
+export const maxDuration = 300;
 
 async function handle(request: Request) {
   const auth = verifyCronRequest(request);

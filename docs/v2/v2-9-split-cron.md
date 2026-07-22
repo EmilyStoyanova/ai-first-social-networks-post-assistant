@@ -25,15 +25,14 @@ slow stage can overrun without colliding with the next.
 
 Routes:
 
-- **ingest / translate:** `maxDuration = 300` (Vercel Hobby + **Fluid Compute**), internal
-  soft deadline **240s** (~60s headroom). These do slow network/LLM work.
-- **generate:** `maxDuration = 60`.
+- **ingest / translate / generate:** `maxDuration = 300` (Vercel Hobby + **Fluid Compute**),
+  internal soft deadline **240s** (~60s headroom). All three do slow network/LLM/image work.
 - All: `force-dynamic`, `CRON_SECRET` auth (`verifyCronRequest`), create a `CronRun` row and
   record `actionsTaken` (with a `kind` discriminator) for diagnostics.
 
 > **Fluid Compute must be enabled** in the Vercel project (Settings → Functions) for the
-> ingest/translate routes to actually get `maxDuration = 300` on Hobby — the default cap is
-> 60s. On by default for projects created since early 2025; older projects must toggle it on.
+> routes to actually get `maxDuration = 300` on Hobby — the default cap is 60s. On by default
+> for projects created since early 2025; older projects must toggle it on.
 
 > The old combined route `/api/v1/internal/cron` (`runCron`) is **retained for manual /
 > backwards-compatible invocation** but is **no longer scheduled**. It must not be scheduled
@@ -111,15 +110,33 @@ steps 3–8 of the old `runCron`.
 Execution order:
 
 1. `createRun()` — CronRun (kind=`generation`).
-2. Select up to `MAX_COMPANIES_PER_RUN` companies **oldest first**
-   (`lastCronProcessedAt asc nulls first`, then `createdAt asc`).
+2. Select up to `MAX_COMPANIES_PER_RUN` (5) companies **oldest first**
+   (`lastCronProcessedAt asc nulls first`, then `createdAt asc`). The real limiter is the soft
+   time budget (`SOFT_TIME_BUDGET_MS` = 240s), not this cap — a company can make several
+   LLM/image calls, so throughput comes from the 300s window + `shouldStop`, not a big batch.
 3. For each, until the soft time budget is hit:
    - **Claim (lock):** CAS `updateMany({ where:{ id, lastCronProcessedAt: prev },
-data:{ lastCronProcessedAt: now } })`. Loser → `companiesClaimedElsewhere`, skipped.
+data:{ lastCronProcessedAt: now } })`. Loser → `skipped` (the locking signal).
    - **Process (steps 3–8, unchanged):** `generateWeeklySchedule` → `autoApprovePosts` →
      `publishScheduledPosts` → `retryFailedPosts` → `backfillEmbeddings` → `syncPostMetrics`.
+     `shouldStop` is threaded into `processCompany`: it goes into `generateWeeklySchedule` (the
+     LLM/image loop stops **between posts** at the deadline) and is checked between the later
+     steps, so a company crossing the budget defers its remaining maintenance steps to the
+     next run instead of overrunning the function cap. Every step is idempotent, so deferring
+     loses nothing.
    - **Failure isolation:** per-company try/catch → `companyFailures`; batch continues.
-4. `finishRun()` / `failRun()`.
+4. `finishRun()` / `failRun()` — records the summary (kind, `examined`, `processed`, `failed`,
+   `skipped`, `remaining`, `durationMs`, `timings`, `companies`, `companyFailures`, `timedOut`)
+   in `actionsTaken`.
+
+### Continuation & the soft deadline
+
+- **Between companies:** the deadline is checked before each claim; an unclaimed company is
+  left for the next run (`timedOut` set only when a still-pending company is abandoned).
+- **Within a company:** `generateWeeklySchedule` checks `shouldStop` before every post's
+  expensive generation and stops between posts; the schedule stays `generating` and resumes.
+- `remaining` counts companies not yet touched this cycle (`lastCronProcessedAt` null or before
+  this run's start) — the backlog the next run picks up.
 
 Preserved behavior:
 
