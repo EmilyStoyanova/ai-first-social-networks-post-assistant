@@ -1,15 +1,18 @@
 /**
- * Worker bootstrap (Phase 1 — infrastructure only).
+ * Worker bootstrap.
  *
  * Boots a worker process that:
  *   1. loads + validates config from the environment,
  *   2. registers itself in the `workers` table (status: starting),
  *   3. starts heartbeats,
- *   4. starts the polling loop (status: idle),
- *   5. shuts down cleanly on SIGTERM/SIGINT (draining → stopped).
+ *   4. recovers any stale-leased jobs, then starts the polling loop (idle),
+ *   5. claims + dispatches jobs through the orchestrator (Phase 2),
+ *   6. shuts down cleanly on SIGTERM/SIGINT (draining → stopped).
  *
- * It does NOT claim or execute jobs, touch the cron routes, or enqueue anything.
- * The `claim`/`processJob` hooks below are deliberate no-ops that Phase 2 fills in.
+ * The worker is an ORCHESTRATOR ONLY: it manages the queue, claiming, retries,
+ * diagnostics and persistence. All real work lives in the registered handlers,
+ * which are thin adapters over the existing services. Phase 2 registers a single
+ * dummy handler; RSS/generation are NOT migrated yet.
  *
  * Run from the repo root so the shared client and env resolve:
  *   npx tsx worker/src/index.ts
@@ -18,13 +21,16 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
-import type { PrismaClient, Prisma } from "@prisma/client";
 
 import { loadWorkerConfig } from "./config";
 import { createLogger } from "./logger";
 import { WorkerRegistry } from "./registry";
 import { PollingRunner } from "./runner";
-import type { WorkerStore } from "./store";
+import { JobOrchestrator } from "./orchestrator";
+import { HandlerRegistry } from "./handler-registry";
+import { dummyHandler, DUMMY_JOB_TYPE } from "./dummy-handler";
+import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
+import type { JobRecord } from "./job-store";
 
 // Load the repo-root .env regardless of the current working directory, so the
 // worker sees the same DATABASE_URL etc. as the Next app.
@@ -32,51 +38,6 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../
 loadEnv({ path: path.join(repoRoot, ".env") });
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-/** Adapts the shared Prisma client to the registry's storage seam. */
-function createPrismaWorkerStore(prisma: PrismaClient): WorkerStore {
-  return {
-    upsert: async (input) => {
-      const metadata =
-        input.metadata === null ? undefined : (input.metadata as Prisma.InputJsonValue);
-      await prisma.worker.upsert({
-        where: { name: input.name },
-        create: {
-          name: input.name,
-          status: input.status,
-          hostname: input.hostname,
-          pid: input.pid,
-          concurrency: input.concurrency,
-          metadata,
-          startedAt: input.startedAt,
-          lastHeartbeatAt: input.lastHeartbeatAt,
-        },
-        update: {
-          status: input.status,
-          hostname: input.hostname,
-          pid: input.pid,
-          concurrency: input.concurrency,
-          metadata,
-          startedAt: input.startedAt,
-          lastHeartbeatAt: input.lastHeartbeatAt,
-          stoppedAt: null,
-        },
-      });
-    },
-    update: async (name, patch) => {
-      await prisma.worker.update({
-        where: { name },
-        data: {
-          ...(patch.status !== undefined ? { status: patch.status } : {}),
-          ...(patch.lastHeartbeatAt !== undefined
-            ? { lastHeartbeatAt: patch.lastHeartbeatAt }
-            : {}),
-          ...(patch.stoppedAt !== undefined ? { stoppedAt: patch.stoppedAt } : {}),
-        },
-      });
-    },
-  };
-}
 
 async function main(): Promise<void> {
   const config = loadWorkerConfig();
@@ -87,27 +48,47 @@ async function main(): Promise<void> {
     concurrency: config.concurrency,
     pollIntervalMs: config.pollIntervalMs,
     heartbeatIntervalMs: config.heartbeatIntervalMs,
+    leaseTtlMs: config.leaseTtlMs,
   });
 
   // Import the shared client AFTER config validation so a bad env fails with a
   // clear message before any connection is constructed.
   const { prisma } = await import("@/lib/db/client");
-  const store = createPrismaWorkerStore(prisma);
-  const registry = new WorkerRegistry({ store, config, logger });
+
+  const registry = new WorkerRegistry({
+    store: createPrismaWorkerStore(prisma),
+    config,
+    logger,
+  });
+
+  // The engine: queue management, claiming, orchestration, retries, diagnostics.
+  const handlers = new HandlerRegistry().register(DUMMY_JOB_TYPE, dummyHandler);
+  const orchestrator = new JobOrchestrator({
+    store: createPrismaJobStore(prisma),
+    registry: handlers,
+    config,
+    logger,
+  });
 
   await registry.register();
   registry.startHeartbeat();
 
-  const runner = new PollingRunner({
+  // Recover anything a previous crashed worker left leased, then poll.
+  await orchestrator.reapOnce();
+
+  const runner = new PollingRunner<JobRecord>({
     config,
     logger,
     registry,
-    // Phase 1: claiming and execution are intentionally disabled.
-    claim: async () => null,
-    processJob: async () => {},
+    claim: () => orchestrator.claim(),
+    processJob: (job) => orchestrator.process(job),
   });
   runner.start();
-  logger.info("ready", { status: registry.currentStatus() });
+  logger.info("ready", { status: registry.currentStatus(), handlers: handlers.types() });
+
+  // Periodic stale-lease recovery. Cheap; runs independently of the poll loop.
+  const reapIntervalMs = Math.max(30_000, Math.floor(config.leaseTtlMs / 2));
+  const reaper = setInterval(() => void orchestrator.reapOnce(), reapIntervalMs);
 
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals) => {
@@ -115,6 +96,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     logger.info("shutdown", { signal });
     try {
+      clearInterval(reaper);
       await registry.setStatus("draining");
       await Promise.race([runner.stop(), delay(config.shutdownGraceMs)]);
       await registry.markStopped();

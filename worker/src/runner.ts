@@ -13,7 +13,8 @@ import type { WorkerConfig } from "./config";
 import type { Logger } from "./logger";
 import type { WorkerLifecycle } from "./store";
 
-/** Minimal shape of a claimed job. Phase 2 will widen this. */
+/** Minimal shape the runner needs from a claimed job (for logging). The engine
+ * carries a richer record; the runner stays generic over it. */
 export interface ClaimedJob {
   id: string;
   type: string;
@@ -24,24 +25,24 @@ interface StatusSink {
   setStatus(status: WorkerLifecycle): Promise<void>;
 }
 
-interface RunnerDeps {
+interface RunnerDeps<TJob extends ClaimedJob> {
   config: WorkerConfig;
   logger: Logger;
   registry: StatusSink;
   /** Returns the next job to run, or null when the queue has nothing due. */
-  claim: () => Promise<ClaimedJob | null>;
+  claim: () => Promise<TJob | null>;
   /** Executes a claimed job. */
-  processJob: (job: ClaimedJob) => Promise<void>;
+  processJob: (job: TJob) => Promise<void>;
 }
 
-export class PollingRunner {
+export class PollingRunner<TJob extends ClaimedJob = ClaimedJob> {
   private running = false;
   private stopping = false;
   private loopPromise: Promise<void> | null = null;
   /** Resolver that ends an in-flight poll sleep early (set only while sleeping). */
   private wake: (() => void) | null = null;
 
-  constructor(private readonly deps: RunnerDeps) {}
+  constructor(private readonly deps: RunnerDeps<TJob>) {}
 
   isRunning(): boolean {
     return this.running;
@@ -72,7 +73,7 @@ export class PollingRunner {
     await this.deps.registry.setStatus("idle");
 
     while (!this.stopping) {
-      let job: ClaimedJob | null = null;
+      let job: TJob | null = null;
       try {
         job = await this.deps.claim();
       } catch (err) {

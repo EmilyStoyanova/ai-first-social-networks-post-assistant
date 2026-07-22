@@ -4,6 +4,11 @@ External background-job worker for the app. Lives in the same repository and
 imports the app's service layer and Prisma client directly (`@/lib/*`), so job
 logic is never duplicated.
 
+> **Architecture: the worker is an orchestrator only.** It owns queue
+> management, claiming, orchestration, retries, diagnostics and persistence. It
+> contains **no** AI/business logic — every job handler is a thin adapter that
+> delegates to the existing services (text/image/embedding generation, Buffer).
+
 ## Phase 1 — infrastructure only
 
 This phase ships the process skeleton **only**. The worker:
@@ -18,6 +23,28 @@ This phase ships the process skeleton **only**. The worker:
 It does **not** yet claim or execute jobs, modify the cron routes, or enqueue
 anything. The `claim` / `processJob` hooks in `index.ts` are deliberate no-ops
 that Phase 2 fills in without changing the loop.
+
+## Phase 2 — generic queue engine
+
+Adds the queue engine, wired into the Phase 1 loop:
+
+- **Atomic claiming** (`prisma-adapters.ts` → `createPrismaJobStore`): a single
+  `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED LIMIT 1)` leases the
+  highest-priority due job to this worker and bumps `attempts`. Backed by the
+  partial index `jobs_claim_idx`.
+- **Dispatch** (`handler-registry.ts` + `orchestrator.ts`): the orchestrator
+  looks up a handler by `job.type` and runs it. An unknown type fails terminally.
+- **Retries with backoff** (`backoff.ts`): a failed attempt is requeued with an
+  exponential, jittered `run_at` until `attempts >= maxAttempts`, then fails.
+- **Lease reaper**: on startup and on an interval, jobs whose lease expired
+  (crashed worker) are requeued — or failed if attempts are exhausted.
+- **Diagnostics/persistence**: every transition is written to the `jobs` row
+  (`status`, `attempts`, `last_error`, `result`, `started_at`, `finished_at`).
+
+Only a **dummy** handler (`dummy-handler.ts`, type `dummy`) is registered — it
+echoes its payload and, on `{ "fail": true }`, throws to exercise retries. RSS
+and generation are **not** migrated yet. Real handlers (thin adapters over the
+existing services) arrive in Phase 3.
 
 ## Run
 
