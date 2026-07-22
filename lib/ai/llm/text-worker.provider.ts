@@ -1,5 +1,9 @@
 import type { ILlmProvider, LlmRequest, LlmResponse } from "./llm-provider";
 import { LlmProviderError } from "../errors";
+import { requestSignal } from "@/lib/http/request-deadline";
+
+/** Per-request cap; squeezed smaller when a cron deadline leaves less budget. */
+const TEXT_WORKER_TIMEOUT_MS = 120_000;
 
 interface TextWorkerResponse {
   text: string;
@@ -28,14 +32,15 @@ export class TextWorkerProvider implements ILlmProvider {
           "x-worker-api-key": this.apiKey,
         },
         body: JSON.stringify({ prompt, model: this.model }),
-        signal: AbortSignal.timeout(120_000),
+        signal: requestSignal(TEXT_WORKER_TIMEOUT_MS),
       });
     } catch (err) {
       // Diagnostic: distinguish a timeout from an unreachable/transport failure.
       // No prompt, key, or body content is logged — only the failure category.
-      if (err instanceof Error && err.name === "TimeoutError") {
+      // AbortError also fires when the ambient cron deadline cuts the request short.
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
         console.warn("[llm-diag] text-worker transport failure: category=timeout");
-        throw new LlmProviderError("Text worker timed out after 120 seconds");
+        throw new LlmProviderError("Text worker request exceeded its deadline");
       }
       console.warn(
         `[llm-diag] text-worker transport failure: category=unreachable name=${

@@ -3,6 +3,10 @@ import {
   type EmbeddingResult,
   type IEmbeddingProvider,
 } from "./embedding-provider";
+import { requestSignal } from "@/lib/http/request-deadline";
+
+/** Per-request cap; squeezed smaller when a cron deadline leaves less budget. */
+const EMBED_TIMEOUT_MS = 60_000;
 
 /**
  * Local-first embedding provider backed by the self-hosted TEXT_WORKER
@@ -48,11 +52,11 @@ export class WorkerEmbeddingProvider implements IEmbeddingProvider {
           "x-worker-api-key": this.apiKey,
         },
         body: JSON.stringify({ texts }),
-        signal: AbortSignal.timeout(60_000),
+        signal: requestSignal(EMBED_TIMEOUT_MS),
       });
     } catch (err) {
-      if (err instanceof Error && err.name === "TimeoutError") {
-        throw new EmbeddingProviderError("Embedding worker timed out after 60 seconds");
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        throw new EmbeddingProviderError("Embedding worker request exceeded its deadline");
       }
       throw new EmbeddingProviderError(
         `Embedding worker unreachable: ${err instanceof Error ? err.message : String(err)}`

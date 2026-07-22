@@ -85,6 +85,14 @@ describe("runGenerationCron — bounded deterministic batching", () => {
       "databaseWritesMs",
       "cleanupMs",
       "totalMs",
+      "weeklyGenerationMs",
+      "llmMs",
+      "imageMs",
+      "approvalMs",
+      "publishingMs",
+      "retryMs",
+      "backfillMs",
+      "analyticsSyncMs",
     ] as const) {
       assert.equal(typeof s.timings[key], "number");
     }
@@ -205,6 +213,51 @@ describe("runGenerationCron — shouldStop threaded into processCompany", () => 
 
     assert.equal(s.processed, 1);
     assert.deepEqual(probes, [false, true]);
+  });
+});
+
+describe("runGenerationCron — hanging external dependency (out-of-band race)", () => {
+  it("abandons a company whose work never resolves and still returns controlled JSON", async () => {
+    let finished: { id: string; actions: Record<string, unknown> } | undefined;
+    const h = harness({
+      selectCompanies: async () => [company("a"), company("b")],
+      // Simulates a hung LLM/image/Buffer call: processCompany never settles.
+      processCompany: () => new Promise<Record<string, unknown>>(() => {}),
+      // Deterministic deadline: the race timer fires immediately instead of after real time.
+      timer: () => ({ promise: Promise.resolve(), cancel: () => {} }),
+      finishRun: async (id, actions) => {
+        finished = { id, actions };
+      },
+    });
+
+    // The whole point: this resolves (does not hang) even though processCompany never does.
+    const s = await runGenerationCron(h.deps);
+
+    assert.equal(s.status, "completed"); // controlled result, not a crash
+    assert.equal(s.timedOut, true);
+    assert.equal(s.processed, 0);
+    assert.equal(s.failed, 1);
+    assert.match(s.companyFailures[0].message, /Abandoned at the soft deadline/);
+    // "b" is never reached — the run stops claiming once the budget is spent.
+    assert.equal(s.examined, 1);
+    // CronRun was still persisted with the timedOut diagnostics.
+    assert.ok(finished);
+    assert.equal(finished.actions.timedOut, true);
+    assert.equal(finished.actions.kind, "generation");
+  });
+
+  it("completes normally when work finishes before the race timer fires", async () => {
+    // A timer that never resolves — so only the (fast) work can win the race.
+    const h = harness({
+      selectCompanies: async () => [company("a")],
+      timer: () => ({ promise: new Promise<void>(() => {}), cancel: () => {} }),
+    });
+
+    const s = await runGenerationCron(h.deps);
+
+    assert.equal(s.status, "completed");
+    assert.equal(s.timedOut, false);
+    assert.equal(s.processed, 1);
   });
 });
 

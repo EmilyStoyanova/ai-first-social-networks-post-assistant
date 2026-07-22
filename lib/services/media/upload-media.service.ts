@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { prisma } from "@/lib/db/client";
+import { requestSignal } from "@/lib/http/request-deadline";
 
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -118,7 +119,7 @@ export async function uploadMedia(
     uploadRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
       method: "POST",
       body: form,
-      signal: AbortSignal.timeout(25_000),
+      signal: requestSignal(25_000),
     });
   } catch (err) {
     const isTimeout =

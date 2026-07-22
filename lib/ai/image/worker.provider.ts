@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import type { IImageProvider, ImageGenerationOptions, GeneratedImage } from "./image-provider";
 import { ImageProviderError } from "./image-provider-errors";
+import { requestSignal } from "@/lib/http/request-deadline";
 
 interface WorkerResponse {
   imageUrl: string;
@@ -17,7 +18,9 @@ export class WorkerImageProvider implements IImageProvider {
   async generate(prompt: string, options?: ImageGenerationOptions): Promise<GeneratedImage> {
     const url = this.workerUrl.replace(/\/$/, "");
 
-    const TIMEOUT_MS = 180_000;
+    // Per-request cap; squeezed smaller when a cron deadline leaves less budget so a
+    // slow image generation cannot run past the function timeout.
+    const TIMEOUT_MS = 120_000;
 
     let res: Response;
     try {
@@ -25,11 +28,11 @@ export class WorkerImageProvider implements IImageProvider {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-worker-api-key": this.apiKey },
         body: JSON.stringify({ prompt }),
-        signal: AbortSignal.timeout(TIMEOUT_MS),
+        signal: requestSignal(TIMEOUT_MS),
       });
     } catch (err) {
-      if (err instanceof Error && err.name === "TimeoutError") {
-        throw new ImageProviderError("Image worker timed out after 180 seconds");
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        throw new ImageProviderError("Image worker request exceeded its deadline");
       }
       const providerError = new ImageProviderError(
         `Image worker unreachable: ${err instanceof Error ? err.message : String(err)}`

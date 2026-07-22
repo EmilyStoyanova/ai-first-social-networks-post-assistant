@@ -7,6 +7,15 @@ import { publishScheduledPosts } from "./publish-scheduled-posts.service";
 import { retryFailedPosts } from "./retry-failed-posts.service";
 import { backfillEmbeddings } from "./backfill-embeddings.service";
 import { syncPostMetrics } from "@/lib/services/analytics/sync-post-metrics.service";
+import {
+  createRequestDeadline,
+  runInRequestDeadline,
+  recordPhase,
+  raceWithTimeout,
+  realTimer,
+  type RequestDeadlineContext,
+  type Timer,
+} from "@/lib/http/request-deadline";
 
 // ─── Tunables ──────────────────────────────────────────────────────────────────
 
@@ -18,10 +27,19 @@ import { syncPostMetrics } from "@/lib/services/analytics/sync-post-metrics.serv
 const MAX_COMPANIES_PER_RUN = 5;
 /**
  * Wall-clock deadline for a run. 240s leaves ~60s of headroom under the route's 300s cap
- * (Vercel Hobby + Fluid Compute) for the per-company step that was already running when the
- * deadline was crossed. Enforced at two granularities: between companies, and between the
- * expensive LLM/image operations inside a company (shouldStop into processCompany →
- * generateWeeklySchedule), so one company can never run all its generations to the timeout.
+ * (Vercel Hobby + Fluid Compute) — the RESERVE for persisting the CronRun and returning the
+ * HTTP response after work stops.
+ *
+ * The deadline is enforced THREE ways, because a soft (cooperative) deadline alone cannot
+ * interrupt an in-flight network call:
+ *   • between companies — stop claiming new companies once the budget is spent;
+ *   • within a company — `shouldStop` into processCompany → generateWeeklySchedule stops
+ *     between LLM/image generations;
+ *   • per outbound request — every external call runs under an ambient AbortSignal derived
+ *     from the time left to this deadline (see lib/http/request-deadline), so no single
+ *     LLM/image/Buffer/Cloudinary/embedding call can consume the remaining headroom;
+ *   • out-of-band — each company is RACED against a real timer at the deadline, so even a
+ *     call that ignores its signal cannot hold the response past the reserve.
  */
 export const SOFT_TIME_BUDGET_MS = 240_000;
 
@@ -44,7 +62,7 @@ export interface GenerationCronCompany {
 export interface GenerationTimings {
   /** selectCompanies — picking the batch. */
   companySelectionMs: number;
-  /** All processCompany calls — schedule generation, approval, publish, retry, backfill, sync. */
+  /** All processCompany calls — wall clock incl. time spent waiting on external calls. */
   generationMs: number;
   /** Cron-level DB writes: createRun + the per-company CAS claims. */
   databaseWritesMs: number;
@@ -52,6 +70,23 @@ export interface GenerationTimings {
   cleanupMs: number;
   /** Total measured wall-clock of the run. */
   totalMs: number;
+  // ── Per-phase breakdown, accumulated across companies via the ambient deadline ──
+  /** generateWeeklySchedule wall clock (its LLM/image time is broken out below). */
+  weeklyGenerationMs: number;
+  /** LLM calls: aspect mining + generate-with-retry, across all posts this run. */
+  llmMs: number;
+  /** Image generation (provider + Cloudinary upload), across all posts this run. */
+  imageMs: number;
+  /** autoApprovePosts. */
+  approvalMs: number;
+  /** publishScheduledPosts (Buffer). */
+  publishingMs: number;
+  /** retryFailedPosts. */
+  retryMs: number;
+  /** backfillEmbeddings (embedding worker). */
+  backfillMs: number;
+  /** syncPostMetrics (Buffer analytics). */
+  analyticsSyncMs: number;
 }
 
 export interface GenerationCronSummary {
@@ -84,6 +119,8 @@ export interface GenerationCronDeps {
   now?: () => Date;
   timeBudgetMs?: number;
   maxCompanies?: number;
+  /** Real-timer factory for the out-of-band race; injected in tests to drive the deadline. */
+  timer?: Timer;
   createRun?: () => Promise<{ id: string }>;
   finishRun?: (id: string, actions: Record<string, unknown>) => Promise<void>;
   failRun?: (id: string, actions: Record<string, unknown>, error: string) => Promise<void>;
@@ -182,21 +219,44 @@ async function defaultProcessCompany(
   { shouldStop }: { shouldStop: () => boolean }
 ): Promise<Record<string, unknown>> {
   const actions: Record<string, unknown> = {};
-  actions.weeklySchedule = await generateWeeklySchedule(company.id, { shouldStop });
+  // Each step is wrapped in recordPhase so its wall-clock time lands in the ambient
+  // deadline's phase map (merged into the cron's timings). generateWeeklySchedule breaks
+  // its own time down further into `llm`/`image` from inside generatePostFromContext.
+  actions.weeklySchedule = await recordPhase("weeklyGeneration", () =>
+    generateWeeklySchedule(company.id, { shouldStop })
+  );
   if (shouldStop()) return actions;
-  actions.autoApprove = await autoApprovePosts(company.id, company.automationMode);
+  actions.autoApprove = await recordPhase("approval", () =>
+    autoApprovePosts(company.id, company.automationMode)
+  );
   if (shouldStop()) return actions;
-  actions.publish = await publishScheduledPosts(company.id);
+  actions.publish = await recordPhase("publishing", () => publishScheduledPosts(company.id));
   if (shouldStop()) return actions;
-  actions.retry = await retryFailedPosts(company.id);
+  actions.retry = await recordPhase("retry", () => retryFailedPosts(company.id));
   if (shouldStop()) return actions;
-  actions.backfillEmbeddings = await backfillEmbeddings({ companyId: company.id, limit: 25 });
+  actions.backfillEmbeddings = await recordPhase("backfill", () =>
+    backfillEmbeddings({ companyId: company.id, limit: 25 })
+  );
   if (shouldStop()) return actions;
-  actions.syncMetrics = await syncPostMetrics({ companyId: company.id, limit: 15 });
+  actions.syncMetrics = await recordPhase("analyticsSync", () =>
+    syncPostMetrics({ companyId: company.id, limit: 15 })
+  );
   return actions;
 }
 
 // ─── Orchestrator ──────────────────────────────────────────────────────────────
+
+/** Copies the ambient deadline's named phase totals into the typed timings shape. */
+function mergePhaseTimings(timings: GenerationTimings, phases: Record<string, number>): void {
+  timings.weeklyGenerationMs = phases.weeklyGeneration ?? 0;
+  timings.llmMs = phases.llm ?? 0;
+  timings.imageMs = phases.image ?? 0;
+  timings.approvalMs = phases.approval ?? 0;
+  timings.publishingMs = phases.publishing ?? 0;
+  timings.retryMs = phases.retry ?? 0;
+  timings.backfillMs = phases.backfill ?? 0;
+  timings.analyticsSyncMs = phases.analyticsSync ?? 0;
+}
 
 function toActions(summary: GenerationCronSummary): Record<string, unknown> {
   return {
@@ -221,11 +281,17 @@ function toActions(summary: GenerationCronSummary): Record<string, unknown> {
  * unchanged. Companies are processed oldest-first in a bounded batch, each failure-isolated,
  * each claimed with a compare-and-swap so concurrent runs never double-generate.
  *
- * Hobby-safety comes from a wall-clock deadline enforced at TWO granularities:
+ * Hobby-safety comes from a wall-clock deadline enforced at FOUR granularities (a soft,
+ * cooperative deadline alone cannot interrupt an in-flight network call):
  *   • between companies — stop claiming new companies once the budget is spent;
  *   • within a company — `shouldStop` is threaded into processCompany, and from there into
- *     generateWeeklySchedule, so a single company stops between LLM/image generations rather
- *     than running its whole schedule to the timeout.
+ *     generateWeeklySchedule, so a single company stops between LLM/image generations;
+ *   • per outbound request — each company runs under an ambient request deadline, so every
+ *     external call's AbortSignal is bounded by the time left (no single call eats the
+ *     headroom, and a hung provider is aborted);
+ *   • out-of-band — each company is RACED against a real timer at the deadline, so even a
+ *     call that ignores its signal cannot hold the response past the reserve; the company is
+ *     abandoned, `timedOut` is set, and the run still persists its CronRun and returns.
  *
  * Progress persists via the per-company CAS claim (which advances lastCronProcessedAt) and
  * via generateWeeklySchedule's own idempotency (the schedule stays "generating" until every
@@ -237,6 +303,7 @@ export async function runGenerationCron(
   const now = deps.now ?? (() => new Date());
   const timeBudgetMs = deps.timeBudgetMs ?? SOFT_TIME_BUDGET_MS;
   const maxCompanies = deps.maxCompanies ?? MAX_COMPANIES_PER_RUN;
+  const timer = deps.timer ?? realTimer;
   const createRun = deps.createRun ?? defaultCreateRun;
   const finishRun = deps.finishRun ?? defaultFinishRun;
   const failRun = deps.failRun ?? defaultFailRun;
@@ -247,10 +314,15 @@ export async function runGenerationCron(
 
   const startMs = now().getTime();
   const deadlineMs = startMs + timeBudgetMs;
-  const overBudget = () => now().getTime() >= deadlineMs;
   // Passed into each company's step pipeline so it, too, stops at the deadline.
   const shouldStop = () => now().getTime() >= deadlineMs;
   const processedBefore = new Date(startMs);
+
+  // Ambient deadline for every outbound request made while processing a company: each
+  // external call's AbortSignal is derived from the time left to `deadlineMs`. One ctx is
+  // reused across companies so per-phase timings accumulate. Its clock is `now()`, so a test
+  // that injects `now` also controls the per-request budget math.
+  const deadline: RequestDeadlineContext = createRequestDeadline(deadlineMs, () => now().getTime());
 
   // Real-clock timing, deliberately separate from the injectable `now()` used for the
   // deadline — accurate in production, and it never perturbs deterministic budget tests.
@@ -261,6 +333,14 @@ export async function runGenerationCron(
     databaseWritesMs: 0,
     cleanupMs: 0,
     totalMs: 0,
+    weeklyGenerationMs: 0,
+    llmMs: 0,
+    imageMs: 0,
+    approvalMs: 0,
+    publishingMs: 0,
+    retryMs: 0,
+    backfillMs: 0,
+    analyticsSyncMs: 0,
   };
   async function timed<T>(bucket: keyof GenerationTimings, fn: () => Promise<T>): Promise<T> {
     const t = performance.now();
@@ -292,7 +372,11 @@ export async function runGenerationCron(
     const companies = await timed("companySelectionMs", () => selectCompanies(maxCompanies));
 
     for (const company of companies) {
-      if (overBudget()) {
+      // One now() read per iteration drives BOTH the "start new work?" gate and the race
+      // budget, so the injectable clock advances deterministically for tests.
+      const nowMs = now().getTime();
+      const raceMs = deadlineMs - nowMs;
+      if (raceMs <= 0) {
         // A company we were about to process is abandoned → genuine interruption.
         summary.timedOut = true;
         break;
@@ -309,16 +393,38 @@ export async function runGenerationCron(
         continue;
       }
 
+      // Run the company's work under the ambient deadline (so its outbound calls are
+      // budget-bounded) AND race it against a real timer at the deadline. The race is the
+      // hard guarantee: even a call that ignores its AbortSignal cannot hold the response
+      // past the deadline — we abandon it, leaving the ~60s reserve to persist + respond.
+      const work = runInRequestDeadline(deadline, () => processCompany(company, { shouldStop }));
+
+      let raced: { timedOut: false; value: Record<string, unknown> } | { timedOut: true };
       try {
-        const actions = await timed("generationMs", () => processCompany(company, { shouldStop }));
-        summary.processed++;
-        summary.companies.push({ slug: company.slug, actions });
+        raced = await timed("generationMs", () => raceWithTimeout(work, raceMs, timer));
       } catch (err) {
+        // A company that threw is isolated — record it and carry on with the batch.
         summary.failed++;
         summary.companyFailures.push({ slug: company.slug, message: message(err) });
+        continue;
       }
+
+      if (raced.timedOut) {
+        summary.timedOut = true;
+        summary.failed++;
+        summary.companyFailures.push({
+          slug: company.slug,
+          message: `Abandoned at the soft deadline after ${raceMs}ms — in-flight work exceeded the budget.`,
+        });
+        break; // no budget left for further companies
+      }
+
+      summary.processed++;
+      summary.companies.push({ slug: company.slug, actions: raced.value });
     }
 
+    // Merge the per-phase timings accumulated across companies via the ambient deadline.
+    mergePhaseTimings(timings, deadline.phases);
     summary.remaining = await timed("cleanupMs", () => countRemaining(processedBefore));
     timings.totalMs = Math.round(performance.now() - runStart);
     summary.durationMs = timings.totalMs;
@@ -328,6 +434,7 @@ export async function runGenerationCron(
     const msg = message(err);
     summary.status = "failed";
     summary.error = msg;
+    mergePhaseTimings(timings, deadline.phases);
     timings.totalMs = Math.round(performance.now() - runStart);
     summary.durationMs = timings.totalMs;
     await failRun(run.id, toActions(summary), msg);

@@ -138,6 +138,32 @@ data:{ lastCronProcessedAt: now } })`. Loser → `skipped` (the locking signal).
 - `remaining` counts companies not yet touched this cycle (`lastCronProcessedAt` null or before
   this run's start) — the backlog the next run picks up.
 
+### Guaranteeing a response before the hard cap (v2-9 hardening)
+
+A soft, cooperative deadline (`shouldStop`) cannot interrupt a `fetch` that is **already in
+flight**. In production the generation cron still hit `FUNCTION_INVOCATION_TIMEOUT` — exactly
+5 minutes, connection reset, no JSON — because the LLM providers (Groq/OpenAI/Anthropic) had
+**no request timeout at all**, and the worker/embedding/Cloudinary/Buffer timeouts were fixed
+constants (120s/180s/60s/…) unrelated to the remaining budget. One hung or late call ran past
+the 300s cap and the function never returned.
+
+Two more layers now enforce the deadline out-of-band ([lib/http/request-deadline.ts](../../lib/http/request-deadline.ts)):
+
+1. **Ambient per-request deadline.** While a company is processed, an `AsyncLocalStorage`
+   deadline is installed. Every outbound call (`requestSignal(cap)`) gets an `AbortSignal`
+   timed to `min(per-request cap, time left to the 240s deadline)` — so no single LLM, image,
+   Cloudinary, Buffer, or embedding call can consume the remaining headroom, and a call
+   started with no budget left aborts immediately. Outside the cron it is a no-op, so the
+   interactive path keeps its generous timeouts.
+2. **Out-of-band race.** Each company is raced (`raceWithTimeout`) against a real timer at the
+   deadline. Even a call that ignores its signal cannot hold the response: the company is
+   abandoned, `timedOut=true`, the CronRun is still persisted, and the run returns — leaving
+   the ~60s reserve (240s → 300s) for that persistence and the HTTP response.
+
+The same ambient context accumulates **per-phase timings** (`recordPhase`) — `weeklyGeneration`,
+`llm`, `image`, `approval`, `publishing`, `retry`, `backfill`, `analyticsSync` — surfaced in
+`timings` alongside `companySelection`, `databaseWrites`, `cleanup`, and `total`.
+
 Preserved behavior:
 
 - **pending_approval / fully_automated** unchanged — `generateWeeklySchedule` still writes

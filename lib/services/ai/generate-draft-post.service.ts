@@ -44,6 +44,7 @@ import {
   recordSemanticCalibration,
   type SemanticCalibrationInput,
 } from "./semantic-calibration.service";
+import { recordPhase } from "@/lib/http/request-deadline";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -518,15 +519,18 @@ export async function generatePostFromContext(
     extractionRound,
     fingerprint: aspectFingerprint,
     usedAspectIds,
-  } = await resolveGenerationAspect({
-    // Aspects are mined from the primary ALONE. An aspect reaches the prompt as a
-    // mandatory "build the post around this" constraint, so one mined from a
-    // background article would order the model to write about an article this
-    // post does not link to.
-    primary: primary.item,
-    snapshots,
-    provider,
-  });
+    // Aspect mining is an LLM call — timed into the `llm` phase for cron diagnostics.
+  } = await recordPhase("llm", () =>
+    resolveGenerationAspect({
+      // Aspects are mined from the primary ALONE. An aspect reaches the prompt as a
+      // mandatory "build the post around this" constraint, so one mined from a
+      // background article would order the model to write about an article this
+      // post does not link to.
+      primary: primary.item,
+      snapshots,
+      provider,
+    })
+  );
 
   // ── Build prompts ─────────────────────────────────────────────────────────
   const { systemPrompt, userPrompt } = buildPrompts(
@@ -555,22 +559,25 @@ export async function generatePostFromContext(
   // is persisted; rejected candidates leave no embedding behind.
   let generationResult!: GenerationLoopResult;
   try {
-    generationResult = await generateWithRetry(
-      provider,
-      systemPrompt,
-      userPrompt,
-      recentRows10.map((r) => ({ id: r.id, text: r.content })),
-      {
-        initialAngle,
-        recentAngles,
-        initialPattern,
-        recentPatterns,
-        recentTopics: topicMemory,
-        initialAspect,
-        aspectPool,
-        aspectUsedIds: usedAspectIds,
-      },
-      semanticGate
+    // The generation LLM calls (incl. retries) — timed into the `llm` phase.
+    generationResult = await recordPhase("llm", () =>
+      generateWithRetry(
+        provider,
+        systemPrompt,
+        userPrompt,
+        recentRows10.map((r) => ({ id: r.id, text: r.content })),
+        {
+          initialAngle,
+          recentAngles,
+          initialPattern,
+          recentPatterns,
+          recentTopics: topicMemory,
+          initialAspect,
+          aspectPool,
+          aspectUsedIds: usedAspectIds,
+        },
+        semanticGate
+      )
     );
   } catch (err) {
     await releaseClaimedFeedItem();
@@ -896,12 +903,15 @@ export async function generatePostFromContext(
   // null and can still be illustrated manually.
   let mediaUrl: string | null = null;
   try {
-    const outcome = await autoImage({
-      postId: post.id,
-      companyId,
-      enabled: context.channel.autoGenerateImage,
-      generatedById,
-    });
+    // Image generation (provider + upload) — timed into the `image` phase.
+    const outcome = await recordPhase("image", () =>
+      autoImage({
+        postId: post.id,
+        companyId,
+        enabled: context.channel.autoGenerateImage,
+        generatedById,
+      })
+    );
     if (outcome.status === "generated") mediaUrl = outcome.media.url;
   } catch (err) {
     console.error(

@@ -4,9 +4,12 @@ import {
   AnalyticsScopeError,
 } from "./buffer-analytics-errors";
 import type { BufferPostMetric } from "./metric-normalizer";
+import { requestSignal } from "@/lib/http/request-deadline";
 
 const API_URL = "https://api.buffer.com";
 const LOG_LIMIT = 500;
+/** Per-request cap for a single metrics call; squeezed smaller under a cron deadline. */
+const ANALYTICS_TIMEOUT_MS = 30_000;
 
 /**
  * Read-only Buffer client for engagement metrics, authenticated with a company's
@@ -95,10 +98,13 @@ export class BufferAnalyticsClient {
           Authorization: `Bearer ${this.personalApiKey}`,
         },
         body: JSON.stringify({ query, variables }),
+        // Bounded by the ambient cron deadline so a hung metrics call cannot run past it.
+        signal: requestSignal(ANALYTICS_TIMEOUT_MS),
       });
     } catch (err) {
-      // Network-level failure. Surfaced as a rate-limit-shaped retryable error so
-      // the cron treats it as "try next run" rather than poisoning the key state.
+      // Network-level failure (incl. a deadline abort). Surfaced as a rate-limit-shaped
+      // retryable error so the cron treats it as "try next run" rather than poisoning
+      // the key state.
       const message = err instanceof Error ? err.message : "network error";
       throw new AnalyticsRateLimitError(`Could not reach Buffer: ${message}`);
     }

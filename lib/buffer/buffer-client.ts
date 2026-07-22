@@ -3,6 +3,10 @@ import {
   BufferTokenExpiredError,
   BufferInvalidProfileError,
 } from "./buffer-errors";
+import { requestSignal } from "@/lib/http/request-deadline";
+
+/** Per-request cap for a single Buffer call; squeezed smaller under a cron deadline. */
+const BUFFER_TIMEOUT_MS = 30_000;
 
 // Buffer's current GraphQL API (the legacy api.bufferapp.com/1 REST API does not
 // accept tokens issued by auth.buffer.com).
@@ -68,14 +72,26 @@ export class BufferClient {
   constructor(private readonly accessToken: string) {}
 
   private async query<T>(query: string): Promise<T> {
-    const res = await fetch(API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.accessToken}`,
-      },
-      body: JSON.stringify({ query }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(API_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.accessToken}`,
+        },
+        body: JSON.stringify({ query }),
+        // Bounded by the ambient cron deadline so a hung Buffer call cannot run past it.
+        signal: requestSignal(BUFFER_TIMEOUT_MS),
+      });
+    } catch (err) {
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        throw new BufferApiError("Buffer request exceeded its deadline.");
+      }
+      throw new BufferApiError(
+        `Buffer unreachable: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
 
     if (res.status === 401 || res.status === 403) throw new BufferTokenExpiredError();
     if (res.status === 429) {

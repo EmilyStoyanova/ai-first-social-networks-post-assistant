@@ -1,7 +1,11 @@
 import type { ILlmProvider, LlmRequest, LlmResponse } from "./llm-provider";
 import { LlmProviderError, LlmRateLimitError } from "../errors";
+import { requestSignal } from "@/lib/http/request-deadline";
 
 const DEFAULT_BASE_URL = "https://api.groq.com/openai";
+
+/** Per-request cap for a single Groq call; squeezed smaller under a cron deadline. */
+const GROQ_TIMEOUT_MS = 90_000;
 
 /** Initial attempt + this many retries when Groq reports a rate limit. */
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -63,22 +67,34 @@ export class GroqProvider implements ILlmProvider {
     const base = (this.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
 
     for (let attempt = 1; ; attempt++) {
-      const res = await fetch(`${base}/v1/chat/completions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          model: this.model,
-          temperature: request.temperature ?? 0.7,
-          max_tokens: request.maxTokens ?? 1024,
-          messages: [
-            { role: "system", content: request.systemPrompt },
-            { role: "user", content: request.userPrompt },
-          ],
-        }),
-      });
+      let res: Response;
+      try {
+        res = await fetch(`${base}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            model: this.model,
+            temperature: request.temperature ?? 0.7,
+            max_tokens: request.maxTokens ?? 1024,
+            messages: [
+              { role: "system", content: request.systemPrompt },
+              { role: "user", content: request.userPrompt },
+            ],
+          }),
+          // Bounded by the ambient cron deadline so a hung Groq call cannot run past it.
+          signal: requestSignal(GROQ_TIMEOUT_MS),
+        });
+      } catch (err) {
+        if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+          throw new LlmProviderError("Groq request exceeded its deadline");
+        }
+        throw new LlmProviderError(
+          `Groq unreachable: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
 
       if (res.ok) {
         const data = (await res.json()) as GroqChatResponse;
