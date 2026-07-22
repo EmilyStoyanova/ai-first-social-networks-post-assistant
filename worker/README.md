@@ -63,8 +63,25 @@ ingestion inline — it authenticates as before, then enqueues **one** job via
 `jobs_dedupe_active_key` makes an overlapping cron tick return
 `{ deduplicated: true }` instead of starting a second concurrent run.
 
-Translation, generation, image generation and manual generation are still on
-their own cron routes — **not** migrated yet.
+## Phase 4 — RSS translation migrated
+
+The second real job type, following the exact shape of Phase 3.
+`rss-translation-handler.ts` (type `rss-translation`) is a **thin adapter**: it calls
+the existing `runTranslationCron` service unchanged, maps its summary to compact
+job-result diagnostics (`examinedCompanies`, `processedCompanies`, `failedCompanies`,
+`translated`, `failed`, `skipped`, `remaining`, `durationMs`, `timedOut`), and re-throws
+on a run-level failure so the queue's retry/terminal policy applies. No translation or
+AI logic moved into `worker/`; per-company failures stay isolated inside the service
+(a completed run with `failedCompanies > 0` is not retried).
+
+The `translate` cron route (`app/api/v1/internal/cron/translate`) no longer runs
+translation inline — it authenticates as before, then enqueues **one** job via
+`enqueueJob` with a stable `dedupeKey` (`cron:rss-translation`). The same partial unique
+index `jobs_dedupe_active_key` makes an overlapping cron tick return
+`{ deduplicated: true }` instead of starting a second concurrent run.
+
+Generation, image generation and manual generation are still on their own cron
+routes — **not** migrated yet.
 
 ## Run
 

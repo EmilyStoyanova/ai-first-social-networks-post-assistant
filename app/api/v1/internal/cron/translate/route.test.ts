@@ -2,8 +2,9 @@ import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { GET, POST } from "./route";
 
-// These exercise ONLY the auth gate, which returns before runTranslationCron (and thus
-// before any DB access). The authorized path is covered by the service unit tests.
+// These exercise ONLY the auth gate, which returns before enqueueJob (and thus
+// before any DB access). The enqueue + dedupe behaviour is covered by the
+// enqueue-job service unit tests.
 
 const ORIGINAL = process.env.CRON_SECRET;
 

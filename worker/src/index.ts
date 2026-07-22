@@ -12,8 +12,8 @@
  * The worker is an ORCHESTRATOR ONLY: it manages the queue, claiming, retries,
  * diagnostics and persistence. All real work lives in the registered handlers,
  * which are thin adapters over the existing services. Registered so far: the
- * dummy handler (Phase 2) and RSS ingestion (Phase 3). Translation, generation,
- * image generation and manual generation are NOT migrated yet.
+ * dummy handler (Phase 2), RSS ingestion (Phase 3) and RSS translation (Phase 4).
+ * Generation, image generation and manual generation are NOT migrated yet.
  *
  * Run from the repo root so the shared client and env resolve:
  *   npx tsx worker/src/index.ts
@@ -30,6 +30,7 @@ import { JobOrchestrator } from "./orchestrator";
 import { HandlerRegistry } from "./handler-registry";
 import { dummyHandler, DUMMY_JOB_TYPE } from "./dummy-handler";
 import { rssIngestionHandler, RSS_INGESTION_JOB_TYPE } from "./rss-ingestion-handler";
+import { rssTranslationHandler, RSS_TRANSLATION_JOB_TYPE } from "./rss-translation-handler";
 import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
 import type { JobRecord } from "./job-store";
 
@@ -61,7 +62,8 @@ async function main(): Promise<void> {
   // Handlers are thin adapters over the existing services (orchestrator-only).
   const handlers = new HandlerRegistry()
     .register(DUMMY_JOB_TYPE, dummyHandler)
-    .register(RSS_INGESTION_JOB_TYPE, rssIngestionHandler);
+    .register(RSS_INGESTION_JOB_TYPE, rssIngestionHandler)
+    .register(RSS_TRANSLATION_JOB_TYPE, rssTranslationHandler);
   const orchestrator = new JobOrchestrator({
     store: createPrismaJobStore(prisma),
     registry: handlers,

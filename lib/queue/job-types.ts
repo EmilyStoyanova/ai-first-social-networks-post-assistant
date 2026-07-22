@@ -17,3 +17,14 @@ export const RSS_INGESTION_JOB_TYPE = "rss-ingestion";
  * so overlapping cron ticks can never create concurrent ingestion runs.
  */
 export const RSS_INGESTION_DEDUPE_KEY = "cron:rss-ingestion";
+
+/** RSS translation fan-out: drain the pending-translation queue across all companies. */
+export const RSS_TRANSLATION_JOB_TYPE = "rss-translation";
+
+/**
+ * Stable dedupe key for the single recurring RSS translation job. Same guarantee as
+ * ingestion: the partial unique index `jobs_dedupe_active_key` rejects a second enqueue
+ * while one translation job is still queued or running, so overlapping cron ticks can
+ * never create concurrent translation runs.
+ */
+export const RSS_TRANSLATION_DEDUPE_KEY = "cron:rss-translation";
