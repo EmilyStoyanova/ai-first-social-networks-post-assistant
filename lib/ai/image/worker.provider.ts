@@ -16,7 +16,11 @@ export class WorkerImageProvider implements IImageProvider {
   ) {}
 
   async generate(prompt: string, options?: ImageGenerationOptions): Promise<GeneratedImage> {
-    const url = this.workerUrl.replace(/\/$/, "");
+    // IMAGE_WORKER_URL is the worker base URL; the request always targets the
+    // /generate-image endpoint. Appending is idempotent so a config that already
+    // includes the path still resolves to a single /generate-image.
+    const base = this.workerUrl.replace(/\/+$/, "");
+    const url = base.endsWith("/generate-image") ? base : `${base}/generate-image`;
 
     // Per-request cap; squeezed smaller when a cron deadline leaves less budget so a
     // slow image generation cannot run past the function timeout.
