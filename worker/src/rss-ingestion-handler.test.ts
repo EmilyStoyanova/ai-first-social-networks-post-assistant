@@ -12,6 +12,17 @@ import {
 } from "./rss-ingestion-handler";
 import type { ClaimInput, EnqueueInput, FailInput, JobRecord, JobStore } from "./job-store";
 import type { IngestionCronSummary } from "@/lib/services/cron/run-ingestion-cron.service";
+import type { EnqueueJobResult } from "@/lib/services/queue/enqueue-job.service";
+
+/** A follow-up enqueue spy that records calls and returns a canned result. */
+function enqueueSpy(result: Partial<EnqueueJobResult> = {}) {
+  let calls = 0;
+  const fn = async (): Promise<EnqueueJobResult> => {
+    calls++;
+    return { enqueued: true, deduplicated: false, jobId: "t-job-1", ...result };
+  };
+  return { fn, calls: () => calls };
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -122,6 +133,58 @@ describe("rssIngestionHandler", () => {
       summary({ status: "completed", failed: 2 })
     );
     await assert.doesNotReject(() => handler({ job: job(), logger: silentLogger }));
+  });
+});
+
+describe("rssIngestionHandler — Phase 6.0 event-driven translation follow-up", () => {
+  it("enqueues one translation job when the run created new items", async () => {
+    const spy = enqueueSpy();
+    const handler = createRssIngestionHandler(async () => summary({ itemsCreated: 3 }), spy.fn);
+    await handler({ job: job(), logger: silentLogger });
+    assert.equal(spy.calls(), 1);
+  });
+
+  it("does NOT enqueue when the run created zero new items", async () => {
+    const spy = enqueueSpy();
+    const handler = createRssIngestionHandler(
+      async () => summary({ itemsCreated: 0, itemsUpdated: 7 }),
+      spy.fn
+    );
+    await handler({ job: job(), logger: silentLogger });
+    assert.equal(spy.calls(), 0);
+  });
+
+  it("does NOT enqueue when the run failed at the top level (throws first)", async () => {
+    const spy = enqueueSpy();
+    const handler = createRssIngestionHandler(
+      // itemsCreated > 0 but the run failed — the throw happens before the enqueue.
+      async () => summary({ status: "failed", error: "boom", itemsCreated: 5 }),
+      spy.fn
+    );
+    await assert.rejects(() => handler({ job: job(), logger: silentLogger }), /boom/);
+    assert.equal(spy.calls(), 0);
+  });
+
+  it("still returns unchanged diagnostics and does NOT throw when the follow-up enqueue fails", async () => {
+    const failingEnqueue = async (): Promise<never> => {
+      throw new Error("enqueue exploded");
+    };
+    const handler = createRssIngestionHandler(
+      async () => summary({ itemsCreated: 2 }),
+      failingEnqueue
+    );
+    const result = await handler({ job: job(), logger: silentLogger });
+    // Best-effort: a swallowed enqueue failure must not fail the successful import,
+    // and the ingestion diagnostics contract is unchanged.
+    assert.deepEqual(result, toDiagnostics(summary({ itemsCreated: 2 })));
+  });
+
+  it("a deduplicated follow-up is a success (no throw, diagnostics intact)", async () => {
+    const spy = enqueueSpy({ enqueued: false, deduplicated: true, jobId: null });
+    const handler = createRssIngestionHandler(async () => summary({ itemsCreated: 1 }), spy.fn);
+    const result = await handler({ job: job(), logger: silentLogger });
+    assert.equal(spy.calls(), 1);
+    assert.deepEqual(result, toDiagnostics(summary({ itemsCreated: 1 })));
   });
 });
 
