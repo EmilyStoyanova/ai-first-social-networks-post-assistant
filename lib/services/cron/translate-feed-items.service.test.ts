@@ -8,6 +8,7 @@ interface Candidate {
   id: string;
   title: string | null;
   content: string | null;
+  url: string;
   translationStatus: string | null;
   translationHash: string | null;
   translationAttemptCount: number;
@@ -24,6 +25,7 @@ function makeCandidate(
     id,
     title: `Title ${id}`,
     content: `Content ${id}`,
+    url: `https://example.com/${id}`,
     translationStatus: "pending",
     translationHash: null,
     translationAttemptCount: 0,

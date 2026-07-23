@@ -39,6 +39,8 @@ export interface TranslatableItem {
   id: string;
   title: string | null;
   content: string | null;
+  /** The article's own URL — logged for diagnostics so a hang/timeout is traceable. */
+  url: string;
   translationStatus: string | null;
   translationHash: string | null;
   translationAttemptCount: number;
@@ -129,12 +131,24 @@ export async function translateFeedItem(
     },
   });
 
+  const { systemPrompt, userPrompt } = buildTranslationPrompts(item.title, item.content, targetLang);
+
+  // Per-translation diagnostics. The article BODY is never logged — only its length —
+  // so a request that hangs or times out can be tied to an exact feed item (id, title,
+  // source URL) and correlated with prompt/article size, without dumping content.
+  const diag = {
+    feedItemId: item.id,
+    title: item.title ?? "(untitled)",
+    sourceUrl: item.url,
+    promptLength: systemPrompt.length + userPrompt.length,
+    articleTextLength: item.content?.length ?? 0,
+  };
+  const startedAtMs = now().getTime();
+  // Logged BEFORE the call so an item whose request hangs and never returns (e.g. process
+  // killed or lease reaped) still leaves a line naming the exact in-flight feed item.
+  console.info("[rss-translation] translating item", diag);
+
   try {
-    const { systemPrompt, userPrompt } = buildTranslationPrompts(
-      item.title,
-      item.content,
-      targetLang
-    );
     const response = await resolved.instance.generate({
       systemPrompt,
       userPrompt,
@@ -158,10 +172,25 @@ export async function translateFeedItem(
       },
     });
 
+    console.info("[rss-translation] item translated", {
+      ...diag,
+      elapsedMs: now().getTime() - startedAtMs,
+      provider: resolved.provider,
+      model: resolved.model,
+    });
+
     return { status: "translated", provider: resolved.provider, model: resolved.model };
   } catch (err) {
     const error = err instanceof Error ? err.message : "Unknown translation error.";
     const nextRetryAt = computeTranslationBackoff(attempt, now());
+
+    // Names the exact feed item that failed (e.g. a >300s text-worker timeout) with how
+    // long it ran and the error, so a hang is pinned to one article, not the whole batch.
+    console.warn("[rss-translation] item translation FAILED", {
+      ...diag,
+      elapsedMs: now().getTime() - startedAtMs,
+      error,
+    });
 
     await db.feedItem.update({
       where: { id: item.id },

@@ -2,7 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   MAX_TRANSLATION_ATTEMPTS,
+  MAX_TRANSLATION_CONTENT_CHARS,
   buildTranslationPrompts,
+  capTranslationContent,
   computeTranslationBackoff,
   computeTranslationHash,
   isTranslatableSourceType,
@@ -252,5 +254,45 @@ describe("buildTranslationPrompts", () => {
     const { userPrompt } = buildTranslationPrompts(null, "C", "bg");
     assert.match(userPrompt, /Title: \n/);
     assert.ok(!userPrompt.includes("null"));
+  });
+
+  it("caps an over-long body but never the title (bounds generation cost)", () => {
+    const longBody = "word ".repeat(2000); // ~10k chars, over the cap
+    const { userPrompt } = buildTranslationPrompts("Full Title Kept", longBody, "bg");
+
+    // Title survives in full.
+    assert.match(userPrompt, /Title: Full Title Kept/);
+    // The prompt body is bounded to roughly the cap (+ marker + "Content: " prefix), not 10k.
+    assert.ok(userPrompt.length < MAX_TRANSLATION_CONTENT_CHARS + 200);
+    assert.match(userPrompt, /\[…\]$/);
+  });
+
+  it("leaves a body at or under the cap untouched", () => {
+    const body = "x".repeat(MAX_TRANSLATION_CONTENT_CHARS);
+    const { userPrompt } = buildTranslationPrompts("T", body, "bg");
+    assert.match(userPrompt, new RegExp(`Content: ${body}$`));
+    assert.ok(!userPrompt.includes("[…]"));
+  });
+});
+
+// ─── capTranslationContent ────────────────────────────────────────────────────
+
+describe("capTranslationContent", () => {
+  it("returns short content and null unchanged", () => {
+    assert.equal(capTranslationContent(null), null);
+    assert.equal(capTranslationContent("short"), "short");
+  });
+
+  it("cuts at a word boundary and appends a neutral marker", () => {
+    const capped = capTranslationContent("alpha beta gamma delta", 12)!;
+    assert.ok(capped.endsWith(" […]"));
+    // Cut backed up to the last space within the window → no split word.
+    assert.ok(!/\bgam$/.test(capped));
+    assert.ok(capped.startsWith("alpha beta"));
+  });
+
+  it("hard-cuts when there is no late whitespace to back up to", () => {
+    const capped = capTranslationContent("abcdefghijklmnop", 10)!;
+    assert.equal(capped, "abcdefghij […]");
   });
 });

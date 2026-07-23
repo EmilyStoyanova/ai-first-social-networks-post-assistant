@@ -30,6 +30,7 @@ function makeItem(overrides: Partial<TranslatableItem> = {}): TranslatableItem {
     id: "item-1",
     title: "Original title",
     content: "Original content",
+    url: "https://example.com/article",
     translationStatus: "pending",
     translationHash: null,
     translationAttemptCount: 0,
@@ -204,6 +205,24 @@ describe("translateFeedItem — failure", () => {
     assert.equal((final.translationNextRetryAt as Date).getTime(), NOW.getTime() + 5 * 60 * 1000);
   });
 
+  it("counts a TRUNCATED 200 response as failed (the real HTTP-200-but-failed case)", async () => {
+    // The worker returns HTTP 200, but the model hit its output limit mid-JSON, so the body
+    // is cut off before the closing quote/brace. The strict parser rejects it → the item is
+    // failed even though the transport succeeded. This is the production symptom the content
+    // cap prevents by keeping generation within limits.
+    const db = makeDb();
+    const truncated = '{"title":"Заглавие","content":"Частичен превод, който бе отря';
+    const outcome = await translateFeedItem(
+      makeItem(),
+      "bg",
+      makeDeps(db, async () => ({ text: truncated }))
+    );
+
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.status === "failed" ? outcome.error : "", /JSON/i);
+    assert.equal(db.updates.at(-1)!.translationStatus, "failed");
+  });
+
   it("treats a malformed JSON response as a failure and counts the attempt", async () => {
     const db = makeDb();
     const outcome = await translateFeedItem(
@@ -249,6 +268,89 @@ describe("translateFeedItem — failure", () => {
     assert.deepEqual(outcome, { status: "skipped", reason: "max_attempts" });
     assert.equal(called, false);
     assert.equal(db.updates.length, 0);
+  });
+});
+
+// ─── Diagnostics logging ────────────────────────────────────────────────────────
+
+/** Captures console.info/console.warn calls, restoring the originals on stop(). */
+function captureConsole() {
+  const infos: unknown[][] = [];
+  const warns: unknown[][] = [];
+  const origInfo = console.info;
+  const origWarn = console.warn;
+  console.info = (...args: unknown[]) => void infos.push(args);
+  console.warn = (...args: unknown[]) => void warns.push(args);
+  return {
+    infos,
+    warns,
+    stop: () => {
+      console.info = origInfo;
+      console.warn = origWarn;
+    },
+    /** Serialised form of every captured line — used to assert the body never leaks. */
+    allText: () => [...infos, ...warns].map((a) => JSON.stringify(a)).join("\n"),
+  };
+}
+
+describe("translateFeedItem — diagnostics", () => {
+  const SECRET_BODY = "SUPER_SECRET_ARTICLE_BODY_9182_should_never_be_logged";
+
+  it("logs id, title, source URL, prompt length, article length, and elapsed — never the body", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem({ title: "Public Title", content: SECRET_BODY, url: "https://news.example/x" }),
+        "bg",
+        makeDeps(db, async () => ({ text: GOOD_RESPONSE }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    // A start line names the in-flight item with all required fields.
+    const start = cap.infos.find((a) => a[0] === "[rss-translation] translating item");
+    assert.ok(start, "expected a 'translating item' log");
+    const startPayload = start![1] as Record<string, unknown>;
+    assert.equal(startPayload.feedItemId, "item-1");
+    assert.equal(startPayload.title, "Public Title");
+    assert.equal(startPayload.sourceUrl, "https://news.example/x");
+    assert.equal(startPayload.articleTextLength, SECRET_BODY.length);
+    assert.ok((startPayload.promptLength as number) > 0);
+
+    // A completion line carries the elapsed time.
+    const done = cap.infos.find((a) => a[0] === "[rss-translation] item translated");
+    assert.ok(done, "expected an 'item translated' log");
+    assert.equal(typeof (done![1] as Record<string, unknown>).elapsedMs, "number");
+
+    // The article body must never appear in any logged line.
+    assert.ok(!cap.allText().includes(SECRET_BODY), "the article body must not be logged");
+  });
+
+  it("on failure (e.g. a timeout) logs exactly which feed item failed", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem({ id: "item-42", url: "https://news.example/slow", content: SECRET_BODY }),
+        "bg",
+        makeDeps(db, async () => {
+          throw new Error("Text worker request exceeded its deadline");
+        })
+      );
+    } finally {
+      cap.stop();
+    }
+
+    const failed = cap.warns.find((a) => a[0] === "[rss-translation] item translation FAILED");
+    assert.ok(failed, "expected a FAILED log on timeout");
+    const payload = failed![1] as Record<string, unknown>;
+    assert.equal(payload.feedItemId, "item-42");
+    assert.equal(payload.sourceUrl, "https://news.example/slow");
+    assert.equal(payload.error, "Text worker request exceeded its deadline");
+    assert.equal(typeof payload.elapsedMs, "number");
+    assert.ok(!cap.allText().includes(SECRET_BODY), "the article body must not be logged");
   });
 });
 

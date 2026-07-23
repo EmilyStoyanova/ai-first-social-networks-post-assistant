@@ -43,6 +43,7 @@ const SELECT = {
   id: true,
   title: true,
   content: true,
+  url: true,
   translationStatus: true,
   translationHash: true,
   translationAttemptCount: true,

@@ -178,6 +178,40 @@ export function requiresTranslationWork(
 
 // ─── Prompt + response ────────────────────────────────────────────────────────
 
+/**
+ * Max article-body characters sent to the translator. Translation cost (generation
+ * time AND output length) scales with the body, and the self-hosted worker (qwen3:8b)
+ * is slow: probing the live worker, ~2.5–3.5k chars translated in ~47s, while ≥5k chars
+ * ran past the 300s request deadline. Two distinct production failures both trace to an
+ * unbounded body:
+ *   • the request never returns within 300s → timeout, and
+ *   • the model stops at its output limit mid-JSON → the worker still returns HTTP 200,
+ *     but the truncated body is invalid JSON that the strict parser (correctly) rejects,
+ *     so the item is counted `failed` despite a 200.
+ * Capping the body keeps generation well under the deadline and lets the model finish a
+ * complete JSON object. The full title is always kept, and a leading slice of the body
+ * preserves the lede/key context (the model's output was already effectively capped near
+ * ~4.8k chars, so little is lost). Conservative on purpose — raise only with worker headroom.
+ */
+export const MAX_TRANSLATION_CONTENT_CHARS = 3000;
+
+/**
+ * Caps the article body for translation, preserving a coherent leading slice. Bodies at
+ * or under the cap are returned unchanged; longer bodies are cut at the cap (backed up to
+ * the last whitespace to avoid splitting a word) with a neutral "[…]" marker so the
+ * translation reads as an intentional excerpt. Title is never capped by this function.
+ */
+export function capTranslationContent(
+  content: string | null,
+  max: number = MAX_TRANSLATION_CONTENT_CHARS
+): string | null {
+  if (content === null || content.length <= max) return content;
+  const slice = content.slice(0, max);
+  const lastSpace = slice.lastIndexOf(" ");
+  const body = lastSpace > max * 0.8 ? slice.slice(0, lastSpace) : slice;
+  return `${body.trimEnd()} […]`;
+}
+
 export function buildTranslationPrompts(
   title: string | null,
   content: string | null,
@@ -190,7 +224,8 @@ export function buildTranslationPrompts(
     'If the title is empty, return null for "title".',
   ].join("\n");
 
-  const userPrompt = [`Title: ${title ?? ""}`, `Content: ${content ?? ""}`].join("\n");
+  const cappedContent = capTranslationContent(content);
+  const userPrompt = [`Title: ${title ?? ""}`, `Content: ${cappedContent ?? ""}`].join("\n");
 
   return { systemPrompt, userPrompt };
 }
