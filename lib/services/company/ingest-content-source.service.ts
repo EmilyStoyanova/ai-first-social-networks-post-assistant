@@ -5,19 +5,31 @@ import { extractArticleContent } from "@/lib/integrations/rss/article-extractor"
 import {
   computeTranslationHash,
   isTranslatableSourceType,
+  requiresTranslationWork,
   resolveTranslationConfig,
   type TranslationConfig,
 } from "@/lib/ai/feed-item-translation";
 import type { Prisma } from "@prisma/client";
 
 export type IngestContentSourceResult =
-  | { success: true; created: number; updated: number }
+  | {
+      success: true;
+      created: number;
+      updated: number;
+      /**
+       * Feed items this run left genuinely needing translation (newly created eligible,
+       * reopened by a changed hash, or still-pending/failed with attempts left). Drives
+       * the manual route's translation enqueue; NOT part of the public API response.
+       */
+      translationWorkCreated: number;
+    }
   | { success: false; code: "NOT_FOUND" | "FORBIDDEN" | "INGEST_FAILED"; message?: string };
 
 /** What ingestion knows about an existing row's translation state. */
 interface ExistingTranslation {
   translationHash: string | null;
   translationStatus: string | null;
+  translationAttemptCount: number;
 }
 
 /**
@@ -77,9 +89,11 @@ async function upsertFeedItem(
   existingUrls: Set<string>,
   translation: TranslationConfig | null,
   existingTranslations: Map<string, ExistingTranslation>
-): Promise<"created" | "updated"> {
+): Promise<{ outcome: "created" | "updated"; requiresTranslation: boolean }> {
+  // Same input the translation hash is computed from everywhere (title+content+target).
+  const hash = computeTranslationHash(title, content, translation?.targetLanguage ?? "");
   if (existingUrls.has(url)) {
-    const hash = computeTranslationHash(title, content, translation?.targetLanguage ?? "");
+    const existing = existingTranslations.get(url);
     await prisma.feedItem.update({
       where: { sourceId_url: { sourceId, url } },
       // title/content always carry the ORIGINAL article text — translation never
@@ -88,10 +102,13 @@ async function upsertFeedItem(
         title,
         content,
         publishedAt,
-        ...translationFieldsForUpdate(translation, hash, existingTranslations.get(url)),
+        ...translationFieldsForUpdate(translation, hash, existing),
       },
     });
-    return "updated";
+    return {
+      outcome: "updated",
+      requiresTranslation: requiresTranslationWork(translation, hash, false, existing),
+    };
   } else {
     await prisma.feedItem.create({
       data: {
@@ -105,7 +122,10 @@ async function upsertFeedItem(
       },
     });
     existingUrls.add(url);
-    return "created";
+    return {
+      outcome: "created",
+      requiresTranslation: requiresTranslationWork(translation, hash, true, undefined),
+    };
   }
 }
 
@@ -138,7 +158,7 @@ export async function runSourceIngestion(
   source: IngestableSource,
   companyId: string,
   options?: RunSourceIngestionOptions
-): Promise<{ created: number; updated: number }> {
+): Promise<{ created: number; updated: number; translationWorkCreated: number }> {
   const sourceId = source.id;
   const config = source.config as Record<string, string>;
 
@@ -156,18 +176,30 @@ export async function runSourceIngestion(
   // Pre-fetch existing URLs for this source to avoid N+1 existence checks
   const existingRows = await prisma.feedItem.findMany({
     where: { sourceId },
-    select: { url: true, translationHash: true, translationStatus: true },
+    select: {
+      url: true,
+      translationHash: true,
+      translationStatus: true,
+      translationAttemptCount: true,
+    },
   });
   const existingUrls = new Set(existingRows.map((r) => r.url));
   const existingTranslations = new Map<string, ExistingTranslation>(
     existingRows.map((r) => [
       r.url,
-      { translationHash: r.translationHash, translationStatus: r.translationStatus },
+      {
+        translationHash: r.translationHash,
+        translationStatus: r.translationStatus,
+        translationAttemptCount: r.translationAttemptCount,
+      },
     ])
   );
 
   let created = 0;
   let updated = 0;
+  // Feed items this run left genuinely needing translation — the precise signal (not
+  // created/updated) the manual ingest route uses to enqueue translation.
+  let translationWorkCreated = 0;
 
   if (source.type === "rss") {
     const items = await parseFeed(config.url);
@@ -185,7 +217,7 @@ export async function runSourceIngestion(
       processed.add(item.url);
       const extracted = await extractArticleContent(item.url);
       const content = extracted ?? item.summary;
-      const outcome = await upsertFeedItem(
+      const { outcome, requiresTranslation } = await upsertFeedItem(
         sourceId,
         companyId,
         item.url,
@@ -198,6 +230,7 @@ export async function runSourceIngestion(
       );
       if (outcome === "created") created++;
       else updated++;
+      if (requiresTranslation) translationWorkCreated++;
     }
   } else if (source.type === "product_page") {
     const meta = await scrapeProductPage(config.url);
@@ -206,7 +239,7 @@ export async function runSourceIngestion(
       description: meta.ogDescription ?? meta.description,
       image: meta.ogImage,
     });
-    const outcome = await upsertFeedItem(
+    const { outcome, requiresTranslation } = await upsertFeedItem(
       sourceId,
       companyId,
       config.url,
@@ -219,9 +252,10 @@ export async function runSourceIngestion(
     );
     if (outcome === "created") created++;
     else updated++;
+    if (requiresTranslation) translationWorkCreated++;
   } else if (source.type === "prompt") {
     const stableUrl = `prompt:${sourceId}`;
-    const outcome = await upsertFeedItem(
+    const { outcome, requiresTranslation } = await upsertFeedItem(
       sourceId,
       companyId,
       stableUrl,
@@ -234,6 +268,7 @@ export async function runSourceIngestion(
     );
     if (outcome === "created") created++;
     else updated++;
+    if (requiresTranslation) translationWorkCreated++;
   } else if (source.type === "calendar_event") {
     const stableUrl = `event:${sourceId}`;
     const content = JSON.stringify({
@@ -242,7 +277,7 @@ export async function runSourceIngestion(
       description: config.description ?? null,
     });
     const publishedAt = config.date ? new Date(config.date) : null;
-    const outcome = await upsertFeedItem(
+    const { outcome, requiresTranslation } = await upsertFeedItem(
       sourceId,
       companyId,
       stableUrl,
@@ -255,6 +290,7 @@ export async function runSourceIngestion(
     );
     if (outcome === "created") created++;
     else updated++;
+    if (requiresTranslation) translationWorkCreated++;
   }
 
   await prisma.contentSource.update({
@@ -262,7 +298,7 @@ export async function runSourceIngestion(
     data: { lastFetchedAt: new Date() },
   });
 
-  return { created, updated };
+  return { created, updated, translationWorkCreated };
 }
 
 export async function ingestContentSource(
@@ -293,8 +329,11 @@ export async function ingestContentSource(
   if (!source) return { success: false, code: "NOT_FOUND" };
 
   try {
-    const { created, updated } = await runSourceIngestion(source, companyId);
-    return { success: true, created, updated };
+    const { created, updated, translationWorkCreated } = await runSourceIngestion(
+      source,
+      companyId
+    );
+    return { success: true, created, updated, translationWorkCreated };
   } catch (err) {
     return {
       success: false,

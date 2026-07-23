@@ -128,6 +128,54 @@ export function resolveFeedItemContent(item: TranslatableFeedItem): {
   return { title: item.title, content: item.content, usedTranslation: false };
 }
 
+// ─── Ingestion-time translation-work classification ─────────────────────────────
+
+/** The prior translation state of an EXISTING feed item, as ingestion sees it. */
+export interface ExistingItemTranslationState {
+  translationHash: string | null;
+  translationStatus: string | null;
+  translationAttemptCount: number;
+}
+
+/**
+ * Whether a feed item, AFTER an ingestion upsert, still represents REAL translation
+ * work that the translation cron/worker would act on — the precise signal ingestion
+ * uses to decide whether to kick off translation.
+ *
+ * This is deliberately narrower than "was created/updated": an RSS feed re-lists the
+ * same items every poll, so most upserts are no-op re-writes that change nothing. Work
+ * exists only when:
+ *   • a NEW eligible item was created (enters the queue as pending), OR
+ *   • an existing item's input hash CHANGED, so it was reopened to pending, OR
+ *   • an existing item's input is unchanged but it is still pending/failed with attempts
+ *     left — i.e. it already owed a translation that hasn't happened yet.
+ *
+ * It returns false for the cases that need nothing: non-translatable/disabled sources
+ * (`cfg` null or disabled), unchanged completed items, skipped items, and failed items
+ * that have exhausted their attempt budget (terminal — never retried).
+ */
+export function requiresTranslationWork(
+  cfg: TranslationConfig | null,
+  newHash: string,
+  wasCreated: boolean,
+  existing: ExistingItemTranslationState | undefined
+): boolean {
+  // Only a translatable source with translation enabled can ever produce work.
+  if (!cfg || !cfg.enabled) return false;
+  // A newly created eligible item enters the queue as pending (fresh attempt budget).
+  if (wasCreated) return true;
+  // An existing item whose input changed (or that has no prior hash) is reopened to
+  // pending with a fresh budget.
+  if (!existing || existing.translationHash !== newHash) return true;
+  // Input unchanged: the item is left exactly as-is, so work remains only if it was
+  // already owed — pending or failed, and still under the attempt cap. Completed,
+  // skipped, null, and attempt-exhausted failures need nothing.
+  if (existing.translationStatus === "pending" || existing.translationStatus === "failed") {
+    return existing.translationAttemptCount < MAX_TRANSLATION_ATTEMPTS;
+  }
+  return false;
+}
+
 // ─── Prompt + response ────────────────────────────────────────────────────────
 
 export function buildTranslationPrompts(

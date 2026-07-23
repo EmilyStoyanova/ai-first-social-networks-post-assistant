@@ -7,9 +7,11 @@ import {
   computeTranslationHash,
   isTranslatableSourceType,
   parseTranslationResponse,
+  requiresTranslationWork,
   resolveFeedItemContent,
   resolveTranslationConfig,
   TranslationParseError,
+  type TranslationConfig,
 } from "./feed-item-translation";
 
 // ─── computeTranslationHash ───────────────────────────────────────────────────
@@ -30,6 +32,62 @@ describe("computeTranslationHash", () => {
 
   it("treats null title/content as empty rather than throwing", () => {
     assert.equal(computeTranslationHash(null, null, "bg"), computeTranslationHash("", "", "bg"));
+  });
+});
+
+// ─── requiresTranslationWork ──────────────────────────────────────────────────
+
+describe("requiresTranslationWork", () => {
+  const enabled: TranslationConfig = { enabled: true, targetLanguage: "bg" };
+  const disabled: TranslationConfig = { enabled: false, targetLanguage: "bg" };
+  const HASH = "hash-current";
+  const OLD_HASH = "hash-old";
+
+  it("(1) counts a newly created translatable item", () => {
+    assert.equal(requiresTranslationWork(enabled, HASH, true, undefined), true);
+  });
+
+  it("(2) does NOT count an unchanged completed item", () => {
+    const existing = { translationHash: HASH, translationStatus: "completed", translationAttemptCount: 1 };
+    assert.equal(requiresTranslationWork(enabled, HASH, false, existing), false);
+  });
+
+  it("(3) counts an unchanged pending item (still owed)", () => {
+    const existing = { translationHash: HASH, translationStatus: "pending", translationAttemptCount: 1 };
+    assert.equal(requiresTranslationWork(enabled, HASH, false, existing), true);
+  });
+
+  it("(4) counts a changed (reopened) completed item — hash differs", () => {
+    const existing = { translationHash: OLD_HASH, translationStatus: "completed", translationAttemptCount: 1 };
+    assert.equal(requiresTranslationWork(enabled, HASH, false, existing), true);
+  });
+
+  it("(5) does NOT count a disabled source (created or updated), nor a non-translatable source", () => {
+    assert.equal(requiresTranslationWork(disabled, HASH, true, undefined), false);
+    const skipped = { translationHash: HASH, translationStatus: "skipped", translationAttemptCount: 0 };
+    assert.equal(requiresTranslationWork(disabled, HASH, false, skipped), false);
+    // cfg null → non-translatable source type (prompt/product_page/calendar).
+    assert.equal(requiresTranslationWork(null, HASH, true, undefined), false);
+  });
+
+  it("counts an unchanged failed item under the attempt cap, but not once exhausted", () => {
+    const under = {
+      translationHash: HASH,
+      translationStatus: "failed",
+      translationAttemptCount: MAX_TRANSLATION_ATTEMPTS - 1,
+    };
+    const exhausted = {
+      translationHash: HASH,
+      translationStatus: "failed",
+      translationAttemptCount: MAX_TRANSLATION_ATTEMPTS,
+    };
+    assert.equal(requiresTranslationWork(enabled, HASH, false, under), true);
+    assert.equal(requiresTranslationWork(enabled, HASH, false, exhausted), false);
+  });
+
+  it("counts an existing item with no prior hash (never translated) as reopened work", () => {
+    const noHash = { translationHash: null, translationStatus: "pending", translationAttemptCount: 0 };
+    assert.equal(requiresTranslationWork(enabled, HASH, false, noHash), true);
   });
 });
 
