@@ -12,11 +12,22 @@ import {
 } from "./rss-translation-handler";
 import type { ClaimInput, EnqueueInput, FailInput, JobRecord, JobStore } from "./job-store";
 import type { TranslationCronSummary } from "@/lib/services/cron/run-translation-cron.service";
+import type { EnqueueJobResult } from "@/lib/services/queue/enqueue-job.service";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 const silentLogger = createLogger("test", () => {});
 const config = loadWorkerConfig({ DATABASE_URL: "postgres://localhost/test", WORKER_ID: "w1" });
+
+/** A continuation-enqueue spy that records calls and returns a canned result. */
+function enqueueSpy(result: Partial<EnqueueJobResult> = {}) {
+  let calls = 0;
+  const fn = async (): Promise<EnqueueJobResult> => {
+    calls++;
+    return { enqueued: true, deduplicated: false, jobId: "cont-job-1", ...result };
+  };
+  return { fn, calls: () => calls };
+}
 
 function summary(overrides: Partial<TranslationCronSummary> = {}): TranslationCronSummary {
   return {
@@ -121,6 +132,55 @@ describe("rssTranslationHandler", () => {
       summary({ status: "completed", failures: [{ companyId: "c1", message: "boom" }] })
     );
     await assert.doesNotReject(() => handler({ job: job(), logger: silentLogger }));
+  });
+});
+
+describe("rssTranslationHandler — self-continuation follow-up", () => {
+  it("enqueues one continuation job when the run left work remaining", async () => {
+    const spy = enqueueSpy();
+    const handler = createRssTranslationHandler(async () => summary({ remaining: 16 }), spy.fn);
+    await handler({ job: job(), logger: silentLogger });
+    assert.equal(spy.calls(), 1);
+  });
+
+  it("does NOT enqueue when nothing remains (remaining === 0)", async () => {
+    const spy = enqueueSpy();
+    const handler = createRssTranslationHandler(async () => summary({ remaining: 0 }), spy.fn);
+    await handler({ job: job(), logger: silentLogger });
+    assert.equal(spy.calls(), 0);
+  });
+
+  it("does NOT enqueue when the run failed at the top level (throws first)", async () => {
+    const spy = enqueueSpy();
+    const handler = createRssTranslationHandler(
+      // remaining > 0 but the run failed — the throw happens before the continuation.
+      async () => summary({ status: "failed", error: "boom", remaining: 9 }),
+      spy.fn
+    );
+    await assert.rejects(() => handler({ job: job(), logger: silentLogger }), /boom/);
+    assert.equal(spy.calls(), 0);
+  });
+
+  it("still returns unchanged diagnostics and does NOT throw when the continuation enqueue fails", async () => {
+    const failingEnqueue = async (): Promise<never> => {
+      throw new Error("enqueue exploded");
+    };
+    const handler = createRssTranslationHandler(
+      async () => summary({ remaining: 5 }),
+      failingEnqueue
+    );
+    const result = await handler({ job: job(), logger: silentLogger });
+    // Best-effort: a swallowed enqueue failure must not fail the successful run, and the
+    // translation diagnostics contract is unchanged.
+    assert.deepEqual(result, toDiagnostics(summary({ remaining: 5 })));
+  });
+
+  it("a deduplicated continuation is a success (no throw, diagnostics intact)", async () => {
+    const spy = enqueueSpy({ enqueued: false, deduplicated: true, jobId: null });
+    const handler = createRssTranslationHandler(async () => summary({ remaining: 3 }), spy.fn);
+    const result = await handler({ job: job(), logger: silentLogger });
+    assert.equal(spy.calls(), 1);
+    assert.deepEqual(result, toDiagnostics(summary({ remaining: 3 })));
   });
 });
 
