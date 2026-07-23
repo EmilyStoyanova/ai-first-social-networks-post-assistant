@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { Prisma } from "@prisma/client";
 
 import { loadWorkerConfig } from "./config";
 import { createLogger } from "./logger";
@@ -7,9 +8,12 @@ import { HandlerRegistry } from "./handler-registry";
 import { JobOrchestrator } from "./orchestrator";
 import {
   createRssTranslationHandler,
+  defaultEnqueueTranslationContinuation,
   toDiagnostics,
   RSS_TRANSLATION_JOB_TYPE,
 } from "./rss-translation-handler";
+import { RSS_TRANSLATION_DEDUPE_KEY } from "@/lib/queue/job-types";
+import { enqueueJob, type EnqueueJobInput, type JobInsert } from "@/lib/services/queue/enqueue-job.service";
 import type { ClaimInput, EnqueueInput, FailInput, JobRecord, JobStore } from "./job-store";
 import type { TranslationCronSummary } from "@/lib/services/cron/run-translation-cron.service";
 import type { EnqueueJobResult } from "@/lib/services/queue/enqueue-job.service";
@@ -181,6 +185,58 @@ describe("rssTranslationHandler — self-continuation follow-up", () => {
     const result = await handler({ job: job(), logger: silentLogger });
     assert.equal(spy.calls(), 1);
     assert.deepEqual(result, toDiagnostics(summary({ remaining: 3 })));
+  });
+});
+
+describe("defaultEnqueueTranslationContinuation — dedupe-key fix", () => {
+  it("enqueues WITHOUT a dedupe key (it must not collide with the still-active parent)", async () => {
+    // The continuation is enqueued from inside the handler while the spawning job is still
+    // `active` and holds the shared key. Passing that key would dedupe against the parent
+    // and never enqueue — so the production input must carry no dedupeKey at all.
+    let seen: EnqueueJobInput | undefined;
+    const enqueue = (async (input: EnqueueJobInput) => {
+      seen = input;
+      return { enqueued: true, deduplicated: false, jobId: "job-1" };
+    }) as typeof enqueueJob;
+
+    await defaultEnqueueTranslationContinuation(enqueue);
+
+    assert.equal(seen?.type, RSS_TRANSLATION_JOB_TYPE);
+    assert.equal(seen?.dedupeKey, undefined);
+  });
+
+  it("still enqueues even when a shared-key translation job is already active", async () => {
+    // Reproduce the exact production state: a translation job holding the shared dedupe key
+    // is currently active (the spawning parent). The partial unique index blocks a second
+    // active/queued row for that key.
+    const active = new Set<string>([RSS_TRANSLATION_DEDUPE_KEY]);
+    let seq = 0;
+    const insertJob = async (data: JobInsert): Promise<{ id: string }> => {
+      if (data.dedupeKey !== null && active.has(data.dedupeKey)) {
+        throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+          code: "P2002",
+          clientVersion: "test",
+          meta: { target: "jobs_dedupe_active_key" },
+        });
+      }
+      if (data.dedupeKey !== null) active.add(data.dedupeKey);
+      return { id: `job-${++seq}` };
+    };
+    const enqueue = ((input: EnqueueJobInput) =>
+      enqueueJob(input, { insertJob })) as typeof enqueueJob;
+
+    // The OLD behaviour (reusing the shared key) would have deduped against the active parent.
+    const old = await enqueueJob(
+      { type: RSS_TRANSLATION_JOB_TYPE, dedupeKey: RSS_TRANSLATION_DEDUPE_KEY },
+      { insertJob }
+    );
+    assert.deepEqual(old, { enqueued: false, deduplicated: true, jobId: null });
+
+    // The FIX: the continuation carries no dedupe key, so it enqueues a real follow-up.
+    const result = await defaultEnqueueTranslationContinuation(enqueue);
+    assert.equal(result.enqueued, true);
+    assert.equal(result.deduplicated, false);
+    assert.notEqual(result.jobId, null);
   });
 });
 

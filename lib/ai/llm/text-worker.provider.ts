@@ -2,8 +2,19 @@ import type { ILlmProvider, LlmRequest, LlmResponse } from "./llm-provider";
 import { LlmProviderError } from "../errors";
 import { requestSignal } from "@/lib/http/request-deadline";
 
-/** Per-request cap; squeezed smaller when a cron deadline leaves less budget. */
-const TEXT_WORKER_TIMEOUT_MS = 120_000;
+/**
+ * Per-request cap; squeezed smaller when a cron deadline leaves less budget.
+ * Set to 300s to accommodate slow self-hosted (e.g. Ollama) generations — the Mac
+ * text-worker's own Ollama timeout is 300s, so this must match to avoid the app
+ * aborting a request the worker would have completed. No env override exists; this
+ * compile-time constant is the single source of truth for the cap.
+ *
+ * NB: on the background-worker path a single request can now approach the job lease
+ * TTL (WORKER_LEASE_TTL_MS, default 300s). Operators running slow generations should
+ * raise WORKER_LEASE_TTL_MS above this cap plus run overhead so a long in-flight call
+ * cannot have its job reaped mid-flight.
+ */
+export const TEXT_WORKER_TIMEOUT_MS = 300_000;
 
 interface TextWorkerResponse {
   text: string;

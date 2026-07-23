@@ -15,11 +15,13 @@
  * budget), so a large backlog leaves `remaining > 0`. After a COMPLETED run with items
  * still eligible, this handler enqueues ANOTHER translation job so the backlog drains
  * across back-to-back worker runs instead of waiting for the once-a-day scheduled cron.
- * This is pure orchestration — it reuses the existing translation job type and the SHARED
- * dedupe key (so it can never create a second concurrent run and duplicates no translation
- * logic), and mirrors the ingestion → translation follow-up pattern. The enqueue is
- * best-effort: a failure is logged and swallowed (a successful run must not be retried),
- * and the scheduled translation cron remains the backstop.
+ * This is pure orchestration — it reuses the existing translation job type and duplicates
+ * no translation logic. The continuation carries NO dedupe key: it is enqueued while the
+ * spawning job is still `active` holding the shared key, so reusing that key would dedupe
+ * the continuation against its own parent and it would never enqueue (see
+ * `EnqueueTranslationContinuation`). The enqueue is best-effort: a failure is logged and
+ * swallowed (a successful run must not be retried), and the scheduled translation cron
+ * remains the backstop.
  */
 
 import type { JobHandler } from "./handler-registry";
@@ -28,22 +30,38 @@ import {
   type TranslationCronSummary,
 } from "@/lib/services/cron/run-translation-cron.service";
 import { enqueueJob, type EnqueueJobResult } from "@/lib/services/queue/enqueue-job.service";
-import { RSS_TRANSLATION_JOB_TYPE, RSS_TRANSLATION_DEDUPE_KEY } from "@/lib/queue/job-types";
+import { RSS_TRANSLATION_JOB_TYPE } from "@/lib/queue/job-types";
 
 export { RSS_TRANSLATION_JOB_TYPE };
 
 /**
- * The continuation enqueue seam. Defaults to the real `enqueueJob` (translation type +
- * shared dedupe key); tests inject a fake to assert it fires only when work remains and
- * to simulate an enqueue failure. Narrowed to a no-arg call because the type and dedupe
- * key are fixed by this orchestration step.
+ * The continuation enqueue seam. Defaults to the real `enqueueJob` (translation type,
+ * NO dedupe key); tests inject a fake to assert it fires only when work remains and to
+ * simulate an enqueue failure. Narrowed to a no-arg call because the type is fixed by
+ * this orchestration step.
+ *
+ * Why no dedupe key: this enqueue runs INSIDE the handler, before the orchestrator marks
+ * the spawning job `completed`, so that job is still `status='active'` holding the shared
+ * key `cron:rss-translation`. Reusing that key would collide with the parent's own row in
+ * the partial unique index `jobs_dedupe_active_key (WHERE status IN ('queued','active'))`,
+ * so the continuation would always dedupe against itself and never enqueue — and any fixed
+ * key has the same flaw, since each continuation would in turn block its own successor.
+ * The continuation is inherently sequential (claimed only after the parent leaves the
+ * active set on a single worker), so it needs no active-dedupe guard; the scheduled
+ * translation cron keeps its shared-key guard against overlapping ticks.
  */
 export type EnqueueTranslationContinuation = () => Promise<EnqueueJobResult>;
 
-function defaultEnqueueTranslationContinuation(): Promise<EnqueueJobResult> {
-  return enqueueJob({
+/**
+ * Enqueues the continuation job. Exported with the `enqueue` seam injectable so a test can
+ * assert the exact input (crucially: NO dedupeKey) without a database; production calls it
+ * with no args, using the real `enqueueJob`.
+ */
+export function defaultEnqueueTranslationContinuation(
+  enqueue: typeof enqueueJob = enqueueJob
+): Promise<EnqueueJobResult> {
+  return enqueue({
     type: RSS_TRANSLATION_JOB_TYPE,
-    dedupeKey: RSS_TRANSLATION_DEDUPE_KEY,
   });
 }
 
@@ -106,9 +124,10 @@ export function createRssTranslationHandler(
 
     // Self-continuation: this run drained one bounded batch; if items remain eligible,
     // chain another run so the backlog drains promptly instead of waiting a full day for
-    // the scheduled cron. Best-effort — the shared dedupe key collapses this into any
-    // in-flight translation job, and a failure here must never retry a successful run
-    // (the scheduled translation cron is the backstop), so we log and swallow.
+    // the scheduled cron. Best-effort — the continuation carries no dedupe key (it would
+    // otherwise collide with this still-active parent), and a failure here must never
+    // retry a successful run (the scheduled translation cron is the backstop), so we log
+    // and swallow.
     if (summary.remaining > 0) {
       try {
         const enqueue = await enqueueContinuation();
