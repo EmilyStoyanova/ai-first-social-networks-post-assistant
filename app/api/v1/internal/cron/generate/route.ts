@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { verifyCronRequest } from "@/lib/security/cron-auth";
-import { runGenerationCron } from "@/lib/services/cron/run-generation-cron.service";
+import { enqueueJob } from "@/lib/services/queue/enqueue-job.service";
+import { POST_GENERATION_JOB_TYPE, POST_GENERATION_DEDUPE_KEY } from "@/lib/queue/job-types";
 
 // Cron work must never be cached or statically optimized.
 export const dynamic = "force-dynamic";
-// 300s (Vercel Hobby + Fluid Compute) for the LLM/image generation + Buffer calls. The
-// internal soft deadline stops work at 240s, leaving ~60s of response headroom so the
-// function returns its diagnostics well before this hard cap.
-export const maxDuration = 300;
+// The route no longer runs generation inline — it only enqueues one job and returns.
+// A short cap is ample for a single INSERT; the background worker owns the run (which
+// keeps its own 240s soft time budget and out-of-band deadline, both unchanged).
+export const maxDuration = 60;
 
 async function handle(request: Request) {
   const auth = verifyCronRequest(request);
@@ -29,15 +30,22 @@ async function handle(request: Request) {
     );
   }
 
-  const summary = await runGenerationCron();
+  // Enqueue a single post generation job for the worker to run. The stable dedupeKey
+  // means an overlapping cron tick returns { deduplicated: true } instead of
+  // creating a second concurrent run.
+  const result = await enqueueJob({
+    type: POST_GENERATION_JOB_TYPE,
+    dedupeKey: POST_GENERATION_DEDUPE_KEY,
+  });
 
-  if (summary.status === "failed") {
-    return NextResponse.json(
-      { error: { code: "CRON_RUN_FAILED", message: summary.error }, data: summary },
-      { status: 500 }
-    );
-  }
-  return NextResponse.json({ data: summary });
+  return NextResponse.json({
+    data: {
+      kind: "generation",
+      enqueued: result.enqueued,
+      deduplicated: result.deduplicated,
+      jobId: result.jobId,
+    },
+  });
 }
 
 // Vercel Cron invokes GET; POST is kept for manual/external triggering.

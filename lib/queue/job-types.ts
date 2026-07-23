@@ -28,3 +28,18 @@ export const RSS_TRANSLATION_JOB_TYPE = "rss-translation";
  * never create concurrent translation runs.
  */
 export const RSS_TRANSLATION_DEDUPE_KEY = "cron:rss-translation";
+
+/** Post generation fan-out: generate/fill weekly schedules, auto-approve, publish, retry. */
+export const POST_GENERATION_JOB_TYPE = "post-generation";
+
+/**
+ * Stable dedupe key for the single recurring post generation job. Same guarantee as
+ * ingestion/translation: the partial unique index `jobs_dedupe_active_key` rejects a
+ * second enqueue while one generation job is still queued or running, so overlapping
+ * cron ticks can never create concurrent generation runs.
+ *
+ * This dedupe is one of three layers that keep concurrent runs from double-generating;
+ * the others (the company-level CAS claim on `lastCronProcessedAt` and the unique index
+ * on `Post.primaryFeedItemId`) live inside `runGenerationCron` and are unchanged.
+ */
+export const POST_GENERATION_DEDUPE_KEY = "cron:post-generation";
