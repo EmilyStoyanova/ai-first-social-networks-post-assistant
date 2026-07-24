@@ -15,7 +15,9 @@ const bodySchema = z.object({
     .string()
     .transform((v) => v.toLowerCase())
     .pipe(z.enum(["facebook", "linkedin", "instagram", "tiktok"])),
-  contentLanguage: z.enum(["en", "bg"]).optional().default("en"),
+  // Omitted = "Default": inherit the channel's configured posting language,
+  // mirroring the real generate endpoint.
+  contentLanguage: z.enum(["en", "bg"]).optional(),
   // Mirrors the real generate endpoint so a preview reflects the same choice.
   llmConfigId: z.string().min(1).optional(),
 });

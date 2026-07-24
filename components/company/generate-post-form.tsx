@@ -62,7 +62,9 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
   const [channel, setChannel] = useState<Channel>("FACEBOOK");
-  const [contentLanguage, setContentLanguage] = useState<"en" | "bg">("en");
+  // "default" = inherit the selected channel's configured posting language;
+  // "en"/"bg" = explicit one-time override.
+  const [contentLanguage, setContentLanguage] = useState<"default" | "en" | "bg">("default");
   const [sourceLinkOverride, setSourceLinkOverride] = useState<SourceLinkOverride>("inherit");
   // The "Content source" choice: a sentinel, or an RSS source id. Defaults to
   // company rules, which is the behaviour the form has always had.
@@ -122,7 +124,8 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           channel,
-          contentLanguage,
+          // Omit when "Default" so the server inherits the channel's language.
+          ...(contentLanguage !== "default" ? { contentLanguage } : {}),
           ...(hasRssFeedItems && sourceLinkOverride !== "inherit"
             ? { includeSourceLink: sourceLinkOverride === "include" }
             : {}),
@@ -206,10 +209,11 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
           <select
             id="generate-content-language"
             value={contentLanguage}
-            onChange={(e) => setContentLanguage(e.target.value as "en" | "bg")}
+            onChange={(e) => setContentLanguage(e.target.value as "default" | "en" | "bg")}
             disabled={generating}
             className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
           >
+            <option value="default">{t("contentLanguageDefault")}</option>
             <option value="en">{t("contentLanguageEN")}</option>
             <option value="bg">{t("contentLanguageBG")}</option>
           </select>
@@ -295,6 +299,14 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
           {generating ? t("generating") : t("generateDraft")}
         </Button>
       </div>
+
+      {contentLanguage === "default" && (
+        <p className="text-fg-faint mt-3 text-xs">
+          {t("contentLanguageDefaultHint", {
+            channel: CHANNELS.find((c) => c.value === channel)?.label ?? channel,
+          })}
+        </p>
+      )}
     </div>
   );
 }

@@ -9,7 +9,10 @@ const bodySchema = z.object({
     .string()
     .transform((v) => v.toLowerCase())
     .pipe(z.enum(["facebook", "linkedin", "instagram", "tiktok"])),
-  contentLanguage: z.enum(["en", "bg"]).optional().default("en"),
+  // Omitted = "Default": let the generator inherit the channel's configured
+  // posting language (which itself falls back to the company default). An
+  // explicit "en"/"bg" overrides it for this generation only.
+  contentLanguage: z.enum(["en", "bg"]).optional(),
   // Manual source-link override (v2-1); omitted = inherit source/channel config.
   includeSourceLink: z.boolean().optional(),
   // Explicit per-generation LLM config (v2-5); omitted = env-var default provider.
