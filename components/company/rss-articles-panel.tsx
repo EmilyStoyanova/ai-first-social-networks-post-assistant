@@ -42,8 +42,13 @@ function TranslationBadge({ item }: { item: FeedItemRow }) {
   };
 
   const status = item.translationStatus;
+  // `translating` is a transient in-flight claim — show it as pending to the user.
   const key =
-    status === "completed" || status === "pending" || status === "failed" ? status : "original";
+    status === "completed" || status === "failed"
+      ? status
+      : status === "pending" || status === "translating"
+        ? "pending"
+        : "original";
 
   const label =
     key === "completed"

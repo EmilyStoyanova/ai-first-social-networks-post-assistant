@@ -351,7 +351,7 @@ model FeedItem {
   translatedContent        String?   @map("translated_content")
   /// ISO 639-1, e.g. "bg".
   translationLanguage      String?   @map("translation_language")
-  /// pending | completed | failed | skipped
+  /// pending | translating | completed | failed | skipped
   translationStatus        String?   @map("translation_status")
   /// sha256(title + content + targetLang) — unchanged content skips re-translation.
   translationHash          String?   @map("translation_hash")
@@ -362,6 +362,9 @@ model FeedItem {
   translationAttemptCount  Int       @default(0) @map("translation_attempt_count")
   translationLastAttemptAt DateTime? @map("translation_last_attempt_at")
   translationNextRetryAt   DateTime? @map("translation_next_retry_at")
+  /// Set while a run holds an atomic claim (status = 'translating'). An expired
+  /// lease means the worker died mid-translation and the item is reclaimable.
+  translationLeaseExpiresAt DateTime? @map("translation_lease_expires_at")
 
   source ContentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   // A feed item backs at most one generated post (one-post-per-article, V2).
@@ -373,6 +376,8 @@ model FeedItem {
   // Drives the cron translation batch: eligible items are selected by status and
   // ordered by next-retry time.
   @@index([translationStatus, translationNextRetryAt])
+  // Recovery scan: reclaim in-flight claims ('translating') whose lease expired.
+  @@index([translationStatus, translationLeaseExpiresAt])
   @@map("feed_items")
 }
 

@@ -7,6 +7,7 @@ import {
   parseTranslationResponse,
   MAX_TRANSLATION_ATTEMPTS,
 } from "@/lib/ai/feed-item-translation";
+import { claimFeedItemForTranslation } from "@/lib/ai/feed-item-translation-claim";
 import { resolveLlmSelection } from "./resolve-llm-selection.service";
 import {
   buildSupportedProvider,
@@ -28,8 +29,14 @@ import {
 
 export type TranslateFeedItemOutcome =
   | { status: "translated"; provider: string; model: string }
-  /** Input hash unchanged and already completed — no LLM call made. */
-  | { status: "skipped"; reason: "unchanged" | "max_attempts" }
+  /**
+   * No LLM call was made because another run owns the item:
+   *   • "unchanged"    — hash matches an already-completed translation;
+   *   • "max_attempts" — the retry budget is exhausted;
+   *   • "claimed"      — a concurrent run holds the atomic claim (in flight);
+   *   • "superseded"   — a concurrent run finished/reclaimed it after this attempt started.
+   */
+  | { status: "skipped"; reason: "unchanged" | "max_attempts" | "claimed" | "superseded" }
   /** No admin default provider configured; deliberately does NOT count an attempt. */
   | { status: "no_provider" }
   | { status: "failed"; error: string; nextRetryAt: Date };
@@ -50,6 +57,16 @@ export interface TranslatableItem {
 export interface TranslateFeedItemDb {
   feedItem: {
     update: (args: { where: { id: string }; data: Record<string, unknown> }) => Promise<unknown>;
+    /**
+     * Conditional write used for BOTH the atomic claim and the guarded failure write.
+     * Each is an `UPDATE ... WHERE <still-eligible>` returning the number of rows
+     * actually changed, so a run can tell whether it still owns the item (count 1) or
+     * a concurrent run took it (count 0).
+     */
+    updateMany: (args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }) => Promise<{ count: number }>;
   };
 }
 
@@ -117,19 +134,29 @@ export async function translateFeedItem(
 
   const attempt = item.translationAttemptCount + 1;
 
-  // Record the attempt before calling out, so a crash mid-call still counts.
-  // The hash is stored here (not only on success) so ingestion can tell "this
-  // exact input was already attempted" from "the article changed".
-  await db.feedItem.update({
-    where: { id: item.id },
-    data: {
-      translationStatus: "pending",
-      translationHash: hash,
-      translationLanguage: targetLang,
-      translationLastAttemptAt: now(),
-      translationAttemptCount: { increment: 1 },
-    },
+  // Atomically CLAIM the item before calling out. This is the single point that makes
+  // translation safe under concurrency: the scheduled cron and a continuation job select
+  // candidates with no lock, so both can hold this same item — but only one wins the
+  // conditional write below. The winner flips the row to `translating`, stamps a lease,
+  // stores the input hash, and counts the attempt exactly once; the loser matches no row
+  // and skips WITHOUT calling the LLM. This eliminates duplicate calls, double attempt
+  // increments, and the racing writes at their source. A crashed claim self-recovers once
+  // its lease expires (see feed-item-translation-claim.ts). The lease is reused below as a
+  // fencing token so a stale attempt can never clobber a fresher claim or a completion.
+  const claimAt = now();
+  const { claimed, leaseExpiresAt } = await claimFeedItemForTranslation(db, {
+    id: item.id,
+    hash,
+    targetLang,
+    now: claimAt,
   });
+  if (!claimed) {
+    console.info("[rss-translation] item already claimed by another run — skipping", {
+      feedItemId: item.id,
+      sourceUrl: item.url,
+    });
+    return { status: "skipped", reason: "claimed" };
+  }
 
   const { systemPrompt, userPrompt } = buildTranslationPrompts(item.title, item.content, targetLang);
 
@@ -174,6 +201,10 @@ export async function translateFeedItem(
       throw parseErr;
     }
 
+    // Success is written UNCONDITIONALLY by id and always wins: a genuine, completed
+    // translation is the outcome we most want to keep, even if a lease-expiry hand-off
+    // means a second run is also working on the item. Clearing the lease marks the claim
+    // released.
     await db.feedItem.update({
       where: { id: item.id },
       data: {
@@ -187,6 +218,7 @@ export async function translateFeedItem(
         translationModel: resolved.model,
         translationError: null,
         translationNextRetryAt: null,
+        translationLeaseExpiresAt: null,
       },
     });
 
@@ -210,14 +242,34 @@ export async function translateFeedItem(
       error,
     });
 
-    await db.feedItem.update({
-      where: { id: item.id },
+    // Guarded write (defense in depth on top of the claim): only record the failure while
+    // this run still holds ITS claim — the row is `translating` AND carries the exact lease
+    // this attempt stamped. The lease acts as a fencing token, so the failure lands only if
+    // nothing displaced us. It matches no row when a concurrent run has since completed the
+    // item (status → completed) or reclaimed an expired lease (a different lease value); in
+    // either case we must NOT overwrite their state with a stale "failed", which is precisely
+    // the bug where the UI showed "Translation failed" for an item that was actually translated.
+    const written = await db.feedItem.updateMany({
+      where: {
+        id: item.id,
+        translationStatus: "translating",
+        translationLeaseExpiresAt: leaseExpiresAt,
+      },
       data: {
         translationStatus: "failed",
         translationError: error,
         translationNextRetryAt: nextRetryAt,
+        translationLeaseExpiresAt: null,
       },
     });
+
+    if (written.count === 0) {
+      // Another run finished or reclaimed this item after our attempt started — its state
+      // stands. Report skipped (not failed): this run translated nothing, and the run that
+      // owns the item now is the one that counts its outcome.
+      console.info("[rss-translation] failure superseded by a concurrent run", { ...diag });
+      return { status: "skipped", reason: "superseded" };
+    }
 
     return { status: "failed", error, nextRetryAt };
   }

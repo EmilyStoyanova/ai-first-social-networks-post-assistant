@@ -1,9 +1,9 @@
 import { prisma } from "@/lib/db/client";
 import {
-  MAX_TRANSLATION_ATTEMPTS,
   TRANSLATION_BATCH_SIZE,
   resolveTranslationConfig,
 } from "@/lib/ai/feed-item-translation";
+import { translationSelectableWhere } from "@/lib/ai/feed-item-translation-claim";
 import {
   translateFeedItem,
   type TranslateFeedItemOutcome,
@@ -55,10 +55,9 @@ async function defaultFindCandidates(companyId: string, limit: number): Promise<
     where: {
       companyId,
       source: { enabled: true },
-      translationStatus: { in: ["pending", "failed"] },
-      translationAttemptCount: { lt: MAX_TRANSLATION_ATTEMPTS },
-      // Never before its backoff window elapses; null = never attempted.
-      OR: [{ translationNextRetryAt: null }, { translationNextRetryAt: { lte: new Date() } }],
+      // Retry-due pending/failed items, plus crashed `translating` claims past their
+      // lease (recovery). A live claim is excluded, so an in-flight item is never re-picked.
+      ...translationSelectableWhere(new Date()),
     },
     orderBy: [{ translationNextRetryAt: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }],
     take: limit,

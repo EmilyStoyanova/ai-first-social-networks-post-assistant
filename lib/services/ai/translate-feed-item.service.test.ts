@@ -9,15 +9,93 @@ import { computeTranslationHash, MAX_TRANSLATION_ATTEMPTS } from "@/lib/ai/feed-
 
 // ─── Fakes ────────────────────────────────────────────────────────────────────
 
-/** Records every update so tests can assert on the exact write sequence. */
-function makeDb() {
+/**
+ * A faithful conditional-UPDATE double for one feed_items row. `update` writes
+ * unconditionally by id (the success path); `updateMany` applies its data only when the
+ * row matches the WHERE and reports how many rows changed — exactly the semantics the
+ * atomic claim and the guarded failure write rely on. The matcher understands only the
+ * operators those two writes use (in / lt / lte / not / null / Date equality / OR), so a
+ * claim on an ineligible row, or a failure whose lease no longer matches, reports count 0.
+ */
+interface RowState {
+  translationStatus: string | null;
+  translationHash: string | null;
+  translationAttemptCount: number;
+  translationNextRetryAt: Date | null;
+  translationLeaseExpiresAt: Date | null;
+}
+
+const num = (v: unknown): number =>
+  v instanceof Date ? v.getTime() : typeof v === "number" ? v : NaN;
+
+function matchLeaf(value: unknown, cond: unknown): boolean {
+  if (cond === null) return value === null;
+  if (cond instanceof Date) return value instanceof Date && value.getTime() === cond.getTime();
+  if (typeof cond === "object") {
+    const c = cond as Record<string, unknown>;
+    if ("in" in c) return (c.in as unknown[]).includes(value);
+    if ("lt" in c) return value != null && num(value) < num(c.lt);
+    if ("lte" in c) return value != null && num(value) <= num(c.lte);
+    if ("not" in c) return value !== c.not;
+  }
+  return value === cond;
+}
+
+function makeDb(init: Partial<RowState> = {}) {
+  const row: RowState = {
+    translationStatus: "pending",
+    translationHash: null,
+    translationAttemptCount: 0,
+    translationNextRetryAt: null,
+    translationLeaseExpiresAt: null,
+    ...init,
+  };
   const updates: Array<Record<string, unknown>> = [];
+
+  const matches = (where: Record<string, unknown>): boolean => {
+    for (const [k, v] of Object.entries(where)) {
+      if (k === "id") continue;
+      if (k === "OR") {
+        if (!(v as Record<string, unknown>[]).some((sub) => matches(sub))) return false;
+        continue;
+      }
+      if (!matchLeaf((row as unknown as Record<string, unknown>)[k], v)) return false;
+    }
+    return true;
+  };
+
+  const apply = (data: Record<string, unknown>) => {
+    for (const [k, v] of Object.entries(data)) {
+      if (k === "translationAttemptCount" && v && typeof v === "object" && "increment" in v) {
+        row.translationAttemptCount += (v as { increment: number }).increment;
+      } else if (k in row) {
+        (row as unknown as Record<string, unknown>)[k] = v;
+      }
+    }
+    updates.push(data);
+  };
+
   return {
     updates,
+    /** Simulate a concurrent run mutating this row (used by the race test). */
+    setStatus: (s: string) => {
+      row.translationStatus = s;
+    },
+    get currentStatus() {
+      return row.translationStatus;
+    },
     feedItem: {
       update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
-        updates.push(args.data);
+        apply(args.data);
         return {};
+      },
+      updateMany: async (args: {
+        where: Record<string, unknown>;
+        data: Record<string, unknown>;
+      }) => {
+        if (!matches(args.where)) return { count: 0 };
+        apply(args.data);
+        return { count: 1 };
       },
     },
   };
@@ -115,11 +193,12 @@ describe("translateFeedItem — success", () => {
       })
     );
 
-    assert.equal(dbWritesBeforeCall, 1, "attempt must be recorded before the LLM call");
+    assert.equal(dbWritesBeforeCall, 1, "the claim must be recorded before the LLM call");
     const attempt = db.updates[0];
     assert.deepEqual(attempt.translationAttemptCount, { increment: 1 });
     assert.equal(attempt.translationLastAttemptAt, NOW);
-    assert.equal(attempt.translationStatus, "pending");
+    // The pre-call write is now the atomic claim, which flips the row to `translating`.
+    assert.equal(attempt.translationStatus, "translating");
   });
 });
 
@@ -149,7 +228,7 @@ describe("translateFeedItem — unchanged content", () => {
   });
 
   it("re-translates when the same hash is present but the status is not completed", async () => {
-    const db = makeDb();
+    const db = makeDb({ translationStatus: "failed", translationAttemptCount: 1 });
     const item = makeItem({
       translationStatus: "failed",
       translationHash: computeTranslationHash("Original title", "Original content", "bg"),
@@ -166,7 +245,10 @@ describe("translateFeedItem — unchanged content", () => {
   });
 
   it("re-translates a completed item when the target language changed", async () => {
-    const db = makeDb();
+    const db = makeDb({
+      translationStatus: "completed",
+      translationHash: computeTranslationHash("Original title", "Original content", "bg"),
+    });
     const item = makeItem({
       translationStatus: "completed",
       translationHash: computeTranslationHash("Original title", "Original content", "bg"),
@@ -241,6 +323,56 @@ describe("translateFeedItem — failure", () => {
     assert.equal(final.translatedContent, "Пълно съдържание");
   });
 
+  it("does not resurrect a failed status when a concurrent run already completed the item", async () => {
+    // Defense in depth on top of the claim: even if two runs both reach the failure write
+    // (e.g. a lease-expiry hand-off), the guarded write must never overwrite a row another run
+    // has since completed. Here a concurrent run completes the item while this run's request is
+    // in flight; this run then fails. The lease-fenced failure write matches no row — otherwise
+    // the UI would show "Translation failed" for an item that is actually translated.
+    const db = makeDb();
+    const outcome = await translateFeedItem(
+      makeItem(),
+      "bg",
+      makeDeps(db, async () => {
+        db.setStatus("completed"); // a concurrent run finishes the translation first
+        throw new Error("Translation response was not valid JSON.");
+      })
+    );
+
+    // The item stays completed, and no "failed" state is ever persisted.
+    assert.equal(db.currentStatus, "completed");
+    assert.ok(
+      !db.updates.some((d) => d.translationStatus === "failed"),
+      "a superseded failure must not write a failed status"
+    );
+    // This run translated nothing — it reports skipped; the concurrent run counts the success.
+    assert.equal(outcome.status, "skipped");
+    assert.equal(outcome.status === "skipped" && outcome.reason, "superseded");
+  });
+
+  it("skips without calling the model when another run already holds the claim", async () => {
+    // The item is already claimed (translating, live lease) by a concurrent run. This run's
+    // atomic claim matches no row, so it must NOT call the LLM and must report skipped.
+    const db = makeDb({
+      translationStatus: "translating",
+      translationLeaseExpiresAt: new Date(NOW.getTime() + 5 * 60_000),
+      translationAttemptCount: 1,
+    });
+    let called = false;
+    const outcome = await translateFeedItem(
+      makeItem(),
+      "bg",
+      makeDeps(db, async () => {
+        called = true;
+        return { text: GOOD_RESPONSE };
+      })
+    );
+
+    assert.equal(called, false, "a lost claim must not reach the LLM");
+    assert.deepEqual(outcome, { status: "skipped", reason: "claimed" });
+    assert.equal(db.updates.length, 0, "a lost claim writes nothing");
+  });
+
   it("treats a malformed JSON response as a failure and counts the attempt", async () => {
     const db = makeDb();
     const outcome = await translateFeedItem(
@@ -255,7 +387,7 @@ describe("translateFeedItem — failure", () => {
   });
 
   it("lengthens the backoff as attempts accumulate", async () => {
-    const db = makeDb();
+    const db = makeDb({ translationStatus: "failed", translationAttemptCount: 2 });
     const outcome = await translateFeedItem(
       makeItem({ translationStatus: "failed", translationAttemptCount: 2 }),
       "bg",

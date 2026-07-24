@@ -15,7 +15,12 @@ export const MAX_TRANSLATION_ATTEMPTS = 5;
 /** Items translated per cron run — keeps one run inside the function timeout. */
 export const TRANSLATION_BATCH_SIZE = 10;
 
-export type TranslationStatus = "pending" | "completed" | "failed" | "skipped";
+export type TranslationStatus =
+  | "pending"
+  | "translating"
+  | "completed"
+  | "failed"
+  | "skipped";
 
 /** Only article sources are translated; prompt/calendar_event content is authored in-app. */
 const TRANSLATABLE_SOURCE_TYPES = ["rss"] as const;

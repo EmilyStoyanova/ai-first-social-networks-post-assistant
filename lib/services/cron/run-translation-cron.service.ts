@@ -2,7 +2,7 @@ import { performance } from "node:perf_hooks";
 import { prisma } from "@/lib/db/client";
 import { Prisma } from "@prisma/client";
 import { translateFeedItems, type TranslateFeedItemsSummary } from "./translate-feed-items.service";
-import { MAX_TRANSLATION_ATTEMPTS } from "@/lib/ai/feed-item-translation";
+import { translationSelectableWhere } from "@/lib/ai/feed-item-translation-claim";
 
 // ─── Tunables ──────────────────────────────────────────────────────────────────
 
@@ -120,14 +120,15 @@ async function defaultFailRun(
   });
 }
 
-/** Only items still eligible: enabled source, pending/failed, under the attempt cap, retry-due. */
+/**
+ * Only items still eligible: enabled source, retry-due pending/failed under the attempt cap,
+ * plus crashed `translating` claims past their lease (recovery). A live claim is excluded, so
+ * the `remaining` diagnostic and company selection never count an in-flight item as backlog.
+ */
 function pendingWhere(): Prisma.FeedItemWhereInput {
   return {
     source: { enabled: true },
-    translationStatus: { in: ["pending", "failed"] },
-    translationAttemptCount: { lt: MAX_TRANSLATION_ATTEMPTS },
-    // Never before its backoff window elapses; null = never attempted.
-    OR: [{ translationNextRetryAt: null }, { translationNextRetryAt: { lte: new Date() } }],
+    ...translationSelectableWhere(new Date()),
   };
 }
 
