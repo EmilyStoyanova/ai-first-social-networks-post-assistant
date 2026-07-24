@@ -676,6 +676,9 @@
     "searchPlaceholder": "Search by provider or date…",
     "noPrompt": "This post has no image prompt. Regenerate the post draft to get one.",
     "imagePrompt": "Image Prompt",
+    "imagePromptPlaceholder": "Describe the image you want…",
+    "imagePromptHint": "Edit the prompt to change what the image shows.",
+    "resetPrompt": "Reset to original",
     "imageStyleLabel": "Image Style",
     "imageStyleOption": {
       "default": "Default",

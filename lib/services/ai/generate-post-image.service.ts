@@ -98,7 +98,8 @@ export async function generatePostImageCore(
   postId: string,
   actor: ImageGenerationActor,
   imageStyle: ImageStyle | undefined,
-  deps: GeneratePostImageDeps
+  deps: GeneratePostImageDeps,
+  promptOverride?: string
 ): Promise<GeneratePostImageResult> {
   const { db, getProvider } = deps;
 
@@ -129,13 +130,16 @@ export async function generatePostImageCore(
     }
   }
 
-  if (!post.imagePrompt) {
+  // A non-empty override replaces the post's stored prompt for this generation
+  // only; it is never written back to the post.
+  const basePrompt = promptOverride?.trim() || post.imagePrompt;
+  if (!basePrompt) {
     return { success: false, code: "NO_IMAGE_PROMPT" };
   }
 
   const forbiddenWords = post.company.brandGuidelines?.forbiddenWords ?? [];
   const prompt = buildImagePrompt({
-    basePrompt: post.imagePrompt,
+    basePrompt,
     channel: post.channel,
     forbiddenWords,
     imageStyle,
@@ -202,22 +206,32 @@ export async function generatePostImageCore(
 export async function generatePostImageForActor(
   postId: string,
   actor: ImageGenerationActor,
-  imageStyle?: ImageStyle
+  imageStyle?: ImageStyle,
+  promptOverride?: string
 ): Promise<GeneratePostImageResult> {
-  return generatePostImageCore(postId, actor, imageStyle, {
-    db: prisma,
-    getProvider: getImageProvider,
-  });
+  return generatePostImageCore(
+    postId,
+    actor,
+    imageStyle,
+    { db: prisma, getProvider: getImageProvider },
+    promptOverride
+  );
 }
 
-/** The manual path: a user clicked "Generate image". Signature unchanged. */
+/** The manual path: a user clicked "Generate image". */
 export async function generatePostImage(
   postId: string,
   userId: string,
   isGlobalAdmin: boolean,
-  imageStyle?: ImageStyle
+  imageStyle?: ImageStyle,
+  promptOverride?: string
 ): Promise<GeneratePostImageResult> {
-  return generatePostImageForActor(postId, { kind: "user", userId, isGlobalAdmin }, imageStyle);
+  return generatePostImageForActor(
+    postId,
+    { kind: "user", userId, isGlobalAdmin },
+    imageStyle,
+    promptOverride
+  );
 }
 
 function logImageProviderFailure(err: ImageProviderError): void {

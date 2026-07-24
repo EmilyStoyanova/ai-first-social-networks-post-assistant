@@ -91,6 +91,27 @@ describe("generatePostImageCore — image style persistence", () => {
   });
 });
 
+describe("generatePostImageCore — prompt override", () => {
+  it("uses a non-empty override instead of the post's stored prompt", async () => {
+    const { deps, generatedPrompt } = makeDeps();
+    await generatePostImageCore("post-1", USER_ACTOR, undefined, deps, "A neon skyline");
+    assert.ok(generatedPrompt()?.includes("A neon skyline"));
+    assert.ok(!generatedPrompt()?.includes("A coffee cup"));
+  });
+
+  it("records the override in the MediaAsset's aiPrompt", async () => {
+    const { deps, created } = makeDeps();
+    await generatePostImageCore("post-1", USER_ACTOR, undefined, deps, "A neon skyline");
+    assert.ok(created()?.aiPrompt.includes("A neon skyline"));
+  });
+
+  it("falls back to the post's prompt when the override is blank", async () => {
+    const { deps, generatedPrompt } = makeDeps();
+    await generatePostImageCore("post-1", USER_ACTOR, undefined, deps, "   ");
+    assert.ok(generatedPrompt()?.includes("A coffee cup"));
+  });
+});
+
 describe("generatePostImageCore — actor", () => {
   it("re-checks membership for a non-admin user", async () => {
     const { deps, membershipChecked } = makeDeps();

@@ -13,9 +13,20 @@ export type ImageStyle = (typeof IMAGE_STYLES)[number];
 /** Zod schema for a single image style. Rejects any value outside the list. */
 export const imageStyleSchema = z.enum(IMAGE_STYLES);
 
-/** Zod schema for the optional `imageStyle` field on the generate-image request. */
+/** Upper bound on a user-supplied image prompt override. */
+export const IMAGE_PROMPT_MAX_LENGTH = 2000;
+
+/**
+ * Zod schema for the generate-image request body.
+ *
+ * `imageStyle` selects a style preset. `imagePrompt`, when present, overrides
+ * the post's stored prompt for this one generation (it is never persisted back
+ * to the post). Empty/whitespace-only overrides are ignored by the service,
+ * which falls back to the post's own prompt.
+ */
 export const generateImageRequestSchema = z.object({
   imageStyle: imageStyleSchema.optional(),
+  imagePrompt: z.string().max(IMAGE_PROMPT_MAX_LENGTH).optional(),
 });
 
 /**

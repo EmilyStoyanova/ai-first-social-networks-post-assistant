@@ -28,7 +28,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     id,
     session.user.id,
     session.user.isGlobalAdmin,
-    parsed.data.imageStyle
+    parsed.data.imageStyle,
+    parsed.data.imagePrompt
   );
 
   if (!result.success) {

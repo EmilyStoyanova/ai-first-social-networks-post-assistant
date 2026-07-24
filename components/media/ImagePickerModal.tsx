@@ -216,8 +216,14 @@ function AiGenerateTab({
   const [error, setError] = useState("");
   const [preview, setPreview] = useState<AttachedMedia | null>(null);
   const [imageStyle, setImageStyle] = useState<ImageStyle>("default");
+  const [prompt, setPrompt] = useState(postImagePrompt ?? "");
+
+  const trimmedPrompt = prompt.trim();
+  const canGenerate = trimmedPrompt.length > 0;
+  const isEdited = postImagePrompt != null && prompt !== postImagePrompt;
 
   async function handleGenerate() {
+    if (!canGenerate) return;
     setGenerating(true);
     setError("");
     setPreview(null);
@@ -225,7 +231,7 @@ function AiGenerateTab({
       const res = await fetch(`/api/v1/posts/${postId}/generate-image`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ imageStyle }),
+        body: JSON.stringify({ imageStyle, imagePrompt: trimmedPrompt }),
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
@@ -242,40 +248,58 @@ function AiGenerateTab({
 
   return (
     <div className="space-y-4">
-      {!postImagePrompt ? (
-        <Alert variant="warning">{t("noPrompt")}</Alert>
-      ) : (
-        <div className="rounded-control border-border bg-surface-subtle border px-4 py-3">
-          <p className="text-fg-faint mb-1 text-xs font-semibold tracking-wide uppercase">
-            {t("imagePrompt")}
-          </p>
-          <p className="text-fg-muted text-sm leading-relaxed">{postImagePrompt}</p>
-        </div>
-      )}
-
-      {postImagePrompt && (
-        <div>
+      <div>
+        <div className="mb-1 flex items-baseline justify-between gap-2">
           <label
-            htmlFor="image-style"
-            className="text-fg-faint mb-1 block text-xs font-semibold tracking-wide uppercase"
+            htmlFor="image-prompt"
+            className="text-fg-faint block text-xs font-semibold tracking-wide uppercase"
           >
-            {t("imageStyleLabel")}
+            {t("imagePrompt")}
           </label>
-          <select
-            id="image-style"
-            value={imageStyle}
-            disabled={generating}
-            onChange={(e) => setImageStyle(e.target.value as ImageStyle)}
-            className="rounded-control border-border-strong focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2 text-sm outline-none focus:ring-2"
-          >
-            {IMAGE_STYLES.map((style) => (
-              <option key={style} value={style}>
-                {t(`imageStyleOption.${style}`)}
-              </option>
-            ))}
-          </select>
+          {isEdited && (
+            <button
+              type="button"
+              onClick={() => setPrompt(postImagePrompt ?? "")}
+              disabled={generating}
+              className="text-accent text-xs font-medium hover:underline disabled:opacity-50"
+            >
+              {t("resetPrompt")}
+            </button>
+          )}
         </div>
-      )}
+        <textarea
+          id="image-prompt"
+          value={prompt}
+          disabled={generating}
+          rows={3}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder={t("imagePromptPlaceholder")}
+          className="rounded-control border-border-strong focus:border-accent focus:ring-accent/20 w-full resize-y border px-3.5 py-2 text-sm leading-relaxed outline-none focus:ring-2"
+        />
+        <p className="text-fg-faint mt-1 text-xs">{t("imagePromptHint")}</p>
+      </div>
+
+      <div>
+        <label
+          htmlFor="image-style"
+          className="text-fg-faint mb-1 block text-xs font-semibold tracking-wide uppercase"
+        >
+          {t("imageStyleLabel")}
+        </label>
+        <select
+          id="image-style"
+          value={imageStyle}
+          disabled={generating}
+          onChange={(e) => setImageStyle(e.target.value as ImageStyle)}
+          className="rounded-control border-border-strong focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2 text-sm outline-none focus:ring-2"
+        >
+          {IMAGE_STYLES.map((style) => (
+            <option key={style} value={style}>
+              {t(`imageStyleOption.${style}`)}
+            </option>
+          ))}
+        </select>
+      </div>
 
       {error && <Alert variant="error">{error}</Alert>}
 
@@ -299,7 +323,7 @@ function AiGenerateTab({
               variant="ghost"
               size="sm"
               loading={generating}
-              disabled={!postImagePrompt}
+              disabled={!canGenerate}
               onClick={() => void handleGenerate()}
             >
               {generating ? t("generating") : t("regenerate")}
@@ -311,7 +335,7 @@ function AiGenerateTab({
           variant="primary"
           size="sm"
           loading={generating}
-          disabled={!postImagePrompt}
+          disabled={!canGenerate}
           onClick={() => void handleGenerate()}
         >
           {generating ? t("generatingImage") : t("generateImage")}
