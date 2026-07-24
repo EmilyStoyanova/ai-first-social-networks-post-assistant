@@ -62,7 +62,12 @@ export function VerifyEmailCard({ token }: Props) {
       <div className="rounded-card border-border bg-surface w-full max-w-md border px-5 py-8 shadow-sm sm:px-8 sm:py-10">
         <div className="mb-8 flex flex-col items-center gap-3">
           <Logo size="lg" />
-          <p className="text-fg-faint text-sm">{tBrand("tagline")}</p>
+          <div className="text-center">
+            <p className="text-fg text-base font-bold tracking-tight break-words">
+              {tBrand("title")}
+            </p>
+            <p className="text-fg-faint text-sm">{tBrand("tagline")}</p>
+          </div>
         </div>
 
         {status === "invalid" && (

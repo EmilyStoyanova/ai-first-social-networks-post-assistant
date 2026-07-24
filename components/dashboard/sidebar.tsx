@@ -41,9 +41,14 @@ export function Sidebar({ isOpen, onClose, isGlobalAdmin }: Props) {
         ].join(" ")}
       >
         {/* Logo */}
-        <div className="border-border flex h-14 shrink-0 flex-col justify-center gap-0.5 border-b px-4">
+        <div className="border-border flex min-h-14 shrink-0 items-center gap-2.5 border-b px-4 py-2.5">
           <Logo size="sm" />
-          <p className="text-fg-faint text-[11px] leading-tight">{t("logoTagline")}</p>
+          <div className="min-w-0">
+            <p className="text-fg text-xs leading-tight font-bold tracking-tight break-words">
+              {t("logoName")}
+            </p>
+            <p className="text-fg-faint text-[11px] leading-tight">{t("logoTagline")}</p>
+          </div>
         </div>
 
         {/* Navigation */}
