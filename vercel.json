@@ -7,7 +7,7 @@
     },
     {
       "path": "/api/v1/internal/cron/translate",
-      "schedule": "0 6 * * *"
+      "schedule": "0 * * * *"
     },
     {
       "path": "/api/v1/internal/cron/generate",
