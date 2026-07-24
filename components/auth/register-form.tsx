@@ -84,9 +84,7 @@ export function RegisterForm() {
         <div className="mb-8 flex flex-col items-center gap-3">
           <Logo size="lg" />
           <div className="text-center">
-            <p className="text-fg text-base font-bold tracking-tight break-words">
-              {tBrand("title")}
-            </p>
+            <p className="text-fg text-base font-bold tracking-tight">{tBrand("title")}</p>
             <p className="text-fg-faint text-sm">{tBrand("tagline")}</p>
           </div>
         </div>

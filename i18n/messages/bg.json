@@ -70,7 +70,7 @@
     "UNKNOWN_SOURCE": "Този източник не е на тази компания."
   },
   "brand": {
-    "title": "ai-first-social-networks-post-assistant",
+    "title": "New Post",
     "tagline": "Помощник за публикации"
   },
   "auth": {
@@ -124,7 +124,7 @@
     "mainNavigation": "Основна навигация"
   },
   "sidebar": {
-    "logoName": "ai-first-social-networks-post-assistant",
+    "logoName": "New Post",
     "logoTagline": "Помощник за публикации"
   },
   "header": {

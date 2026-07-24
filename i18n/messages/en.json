@@ -70,7 +70,7 @@
     "UNKNOWN_SOURCE": "That content source doesn't belong to this company."
   },
   "brand": {
-    "title": "ai-first-social-networks-post-assistant",
+    "title": "New Post",
     "tagline": "Post Assistant"
   },
   "auth": {
@@ -124,7 +124,7 @@
     "mainNavigation": "Main navigation"
   },
   "sidebar": {
-    "logoName": "ai-first-social-networks-post-assistant",
+    "logoName": "New Post",
     "logoTagline": "Post Assistant"
   },
   "header": {
