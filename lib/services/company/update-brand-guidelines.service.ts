@@ -42,10 +42,15 @@ async function upsert(
   data: UpdateBrandGuidelinesInput
 ): Promise<BrandGuidelinesData> {
   return prisma.$transaction(async (tx) => {
-    if (data.automationMode) {
+    // Both automationMode and defaultLang live on Company (not BrandGuidelines),
+    // but are edited from the same Brand Settings form, so they are updated here.
+    if (data.automationMode || data.defaultLang) {
       await tx.company.update({
         where: { id: companyId },
-        data: { automationMode: data.automationMode },
+        data: {
+          ...(data.automationMode ? { automationMode: data.automationMode } : {}),
+          ...(data.defaultLang ? { defaultLang: data.defaultLang } : {}),
+        },
       });
     }
     return tx.brandGuidelines.upsert({

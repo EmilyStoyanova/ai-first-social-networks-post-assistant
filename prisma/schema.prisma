@@ -229,7 +229,10 @@ model ChannelConfig {
   imageRequired          Boolean?        @map("image_required")
   maxTextLength          Int?            @map("max_text_length")
   hashtagStyle           HashtagStyle    @default(end_of_post) @map("hashtag_style")
-  postingLanguage        String          @default("en") @map("posting_language")
+  // NULL = inherit the company brand default (Company.defaultLang). An explicit
+  // "en"/"bg" overrides the brand default for this channel only. Resolution order:
+  // manual generation choice → this override → Company.defaultLang.
+  postingLanguage        String?         @map("posting_language")
   postsPerDay            Int             @default(1) @map("posts_per_day")
   postsPerWeek           Int             @default(5) @map("posts_per_week")
   postingWindows         Json?           @map("posting_windows")

@@ -67,6 +67,7 @@ export default async function ChannelsSettingsPage({ params }: Props) {
             bufferConnected={bufferConnection.connected}
             lastSyncedAt={bufferConnection.lastProfileSyncAt?.toISOString() ?? null}
             companyAutomationMode={company.automationMode ?? "semi_automated"}
+            companyDefaultLang={company.defaultLang === "bg" ? "bg" : "en"}
           />
         </Section>
 

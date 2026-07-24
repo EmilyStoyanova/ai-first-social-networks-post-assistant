@@ -16,6 +16,7 @@ interface Props {
   initialConfig: ChannelConfigItem;
   canManage: boolean;
   companyAutomationMode: "semi_automated" | "fully_automated";
+  companyDefaultLang: "en" | "bg";
 }
 
 interface ChannelMeta {
@@ -73,6 +74,7 @@ export function ChannelConfigCard({
   initialConfig,
   canManage,
   companyAutomationMode,
+  companyDefaultLang,
 }: Props) {
   const t = useTranslations("channels");
   const tCommon = useTranslations("common");
@@ -170,14 +172,26 @@ export function ChannelConfigCard({
             setErrorMessage("");
           }}
           companyAutomationMode={companyAutomationMode}
+          companyDefaultLang={companyDefaultLang}
         />
       ) : (
         <>
           {/* Summary */}
           <dl className="mb-4 space-y-1.5 text-sm">
-            <div className="flex items-center justify-between">
+            <div className="flex items-start justify-between">
               <dt className="text-fg-muted">{t("language")}</dt>
-              <dd className="text-fg font-medium">{config.postingLanguage.toUpperCase()}</dd>
+              <dd className="text-fg text-right font-medium">
+                {config.postingLanguage ? (
+                  config.postingLanguage.toUpperCase()
+                ) : (
+                  <>
+                    {t("languageBrandDefault")}
+                    <span className="text-fg-faint mt-0.5 block text-xs font-normal">
+                      {companyDefaultLang.toUpperCase()}
+                    </span>
+                  </>
+                )}
+              </dd>
             </div>
             <div className="flex items-center justify-between">
               <dt className="text-fg-muted">{t("postsPerDay")}</dt>

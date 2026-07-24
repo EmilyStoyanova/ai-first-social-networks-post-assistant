@@ -44,6 +44,7 @@ export default async function BrandSettingsPage({ params }: Props) {
           slug={slug}
           initialValues={brandGuidelines}
           initialAutomationMode={company.automationMode ?? "semi_automated"}
+          initialDefaultLang={company.defaultLang === "bg" ? "bg" : "en"}
           role={company.role ?? null}
           isGlobalAdmin={false}
         />

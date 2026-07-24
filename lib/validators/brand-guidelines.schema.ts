@@ -7,6 +7,9 @@ const hexColor = z
 
 export const updateBrandGuidelinesSchema = z.object({
   automationMode: z.enum(["semi_automated", "fully_automated"]).optional(),
+  // Company-wide brand default post language (Company.defaultLang). Channels
+  // inherit this unless they set their own override.
+  defaultLang: z.enum(["en", "bg"]).optional(),
   logoUrl: z.string().url("Must be a valid URL.").optional(),
   primaryColor: hexColor,
   secondaryColor: hexColor,

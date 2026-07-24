@@ -6,6 +6,8 @@ export type CompanyDetails = {
   slug: string;
   website: string | null;
   automationMode: "semi_automated" | "fully_automated";
+  /** Company-wide brand default post language. Channels may override it. */
+  defaultLang: string;
   createdAt: Date;
   role: "OWNER" | "EDITOR" | null;
 };
@@ -24,6 +26,7 @@ export async function getCompany(
         slug: true,
         website: true,
         automationMode: true,
+        defaultLang: true,
         createdAt: true,
         members: {
           where: { userId },
@@ -42,6 +45,7 @@ export async function getCompany(
       slug: company.slug,
       website: company.website,
       automationMode: company.automationMode,
+      defaultLang: company.defaultLang,
       createdAt: company.createdAt,
       role:
         membership?.role === "owner" ? "OWNER" : membership?.role === "editor" ? "EDITOR" : null,
@@ -62,6 +66,7 @@ export async function getCompany(
           slug: true,
           website: true,
           automationMode: true,
+          defaultLang: true,
           createdAt: true,
         },
       },
@@ -76,6 +81,7 @@ export async function getCompany(
     slug: membership.company.slug,
     website: membership.company.website,
     automationMode: membership.company.automationMode,
+    defaultLang: membership.company.defaultLang,
     createdAt: membership.company.createdAt,
     role: membership.role === "owner" ? "OWNER" : "EDITOR",
   };

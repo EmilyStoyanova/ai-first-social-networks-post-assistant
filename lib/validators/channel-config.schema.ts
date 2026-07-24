@@ -26,7 +26,9 @@ export const upsertChannelConfigSchema = z.object({
   enabled: z.boolean(),
   postsPerDay: z.number().int().min(0).max(20),
   postsPerWeek: z.number().int().min(0).max(100),
-  language: z.enum(["en", "bg"]),
+  // "inherit" = use the company brand default (stored as NULL); "en"/"bg" set an
+  // explicit per-channel override.
+  language: z.enum(["inherit", "en", "bg"]),
   imageRequired: z.boolean(),
   includeSourceLink: z.boolean().optional().default(false),
   autoGenerateImage: z.boolean().optional().default(false),

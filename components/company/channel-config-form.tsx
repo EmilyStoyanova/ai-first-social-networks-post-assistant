@@ -12,7 +12,7 @@ export interface ChannelFormPayload {
   enabled: boolean;
   postsPerDay: number;
   postsPerWeek: number;
-  language: "en" | "bg";
+  language: "inherit" | "en" | "bg";
   imageRequired: boolean;
   includeSourceLink: boolean;
   autoGenerateImage: boolean;
@@ -26,6 +26,7 @@ interface Props {
   onSave: (data: ChannelFormPayload) => void;
   onCancel: () => void;
   companyAutomationMode: "semi_automated" | "fully_automated";
+  companyDefaultLang: "en" | "bg";
 }
 
 const BASE =
@@ -58,14 +59,20 @@ export function ChannelConfigForm({
   onSave,
   onCancel,
   companyAutomationMode,
+  companyDefaultLang,
 }: Props) {
   const t = useTranslations("channels");
   const tCommon = useTranslations("common");
   const [enabled, setEnabled] = useState(initialConfig.enabled);
   const [postsPerDay, setPostsPerDay] = useState(String(initialConfig.postsPerDay));
   const [postsPerWeek, setPostsPerWeek] = useState(String(initialConfig.postsPerWeek));
-  const [language, setLanguage] = useState<"en" | "bg">(
-    initialConfig.postingLanguage === "bg" ? "bg" : "en"
+  // null posting language = inherit the brand default.
+  const [language, setLanguage] = useState<"inherit" | "en" | "bg">(
+    initialConfig.postingLanguage === "bg"
+      ? "bg"
+      : initialConfig.postingLanguage === "en"
+        ? "en"
+        : "inherit"
   );
   const [imageRequired, setImageRequired] = useState(initialConfig.imageRequired);
   const [includeSourceLink, setIncludeSourceLink] = useState(initialConfig.includeSourceLink);
@@ -142,12 +149,21 @@ export function ChannelConfigForm({
           <label className="text-fg-muted mb-1.5 block text-sm font-medium">{t("language")}</label>
           <select
             value={language}
-            onChange={(e) => setLanguage(e.target.value as "en" | "bg")}
+            onChange={(e) => setLanguage(e.target.value as "inherit" | "en" | "bg")}
             className={`${BASE} ${NORMAL}`}
           >
+            <option value="inherit">{t("languageBrandDefault")}</option>
             <option value="en">{t("languageEN")}</option>
             <option value="bg">{t("languageBG")}</option>
           </select>
+          {language === "inherit" && (
+            <div className="mt-1.5 space-y-0.5">
+              <p className="text-fg-faint text-xs">{t("languageBrandDefaultHelp")}</p>
+              <p className="text-fg-faint text-xs">
+                {t("effectiveLanguage", { language: companyDefaultLang.toUpperCase() })}
+              </p>
+            </div>
+          )}
         </div>
         <div>
           <label className="text-fg-muted mb-1.5 block text-sm font-medium">

@@ -15,7 +15,8 @@ export interface ChannelConfigItem {
   imageRequired: boolean;
   includeSourceLink: boolean;
   autoGenerateImage: boolean;
-  postingLanguage: string;
+  /** Explicit per-channel language, or null to inherit the brand default. */
+  postingLanguage: string | null;
   postsPerDay: number;
   postsPerWeek: number;
   postingWindows: PostingWindow[];

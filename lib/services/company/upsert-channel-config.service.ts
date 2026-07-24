@@ -59,7 +59,8 @@ export async function upsertChannelConfig(
       imageRequired: data.imageRequired,
       includeSourceLink: data.includeSourceLink,
       autoGenerateImage: data.autoGenerateImage,
-      postingLanguage: data.language,
+      // "inherit" is stored as NULL so the channel follows the brand default.
+      postingLanguage: data.language === "inherit" ? null : data.language,
       postsPerDay: data.postsPerDay,
       postsPerWeek: data.postsPerWeek,
       postingWindows: (data.postingWindows ?? []) as object[],

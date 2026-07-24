@@ -16,6 +16,7 @@ interface Props {
   bufferConnected: boolean;
   lastSyncedAt: string | null;
   companyAutomationMode: "semi_automated" | "fully_automated";
+  companyDefaultLang: "en" | "bg";
 }
 
 function formatSyncDate(isoString: string, locale: string): string {
@@ -29,6 +30,7 @@ export function ChannelConfigSection({
   bufferConnected,
   lastSyncedAt,
   companyAutomationMode,
+  companyDefaultLang,
 }: Props) {
   const t = useTranslations("channels");
   const locale = useLocale();
@@ -102,6 +104,7 @@ export function ChannelConfigSection({
             initialConfig={config}
             canManage={canManage}
             companyAutomationMode={companyAutomationMode}
+            companyDefaultLang={companyDefaultLang}
           />
         ))}
       </div>

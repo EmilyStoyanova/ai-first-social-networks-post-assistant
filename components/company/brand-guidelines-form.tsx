@@ -19,12 +19,14 @@ interface Props {
   slug: string;
   initialValues: BrandGuidelinesData | null;
   initialAutomationMode: "semi_automated" | "fully_automated";
+  initialDefaultLang: "en" | "bg";
   role: "OWNER" | "EDITOR" | null;
   isGlobalAdmin: boolean;
 }
 
 type FormValues = {
   automationMode: "semi_automated" | "fully_automated";
+  defaultLang: "en" | "bg";
   logoUrl: string;
   primaryColor: string;
   secondaryColor: string;
@@ -42,10 +44,12 @@ type FieldErrors = Partial<Record<keyof FormValues, string>>;
 
 function toFormValues(
   data: BrandGuidelinesData | null,
-  automationMode: "semi_automated" | "fully_automated"
+  automationMode: "semi_automated" | "fully_automated",
+  defaultLang: "en" | "bg"
 ): FormValues {
   return {
     automationMode,
+    defaultLang,
     logoUrl: data?.logoUrl ?? "",
     primaryColor: data?.primaryColor ?? "",
     secondaryColor: data?.secondaryColor ?? "",
@@ -67,6 +71,7 @@ function toApiPayload(values: FormValues) {
 
   return {
     automationMode: values.automationMode,
+    defaultLang: values.defaultLang,
     logoUrl: values.logoUrl.trim() || undefined,
     primaryColor: values.primaryColor.trim() || undefined,
     secondaryColor: values.secondaryColor.trim() || undefined,
@@ -119,6 +124,7 @@ export function BrandGuidelinesForm({
   slug,
   initialValues,
   initialAutomationMode,
+  initialDefaultLang,
   role,
   isGlobalAdmin,
 }: Props) {
@@ -129,7 +135,7 @@ export function BrandGuidelinesForm({
   const canEdit = role === "OWNER" || isGlobalAdmin;
 
   const [values, setValues] = useState<FormValues>(() =>
-    toFormValues(initialValues, initialAutomationMode)
+    toFormValues(initialValues, initialAutomationMode, initialDefaultLang)
   );
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [status, setStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
@@ -217,6 +223,22 @@ export function BrandGuidelinesForm({
           >
             <option value="semi_automated">{t("semiAutomated")}</option>
             <option value="fully_automated">{t("fullyAutomated")}</option>
+          </Select>
+        </div>
+
+        {/* Default post language */}
+        <div className="mb-4">
+          <Select
+            id="bg-defaultLang"
+            name="defaultLang"
+            label={t("defaultPostLanguage")}
+            value={values.defaultLang}
+            onChange={(e) => set("defaultLang", e.target.value as FormValues["defaultLang"])}
+            disabled={disabled}
+            helperText={t("defaultPostLanguageHelp")}
+          >
+            <option value="en">{t("languageEnglish")}</option>
+            <option value="bg">{t("languageBulgarian")}</option>
           </Select>
         </div>
 

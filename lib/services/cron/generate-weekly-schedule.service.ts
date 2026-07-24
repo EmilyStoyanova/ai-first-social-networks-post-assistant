@@ -110,7 +110,8 @@ function slotFor(
 interface ChannelConfigRow {
   channel: string;
   postsPerWeek: number;
-  postingLanguage: string;
+  // null = inherit the brand default; the generation context resolves it.
+  postingLanguage: string | null;
   postingWindows: unknown;
 }
 
@@ -385,7 +386,9 @@ async function fillChannelPooled(
     }
 
     const result = await generate(contextResult.context, companyId, {
-      contentLanguage: config.postingLanguage,
+      // null (inherit) → undefined so the context's resolved channel language
+      // (which already falls back to the brand default) is used.
+      contentLanguage: config.postingLanguage ?? undefined,
       scheduleId,
       scheduledFor: slotFor(weekStart, have, target, config.postingWindows),
       initialStatus: "pending_approval",
@@ -490,7 +493,9 @@ async function fillChannelFromMix(
     }
 
     const result = await generate(contextResult.context, companyId, {
-      contentLanguage: config.postingLanguage,
+      // null (inherit) → undefined so the context's resolved channel language
+      // (which already falls back to the brand default) is used.
+      contentLanguage: config.postingLanguage ?? undefined,
       scheduleId,
       scheduledFor: slotFor(weekStart, totalGenerated(), target, config.postingWindows),
       initialStatus: "pending_approval",
