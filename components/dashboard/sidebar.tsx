@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Navigation } from "./navigation";
 import { LogoutButton } from "./logout-button";
+import { Logo } from "@/components/ui/Logo";
 
 interface Props {
   isOpen: boolean;
@@ -40,16 +41,9 @@ export function Sidebar({ isOpen, onClose, isGlobalAdmin }: Props) {
         ].join(" ")}
       >
         {/* Logo */}
-        <div className="border-border flex h-14 shrink-0 items-center gap-3 border-b px-4">
-          <div className="rounded-control bg-fg flex h-7 w-7 shrink-0 items-center justify-center">
-            <span className="text-xs font-bold text-white">AI</span>
-          </div>
-          <div>
-            <p className="text-fg text-sm leading-tight font-bold tracking-tight">
-              {t("logoName")}
-            </p>
-            <p className="text-fg-faint text-[11px] leading-tight">{t("logoTagline")}</p>
-          </div>
+        <div className="border-border flex h-14 shrink-0 flex-col justify-center gap-0.5 border-b px-4">
+          <Logo size="sm" />
+          <p className="text-fg-faint text-[11px] leading-tight">{t("logoTagline")}</p>
         </div>
 
         {/* Navigation */}

@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
+import { Logo } from "@/components/ui/Logo";
 
 interface Props {
   token: string;
@@ -60,13 +61,8 @@ export function VerifyEmailCard({ token }: Props) {
     <div className="bg-bg flex min-h-screen flex-1 items-center justify-center px-4 py-12">
       <div className="rounded-card border-border bg-surface w-full max-w-md border px-5 py-8 shadow-sm sm:px-8 sm:py-10">
         <div className="mb-8 flex flex-col items-center gap-3">
-          <div className="rounded-card bg-fg flex h-11 w-11 items-center justify-center shadow-sm">
-            <span className="text-base font-bold text-white">AI</span>
-          </div>
-          <div className="text-center">
-            <p className="text-fg text-base font-bold tracking-tight">{tBrand("title")}</p>
-            <p className="text-fg-faint text-sm">{tBrand("tagline")}</p>
-          </div>
+          <Logo size="lg" />
+          <p className="text-fg-faint text-sm">{tBrand("tagline")}</p>
         </div>
 
         {status === "invalid" && (
