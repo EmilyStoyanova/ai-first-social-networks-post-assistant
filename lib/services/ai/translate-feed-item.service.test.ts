@@ -223,6 +223,24 @@ describe("translateFeedItem — failure", () => {
     assert.equal(db.updates.at(-1)!.translationStatus, "failed");
   });
 
+  it("completes a 200 reply truncated just before its closing brace (the real qwen3 case)", async () => {
+    // The worker returns HTTP 200 with a full title + content but no trailing "}". This is
+    // recoverable — the strings are terminated — so the item translates instead of failing.
+    const db = makeDb();
+    const missingBrace = '{"title":"Заглавие","content":"Пълно съдържание"';
+    const outcome = await translateFeedItem(
+      makeItem(),
+      "bg",
+      makeDeps(db, async () => ({ text: missingBrace }))
+    );
+
+    assert.equal(outcome.status, "translated");
+    const final = db.updates.at(-1)!;
+    assert.equal(final.translationStatus, "completed");
+    assert.equal(final.translatedTitle, "Заглавие");
+    assert.equal(final.translatedContent, "Пълно съдържание");
+  });
+
   it("treats a malformed JSON response as a failure and counts the attempt", async () => {
     const db = makeDb();
     const outcome = await translateFeedItem(
@@ -326,6 +344,40 @@ describe("translateFeedItem — diagnostics", () => {
 
     // The article body must never appear in any logged line.
     assert.ok(!cap.allText().includes(SECRET_BODY), "the article body must not be logged");
+  });
+
+  it("on an unparseable 200 reply logs the response SHAPE only — first/last 200 + length", async () => {
+    // A middle marker proves the full body is never logged: with a >400-char reply, only the
+    // first 200 and last 200 chars are captured, so anything in between must not appear.
+    const db = makeDb();
+    const MIDDLE = "MIDDLE_MARKER_MUST_NOT_LEAK";
+    const unparseable =
+      "Sorry, I cannot translate this. " +
+      "a".repeat(220) +
+      MIDDLE +
+      "b".repeat(220) +
+      " The end.";
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem(),
+        "bg",
+        makeDeps(db, async () => ({ text: unparseable }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    const shape = cap.warns.find((a) => a[0] === "[rss-translation] unparseable model response");
+    assert.ok(shape, "expected an 'unparseable model response' log");
+    const payload = shape![1] as Record<string, unknown>;
+    assert.equal(payload.responseLength, unparseable.length);
+    assert.equal((payload.responseFirst200 as string).length, 200);
+    assert.equal((payload.responseLast200 as string).length, 200);
+    assert.match(payload.responseFirst200 as string, /^Sorry, I cannot translate/);
+    assert.match(payload.error as string, /no JSON object/);
+    // The bounded window excludes the middle of the reply — the full body is never logged.
+    assert.ok(!cap.allText().includes(MIDDLE), "the middle of the response body must not be logged");
   });
 
   it("on failure (e.g. a timeout) logs exactly which feed item failed", async () => {

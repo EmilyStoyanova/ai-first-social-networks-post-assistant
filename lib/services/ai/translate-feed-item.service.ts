@@ -154,7 +154,25 @@ export async function translateFeedItem(
       userPrompt,
       temperature: 0.2,
     });
-    const { translatedTitle, translatedContent } = parseTranslationResponse(response.text);
+
+    let translatedTitle: string | null;
+    let translatedContent: string;
+    try {
+      ({ translatedTitle, translatedContent } = parseTranslationResponse(response.text));
+    } catch (parseErr) {
+      // The transport succeeded (HTTP 200) but the reply could not be parsed. Log the SHAPE
+      // of the raw model output — first/last 200 chars and total length only, never the full
+      // body — so the exact failure pattern (truncation, prose, wrong format) is diagnosable.
+      const text = response.text ?? "";
+      console.warn("[rss-translation] unparseable model response", {
+        ...diag,
+        responseLength: text.length,
+        responseFirst200: text.slice(0, 200),
+        responseLast200: text.length > 200 ? text.slice(-200) : "",
+        error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+      });
+      throw parseErr;
+    }
 
     await db.feedItem.update({
       where: { id: item.id },

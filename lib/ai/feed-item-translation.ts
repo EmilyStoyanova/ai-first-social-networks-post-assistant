@@ -219,9 +219,11 @@ export function buildTranslationPrompts(
 ): { systemPrompt: string; userPrompt: string } {
   const systemPrompt = [
     `You are a professional translator. Translate the following article title and body into ${targetLang}.`,
-    'Preserve meaning exactly. Return JSON: {"title": "...", "content": "..."}',
-    "Do not add commentary, summaries, or any additional text.",
-    'If the title is empty, return null for "title".',
+    "Preserve meaning exactly.",
+    'Respond with ONLY a single, complete JSON object of exactly this shape: {"title": "...", "content": "..."}',
+    "Output nothing before or after the JSON — no reasoning, no commentary, no summaries, no code fences.",
+    "Make sure the JSON is complete and ends with its closing brace.",
+    'If the title is empty, use null for "title".',
   ].join("\n");
 
   const cappedContent = capTranslationContent(content);
@@ -238,16 +240,57 @@ export class TranslationParseError extends Error {
   }
 }
 
-/** Strips ``` fences some models wrap JSON in, then isolates the JSON object. */
+/**
+ * Repairs the ONE truncation the self-hosted model actually produces: a complete
+ * object whose trailing "}" it forgot to emit before stopping (observed live —
+ * qwen3:8b returns HTTP 200 with `{"title":"…","content":"…"` and no closing brace).
+ * Both string values are fully terminated; only structural close braces are missing.
+ *
+ * The scan tracks JSON string state so braces inside translated text are ignored, and
+ * it repairs ONLY when generation stopped cleanly OUTSIDE any string with unclosed
+ * objects. A cut mid-string (an unterminated value) is left exactly as-is so JSON.parse
+ * still rejects it — this salvages a whole object, never a partial string value.
+ */
+function completeTruncatedJson(candidate: string): string {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (const ch of candidate) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") depth -= 1;
+  }
+  // Only a clean truncation (not inside a string, with objects still open) is repairable.
+  if (!inString && depth > 0) return candidate + "}".repeat(depth);
+  return candidate;
+}
+
+/**
+ * Isolates the JSON object from a model reply. Tolerates ``` fences and leading/trailing
+ * prose (the model is told not to add them, but occasionally does), and repairs a reply
+ * truncated just before its closing brace. It never loosens validation: the result is
+ * still handed to JSON.parse and the strict field checks below, so anything that is not a
+ * well-formed object — genuinely brace-less prose, or a value cut off mid-string — is rejected.
+ */
 function extractJson(raw: string): string {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const body = (fenced ? fenced[1] : raw).trim();
   const start = body.indexOf("{");
-  const end = body.lastIndexOf("}");
-  if (start === -1 || end === -1 || end < start) {
+  if (start === -1) {
     throw new TranslationParseError("Translation response contained no JSON object.");
   }
-  return body.slice(start, end + 1);
+  // A closing brace after the opening one → complete object; slice it out, dropping any
+  // trailing prose. No closing brace → a truncated reply; take everything from the opening
+  // brace and let completeTruncatedJson add the missing close (or leave a bad cut to fail).
+  const end = body.lastIndexOf("}");
+  const candidate = end > start ? body.slice(start, end + 1) : body.slice(start);
+  return completeTruncatedJson(candidate);
 }
 
 /**

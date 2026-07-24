@@ -220,6 +220,39 @@ describe("parseTranslationResponse", () => {
     assert.equal(r.translatedTitle, "Заглавие");
   });
 
+  it("salvages a reply truncated just before its closing brace (the real qwen3 output)", () => {
+    // Observed live: the worker returns HTTP 200 with a complete title + content but no
+    // trailing "}" — both string values are terminated, only the close brace is missing.
+    const truncated = '{\n  "title": "Заглавие",\n  "content": "Пълно съдържание на статията."';
+    const r = parseTranslationResponse(truncated);
+    assert.deepEqual(r, {
+      translatedTitle: "Заглавие",
+      translatedContent: "Пълно съдържание на статията.",
+    });
+  });
+
+  it("still rejects a reply cut off mid-string (an unterminated value is not salvaged)", () => {
+    // Distinct from the missing-brace case: the content value itself is truncated, so the
+    // string never closes. Repairing this would fabricate a partial translation — it must fail.
+    assert.throws(
+      () => parseTranslationResponse('{"title":"Заглавие","content":"Частичен превод, който бе отря'),
+      TranslationParseError
+    );
+  });
+
+  it("does not turn a trailing-comma truncation into valid output", () => {
+    assert.throws(
+      () => parseTranslationResponse('{"title":"x","content":"y",'),
+      TranslationParseError
+    );
+  });
+
+  it("ignores braces inside translated text when locating the object", () => {
+    const r = parseTranslationResponse('{"title":"Кодът {x} работи","content":"Виж {y} тук."}');
+    assert.equal(r.translatedTitle, "Кодът {x} работи");
+    assert.equal(r.translatedContent, "Виж {y} тук.");
+  });
+
   it("normalises a null/empty title to null", () => {
     assert.equal(parseTranslationResponse('{"title":null,"content":"x"}').translatedTitle, null);
     assert.equal(parseTranslationResponse('{"title":"  ","content":"x"}').translatedTitle, null);
@@ -242,10 +275,14 @@ describe("parseTranslationResponse", () => {
 // ─── buildTranslationPrompts ──────────────────────────────────────────────────
 
 describe("buildTranslationPrompts", () => {
-  it("names the target language and asks for JSON only", () => {
+  it("names the target language and demands a single, complete JSON object only", () => {
     const { systemPrompt, userPrompt } = buildTranslationPrompts("T", "C", "bg");
     assert.match(systemPrompt, /into bg/);
-    assert.match(systemPrompt, /Return JSON/);
+    // Firmer than "return JSON": one complete object, closed, with nothing else around it —
+    // this is what keeps a reasoning model from emitting prose or an unclosed object.
+    assert.match(systemPrompt, /ONLY a single, complete JSON object/);
+    assert.match(systemPrompt, /closing brace/);
+    assert.match(systemPrompt, /no reasoning/);
     assert.match(userPrompt, /Title: T/);
     assert.match(userPrompt, /Content: C/);
   });
