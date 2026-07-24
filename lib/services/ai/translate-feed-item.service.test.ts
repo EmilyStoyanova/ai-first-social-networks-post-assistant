@@ -118,7 +118,7 @@ function makeItem(overrides: Partial<TranslatableItem> = {}): TranslatableItem {
 
 function makeDeps(
   db: ReturnType<typeof makeDb>,
-  generate: () => Promise<{ text: string }>,
+  generate: () => Promise<{ text: string; raw?: unknown }>,
   providerOk = true
 ): TranslateFeedItemDeps {
   return {
@@ -476,6 +476,64 @@ describe("translateFeedItem — diagnostics", () => {
 
     // The article body must never appear in any logged line.
     assert.ok(!cap.allText().includes(SECRET_BODY), "the article body must not be logged");
+  });
+
+  it("logs prompt/completion token estimates and Ollama durations on success", async () => {
+    // These diagnostics let a timeout be correlated with size, and reveal when Ollama hit the
+    // num_predict ceiling (done_reason="length") vs finished cleanly ("stop").
+    const db = makeDb();
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem(),
+        "bg",
+        makeDeps(db, async () => ({
+          text: GOOD_RESPONSE,
+          // The worker forwarded Ollama's metrics (durations in nanoseconds).
+          raw: {
+            text: GOOD_RESPONSE,
+            total_duration: 5_000_000,
+            eval_duration: 4_000_000,
+            prompt_eval_duration: 1_000_000,
+            eval_count: 42,
+            done_reason: "stop",
+          },
+        }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    const done = cap.infos.find((a) => a[0] === "[rss-translation] item translated");
+    assert.ok(done, "expected an 'item translated' log");
+    const p = done![1] as Record<string, unknown>;
+    assert.equal(typeof p.promptTokenEstimate, "number");
+    assert.equal(typeof p.completionTokenEstimate, "number");
+    // Nanoseconds are converted to whole milliseconds.
+    assert.equal(p.ollamaTotalMs, 5);
+    assert.equal(p.ollamaEvalMs, 4);
+    assert.equal(p.ollamaPromptEvalMs, 1);
+    assert.equal(p.ollamaEvalCount, 42);
+    assert.equal(p.ollamaDoneReason, "stop");
+  });
+
+  it("omits Ollama metrics when the worker returns only text (no raw)", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem(),
+        "bg",
+        makeDeps(db, async () => ({ text: GOOD_RESPONSE }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    const done = cap.infos.find((a) => a[0] === "[rss-translation] item translated");
+    const p = done![1] as Record<string, unknown>;
+    assert.ok(!("ollamaTotalMs" in p), "no metrics key when the worker forwards none");
+    assert.equal(typeof p.promptTokenEstimate, "number");
   });
 
   it("on an unparseable 200 reply logs the response SHAPE only — first/last 200 + length", async () => {

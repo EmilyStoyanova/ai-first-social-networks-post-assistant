@@ -90,6 +90,72 @@ describe("TextWorkerProvider — request shape", () => {
 
     assert.equal(requests[0].body.prompt, "hi");
   });
+
+  it("keeps the plain {prompt, model} body when no structured format is requested", async () => {
+    // Generation must be byte-for-byte unchanged: no format / stream / options leak in.
+    stubFetch({ status: 200, body: JSON.stringify({ text: "ok" }) });
+    await new TextWorkerProvider("http://worker.local", "k", "m").generate(REQUEST);
+
+    assert.deepEqual(Object.keys(requests[0].body).sort(), ["model", "prompt"]);
+  });
+
+  it("forwards the JSON schema, stream:false, and low temperature when format is set", async () => {
+    // Translation path: the Ollama structured-output contract — a JSON schema in `format`,
+    // non-streamed, temperature in `options`. We deliberately never send `think`.
+    stubFetch({ status: 200, body: JSON.stringify({ text: '{"title":"t","content":"c"}' }) });
+    const schema = { type: "object", required: ["title", "content"] };
+
+    await new TextWorkerProvider("http://worker.local", "k", "m").generate({
+      systemPrompt: "sys",
+      userPrompt: "user",
+      temperature: 0,
+      format: schema,
+    });
+
+    const body = requests[0].body;
+    assert.deepEqual(body.format, schema);
+    assert.equal(body.stream, false);
+    assert.deepEqual(body.options, { temperature: 0 });
+    assert.ok(!("think" in body), "must not send `think` (some builds ignore format when it is set)");
+  });
+
+  it("maps maxTokens to Ollama options.num_predict to bound generation", async () => {
+    // The fix for the intermittent 300s hang: without num_predict Ollama generates unlimited.
+    stubFetch({ status: 200, body: JSON.stringify({ text: '{"title":"t","content":"c"}' }) });
+
+    await new TextWorkerProvider("http://worker.local", "k", "m").generate({
+      systemPrompt: "sys",
+      userPrompt: "user",
+      temperature: 0,
+      format: { type: "object" },
+      maxTokens: 4096,
+    });
+
+    assert.deepEqual(requests[0].body.options, { temperature: 0, num_predict: 4096 });
+  });
+
+  it("surfaces Ollama metrics from the worker reply as raw", async () => {
+    // When the worker forwards Ollama's durations/counts, they must reach the caller via raw
+    // so the service can log total_duration / eval_duration / prompt_eval_duration.
+    const reply = {
+      text: '{"title":"t","content":"c"}',
+      total_duration: 5_000_000,
+      eval_duration: 4_000_000,
+      prompt_eval_duration: 1_000_000,
+      eval_count: 42,
+      done_reason: "stop",
+    };
+    stubFetch({ status: 200, body: JSON.stringify(reply) });
+
+    const res = await new TextWorkerProvider("http://worker.local", "k", "m").generate({
+      systemPrompt: "sys",
+      userPrompt: "user",
+      format: { type: "object" },
+      maxTokens: 4096,
+    });
+
+    assert.deepEqual(res.raw, reply);
+  });
 });
 
 // ─── Error handling ─────────────────────────────────────────────────────────────

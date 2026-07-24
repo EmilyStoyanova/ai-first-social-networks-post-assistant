@@ -7,12 +7,15 @@ import {
   capTranslationContent,
   computeTranslationBackoff,
   computeTranslationHash,
+  estimateTokenCount,
   isTranslatableSourceType,
+  MAX_TRANSLATION_OUTPUT_TOKENS,
   parseTranslationResponse,
   requiresTranslationWork,
   resolveFeedItemContent,
   resolveTranslationConfig,
   TranslationParseError,
+  TRANSLATION_JSON_SCHEMA,
   type TranslationConfig,
 } from "./feed-item-translation";
 
@@ -209,9 +212,21 @@ describe("resolveFeedItemContent", () => {
 // ─── parseTranslationResponse ─────────────────────────────────────────────────
 
 describe("parseTranslationResponse", () => {
-  it("parses a plain JSON object", () => {
+  it("parses a plain (schema-constrained) JSON object without needing repair", () => {
     const r = parseTranslationResponse('{"title":"Заглавие","content":"Съдържание"}');
-    assert.deepEqual(r, { translatedTitle: "Заглавие", translatedContent: "Съдържание" });
+    assert.deepEqual(r, {
+      translatedTitle: "Заглавие",
+      translatedContent: "Съдържание",
+      usedRepair: false,
+    });
+  });
+
+  it("preserves quotes and newlines inside content (valid JSON string escapes)", () => {
+    const raw = '{"title":"Той каза \\"здравей\\"","content":"Първи ред\\nВтори ред"}';
+    const r = parseTranslationResponse(raw);
+    assert.equal(r.translatedTitle, 'Той каза "здравей"');
+    assert.equal(r.translatedContent, "Първи ред\nВтори ред");
+    assert.equal(r.usedRepair, false);
   });
 
   it("tolerates code fences and surrounding prose", () => {
@@ -228,6 +243,9 @@ describe("parseTranslationResponse", () => {
     assert.deepEqual(r, {
       translatedTitle: "Заглавие",
       translatedContent: "Пълно съдържание на статията.",
+      // The primary JSON.parse failed and the defensive repair salvaged it — the fallback
+      // still works, and it flags that it had to be used.
+      usedRepair: true,
     });
   });
 
@@ -270,6 +288,70 @@ describe("parseTranslationResponse", () => {
       TranslationParseError
     );
   });
+
+  it("rejects a missing title field as a schema-validation failure", () => {
+    // `title` is required by TRANSLATION_JSON_SCHEMA; a reply that omits the key entirely
+    // is the wrong shape (distinct from an article with an empty title, which sends "").
+    const err = parseTranslationResponse.bind(null, '{"content":"Съдържание"}');
+    assert.throws(err, (e: unknown) => {
+      assert.ok(e instanceof TranslationParseError);
+      assert.equal(e.reason, "schema_validation");
+      return true;
+    });
+  });
+
+  it("tags malformed JSON with reason invalid_json", () => {
+    assert.throws(() => parseTranslationResponse("not json at all"), (e: unknown) => {
+      assert.ok(e instanceof TranslationParseError);
+      assert.equal(e.reason, "invalid_json");
+      return true;
+    });
+  });
+
+  it("rejects Serbian/Macedonian-looking output for a Bulgarian target", () => {
+    // Macedonian uses "ј" (and Serbian "ђ/ћ/џ"); none exist in the Bulgarian alphabet, so a
+    // reply carrying them is a language drift and must be rejected as wrong_language.
+    const macedonian = '{"title":"Наслов","content":"Ова е текст напишан на македонски јазик."}';
+    assert.throws(() => parseTranslationResponse(macedonian, "bg"), (e: unknown) => {
+      assert.ok(e instanceof TranslationParseError);
+      assert.equal(e.reason, "wrong_language");
+      return true;
+    });
+
+    const serbian = '{"title":"Наслов","content":"Ђорђе је отишао кући."}';
+    assert.throws(
+      () => parseTranslationResponse(serbian, "bg"),
+      (e: unknown) => e instanceof TranslationParseError && e.reason === "wrong_language"
+    );
+  });
+
+  it("accepts clean Bulgarian (including native ъ/я/ю) for a Bulgarian target", () => {
+    const bg = '{"title":"Заглавие","content":"Това е текст на български език — ъгъл, ютия, ябълка."}';
+    const r = parseTranslationResponse(bg, "bg");
+    assert.equal(r.translatedContent, "Това е текст на български език — ъгъл, ютия, ябълка.");
+  });
+
+  it("does not language-check when no target language is supplied", () => {
+    // The wrong-language guard only runs for Bulgarian targets; without a target it is a no-op.
+    const macedonian = '{"title":"Наслов","content":"Ова е на македонски јазик."}';
+    assert.equal(parseTranslationResponse(macedonian).translatedContent, "Ова е на македонски јазик.");
+  });
+});
+
+// ─── TRANSLATION_JSON_SCHEMA ──────────────────────────────────────────────────
+
+describe("TRANSLATION_JSON_SCHEMA", () => {
+  it("is the strict {title, content} object schema handed to Ollama's format field", () => {
+    assert.deepEqual(TRANSLATION_JSON_SCHEMA, {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        content: { type: "string" },
+      },
+      required: ["title", "content"],
+      additionalProperties: false,
+    });
+  });
 });
 
 // ─── buildTranslationPrompts ──────────────────────────────────────────────────
@@ -277,7 +359,7 @@ describe("parseTranslationResponse", () => {
 describe("buildTranslationPrompts", () => {
   it("names the target language and demands a single, complete JSON object only", () => {
     const { systemPrompt, userPrompt } = buildTranslationPrompts("T", "C", "bg");
-    assert.match(systemPrompt, /into bg/);
+    assert.match(systemPrompt, /into Bulgarian/);
     // Firmer than "return JSON": one complete object, closed, with nothing else around it —
     // this is what keeps a reasoning model from emitting prose or an unclosed object.
     assert.match(systemPrompt, /ONLY a single, complete JSON object/);
@@ -285,6 +367,20 @@ describe("buildTranslationPrompts", () => {
     assert.match(systemPrompt, /no reasoning/);
     assert.match(userPrompt, /Title: T/);
     assert.match(userPrompt, /Content: C/);
+  });
+
+  it("adds the Bulgarian language guardrails for a Bulgarian target", () => {
+    const { systemPrompt } = buildTranslationPrompts("T", "C", "bg");
+    assert.match(systemPrompt, /natural, fluent Bulgarian/);
+    assert.match(systemPrompt, /Bulgarian Cyrillic/);
+    assert.match(systemPrompt, /Do NOT use Serbian, Macedonian, Russian/);
+    assert.match(systemPrompt, /Keep proper names, URLs, brand names/);
+  });
+
+  it("omits the Bulgarian-specific guardrails for a non-Bulgarian target", () => {
+    const { systemPrompt } = buildTranslationPrompts("T", "C", "en");
+    assert.match(systemPrompt, /into English/);
+    assert.ok(!/Bulgarian Cyrillic/.test(systemPrompt));
   });
 
   it("renders a null title as empty rather than the string 'null'", () => {
@@ -309,6 +405,25 @@ describe("buildTranslationPrompts", () => {
     const { userPrompt } = buildTranslationPrompts("T", body, "bg");
     assert.match(userPrompt, new RegExp(`Content: ${body}$`));
     assert.ok(!userPrompt.includes("[…]"));
+  });
+});
+
+// ─── output bound + token estimate ─────────────────────────────────────────────
+
+describe("MAX_TRANSLATION_OUTPUT_TOKENS", () => {
+  it("is a finite positive bound (never unlimited) that clears a full capped translation", () => {
+    assert.ok(Number.isFinite(MAX_TRANSLATION_OUTPUT_TOKENS));
+    assert.ok(MAX_TRANSLATION_OUTPUT_TOKENS > 0);
+    // The ~3000-char body needs well under this even at a pessimistic ~1.5 chars/token.
+    assert.ok(MAX_TRANSLATION_OUTPUT_TOKENS >= 2048, "must leave headroom for a real translation");
+  });
+});
+
+describe("estimateTokenCount", () => {
+  it("estimates ~4 chars per token and never returns a fraction", () => {
+    assert.equal(estimateTokenCount(""), 0);
+    assert.equal(estimateTokenCount("abcd"), 1);
+    assert.equal(estimateTokenCount("abcde"), 2); // rounds up
   });
 });
 

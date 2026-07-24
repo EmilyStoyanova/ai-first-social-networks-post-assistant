@@ -4,8 +4,12 @@ import {
   buildTranslationPrompts,
   computeTranslationBackoff,
   computeTranslationHash,
+  estimateTokenCount,
   parseTranslationResponse,
+  TranslationParseError,
+  TRANSLATION_JSON_SCHEMA,
   MAX_TRANSLATION_ATTEMPTS,
+  MAX_TRANSLATION_OUTPUT_TOKENS,
 } from "@/lib/ai/feed-item-translation";
 import { claimFeedItemForTranslation } from "@/lib/ai/feed-item-translation-claim";
 import { resolveLlmSelection } from "./resolve-llm-selection.service";
@@ -103,6 +107,34 @@ async function defaultResolveProvider(): Promise<
   }
 }
 
+/**
+ * Extracts Ollama's generation metrics from the provider's raw response, when present.
+ * Durations arrive in nanoseconds (Ollama's unit) and are converted to whole milliseconds;
+ * counts and the stop reason pass through as-is. Returns {} for any provider (e.g. Groq) or
+ * worker that does not forward these fields, so logging never breaks on a plain {text} reply.
+ */
+function ollamaMetrics(raw: unknown): Record<string, number | string> {
+  if (raw === null || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  const ms = (ns: unknown): number | undefined =>
+    typeof ns === "number" ? Math.round(ns / 1e6) : undefined;
+  const num = (v: unknown): number | undefined => (typeof v === "number" ? v : undefined);
+
+  const out: Record<string, number | string> = {};
+  const total = ms(r.total_duration);
+  const evalMs = ms(r.eval_duration);
+  const promptEvalMs = ms(r.prompt_eval_duration);
+  const evalCount = num(r.eval_count);
+  const promptEvalCount = num(r.prompt_eval_count);
+  if (total !== undefined) out.ollamaTotalMs = total;
+  if (evalMs !== undefined) out.ollamaEvalMs = evalMs;
+  if (promptEvalMs !== undefined) out.ollamaPromptEvalMs = promptEvalMs;
+  if (evalCount !== undefined) out.ollamaEvalCount = evalCount;
+  if (promptEvalCount !== undefined) out.ollamaPromptEvalCount = promptEvalCount;
+  if (typeof r.done_reason === "string") out.ollamaDoneReason = r.done_reason;
+  return out;
+}
+
 export async function translateFeedItem(
   item: TranslatableItem,
   targetLang: string,
@@ -169,6 +201,9 @@ export async function translateFeedItem(
     sourceUrl: item.url,
     promptLength: systemPrompt.length + userPrompt.length,
     articleTextLength: item.content?.length ?? 0,
+    // Rough prompt-token estimate — carried on every log (start/success/failure) so a timeout
+    // can be correlated with input size and the num_predict ceiling at a glance.
+    promptTokenEstimate: estimateTokenCount(systemPrompt + userPrompt),
   };
   const startedAtMs = now().getTime();
   // Logged BEFORE the call so an item whose request hangs and never returns (e.g. process
@@ -179,20 +214,32 @@ export async function translateFeedItem(
     const response = await resolved.instance.generate({
       systemPrompt,
       userPrompt,
-      temperature: 0.2,
+      // Deterministic + schema-constrained: temperature 0 and the Ollama `format` schema
+      // make the reply a strict {title, content} object instead of free-form text.
+      temperature: 0,
+      format: TRANSLATION_JSON_SCHEMA,
+      // Bounded generation: without this Ollama runs unlimited and a runaway article never
+      // returns within the deadline. The capped body fits well under this ceiling.
+      maxTokens: MAX_TRANSLATION_OUTPUT_TOKENS,
     });
 
     let translatedTitle: string | null;
     let translatedContent: string;
+    let usedRepair: boolean;
     try {
-      ({ translatedTitle, translatedContent } = parseTranslationResponse(response.text));
+      ({ translatedTitle, translatedContent, usedRepair } = parseTranslationResponse(
+        response.text,
+        targetLang
+      ));
     } catch (parseErr) {
-      // The transport succeeded (HTTP 200) but the reply could not be parsed. Log the SHAPE
-      // of the raw model output — first/last 200 chars and total length only, never the full
-      // body — so the exact failure pattern (truncation, prose, wrong format) is diagnosable.
+      // The transport succeeded (HTTP 200) but the reply was rejected. Log the SHAPE of the
+      // raw output — first/last 200 chars and total length only, never the full body — plus
+      // the failure `reason` so the three modes are distinguishable: invalid JSON, a
+      // schema-validation failure, or wrong-language (non-Bulgarian) output.
       const text = response.text ?? "";
       console.warn("[rss-translation] unparseable model response", {
         ...diag,
+        reason: parseErr instanceof TranslationParseError ? parseErr.reason : "invalid_json",
         responseLength: text.length,
         responseFirst200: text.slice(0, 200),
         responseLast200: text.length > 200 ? text.slice(-200) : "",
@@ -227,6 +274,14 @@ export async function translateFeedItem(
       elapsedMs: now().getTime() - startedAtMs,
       provider: resolved.provider,
       model: resolved.model,
+      // When true, structured output was NOT clean and the defensive repair salvaged the
+      // reply — a signal that Ollama's `format` may not be honoured for this model/worker.
+      usedRepair,
+      completionTokenEstimate: estimateTokenCount(translatedContent + (translatedTitle ?? "")),
+      // Ollama's own generation metrics when the worker forwards them: total/eval/prompt-eval
+      // durations (ms) plus exact token counts and the stop reason. done_reason="length" means
+      // the num_predict ceiling was hit (the runaway case we now bound); "stop" is a clean end.
+      ...ollamaMetrics(response.raw),
     });
 
     return { status: "translated", provider: resolved.provider, model: resolved.model };

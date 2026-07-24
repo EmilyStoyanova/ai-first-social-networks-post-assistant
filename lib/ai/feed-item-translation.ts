@@ -201,6 +201,28 @@ export function requiresTranslationWork(
 export const MAX_TRANSLATION_CONTENT_CHARS = 3000;
 
 /**
+ * Upper bound on tokens generated for one translation — Ollama's `num_predict` (mapped from
+ * `maxTokens`). Ollama's DEFAULT is unlimited (`num_predict = -1`): a reasoning model that
+ * fails to emit a stop token keeps generating until the context fills, which is the observed
+ * intermittent 300s timeout on specific articles. The input body is already capped at
+ * MAX_TRANSLATION_CONTENT_CHARS (~3000 chars); a complete JSON translation of that fits well
+ * under this bound (Cyrillic runs ~1.5–2.5 chars/token, so ≤ ~2.5k tokens), leaving generous
+ * headroom for a legitimate reply while capping worst-case generation time. Anything that
+ * would exceed this is runaway generation, and cutting it is exactly the goal.
+ */
+export const MAX_TRANSLATION_OUTPUT_TOKENS = 4096;
+
+/**
+ * Rough token estimate for DIAGNOSTICS ONLY (~4 chars/token). Cyrillic tokenises higher than
+ * Latin, so treat this as a lower bound. It exists to correlate slow or timed-out
+ * translations with input/output size when the worker does not forward Ollama's exact token
+ * counts; when it does, prefer the real `eval_count` / `prompt_eval_count`.
+ */
+export function estimateTokenCount(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+/**
  * Caps the article body for translation, preserving a coherent leading slice. Bodies at
  * or under the cap are returned unchanged; longer bodies are cut at the cap (backed up to
  * the last whitespace to avoid splitting a word) with a neutral "[…]" marker so the
@@ -217,19 +239,72 @@ export function capTranslationContent(
   return `${body.trimEnd()} […]`;
 }
 
+/**
+ * JSON schema handed to Ollama's `format` field so the model is CONSTRAINED to emit a
+ * strict {title, content} object — structured output, not just a prompt request. This is
+ * the primary defence against qwen3:8b returning prose or unclosed JSON; the prompt text
+ * and the defensive parser are reinforcement/fallback, not the main mechanism.
+ */
+export const TRANSLATION_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string" },
+    content: { type: "string" },
+  },
+  required: ["title", "content"],
+  additionalProperties: false,
+} as const;
+
+/** True when the target is Bulgarian in any of the forms the config/company can supply. */
+export function isBulgarianTarget(targetLang: string): boolean {
+  const t = targetLang.trim().toLowerCase();
+  return t === "bg" || t.startsWith("bg-") || t === "bulgarian" || t === "български";
+}
+
+/** Human-readable language name for the prompt; falls back to the raw code. */
+function languageName(code: string): string {
+  const t = code.trim().toLowerCase();
+  if (isBulgarianTarget(code)) return "Bulgarian";
+  if (t === "en" || t.startsWith("en-") || t === "english") return "English";
+  return code;
+}
+
+/**
+ * Letters that exist in Serbian / Macedonian / Russian Cyrillic but NOT in the Bulgarian
+ * alphabet. Their presence in a reply meant to be Bulgarian means the model drifted into a
+ * neighbouring language. Bulgarian's own ъ, ь, ю, я are deliberately excluded — they are
+ * native and must never trigger a false rejection.
+ */
+const NON_BULGARIAN_CYRILLIC = /[ђјљњћџѓѕќыэёЂЈЉЊЋЏЃЅЌЫЭЁ]/u;
+
+/** The first non-Bulgarian Cyrillic letter in `text`, or null when the text is clean. */
+function firstNonBulgarianCyrillic(text: string): string | null {
+  const m = text.match(NON_BULGARIAN_CYRILLIC);
+  return m ? m[0] : null;
+}
+
 export function buildTranslationPrompts(
   title: string | null,
   content: string | null,
   targetLang: string
 ): { systemPrompt: string; userPrompt: string } {
-  const systemPrompt = [
-    `You are a professional translator. Translate the following article title and body into ${targetLang}.`,
-    "Preserve meaning exactly.",
+  const lines = [
+    `You are a professional translator. Translate the article title and body into ${languageName(targetLang)}.`,
+    "Preserve meaning exactly. Keep proper names, URLs, brand names, and facts unchanged.",
+  ];
+  if (isBulgarianTarget(targetLang)) {
+    lines.push(
+      "Translate ONLY into natural, fluent Bulgarian, written in Bulgarian Cyrillic.",
+      "Do NOT use Serbian, Macedonian, Russian, or any mixed-language words, letters, or spelling."
+    );
+  }
+  lines.push(
     'Respond with ONLY a single, complete JSON object of exactly this shape: {"title": "...", "content": "..."}',
     "Output nothing before or after the JSON — no reasoning, no commentary, no summaries, no code fences.",
     "Make sure the JSON is complete and ends with its closing brace.",
-    'If the title is empty, use null for "title".',
-  ].join("\n");
+    'If the article has no title, use an empty string "" for "title".'
+  );
+  const systemPrompt = lines.join("\n");
 
   const cappedContent = capTranslationContent(content);
   const userPrompt = [`Title: ${title ?? ""}`, `Content: ${cappedContent ?? ""}`].join("\n");
@@ -237,11 +312,22 @@ export function buildTranslationPrompts(
   return { systemPrompt, userPrompt };
 }
 
+/**
+ * Why a model reply could not be accepted — surfaced in diagnostics so the three failure
+ * modes are distinguishable at a glance:
+ *   • invalid_json      — not parseable as JSON even after the fallback repair;
+ *   • schema_validation — valid JSON but the wrong shape (missing/!string title|content);
+ *   • wrong_language    — right shape, but the text is not Bulgarian (drifted language).
+ */
+export type TranslationParseFailure = "invalid_json" | "schema_validation" | "wrong_language";
+
 export class TranslationParseError extends Error {
   readonly code = "TRANSLATION_PARSE_ERROR" as const;
-  constructor(message: string) {
+  readonly reason: TranslationParseFailure;
+  constructor(message: string, reason: TranslationParseFailure = "invalid_json") {
     super(message);
     this.name = "TranslationParseError";
+    this.reason = reason;
   }
 }
 
@@ -299,36 +385,89 @@ function extractJson(raw: string): string {
 }
 
 /**
- * Parses the model's JSON reply. Malformed output throws, which the caller
- * treats as a normal failure (attempt counted, backoff scheduled).
+ * Parses and validates the model's reply against {@link TRANSLATION_JSON_SCHEMA}.
+ *
+ * Primary path: with Ollama structured output the reply is already a clean JSON object, so
+ * we `JSON.parse` it directly. Fallback path: only if that throws do we run the defensive
+ * repair ({@link extractJson}: fences, surrounding prose, a missing closing brace) — the
+ * repair is a salvage net, never the first mechanism. `usedRepair` reports which path won,
+ * so operators can tell whether structured output is actually being honoured.
+ *
+ * After parsing, the object is schema-validated (title + content present and correctly
+ * typed) and, for Bulgarian targets, language-checked. Every rejection throws a
+ * {@link TranslationParseError} carrying a `reason`, which the caller treats as a normal
+ * failure (attempt counted, backoff scheduled) and logs for diagnostics.
  */
-export function parseTranslationResponse(raw: string): {
+export function parseTranslationResponse(
+  raw: string,
+  targetLang?: string
+): {
   translatedTitle: string | null;
   translatedContent: string;
+  /** True when the primary JSON.parse failed and the defensive repair salvaged the reply. */
+  usedRepair: boolean;
 } {
   let parsed: unknown;
+  let usedRepair = false;
   try {
-    parsed = JSON.parse(extractJson(raw));
-  } catch (err) {
-    if (err instanceof TranslationParseError) throw err;
-    throw new TranslationParseError("Translation response was not valid JSON.");
+    // Primary: structured output should be a clean, complete JSON object.
+    parsed = JSON.parse(raw.trim());
+  } catch {
+    // Fallback: strip fences/prose and repair a missing closing brace, then re-parse.
+    usedRepair = true;
+    try {
+      parsed = JSON.parse(extractJson(raw));
+    } catch (err) {
+      if (err instanceof TranslationParseError) throw err;
+      throw new TranslationParseError("Translation response was not valid JSON.", "invalid_json");
+    }
   }
 
-  if (parsed === null || typeof parsed !== "object") {
-    throw new TranslationParseError("Translation response was not a JSON object.");
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new TranslationParseError(
+      "Translation response was not a JSON object.",
+      "schema_validation"
+    );
   }
 
   const record = parsed as Record<string, unknown>;
+
+  if (
+    !("content" in record) ||
+    typeof record.content !== "string" ||
+    record.content.trim() === ""
+  ) {
+    throw new TranslationParseError(
+      'Translation response is missing a non-empty "content".',
+      "schema_validation"
+    );
+  }
+  if (!("title" in record)) {
+    throw new TranslationParseError('Translation response is missing "title".', "schema_validation");
+  }
   const title = record.title;
+  if (title !== null && typeof title !== "string") {
+    throw new TranslationParseError(
+      'Translation response has a non-string "title".',
+      "schema_validation"
+    );
+  }
   const content = record.content;
 
-  if (typeof content !== "string" || content.trim() === "") {
-    throw new TranslationParseError('Translation response is missing a non-empty "content".');
-  }
-  if (title !== null && title !== undefined && typeof title !== "string") {
-    throw new TranslationParseError('Translation response has a non-string "title".');
+  // Wrong-language guard (Bulgarian targets only): reject text that carries letters exclusive
+  // to Serbian/Macedonian/Russian, so a mislanguaged translation fails rather than shipping.
+  if (targetLang && isBulgarianTarget(targetLang)) {
+    const offending =
+      firstNonBulgarianCyrillic(content) ??
+      firstNonBulgarianCyrillic(typeof title === "string" ? title : "");
+    if (offending) {
+      throw new TranslationParseError(
+        `Translation is not Bulgarian — contains "${offending}" (Serbian/Macedonian/Russian).`,
+        "wrong_language"
+      );
+    }
   }
 
   const normalisedTitle = typeof title === "string" && title.trim() !== "" ? title : null;
-  return { translatedTitle: normalisedTitle, translatedContent: content };
+  return { translatedTitle: normalisedTitle, translatedContent: content, usedRepair };
 }

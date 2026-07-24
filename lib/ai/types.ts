@@ -3,6 +3,12 @@ export interface LlmRequest {
   userPrompt: string;
   temperature?: number;
   maxTokens?: number;
+  /**
+   * Optional JSON schema for structured output (Ollama `format`). Set by translation to
+   * constrain the reply to a strict {title, content} object. Providers that do not support
+   * structured output ignore it.
+   */
+  format?: unknown;
 }
 
 export interface LlmResponse {

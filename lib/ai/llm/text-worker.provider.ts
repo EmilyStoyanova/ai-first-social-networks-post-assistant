@@ -18,6 +18,15 @@ export const TEXT_WORKER_TIMEOUT_MS = 300_000;
 
 interface TextWorkerResponse {
   text: string;
+  // Optional Ollama generation metrics, surfaced by the worker when it forwards them.
+  // Durations are in NANOSECONDS (Ollama's unit). Absent when the worker returns only text.
+  total_duration?: number;
+  eval_duration?: number;
+  prompt_eval_duration?: number;
+  eval_count?: number;
+  prompt_eval_count?: number;
+  /** Ollama stop reason: "stop" (natural end) or "length" (hit num_predict). */
+  done_reason?: string;
 }
 
 export class TextWorkerProvider implements ILlmProvider {
@@ -34,6 +43,25 @@ export class TextWorkerProvider implements ILlmProvider {
       ? `${request.systemPrompt}\n\n${request.userPrompt}`
       : request.userPrompt;
 
+    // Base contract (unchanged for generation): the worker gets prompt + model.
+    const body: Record<string, unknown> = { prompt, model: this.model };
+    // Structured output. Only translation sets `format`; when present, forward the JSON
+    // schema so the worker asks Ollama to constrain the reply, keep it non-streamed, and
+    // pass the (low) temperature through `options`. We deliberately do NOT send `think`:
+    // some qwen3/Ollama builds ignore `format` when thinking is explicitly disabled, so we
+    // leave the worker's default thinking behaviour untouched until that is verified.
+    if (request.format !== undefined) {
+      body.format = request.format;
+      body.stream = false;
+      const options: Record<string, unknown> = {};
+      if (request.temperature !== undefined) options.temperature = request.temperature;
+      // Bound the completion length. Ollama's default num_predict is unlimited (-1); a model
+      // that never emits a stop token would otherwise generate until the context fills and
+      // blow past the request deadline. Mapping maxTokens → num_predict prevents that hang.
+      if (request.maxTokens !== undefined) options.num_predict = request.maxTokens;
+      if (Object.keys(options).length > 0) body.options = options;
+    }
+
     let res: Response;
     try {
       res = await fetch(`${url}/generate`, {
@@ -42,7 +70,7 @@ export class TextWorkerProvider implements ILlmProvider {
           "content-type": "application/json",
           "x-worker-api-key": this.apiKey,
         },
-        body: JSON.stringify({ prompt, model: this.model }),
+        body: JSON.stringify(body),
         signal: requestSignal(TEXT_WORKER_TIMEOUT_MS),
       });
     } catch (err) {
