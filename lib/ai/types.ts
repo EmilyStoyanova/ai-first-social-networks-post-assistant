@@ -40,6 +40,12 @@ export interface BrandContext {
   toneOfVoice: string | null;
   targetAudience: string | null;
   forbiddenWords: string[];
+  /**
+   * Competitor names from Brand Setup. Positioning context for the text prompt
+   * only — deliberately NOT passed to image generation, where a brand name in
+   * the prompt would invite logo/style imitation.
+   */
+  competitors: string[];
   primaryColor: string | null;
   secondaryColor: string | null;
 }

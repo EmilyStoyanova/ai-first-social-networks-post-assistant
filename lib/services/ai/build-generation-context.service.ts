@@ -154,6 +154,7 @@ async function loadContext(
         toneOfVoice: true,
         targetAudience: true,
         forbiddenWords: true,
+        competitors: true,
         primaryColor: true,
         secondaryColor: true,
       },
@@ -247,6 +248,7 @@ async function loadContext(
           toneOfVoice: brandData.toneOfVoice,
           targetAudience: brandData.targetAudience,
           forbiddenWords: brandData.forbiddenWords,
+          competitors: brandData.competitors,
           primaryColor: brandData.primaryColor,
           secondaryColor: brandData.secondaryColor,
         }

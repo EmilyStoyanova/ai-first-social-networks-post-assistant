@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { buildPrompts } from "./prompt-builder";
 import { CHANNEL_POLICIES } from "./channel-policy";
-import type { GenerationContext } from "./types";
+import type { BrandContext, GenerationContext } from "./types";
 
 function makeCtx(overrides: {
   imageRequired?: boolean;
@@ -31,6 +31,30 @@ function makeCtx(overrides: {
     hasArticleSources: false,
   };
 }
+
+function makeBrand(overrides: Partial<BrandContext> = {}): BrandContext {
+  return {
+    companyDescription: null,
+    toneOfVoice: null,
+    targetAudience: null,
+    forbiddenWords: [],
+    competitors: [],
+    primaryColor: null,
+    secondaryColor: null,
+    ...overrides,
+  };
+}
+
+/** A context whose brand carries the given competitors (null = no brand row). */
+function ctxWithCompetitors(competitors: string[] | null): GenerationContext {
+  return {
+    ...makeCtx({}),
+    brand: competitors === null ? null : makeBrand({ competitors }),
+  };
+}
+
+const COMPETITOR_INSTRUCTION =
+  "Use the listed competitors only as positioning context. Create distinct content that reflects the company’s own brand, strengths, and tone. Do not imitate competitors, make unsupported comparisons, or mention them unless the source content explicitly requires it.";
 
 describe("prompt-builder — Bulgarian content language", () => {
   it("instructs the LLM to write post text in Bulgarian", () => {
@@ -62,6 +86,80 @@ describe("prompt-builder — Bulgarian content language", () => {
       combined.toLowerCase().includes("english"),
       "imagePrompt English rule should always appear"
     );
+  });
+});
+
+describe("prompt-builder — competitor positioning", () => {
+  it("adds the competitor section when the brand lists competitors", () => {
+    const { systemPrompt } = buildPrompts(ctxWithCompetitors(["Globex", "Initech"]), null);
+
+    assert.ok(
+      systemPrompt.includes("## Competitor Positioning"),
+      "system prompt must carry the competitor section heading"
+    );
+    assert.ok(
+      systemPrompt.includes(COMPETITOR_INSTRUCTION),
+      "the positioning instruction must be sent verbatim"
+    );
+  });
+
+  it("lists every competitor name below the instruction", () => {
+    const { systemPrompt } = buildPrompts(ctxWithCompetitors(["Globex", "Initech"]), null);
+
+    assert.ok(systemPrompt.includes("Competitors:\n- Globex\n- Initech"));
+    // Order matters only in that the names must follow the rule that governs
+    // them — a list ahead of its instruction invites comparison writing.
+    assert.ok(
+      systemPrompt.indexOf(COMPETITOR_INSTRUCTION) < systemPrompt.indexOf("- Globex"),
+      "the instruction must precede the names"
+    );
+  });
+
+  it("omits the section entirely when the competitor list is empty", () => {
+    const { systemPrompt } = buildPrompts(ctxWithCompetitors([]), null);
+
+    assert.ok(
+      !systemPrompt.includes("Competitor Positioning"),
+      "an empty list must add no heading"
+    );
+    assert.ok(!systemPrompt.includes("Competitors:"));
+  });
+
+  it("omits the section when the company has no brand guidelines row", () => {
+    const { systemPrompt } = buildPrompts(ctxWithCompetitors(null), null);
+
+    assert.ok(!systemPrompt.includes("Competitor Positioning"));
+  });
+
+  it("handles a single competitor", () => {
+    const { systemPrompt } = buildPrompts(ctxWithCompetitors(["Globex"]), null);
+
+    assert.ok(systemPrompt.includes("Competitors:\n- Globex"));
+  });
+
+  it("keeps competitors out of the user prompt, which carries the imagePrompt rules", () => {
+    const ctx = ctxWithCompetitors(["Globex"]);
+    const { userPrompt } = buildPrompts(ctx, null);
+
+    // Image generation must never receive competitor names — a brand name in a
+    // visual prompt invites logo and style imitation. The image prompt is built
+    // from the model's imagePrompt field, whose instructions live here.
+    assert.ok(
+      !userPrompt.includes("Globex"),
+      "competitor names must not reach the image-facing half of the prompt"
+    );
+    assert.ok(!userPrompt.includes("Competitor Positioning"));
+  });
+
+  it("leaves the rest of the system prompt intact", () => {
+    const withCompetitors = buildPrompts(ctxWithCompetitors(["Globex"]), null).systemPrompt;
+    const without = buildPrompts(ctxWithCompetitors([]), null).systemPrompt;
+
+    // Everything the section is inserted between must still be there.
+    for (const marker of ["## Company", "## Channel:", "## Writing Rules", "## Core Message"]) {
+      assert.ok(withCompetitors.includes(marker), `${marker} must survive the insertion`);
+      assert.ok(without.includes(marker));
+    }
   });
 });
 

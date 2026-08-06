@@ -98,6 +98,22 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
       )
     : "";
 
+  // Its own section rather than a line inside Brand Voice: the competitor names
+  // are useless without the rule that governs them, and a bare "Competitors: X,
+  // Y" line reads to a model as permission to compare. Omitted entirely when the
+  // company listed none — an empty heading would be noise in every prompt.
+  const competitorSection =
+    brand && brand.competitors.length > 0
+      ? section(
+          "Competitor Positioning",
+          lines(
+            "Use the listed competitors only as positioning context. Create distinct content that reflects the company’s own brand, strengths, and tone. Do not imitate competitors, make unsupported comparisons, or mention them unless the source content explicitly requires it.",
+            "Competitors:",
+            brand.competitors.map((c) => `- ${c}`).join("\n")
+          )
+        )
+      : "";
+
   const channelSection = section(
     `Channel: ${channelLabel}`,
     lines(
@@ -176,6 +192,7 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
     `You are a professional social media content creator for ${company.name}.`,
     companySection,
     brandSection,
+    competitorSection,
     channelSection,
     automationSection,
     writingRules,
