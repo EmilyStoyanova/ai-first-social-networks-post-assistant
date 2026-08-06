@@ -420,8 +420,9 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
     assert.ok(result.success);
 
     const data = created()!;
-    // Fail-open: not a semantic duplicate → normal auto-approval proceeds.
-    assert.equal(data.status, "approved");
+    // Fail-open: not treated as a semantic duplicate, so the post is persisted
+    // normally — as a draft, because generation never approves (Variant B).
+    assert.equal(data.status, "draft");
     const snapshot = data.promptSnapshot as Record<string, unknown>;
     const gate = snapshot.semanticGate as Record<string, unknown>;
     assert.equal(gate.skipped, true);
@@ -1149,6 +1150,176 @@ describe("generatePostFromContext — automatic image generation", () => {
     const result = await generatePostFromContext(ctx, "co-1", {}, deps);
 
     assert.ok(result.success, "a failed image must never fail the post");
+  });
+});
+
+// ─── Approval workflow (Variant B) ───────────────────────────────────────────
+// Generation never approves. Manual generation always lands on a human; only
+// cron step 4 (autoApprovePosts) may promote a post without one.
+
+describe("generatePostFromContext — approval workflow", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  /** A context whose effective automation mode is set at the company level. */
+  function ctxWithMode(automationMode: string): GenerationContext {
+    return makeContext({
+      company: { name: "Acme", website: null, automationMode, defaultLang: "en" },
+    });
+  }
+
+  /** A context whose channel override is what decides the effective mode. */
+  function ctxWithChannelOverride(automationModeOverride: string): GenerationContext {
+    return makeContext({
+      company: { name: "Acme", website: null, automationMode: "semi_automated", defaultLang: "en" },
+      channel: { ...makeContext().channel, automationModeOverride },
+    });
+  }
+
+  // ── Manual generation ──────────────────────────────────────────────────────
+
+  it("manual + semi_automated leaves a draft for a human", async () => {
+    const { deps, created } = makeDeps();
+
+    const result = await generatePostFromContext(
+      ctxWithMode("semi_automated"),
+      "co-1",
+      { initialStatus: "draft", generatedById: "u-1" },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(created()?.status, "draft");
+    assert.equal(created()?.approvedAt, null);
+  });
+
+  it("manual + fully_automated ALSO leaves a draft for a human", async () => {
+    const { deps, created } = makeDeps();
+
+    const result = await generatePostFromContext(
+      ctxWithMode("fully_automated"),
+      "co-1",
+      { initialStatus: "draft", generatedById: "u-1" },
+      deps
+    );
+
+    // The point of Variant B: a post a person asked for is never past review
+    // before that person has seen it.
+    assert.ok(result.success);
+    assert.equal(created()?.status, "draft");
+    assert.equal(created()?.approvedAt, null);
+    assert.equal(result.post.status, "DRAFT");
+  });
+
+  it("a fully_automated CHANNEL override cannot approve a manual post either", async () => {
+    const { deps, created } = makeDeps();
+
+    const result = await generatePostFromContext(
+      ctxWithChannelOverride("fully_automated"),
+      "co-1",
+      { initialStatus: "draft", generatedById: "u-1" },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(created()?.status, "draft");
+  });
+
+  it("never records an auto-approval on the generation audit log", async () => {
+    let logged: Record<string, unknown> | null = null;
+    const { deps } = makeDeps();
+    deps.auditLog = async (entry) => {
+      logged = (entry.metadata ?? null) as Record<string, unknown> | null;
+    };
+
+    await generatePostFromContext(
+      ctxWithMode("fully_automated"),
+      "co-1",
+      { initialStatus: "draft", generatedById: "u-1" },
+      deps
+    );
+
+    assert.ok(logged);
+    assert.equal((logged as Record<string, unknown>).autoApproved, undefined);
+  });
+
+  // ── Owner / editor parity ──────────────────────────────────────────────────
+
+  it("produces the same status whoever generated it", async () => {
+    const owner = makeDeps();
+    const editor = makeDeps();
+
+    await generatePostFromContext(
+      ctxWithMode("fully_automated"),
+      "co-1",
+      { initialStatus: "draft", generatedById: "owner-1" },
+      owner.deps
+    );
+    await generatePostFromContext(
+      ctxWithMode("fully_automated"),
+      "co-1",
+      { initialStatus: "draft", generatedById: "editor-1" },
+      editor.deps
+    );
+
+    // Generation reads no role — the identity only lands in generatedById.
+    assert.equal(owner.created()?.status, editor.created()?.status);
+    assert.equal(owner.created()?.status, "draft");
+    assert.equal(owner.created()?.generatedById, "owner-1");
+    assert.equal(editor.created()?.generatedById, "editor-1");
+  });
+
+  // ── Cron generation ────────────────────────────────────────────────────────
+
+  it("cron + semi_automated waits in pending_approval", async () => {
+    const { deps, created } = makeDeps();
+
+    const result = await generatePostFromContext(
+      ctxWithMode("semi_automated"),
+      "co-1",
+      { initialStatus: "pending_approval", scheduleId: "sched-1" },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(created()?.status, "pending_approval");
+    assert.equal(created()?.approvedAt, null);
+  });
+
+  it("cron + fully_automated also stops at pending_approval, for cron step 4 to promote", async () => {
+    const { deps, created } = makeDeps();
+
+    const result = await generatePostFromContext(
+      ctxWithMode("fully_automated"),
+      "co-1",
+      { initialStatus: "pending_approval", scheduleId: "sched-1" },
+      deps
+    );
+
+    // Generation hands off; autoApprovePosts is the only thing that approves
+    // without a human, and it is where the safety-flag hold lives.
+    assert.ok(result.success);
+    assert.equal(created()?.status, "pending_approval");
+    assert.equal(created()?.approvedAt, null);
+  });
+
+  it("no mode or caller can make generation emit an approved post", async () => {
+    for (const mode of ["semi_automated", "fully_automated"]) {
+      for (const initialStatus of ["draft", "pending_approval"] as const) {
+        const { deps, created } = makeDeps();
+        await generatePostFromContext(ctxWithMode(mode), "co-1", { initialStatus }, deps);
+        assert.notEqual(created()?.status, "approved", `${mode} / ${initialStatus}`);
+      }
+    }
   });
 });
 

@@ -732,17 +732,20 @@ export async function generatePostFromContext(
   } = sourceLinkResult.data;
 
   // ── Resolve final status ──────────────────────────────────────────────────
-  // For manual generation (draft) on a fully_automated channel, skip the
-  // approval queue so the post is immediately publishable. Safety-flagged posts
-  // are always held for human review regardless of mode. Unresolved duplicates
-  // never reach this point — they abort above (CANNOT_GENERATE_UNIQUE_POST).
-  const effectiveMode = context.channel.automationModeOverride ?? context.company.automationMode;
-  const autoApproved =
-    initialStatus === "draft" && effectiveMode === "fully_automated" && !safetyResult.flagged;
-  const resolvedStatus: "draft" | "pending_approval" | "approved" = autoApproved
-    ? "approved"
-    : initialStatus;
-  const approvedAt = autoApproved ? new Date() : null;
+  // Generation NEVER approves. The caller's initialStatus stands as written:
+  // `draft` for the manual flow, `pending_approval` for cron.
+  //
+  // A fully_automated channel used to short-circuit manual generation straight
+  // to `approved`, which meant a post a human asked for was past review before
+  // they could look at it. Automation now earns its approval one place only —
+  // cron step 4 (autoApprovePosts), which promotes `pending_approval` posts on
+  // fully_automated channels and is also where the safety-flag hold lives. A
+  // manually generated post therefore always waits for a person, whatever the
+  // channel mode says, and there is still exactly one approval step.
+  //
+  // Unresolved duplicates never reach this point — they abort above
+  // (CANNOT_GENERATE_UNIQUE_POST).
+  const resolvedStatus: "draft" | "pending_approval" = initialStatus;
 
   // ── Save post ─────────────────────────────────────────────────────────────
   const feedItemIds = context.feedItems.map((f) => f.id);
@@ -768,7 +771,8 @@ export async function generatePostFromContext(
       contentSourceId: options.contentSourceId ?? null,
       ...originSnapshot,
       status: resolvedStatus,
-      approvedAt,
+      // Never stamped at generation. Approval — human or cron — is what sets it.
+      approvedAt: null,
       content: finalContent,
       hashtags: parsed.hashtags,
       imagePrompt: parsed.imagePrompt ?? null,
@@ -868,7 +872,6 @@ export async function generatePostFromContext(
       llmProvider: post.llmProvider ?? undefined,
       llmModel: post.llmModel ?? undefined,
       ...(generatedById ? {} : { automated: true }),
-      ...(autoApproved ? { autoApproved: true } : {}),
     },
   });
 
