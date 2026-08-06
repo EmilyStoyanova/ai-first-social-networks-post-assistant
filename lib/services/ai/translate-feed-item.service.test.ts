@@ -5,7 +5,12 @@ import {
   type TranslatableItem,
   type TranslateFeedItemDeps,
 } from "./translate-feed-item.service";
-import { computeTranslationHash, MAX_TRANSLATION_ATTEMPTS } from "@/lib/ai/feed-item-translation";
+import {
+  computeTranslationHash,
+  MAX_TRANSLATION_ATTEMPTS,
+  MAX_TRANSLATION_RETRIES,
+} from "@/lib/ai/feed-item-translation";
+import type { LlmRequest } from "@/lib/ai/types";
 
 // ─── Fakes ────────────────────────────────────────────────────────────────────
 
@@ -118,7 +123,7 @@ function makeItem(overrides: Partial<TranslatableItem> = {}): TranslatableItem {
 
 function makeDeps(
   db: ReturnType<typeof makeDb>,
-  generate: () => Promise<{ text: string; raw?: unknown }>,
+  generate: (request: LlmRequest) => Promise<{ text: string; raw?: unknown }>,
   providerOk = true
 ): TranslateFeedItemDeps {
   return {
@@ -542,11 +547,7 @@ describe("translateFeedItem — diagnostics", () => {
     const db = makeDb();
     const MIDDLE = "MIDDLE_MARKER_MUST_NOT_LEAK";
     const unparseable =
-      "Sorry, I cannot translate this. " +
-      "a".repeat(220) +
-      MIDDLE +
-      "b".repeat(220) +
-      " The end.";
+      "Sorry, I cannot translate this. " + "a".repeat(220) + MIDDLE + "b".repeat(220) + " The end.";
     const cap = captureConsole();
     try {
       await translateFeedItem(
@@ -558,8 +559,8 @@ describe("translateFeedItem — diagnostics", () => {
       cap.stop();
     }
 
-    const shape = cap.warns.find((a) => a[0] === "[rss-translation] unparseable model response");
-    assert.ok(shape, "expected an 'unparseable model response' log");
+    const shape = cap.warns.find((a) => a[0] === "[rss-translation] unusable model response");
+    assert.ok(shape, "expected an 'unusable model response' log");
     const payload = shape![1] as Record<string, unknown>;
     assert.equal(payload.responseLength, unparseable.length);
     assert.equal((payload.responseFirst200 as string).length, 200);
@@ -567,7 +568,10 @@ describe("translateFeedItem — diagnostics", () => {
     assert.match(payload.responseFirst200 as string, /^Sorry, I cannot translate/);
     assert.match(payload.error as string, /no JSON object/);
     // The bounded window excludes the middle of the reply — the full body is never logged.
-    assert.ok(!cap.allText().includes(MIDDLE), "the middle of the response body must not be logged");
+    assert.ok(
+      !cap.allText().includes(MIDDLE),
+      "the middle of the response body must not be logged"
+    );
   });
 
   it("on failure (e.g. a timeout) logs exactly which feed item failed", async () => {
@@ -609,5 +613,242 @@ describe("translateFeedItem — no provider", () => {
 
     assert.deepEqual(outcome, { status: "no_provider" });
     assert.equal(db.updates.length, 0, "a missing provider must not count as an attempt");
+  });
+});
+
+// ─── In-request regeneration (retries) ────────────────────────────────────────
+
+/**
+ * A provider double that returns a scripted reply per call and records the exact request it
+ * received, so a test can assert BOTH the retry count and that each try actually varied its
+ * sampling — a retry at an unchanged temperature 0 would deterministically reproduce the same
+ * bad reply, which is the failure mode these retries exist to avoid. The last scripted reply
+ * repeats for any further calls.
+ */
+function scriptedProvider(replies: string[]) {
+  const requests: LlmRequest[] = [];
+  return {
+    requests,
+    generate: async (request: LlmRequest) => {
+      requests.push(request);
+      return { text: replies[Math.min(requests.length - 1, replies.length - 1)] };
+    },
+  };
+}
+
+/** A well-formed, right-language reply whose body is a decoding loop ("със със със …"). */
+const REPETITION_RESPONSE = `{"title":"Заглавие","content":"${"със ".repeat(40)}"}`;
+
+describe("translateFeedItem — in-request retries", () => {
+  it("regenerates after invalid JSON and succeeds on the second try", async () => {
+    const db = makeDb();
+    const p = scriptedProvider(["not json at all", GOOD_RESPONSE]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(makeItem(), "bg", makeDeps(db, p.generate));
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "translated");
+    assert.equal(p.requests.length, 2, "expected exactly one regeneration");
+    assert.equal(db.updates.at(-1)!.translatedContent, "Съдържание");
+    // The cross-run attempt is counted ONCE (at claim time) however many retries it took.
+    assert.equal(
+      db.updates.filter((u) => "translationAttemptCount" in u).length,
+      1,
+      "in-request retries must not each burn a cross-run attempt"
+    );
+  });
+
+  it("varies the sampling on each retry — an unchanged retry would fail identically", async () => {
+    const db = makeDb();
+    const p = scriptedProvider(["not json", "still not json", GOOD_RESPONSE]);
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(makeItem(), "bg", makeDeps(db, p.generate));
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(p.requests.length, 3);
+    const temps = p.requests.map((r) => r.temperature);
+    assert.equal(temps[0], 0, "the first try must stay deterministic for fidelity");
+    assert.equal(
+      new Set(temps).size,
+      temps.length,
+      `each try must use a distinct temperature, got ${JSON.stringify(temps)}`
+    );
+    const penalties = p.requests.map((r) => r.repeatPenalty as number);
+    assert.ok(
+      penalties.every((v, i) => i === 0 || v > penalties[i - 1]),
+      `repeatPenalty must climb across retries, got ${JSON.stringify(penalties)}`
+    );
+    // Structured output stays constrained on every try, retries included.
+    assert.ok(p.requests.every((r) => r.format !== undefined));
+  });
+
+  it("gives up after MAX_TRANSLATION_RETRIES regenerations and records one failure", async () => {
+    const db = makeDb();
+    const p = scriptedProvider(["never valid"]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(makeItem(), "bg", makeDeps(db, p.generate));
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "failed");
+    assert.equal(
+      p.requests.length,
+      MAX_TRANSLATION_RETRIES + 1,
+      "expected 1 initial call + MAX_TRANSLATION_RETRIES regenerations"
+    );
+    assert.equal(db.currentStatus, "failed");
+    const failed = cap.warns.find((a) => a[0] === "[rss-translation] item translation FAILED");
+    assert.equal((failed![1] as Record<string, unknown>).tries, MAX_TRANSLATION_RETRIES + 1);
+  });
+
+  it("regenerates a repetition loop and accepts the clean retry", async () => {
+    const db = makeDb();
+    const p = scriptedProvider([REPETITION_RESPONSE, GOOD_RESPONSE]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(makeItem(), "bg", makeDeps(db, p.generate));
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "translated");
+    assert.equal(p.requests.length, 2);
+    assert.equal(db.updates.at(-1)!.translatedContent, "Съдържание");
+
+    const rejected = cap.warns.find((a) => a[0] === "[rss-translation] unusable model response");
+    const payload = rejected![1] as Record<string, unknown>;
+    assert.equal(payload.reason, "repetition");
+    assert.equal(payload.repetitionKind, "repeated_word");
+    assert.equal(payload.willRetry, true);
+  });
+
+  it("never stores a repetition loop when every try degenerates", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem(),
+        "bg",
+        makeDeps(db, async () => ({ text: REPETITION_RESPONSE }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "failed");
+    for (const u of db.updates) {
+      assert.ok(
+        !("translatedContent" in u),
+        "a degenerate translation must never be written to the item"
+      );
+    }
+  });
+
+  it("logs one concise attempt line per try", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem(),
+        "bg",
+        makeDeps(db, scriptedProvider(["bad", GOOD_RESPONSE]).generate)
+      );
+    } finally {
+      cap.stop();
+    }
+
+    const attempts = cap.infos.filter((a) => a[0] === "[rss-translation] attempt");
+    assert.equal(attempts.length, 2);
+    assert.equal((attempts[0][1] as Record<string, unknown>).try, 1);
+    assert.equal((attempts[1][1] as Record<string, unknown>).try, 2);
+    const done = cap.infos.find((a) => a[0] === "[rss-translation] item translated");
+    assert.equal((done![1] as Record<string, unknown>).tries, 2);
+  });
+});
+
+// ─── Per-item timeout ─────────────────────────────────────────────────────────
+
+/** A call that never settles — the hang the per-item budget exists to cut loose. */
+const neverSettles = () => new Promise<{ text: string }>(() => {});
+
+describe("translateFeedItem — timeout", () => {
+  it("abandons a hung model call at its budget instead of hanging the batch", async () => {
+    const db = makeDb();
+    let calls = 0;
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(makeItem(), "bg", {
+        ...makeDeps(db, async () => {
+          calls += 1;
+          // The provider's own AbortSignal is 300s, so only the service's per-attempt
+          // budget can return control to the batch here.
+          return neverSettles();
+        }),
+        attemptTimeoutMs: 20,
+      });
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "failed");
+    assert.match((outcome as { error: string }).error, /exceeded its 20ms budget/);
+    assert.equal(calls, 1, "a timeout must not be retried in-request — the budget is spent");
+    assert.equal(db.currentStatus, "failed");
+
+    const failed = cap.warns.find((a) => a[0] === "[rss-translation] item translation FAILED");
+    assert.equal((failed![1] as Record<string, unknown>).timedOut, true);
+  });
+
+  it("schedules a normal backoff after a timeout so the item is retried next run", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(makeItem(), "bg", {
+        ...makeDeps(db, neverSettles),
+        attemptTimeoutMs: 10,
+      });
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "failed");
+    // First failed attempt → the 5-minute step of the shared backoff schedule.
+    assert.deepEqual(
+      (outcome as { nextRetryAt: Date }).nextRetryAt,
+      new Date(NOW.getTime() + 5 * 60 * 1000)
+    );
+  });
+
+  it("does not let a hung item stop the next item from translating", async () => {
+    // The batch-level guarantee seen through the service: the hung item resolves to a
+    // recorded failure, so the caller's loop proceeds instead of blocking on the socket.
+    const slowDb = makeDb();
+    const slow = await translateFeedItem(makeItem({ id: "slow" }), "bg", {
+      ...makeDeps(slowDb, neverSettles),
+      attemptTimeoutMs: 10,
+    });
+    const fastDb = makeDb();
+    const fast = await translateFeedItem(
+      makeItem({ id: "fast" }),
+      "bg",
+      makeDeps(fastDb, async () => ({ text: GOOD_RESPONSE }))
+    );
+
+    assert.equal(slow.status, "failed");
+    assert.equal(fast.status, "translated");
   });
 });

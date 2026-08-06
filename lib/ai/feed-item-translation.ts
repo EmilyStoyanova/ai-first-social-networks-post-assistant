@@ -15,12 +15,7 @@ export const MAX_TRANSLATION_ATTEMPTS = 5;
 /** Items translated per cron run — keeps one run inside the function timeout. */
 export const TRANSLATION_BATCH_SIZE = 10;
 
-export type TranslationStatus =
-  | "pending"
-  | "translating"
-  | "completed"
-  | "failed"
-  | "skipped";
+export type TranslationStatus = "pending" | "translating" | "completed" | "failed" | "skipped";
 
 /** Only article sources are translated; prompt/calendar_event content is authored in-app. */
 const TRANSLATABLE_SOURCE_TYPES = ["rss"] as const;
@@ -213,6 +208,24 @@ export const MAX_TRANSLATION_CONTENT_CHARS = 3000;
 export const MAX_TRANSLATION_OUTPUT_TOKENS = 4096;
 
 /**
+ * Wall-clock cap for ONE model call, and for one feed item across all of its in-request
+ * retries.
+ *
+ * These exist because the transport cap alone is not a per-item bound: TEXT_WORKER_TIMEOUT_MS
+ * is 300s, so a single slow article could consume an entire cron run on its own and starve
+ * every other queued item. The per-attempt cap is set well under that — a healthy capped-body
+ * translation lands in ~45–60s, so 90s is generous for a real reply while cutting a hung one
+ * loose early. The item cap then bounds the retry loop as a whole, so the worst case for one
+ * article is ~3½ minutes rather than three back-to-back 300s hangs.
+ *
+ * Timeouts are NOT retried in-request: the deadline was already spent, and re-issuing the same
+ * slow request would blow the item budget. The item is recorded failed and picked up on the
+ * next run with its normal backoff.
+ */
+export const TRANSLATION_ATTEMPT_TIMEOUT_MS = 90_000;
+export const TRANSLATION_ITEM_TIMEOUT_MS = 210_000;
+
+/**
  * Rough token estimate for DIAGNOSTICS ONLY (~4 chars/token). Cyrillic tokenises higher than
  * Latin, so treat this as a lower bound. It exists to correlate slow or timed-out
  * translations with input/output size when the worker does not forward Ollama's exact token
@@ -220,6 +233,141 @@ export const MAX_TRANSLATION_OUTPUT_TOKENS = 4096;
  */
 export function estimateTokenCount(text: string): number {
   return Math.ceil(text.length / 4);
+}
+
+// ─── In-request regeneration budget ───────────────────────────────────────────
+
+/**
+ * Regenerations allowed WITHIN a single attempt, on top of the first call — so at most
+ * 1 + MAX_TRANSLATION_RETRIES model calls before the attempt is recorded as failed.
+ *
+ * This is a different mechanism from {@link MAX_TRANSLATION_ATTEMPTS}, and the two compose:
+ * these retries are immediate (same request, seconds apart) and exist because the local model
+ * intermittently emits a bad reply that a straight regeneration fixes; MAX_TRANSLATION_ATTEMPTS
+ * is the cross-run budget with hours of backoff, for outages and genuinely un-translatable items.
+ * Kept at 2 deliberately: a third regeneration mostly buys latency, and the batch has a deadline.
+ */
+export const MAX_TRANSLATION_RETRIES = 2;
+
+/**
+ * Sampling settings for try `n` (0-based) within one attempt.
+ *
+ * The first try is deterministic (temperature 0) because that produces the most faithful
+ * translation. That determinism is exactly why a retry MUST change the sampling: re-issuing an
+ * identical prompt at temperature 0 to the same model reproduces the same bad reply, so a
+ * "retry" that varies nothing is guaranteed to fail the same way and only wastes the deadline.
+ *
+ * `repeatPenalty` climbs alongside it because the failure being retried is often a degeneration
+ * loop ("със със със …"), which is precisely what Ollama's `repeat_penalty` suppresses. Values
+ * stay modest: too high a penalty starts blocking legitimately repeated words and degrades the
+ * translation.
+ */
+export function samplingForTry(tryIndex: number): { temperature: number; repeatPenalty: number } {
+  const TEMPERATURES = [0, 0.3, 0.6];
+  const PENALTIES = [1.1, 1.2, 1.3];
+  const i = Math.min(Math.max(tryIndex, 0), TEMPERATURES.length - 1);
+  return { temperature: TEMPERATURES[i], repeatPenalty: PENALTIES[i] };
+}
+
+// ─── Degenerate-output (repetition) detection ─────────────────────────────────
+
+/** Which degeneration pattern was found — reported in logs so loops are diagnosable. */
+export type RepetitionKind = "repeated_word" | "repeated_phrase" | "repeated_char";
+
+export interface RepetitionFinding {
+  kind: RepetitionKind;
+  /** The looping unit, truncated for logging — never the whole body. */
+  sample: string;
+  /** How many consecutive times it repeated. */
+  count: number;
+}
+
+/** A word repeated this many times BACK-TO-BACK is a decoding loop, not prose. */
+const REPEATED_WORD_LIMIT = 5;
+/** A 2–6 word phrase cycling this many times back-to-back is a loop. */
+const REPEATED_PHRASE_LIMIT = 4;
+const MAX_PHRASE_CYCLE = 6;
+/** One character repeated this many times is never real text (not even "…" or "———"). */
+const REPEATED_CHAR_LIMIT = 30;
+/** A non-space character followed by ≥ REPEATED_CHAR_LIMIT-1 copies of itself. */
+const REPEATED_CHAR_RE = new RegExp(`(\\S)\\1{${REPEATED_CHAR_LIMIT - 1},}`, "u");
+
+/** Strips punctuation so "със," and "със" count as the same looping token. */
+function normaliseToken(token: string): string {
+  return token.replace(/[.,!?;:()[\]{}"'«»„“”—–-]/gu, "").toLowerCase();
+}
+
+/**
+ * Detects the runaway-decoding output the self-hosted model (qwen3:8b) intermittently
+ * produces: it stops translating and emits the same token or phrase until it hits the
+ * generation ceiling — the observed "със със със със …" body. Such a reply is valid JSON
+ * of the right shape, so neither the schema nor the language guard rejects it; without this
+ * check a garbage translation would be stored as `completed` and later written into a post.
+ *
+ * Three patterns, all requiring CONSECUTIVE repeats so ordinary prose is never flagged:
+ *   • repeated_word   — one word ≥5× back-to-back;
+ *   • repeated_phrase — a 2–6 word cycle ≥4× back-to-back;
+ *   • repeated_char   — one character ≥30× in a row.
+ *
+ * Thresholds are deliberately far above natural language (real Bulgarian does not repeat a
+ * word five times running), so this fails closed on loops without rejecting valid translations.
+ * Returns null for healthy text.
+ */
+export function detectRepetition(text: string): RepetitionFinding | null {
+  const charRun = text.match(REPEATED_CHAR_RE);
+  if (charRun) {
+    return { kind: "repeated_char", sample: charRun[1], count: charRun[0].length };
+  }
+
+  const tokens = text
+    .split(/\s+/u)
+    .map(normaliseToken)
+    .filter((t) => t !== "");
+  if (tokens.length < REPEATED_WORD_LIMIT) return null;
+
+  // Single word repeated back-to-back.
+  let run = 1;
+  for (let i = 1; i < tokens.length; i += 1) {
+    if (tokens[i] !== tokens[i - 1]) {
+      run = 1;
+      continue;
+    }
+    run += 1;
+    if (run >= REPEATED_WORD_LIMIT) {
+      // Walk to the end of the run so the reported count is the real severity of the loop
+      // ("×5" and "×300" are very different signals in the logs), not just the threshold.
+      let j = i + 1;
+      while (j < tokens.length && tokens[j] === tokens[i]) {
+        run += 1;
+        j += 1;
+      }
+      return { kind: "repeated_word", sample: tokens[i], count: run };
+    }
+  }
+
+  // Multi-word phrase cycling back-to-back (e.g. "на държавата на държавата …").
+  for (let cycle = 2; cycle <= MAX_PHRASE_CYCLE; cycle += 1) {
+    for (let start = 0; start + cycle * REPEATED_PHRASE_LIMIT <= tokens.length; start += 1) {
+      let repeats = 1;
+      while (
+        start + cycle * (repeats + 1) <= tokens.length &&
+        tokens
+          .slice(start + cycle * repeats, start + cycle * (repeats + 1))
+          .every((t, k) => t === tokens[start + k])
+      ) {
+        repeats += 1;
+      }
+      if (repeats >= REPEATED_PHRASE_LIMIT) {
+        return {
+          kind: "repeated_phrase",
+          sample: tokens.slice(start, start + cycle).join(" "),
+          count: repeats,
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -313,22 +461,47 @@ export function buildTranslationPrompts(
 }
 
 /**
- * Why a model reply could not be accepted — surfaced in diagnostics so the three failure
+ * Why a model reply could not be accepted — surfaced in diagnostics so the failure
  * modes are distinguishable at a glance:
  *   • invalid_json      — not parseable as JSON even after the fallback repair;
  *   • schema_validation — valid JSON but the wrong shape (missing/!string title|content);
- *   • wrong_language    — right shape, but the text is not Bulgarian (drifted language).
+ *   • wrong_language    — right shape, but the text is not Bulgarian (drifted language);
+ *   • repetition        — right shape and language, but the body is a decoding loop.
  */
-export type TranslationParseFailure = "invalid_json" | "schema_validation" | "wrong_language";
+export type TranslationParseFailure =
+  "invalid_json" | "schema_validation" | "wrong_language" | "repetition";
 
 export class TranslationParseError extends Error {
   readonly code = "TRANSLATION_PARSE_ERROR" as const;
   readonly reason: TranslationParseFailure;
-  constructor(message: string, reason: TranslationParseFailure = "invalid_json") {
+  /** Present only for `repetition`: the looping unit and its repeat count, for logging. */
+  readonly repetition?: RepetitionFinding;
+  constructor(
+    message: string,
+    reason: TranslationParseFailure = "invalid_json",
+    repetition?: RepetitionFinding
+  ) {
     super(message);
     this.name = "TranslationParseError";
     this.reason = reason;
+    this.repetition = repetition;
   }
+}
+
+/**
+ * Whether regenerating is worth a retry slot. Every parse failure here is a MODEL-output
+ * defect — a different sample of the same prompt can come out clean — so all of them are
+ * retriable, which is the point of {@link samplingForTry} varying the sampling per try.
+ * Kept as an explicit predicate (rather than "always true") so a future non-retriable
+ * reason has one obvious place to be excluded.
+ */
+export function isRetriableParseFailure(reason: TranslationParseFailure): boolean {
+  return (
+    reason === "invalid_json" ||
+    reason === "schema_validation" ||
+    reason === "wrong_language" ||
+    reason === "repetition"
+  );
 }
 
 /**
@@ -394,9 +567,10 @@ function extractJson(raw: string): string {
  * so operators can tell whether structured output is actually being honoured.
  *
  * After parsing, the object is schema-validated (title + content present and correctly
- * typed) and, for Bulgarian targets, language-checked. Every rejection throws a
- * {@link TranslationParseError} carrying a `reason`, which the caller treats as a normal
- * failure (attempt counted, backoff scheduled) and logs for diagnostics.
+ * typed), language-checked for Bulgarian targets, and finally screened for decoding loops
+ * ({@link detectRepetition}) — a loop is valid JSON in the right language, so it has to be
+ * caught here or it ships. Every rejection throws a {@link TranslationParseError} carrying a
+ * `reason`; the caller regenerates while retries remain, then records a failure with backoff.
  */
 export function parseTranslationResponse(
   raw: string,
@@ -443,7 +617,10 @@ export function parseTranslationResponse(
     );
   }
   if (!("title" in record)) {
-    throw new TranslationParseError('Translation response is missing "title".', "schema_validation");
+    throw new TranslationParseError(
+      'Translation response is missing "title".',
+      "schema_validation"
+    );
   }
   const title = record.title;
   if (title !== null && typeof title !== "string") {
@@ -466,6 +643,17 @@ export function parseTranslationResponse(
         "wrong_language"
       );
     }
+  }
+
+  // Degeneration guard: a decoding loop is well-formed JSON in the right language, so it
+  // passes every check above and would otherwise be stored as a completed translation.
+  const loop = detectRepetition(content);
+  if (loop) {
+    throw new TranslationParseError(
+      `Translation degenerated into a ${loop.kind} loop ("${loop.sample}" ×${loop.count}).`,
+      "repetition",
+      loop
+    );
   }
 
   const normalisedTitle = typeof title === "string" && title.trim() !== "" ? title : null;

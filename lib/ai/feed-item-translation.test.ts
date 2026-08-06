@@ -7,10 +7,16 @@ import {
   capTranslationContent,
   computeTranslationBackoff,
   computeTranslationHash,
+  detectRepetition,
   estimateTokenCount,
+  isRetriableParseFailure,
   isTranslatableSourceType,
   MAX_TRANSLATION_OUTPUT_TOKENS,
+  MAX_TRANSLATION_RETRIES,
   parseTranslationResponse,
+  samplingForTry,
+  TRANSLATION_ATTEMPT_TIMEOUT_MS,
+  TRANSLATION_ITEM_TIMEOUT_MS,
   requiresTranslationWork,
   resolveFeedItemContent,
   resolveTranslationConfig,
@@ -53,23 +59,39 @@ describe("requiresTranslationWork", () => {
   });
 
   it("(2) does NOT count an unchanged completed item", () => {
-    const existing = { translationHash: HASH, translationStatus: "completed", translationAttemptCount: 1 };
+    const existing = {
+      translationHash: HASH,
+      translationStatus: "completed",
+      translationAttemptCount: 1,
+    };
     assert.equal(requiresTranslationWork(enabled, HASH, false, existing), false);
   });
 
   it("(3) counts an unchanged pending item (still owed)", () => {
-    const existing = { translationHash: HASH, translationStatus: "pending", translationAttemptCount: 1 };
+    const existing = {
+      translationHash: HASH,
+      translationStatus: "pending",
+      translationAttemptCount: 1,
+    };
     assert.equal(requiresTranslationWork(enabled, HASH, false, existing), true);
   });
 
   it("(4) counts a changed (reopened) completed item — hash differs", () => {
-    const existing = { translationHash: OLD_HASH, translationStatus: "completed", translationAttemptCount: 1 };
+    const existing = {
+      translationHash: OLD_HASH,
+      translationStatus: "completed",
+      translationAttemptCount: 1,
+    };
     assert.equal(requiresTranslationWork(enabled, HASH, false, existing), true);
   });
 
   it("(5) does NOT count a disabled source (created or updated), nor a non-translatable source", () => {
     assert.equal(requiresTranslationWork(disabled, HASH, true, undefined), false);
-    const skipped = { translationHash: HASH, translationStatus: "skipped", translationAttemptCount: 0 };
+    const skipped = {
+      translationHash: HASH,
+      translationStatus: "skipped",
+      translationAttemptCount: 0,
+    };
     assert.equal(requiresTranslationWork(disabled, HASH, false, skipped), false);
     // cfg null → non-translatable source type (prompt/product_page/calendar).
     assert.equal(requiresTranslationWork(null, HASH, true, undefined), false);
@@ -91,7 +113,11 @@ describe("requiresTranslationWork", () => {
   });
 
   it("counts an existing item with no prior hash (never translated) as reopened work", () => {
-    const noHash = { translationHash: null, translationStatus: "pending", translationAttemptCount: 0 };
+    const noHash = {
+      translationHash: null,
+      translationStatus: "pending",
+      translationAttemptCount: 0,
+    };
     assert.equal(requiresTranslationWork(enabled, HASH, false, noHash), true);
   });
 });
@@ -253,7 +279,8 @@ describe("parseTranslationResponse", () => {
     // Distinct from the missing-brace case: the content value itself is truncated, so the
     // string never closes. Repairing this would fabricate a partial translation — it must fail.
     assert.throws(
-      () => parseTranslationResponse('{"title":"Заглавие","content":"Частичен превод, който бе отря'),
+      () =>
+        parseTranslationResponse('{"title":"Заглавие","content":"Частичен превод, който бе отря'),
       TranslationParseError
     );
   });
@@ -301,22 +328,28 @@ describe("parseTranslationResponse", () => {
   });
 
   it("tags malformed JSON with reason invalid_json", () => {
-    assert.throws(() => parseTranslationResponse("not json at all"), (e: unknown) => {
-      assert.ok(e instanceof TranslationParseError);
-      assert.equal(e.reason, "invalid_json");
-      return true;
-    });
+    assert.throws(
+      () => parseTranslationResponse("not json at all"),
+      (e: unknown) => {
+        assert.ok(e instanceof TranslationParseError);
+        assert.equal(e.reason, "invalid_json");
+        return true;
+      }
+    );
   });
 
   it("rejects Serbian/Macedonian-looking output for a Bulgarian target", () => {
     // Macedonian uses "ј" (and Serbian "ђ/ћ/џ"); none exist in the Bulgarian alphabet, so a
     // reply carrying them is a language drift and must be rejected as wrong_language.
     const macedonian = '{"title":"Наслов","content":"Ова е текст напишан на македонски јазик."}';
-    assert.throws(() => parseTranslationResponse(macedonian, "bg"), (e: unknown) => {
-      assert.ok(e instanceof TranslationParseError);
-      assert.equal(e.reason, "wrong_language");
-      return true;
-    });
+    assert.throws(
+      () => parseTranslationResponse(macedonian, "bg"),
+      (e: unknown) => {
+        assert.ok(e instanceof TranslationParseError);
+        assert.equal(e.reason, "wrong_language");
+        return true;
+      }
+    );
 
     const serbian = '{"title":"Наслов","content":"Ђорђе је отишао кући."}';
     assert.throws(
@@ -326,7 +359,8 @@ describe("parseTranslationResponse", () => {
   });
 
   it("accepts clean Bulgarian (including native ъ/я/ю) for a Bulgarian target", () => {
-    const bg = '{"title":"Заглавие","content":"Това е текст на български език — ъгъл, ютия, ябълка."}';
+    const bg =
+      '{"title":"Заглавие","content":"Това е текст на български език — ъгъл, ютия, ябълка."}';
     const r = parseTranslationResponse(bg, "bg");
     assert.equal(r.translatedContent, "Това е текст на български език — ъгъл, ютия, ябълка.");
   });
@@ -334,7 +368,10 @@ describe("parseTranslationResponse", () => {
   it("does not language-check when no target language is supplied", () => {
     // The wrong-language guard only runs for Bulgarian targets; without a target it is a no-op.
     const macedonian = '{"title":"Наслов","content":"Ова е на македонски јазик."}';
-    assert.equal(parseTranslationResponse(macedonian).translatedContent, "Ова е на македонски јазик.");
+    assert.equal(
+      parseTranslationResponse(macedonian).translatedContent,
+      "Ова е на македонски јазик."
+    );
   });
 });
 
@@ -446,5 +483,139 @@ describe("capTranslationContent", () => {
   it("hard-cuts when there is no late whitespace to back up to", () => {
     const capped = capTranslationContent("abcdefghijklmnop", 10)!;
     assert.equal(capped, "abcdefghij […]");
+  });
+});
+
+describe("detectRepetition", () => {
+  it("flags the observed 'със със със …' single-word decoding loop", () => {
+    const found = detectRepetition(`Новината е важна ${"със ".repeat(30)}край`);
+    assert.equal(found?.kind, "repeated_word");
+    assert.equal(found?.sample, "със");
+    assert.ok(found!.count >= 30);
+  });
+
+  it("flags a repeated multi-word phrase cycle", () => {
+    const found = detectRepetition(`Текст ${"на държавата ".repeat(8)}край`);
+    assert.equal(found?.kind, "repeated_phrase");
+    assert.equal(found?.sample, "на държавата");
+  });
+
+  it("flags a runaway single-character run", () => {
+    const found = detectRepetition(`Заглавие ${"а".repeat(60)}`);
+    assert.equal(found?.kind, "repeated_char");
+    assert.equal(found?.sample, "а");
+  });
+
+  it("ignores punctuation when comparing tokens, so 'със, със, със' still counts", () => {
+    const found = detectRepetition("край със, със, със, със, със, със край");
+    assert.equal(found?.kind, "repeated_word");
+  });
+
+  it("accepts healthy Bulgarian prose (no false positives)", () => {
+    const clean =
+      "Компанията обяви нова услуга за малкия бизнес в България. " +
+      "Тя ще бъде достъпна от следващия месец във всички големи градове, " +
+      "а цената остава непроменена за съществуващите клиенти.";
+    assert.equal(detectRepetition(clean), null);
+  });
+
+  it("allows the natural repetition real text does contain", () => {
+    // Ordinary emphasis and a common word recurring — well under the loop thresholds.
+    assert.equal(detectRepetition("Много, много добре. Той каза, че това е така."), null);
+    assert.equal(detectRepetition("да да да"), null, "three in a row is emphasis, not a loop");
+    assert.equal(detectRepetition("Цената е 1000 лв. — виж на www.example.com …"), null);
+  });
+
+  it("returns null for short or empty text", () => {
+    assert.equal(detectRepetition(""), null);
+    assert.equal(detectRepetition("Кратко заглавие"), null);
+  });
+});
+
+describe("parseTranslationResponse — repetition guard", () => {
+  it("rejects a well-formed, right-language reply whose body is a loop", () => {
+    const raw = JSON.stringify({ title: "Заглавие", content: "със ".repeat(40) });
+    assert.throws(
+      () => parseTranslationResponse(raw, "bg"),
+      (err: unknown) => err instanceof TranslationParseError && err.reason === "repetition"
+    );
+  });
+
+  it("carries the finding on the error so the loop is diagnosable from logs", () => {
+    const raw = JSON.stringify({ title: "Заглавие", content: "със ".repeat(40) });
+    try {
+      parseTranslationResponse(raw, "bg");
+      assert.fail("expected a repetition rejection");
+    } catch (err) {
+      assert.ok(err instanceof TranslationParseError);
+      assert.equal(err.repetition?.kind, "repeated_word");
+      assert.equal(err.repetition?.sample, "със");
+    }
+  });
+
+  it("still accepts a clean translation (the guard adds no false rejections)", () => {
+    const raw = JSON.stringify({ title: "Заглавие", content: "Съвсем нормален текст за теста." });
+    const out = parseTranslationResponse(raw, "bg");
+    assert.equal(out.translatedContent, "Съвсем нормален текст за теста.");
+  });
+});
+
+describe("samplingForTry", () => {
+  it("starts deterministic, then varies so a regeneration is not a rerun", () => {
+    const first = samplingForTry(0);
+    assert.equal(first.temperature, 0, "the first try must be deterministic for fidelity");
+
+    const temps = [0, 1, 2].map((i) => samplingForTry(i).temperature);
+    assert.equal(new Set(temps).size, 3, "each try must sample differently");
+    assert.ok(
+      temps.every((t, i) => i === 0 || t > temps[i - 1]),
+      "temperature must climb across retries"
+    );
+  });
+
+  it("raises the repeat penalty across retries to break decoding loops", () => {
+    const penalties = [0, 1, 2].map((i) => samplingForTry(i).repeatPenalty);
+    assert.equal(penalties[0], 1.1, "the first try uses Ollama's default — no behaviour change");
+    assert.ok(penalties.every((p, i) => i === 0 || p > penalties[i - 1]));
+    assert.ok(
+      penalties.every((p) => p <= 1.5),
+      "an excessive penalty degrades the translation"
+    );
+  });
+
+  it("clamps out-of-range indexes instead of returning undefined", () => {
+    assert.deepEqual(samplingForTry(99), samplingForTry(2));
+    assert.deepEqual(samplingForTry(-1), samplingForTry(0));
+  });
+});
+
+describe("retry + timeout budgets", () => {
+  it("allows exactly two regenerations on top of the first call", () => {
+    assert.equal(MAX_TRANSLATION_RETRIES, 2);
+  });
+
+  it("keeps the per-attempt budget under the transport cap so it actually bites", () => {
+    // TEXT_WORKER_TIMEOUT_MS is 300_000; a per-attempt bound at or above it would never fire.
+    assert.ok(TRANSLATION_ATTEMPT_TIMEOUT_MS < 300_000);
+    assert.ok(TRANSLATION_ATTEMPT_TIMEOUT_MS > 0);
+  });
+
+  it("bounds the whole item, leaving room for more than one try", () => {
+    assert.ok(TRANSLATION_ITEM_TIMEOUT_MS > TRANSLATION_ATTEMPT_TIMEOUT_MS);
+    // A single hung article must not be able to consume a whole cron run on its own.
+    assert.ok(TRANSLATION_ITEM_TIMEOUT_MS < (MAX_TRANSLATION_RETRIES + 1) * 300_000);
+  });
+});
+
+describe("isRetriableParseFailure", () => {
+  it("treats every model-output defect as worth one more sample", () => {
+    for (const reason of [
+      "invalid_json",
+      "schema_validation",
+      "wrong_language",
+      "repetition",
+    ] as const) {
+      assert.equal(isRetriableParseFailure(reason), true, reason);
+    }
   });
 });

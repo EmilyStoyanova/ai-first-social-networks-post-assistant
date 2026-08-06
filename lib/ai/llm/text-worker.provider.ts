@@ -59,6 +59,10 @@ export class TextWorkerProvider implements ILlmProvider {
       // that never emits a stop token would otherwise generate until the context fills and
       // blow past the request deadline. Mapping maxTokens → num_predict prevents that hang.
       if (request.maxTokens !== undefined) options.num_predict = request.maxTokens;
+      // Suppress decoding loops on a regeneration. Translation sends Ollama's own default
+      // (1.1) on the first try and raises it only when retrying, so the happy path is
+      // unaffected and the penalty applies exactly where loops are being broken.
+      if (request.repeatPenalty !== undefined) options.repeat_penalty = request.repeatPenalty;
       if (Object.keys(options).length > 0) body.options = options;
     }
 

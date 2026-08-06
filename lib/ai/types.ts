@@ -9,6 +9,12 @@ export interface LlmRequest {
    * structured output ignore it.
    */
   format?: unknown;
+  /**
+   * Optional penalty on already-emitted tokens (Ollama `repeat_penalty`; 1 = no penalty).
+   * Translation raises it on a regeneration to break the decoding loops the self-hosted
+   * model falls into. Providers without an equivalent knob ignore it.
+   */
+  repeatPenalty?: number;
 }
 
 export interface LlmResponse {

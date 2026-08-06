@@ -5,11 +5,16 @@ import {
   computeTranslationBackoff,
   computeTranslationHash,
   estimateTokenCount,
+  isRetriableParseFailure,
   parseTranslationResponse,
+  samplingForTry,
   TranslationParseError,
   TRANSLATION_JSON_SCHEMA,
   MAX_TRANSLATION_ATTEMPTS,
   MAX_TRANSLATION_OUTPUT_TOKENS,
+  MAX_TRANSLATION_RETRIES,
+  TRANSLATION_ATTEMPT_TIMEOUT_MS,
+  TRANSLATION_ITEM_TIMEOUT_MS,
 } from "@/lib/ai/feed-item-translation";
 import { claimFeedItemForTranslation } from "@/lib/ai/feed-item-translation-claim";
 import { resolveLlmSelection } from "./resolve-llm-selection.service";
@@ -81,6 +86,44 @@ export interface TranslateFeedItemDeps {
     { ok: true; instance: ILlmProvider; provider: string; model: string } | { ok: false }
   >;
   now?: () => Date;
+  /** Wall-clock cap for ONE model call. Overridable so tests need not wait 90s. */
+  attemptTimeoutMs?: number;
+  /** Wall-clock cap for the whole item, across all in-request retries. */
+  itemTimeoutMs?: number;
+}
+
+/** One model call (or one item) exceeded its wall-clock budget. */
+export class TranslationTimeoutError extends Error {
+  readonly code = "TRANSLATION_TIMEOUT" as const;
+  constructor(ms: number, scope: "attempt" | "item") {
+    super(`Translation ${scope} exceeded its ${ms}ms budget.`);
+    this.name = "TranslationTimeoutError";
+  }
+}
+
+/**
+ * Rejects with a {@link TranslationTimeoutError} if `work` has not settled within `ms`.
+ *
+ * The underlying request is NOT cancelled — the provider owns its own AbortSignal and will
+ * tear the socket down at its own (much longer) cap. This bound exists so a hung article
+ * stops occupying the batch, not to manage the socket: control returns immediately, the item
+ * is recorded failed, and the run moves to the next article. A late settle is swallowed
+ * rather than surfacing as an unhandled rejection.
+ */
+function withTimeout<T>(work: Promise<T>, ms: number, scope: "attempt" | "item"): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new TranslationTimeoutError(ms, scope)), ms);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
 }
 
 async function defaultResolveProvider(): Promise<
@@ -190,7 +233,11 @@ export async function translateFeedItem(
     return { status: "skipped", reason: "claimed" };
   }
 
-  const { systemPrompt, userPrompt } = buildTranslationPrompts(item.title, item.content, targetLang);
+  const { systemPrompt, userPrompt } = buildTranslationPrompts(
+    item.title,
+    item.content,
+    targetLang
+  );
 
   // Per-translation diagnostics. The article BODY is never logged — only its length —
   // so a request that hangs or times out can be tied to an exact feed item (id, title,
@@ -206,46 +253,106 @@ export async function translateFeedItem(
     promptTokenEstimate: estimateTokenCount(systemPrompt + userPrompt),
   };
   const startedAtMs = now().getTime();
+  const attemptTimeoutMs = deps.attemptTimeoutMs ?? TRANSLATION_ATTEMPT_TIMEOUT_MS;
+  const itemDeadlineMs = startedAtMs + (deps.itemTimeoutMs ?? TRANSLATION_ITEM_TIMEOUT_MS);
+  const maxTries = MAX_TRANSLATION_RETRIES + 1;
   // Logged BEFORE the call so an item whose request hangs and never returns (e.g. process
   // killed or lease reaped) still leaves a line naming the exact in-flight feed item.
-  console.info("[rss-translation] translating item", diag);
+  console.info("[rss-translation] translating item", { ...diag, maxTries });
+
+  // Declared outside the try so the failure log can report how many model calls were spent.
+  let tries = 0;
 
   try {
-    const response = await resolved.instance.generate({
-      systemPrompt,
-      userPrompt,
-      // Deterministic + schema-constrained: temperature 0 and the Ollama `format` schema
-      // make the reply a strict {title, content} object instead of free-form text.
-      temperature: 0,
-      format: TRANSLATION_JSON_SCHEMA,
-      // Bounded generation: without this Ollama runs unlimited and a runaway article never
-      // returns within the deadline. The capped body fits well under this ceiling.
-      maxTokens: MAX_TRANSLATION_OUTPUT_TOKENS,
-    });
+    let translatedTitle: string | null = null;
+    let translatedContent = "";
+    let usedRepair = false;
+    /** Raw provider payload of the try that SUCCEEDED — source of the Ollama metrics below. */
+    let lastResponseRaw: unknown;
 
-    let translatedTitle: string | null;
-    let translatedContent: string;
-    let usedRepair: boolean;
-    try {
-      ({ translatedTitle, translatedContent, usedRepair } = parseTranslationResponse(
-        response.text,
-        targetLang
-      ));
-    } catch (parseErr) {
-      // The transport succeeded (HTTP 200) but the reply was rejected. Log the SHAPE of the
-      // raw output — first/last 200 chars and total length only, never the full body — plus
-      // the failure `reason` so the three modes are distinguishable: invalid JSON, a
-      // schema-validation failure, or wrong-language (non-Bulgarian) output.
-      const text = response.text ?? "";
-      console.warn("[rss-translation] unparseable model response", {
-        ...diag,
-        reason: parseErr instanceof TranslationParseError ? parseErr.reason : "invalid_json",
-        responseLength: text.length,
-        responseFirst200: text.slice(0, 200),
-        responseLast200: text.length > 200 ? text.slice(-200) : "",
-        error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+    // In-request regeneration loop. A bad reply from the self-hosted model (invalid JSON, a
+    // decoding loop, drifted language) is usually transient, and a fresh sample seconds later
+    // succeeds — far better than failing the item and waiting out a 5-minute backoff. Each try
+    // varies the sampling (see samplingForTry): re-issuing the same prompt at temperature 0
+    // would deterministically reproduce the same bad reply.
+    for (let tryIndex = 0; tryIndex < maxTries; tryIndex += 1) {
+      const remainingMs = itemDeadlineMs - now().getTime();
+      if (remainingMs <= 0) {
+        throw new TranslationTimeoutError(
+          deps.itemTimeoutMs ?? TRANSLATION_ITEM_TIMEOUT_MS,
+          "item"
+        );
+      }
+      // Never let one try run past the item's own budget.
+      const budgetMs = Math.min(attemptTimeoutMs, remainingMs);
+      const { temperature, repeatPenalty } = samplingForTry(tryIndex);
+      const tryStartedMs = now().getTime();
+      tries = tryIndex + 1;
+
+      console.info("[rss-translation] attempt", {
+        feedItemId: item.id,
+        try: tries,
+        of: maxTries,
+        temperature,
+        repeatPenalty,
+        budgetMs,
       });
-      throw parseErr;
+
+      const response = await withTimeout(
+        resolved.instance.generate({
+          systemPrompt,
+          userPrompt,
+          // Schema-constrained structured output: the Ollama `format` schema makes the reply a
+          // strict {title, content} object instead of free-form text. Temperature starts at 0
+          // for fidelity and rises only on a regeneration.
+          temperature,
+          repeatPenalty,
+          format: TRANSLATION_JSON_SCHEMA,
+          // Bounded generation: without this Ollama runs unlimited and a runaway article never
+          // returns within the deadline. The capped body fits well under this ceiling.
+          maxTokens: MAX_TRANSLATION_OUTPUT_TOKENS,
+        }),
+        budgetMs,
+        "attempt"
+      );
+
+      try {
+        ({ translatedTitle, translatedContent, usedRepair } = parseTranslationResponse(
+          response.text,
+          targetLang
+        ));
+        lastResponseRaw = response.raw;
+        break;
+      } catch (parseErr) {
+        // The transport succeeded (HTTP 200) but the reply was rejected. Log the SHAPE of the
+        // raw output — first/last 200 chars and total length only, never the full body — plus
+        // the failure `reason` so the modes are distinguishable: invalid JSON, a
+        // schema-validation failure, wrong-language output, or a repetition loop.
+        const text = response.text ?? "";
+        const reason = parseErr instanceof TranslationParseError ? parseErr.reason : "invalid_json";
+        const willRetry = isRetriableParseFailure(reason) && tryIndex < maxTries - 1;
+        console.warn("[rss-translation] unusable model response", {
+          ...diag,
+          try: tries,
+          of: maxTries,
+          reason,
+          willRetry,
+          ...(parseErr instanceof TranslationParseError && parseErr.repetition
+            ? {
+                repetitionKind: parseErr.repetition.kind,
+                repetitionSample: parseErr.repetition.sample.slice(0, 40),
+                repetitionCount: parseErr.repetition.count,
+              }
+            : {}),
+          elapsedMs: now().getTime() - tryStartedMs,
+          responseLength: text.length,
+          responseFirst200: text.slice(0, 200),
+          responseLast200: text.length > 200 ? text.slice(-200) : "",
+          error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+        });
+        // Retries exhausted (or a reason regeneration cannot fix) — record the failure.
+        if (!willRetry) throw parseErr;
+      }
     }
 
     // Success is written UNCONDITIONALLY by id and always wins: a genuine, completed
@@ -272,6 +379,8 @@ export async function translateFeedItem(
     console.info("[rss-translation] item translated", {
       ...diag,
       elapsedMs: now().getTime() - startedAtMs,
+      // How many model calls this item actually cost — >1 means a regeneration was needed.
+      tries,
       provider: resolved.provider,
       model: resolved.model,
       // When true, structured output was NOT clean and the defensive repair salvaged the
@@ -281,7 +390,7 @@ export async function translateFeedItem(
       // Ollama's own generation metrics when the worker forwards them: total/eval/prompt-eval
       // durations (ms) plus exact token counts and the stop reason. done_reason="length" means
       // the num_predict ceiling was hit (the runaway case we now bound); "stop" is a clean end.
-      ...ollamaMetrics(response.raw),
+      ...ollamaMetrics(lastResponseRaw),
     });
 
     return { status: "translated", provider: resolved.provider, model: resolved.model };
@@ -294,6 +403,10 @@ export async function translateFeedItem(
     console.warn("[rss-translation] item translation FAILED", {
       ...diag,
       elapsedMs: now().getTime() - startedAtMs,
+      tries,
+      // Distinguishes "ran out of time" from "the model kept returning unusable output" —
+      // the two need different operator responses (worker capacity vs. model/prompt quality).
+      timedOut: err instanceof TranslationTimeoutError,
       error,
     });
 
