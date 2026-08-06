@@ -1167,8 +1167,8 @@ describe("generatePostFromContext — post origin", () => {
     else process.env.AI_MOCK_MODE = prevMockMode;
   });
 
-  /** A context whose single article carries a source name. */
-  function articleCtx() {
+  /** A context whose single article carries its source's kind and name. */
+  function articleCtx(sourceType = "rss") {
     return makeContext({
       feedItems: [
         {
@@ -1177,14 +1177,15 @@ describe("generatePostFromContext — post origin", () => {
           content: "The new chip lands in October.",
           url: "https://example.com/m5",
           publishedAt: null,
-          sourceName: "TechCrunch",
+          sourceType,
+          sourceName: "TechPowerUp",
         },
       ],
       hasArticleSources: true,
     });
   }
 
-  it("freezes the source name and article onto the post row", async () => {
+  it("freezes the source type, name and article onto the post row", async () => {
     const { deps, created } = makeDeps();
 
     const result = await generatePostFromContext(articleCtx(), "co-1", {}, deps);
@@ -1192,9 +1193,20 @@ describe("generatePostFromContext — post origin", () => {
     assert.ok(result.success);
     const data = created();
     assert.equal(data?.originType, "content_source");
-    assert.equal(data?.originSourceName, "TechCrunch");
+    assert.equal(data?.originSourceType, "rss");
+    assert.equal(data?.originSourceName, "TechPowerUp");
     assert.equal(data?.originSourceTitle, "Apple ships M5");
     assert.equal(data?.originSourceUrl, "https://example.com/m5");
+  });
+
+  it("freezes a product page source as its own type, not as RSS", async () => {
+    const { deps, created } = makeDeps();
+
+    const result = await generatePostFromContext(articleCtx("product_page"), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(created()?.originSourceType, "product_page");
+    assert.equal(result.post.origin.sourceType, "product_page");
   });
 
   it("returns the frozen origin on the response, with no read-back", async () => {
@@ -1204,7 +1216,8 @@ describe("generatePostFromContext — post origin", () => {
 
     assert.ok(result.success);
     assert.equal(result.post.origin.kind, "source");
-    assert.equal(result.post.origin.sourceName, "TechCrunch");
+    assert.equal(result.post.origin.sourceType, "rss");
+    assert.equal(result.post.origin.sourceName, "TechPowerUp");
     assert.equal(result.post.origin.articleTitle, "Apple ships M5");
     assert.equal(result.post.origin.articleUrl, "https://example.com/m5");
   });
@@ -1217,13 +1230,14 @@ describe("generatePostFromContext — post origin", () => {
     assert.ok(result.success);
     const data = created();
     assert.equal(data?.originType, "brand_setup");
+    assert.equal(data?.originSourceType, null);
     assert.equal(data?.originSourceName, null);
     assert.equal(data?.originSourceTitle, null);
     assert.equal(data?.originSourceUrl, null);
     assert.equal(result.post.origin.kind, "brand_setup");
   });
 
-  it("still records the article when the context carries no source name", async () => {
+  it("still records the article when the context carries no source type or name", async () => {
     const { deps, created } = makeDeps();
     const ctx = makeContext({
       feedItems: [
@@ -1241,8 +1255,9 @@ describe("generatePostFromContext — post origin", () => {
     const result = await generatePostFromContext(ctx, "co-1", {}, deps);
 
     assert.ok(result.success);
-    // A source post with an unknown name beats losing the origin entirely.
+    // A source post that describes itself with less beats losing the origin.
     assert.equal(created()?.originType, "content_source");
+    assert.equal(created()?.originSourceType, null);
     assert.equal(created()?.originSourceName, null);
     assert.equal(result.post.origin.kind, "source");
   });

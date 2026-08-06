@@ -202,8 +202,8 @@ async function loadContext(
             translatedTitle: true,
             translatedContent: true,
             translationStatus: true,
-            // `name` rides along on a join that already exists — it is frozen
-            // into the post's origin snapshot at generation time.
+            // `name` rides along on a join that already exists — it and `type`
+            // are frozen into the post's origin snapshot at generation time.
             source: { select: { name: true, type: true, config: true } },
           },
         }),
@@ -278,6 +278,7 @@ async function loadContext(
         content: resolved.content,
         url: f.url,
         publishedAt: f.publishedAt,
+        sourceType: f.source.type,
         sourceName: f.source.name,
         sourceLinkPreference: extractSourceLinkPreference(f.source.config),
         // rss/product_page → single-use article; prompt/calendar_event → evergreen.

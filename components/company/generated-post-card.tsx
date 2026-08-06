@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import Image from "next/image";
 import { useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
+import { usePostOriginLabel } from "@/lib/i18n/post-origin-label";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { StatusBadge, type PostStatusValue } from "@/components/ui/StatusBadge";
@@ -59,6 +60,7 @@ export function GeneratedPostCard({
   const t = useTranslations("posts");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
+  const originLabelFor = usePostOriginLabel();
 
   // ── Approval state ────────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
@@ -108,13 +110,12 @@ export function GeneratedPostCard({
     variant: "neutral" as BadgeVariant,
   };
 
-  // Origin badge — the feed name for a post written from an article, otherwise
-  // Brand Setup. Text-only, matching the channel and status badges beside it.
-  // The article headline rides along as a tooltip; the full detail (source,
-  // article, link) lives in the activity modal.
+  // Origin badge — "RSS · TechPowerUp" for a post written from an article,
+  // otherwise "Brand Setup". Text-only, matching the channel and status badges
+  // beside it. The article headline rides along as a tooltip; the full detail
+  // (source, article, link) lives in the activity modal.
   const origin = post.origin;
-  const originLabel =
-    origin.kind === "source" ? (origin.sourceName ?? t("origin.source")) : t("origin.brandSetup");
+  const originLabel = originLabelFor(origin);
 
   const actions = resolvePostActions({ role, status: localStatus, bufferConnected });
 

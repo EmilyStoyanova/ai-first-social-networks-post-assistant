@@ -456,7 +456,10 @@ model Post {
   // (see lib/posts/post-origin.ts) and are the only posts whose displayed origin
   // can still change.
   originType        PostOriginType? @map("origin_type")
-  // All three are NULL for a brand_setup post — there is no source to name.
+  // All four are NULL for a brand_setup post — there is no source to describe.
+  // `originSourceType` is what the badge reads to say "RSS · TechPowerUp" rather
+  // than guessing the kind of source from its name.
+  originSourceType  ContentSourceType? @map("origin_source_type")
   originSourceName  String?       @map("origin_source_name")
   originSourceTitle String?       @map("origin_source_title")
   originSourceUrl   String?       @map("origin_source_url")

@@ -185,11 +185,12 @@ export async function getOverviewData(
         mediaAsset: { select: { url: true } },
         // Frozen provenance first; the join is the legacy fallback.
         originType: true,
+        originSourceType: true,
         originSourceName: true,
         originSourceTitle: true,
         originSourceUrl: true,
         primaryFeedItem: {
-          select: { title: true, url: true, source: { select: { name: true } } },
+          select: { title: true, url: true, source: { select: { name: true, type: true } } },
         },
       },
     }),

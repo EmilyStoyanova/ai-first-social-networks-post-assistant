@@ -1,5 +1,9 @@
 import { prisma } from "@/lib/db/client";
-import { resolvePostOrigin, type PostOriginView } from "@/lib/posts/post-origin";
+import {
+  resolvePostOrigin,
+  type OriginSourceType,
+  type PostOriginView,
+} from "@/lib/posts/post-origin";
 
 export interface PostItem {
   id: string;
@@ -44,10 +48,13 @@ const SELECT = {
   // Frozen provenance — authoritative, and immune to a later source rename or
   // delete. The join below is the fallback for posts generated before it.
   originType: true,
+  originSourceType: true,
   originSourceName: true,
   originSourceTitle: true,
   originSourceUrl: true,
-  primaryFeedItem: { select: { title: true, url: true, source: { select: { name: true } } } },
+  primaryFeedItem: {
+    select: { title: true, url: true, source: { select: { name: true, type: true } } },
+  },
 } as const;
 
 function toItem(r: {
@@ -65,10 +72,15 @@ function toItem(r: {
   publishedPostUrl: string | null;
   mediaAsset: { url: string } | null;
   originType: "brand_setup" | "content_source" | null;
+  originSourceType: OriginSourceType | null;
   originSourceName: string | null;
   originSourceTitle: string | null;
   originSourceUrl: string | null;
-  primaryFeedItem: { title: string | null; url: string; source: { name: string } } | null;
+  primaryFeedItem: {
+    title: string | null;
+    url: string;
+    source: { name: string; type: string };
+  } | null;
   scheduledFor: Date | null;
   createdAt: Date;
 }): PostItem {

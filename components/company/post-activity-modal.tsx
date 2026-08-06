@@ -5,6 +5,7 @@ import { useTranslations } from "next-intl";
 import { Modal } from "@/components/ui/Modal";
 import { AuditLogEntries } from "./audit-log-timeline";
 import type { AuditLogItem } from "@/lib/services/audit/audit-log.service";
+import { usePostOriginLabel } from "@/lib/i18n/post-origin-label";
 import type { PostOriginView } from "@/lib/posts/post-origin";
 
 interface Props {
@@ -18,6 +19,8 @@ interface Props {
 export function PostActivityModal({ postId, origin, open, onClose }: Props) {
   const t = useTranslations("postActivity");
   const tCommon = useTranslations("common");
+  // Shared with the post card, so the badge and this row read identically.
+  const originLabelFor = usePostOriginLabel();
   const [logs, setLogs] = useState<AuditLogItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -59,11 +62,7 @@ export function PostActivityModal({ postId, origin, open, onClose }: Props) {
       <dl className="border-border mb-5 grid gap-2 border-b pb-5 text-sm">
         <div className="flex gap-3">
           <dt className="text-fg-muted w-32 shrink-0">{t("origin.label")}</dt>
-          <dd className="text-fg font-medium">
-            {origin.kind === "source"
-              ? (origin.sourceName ?? t("origin.sourceUnknown"))
-              : t("origin.brandSetup")}
-          </dd>
+          <dd className="text-fg font-medium">{originLabelFor(origin)}</dd>
         </div>
 
         {origin.kind === "source" && (

@@ -522,9 +522,7 @@
     "loading": "Зареждане…",
     "origin": {
       "label": "Генерирана от",
-      "brandSetup": "Brand Setup",
       "brandSetupHint": "Написана по мисията и правилата на марката — без статия зад нея.",
-      "sourceUnknown": "Източник на съдържание",
       "article": "Статия",
       "articleUnknown": "Статията вече не е налична"
     }
@@ -532,8 +530,14 @@
   "posts": {
     "origin": {
       "brandSetup": "Brand Setup",
-      "source": "Източник на съдържание",
-      "tooltip": "Откъде е генерирана публикацията"
+      "sourceUnknown": "Източник на съдържание",
+      "tooltip": "Откъде е генерирана публикацията",
+      "types": {
+        "rss": "RSS",
+        "prompt": "Ръчен промпт",
+        "product_page": "Продуктова страница",
+        "calendar_event": "Календарно събитие"
+      }
     },
     "statuses": {
       "DRAFT": "Чернова",
