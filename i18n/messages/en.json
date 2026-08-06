@@ -316,7 +316,7 @@
     "item4Hint": "AI generates posts only for enabled channels.",
     "item4Link": "Configure channels",
     "readyTitle": "🎉 Your company is ready. AI can now generate and publish posts.",
-    "generateFirst": "Generate your first post"
+    "generateFirst": "Generate post"
   },
   "brandGuidelines": {
     "title": "Brand Guidelines",
@@ -578,11 +578,23 @@
     "generate": {
       "title": "Generate a draft post",
       "channel": "Channel",
+      "noChannels": "No social channels are connected yet, so there is nothing to generate for.",
+      "noChannelsCta": "Go to Settings → Integrations",
+      "noChannelsPlaceholder": "No channels available",
       "contentLanguage": "Content language",
       "contentLanguageDefault": "Default",
+      "contentLanguageDefaultResolved": "Default ({language})",
+      "languageNameEN": "English",
+      "languageNameBG": "Bulgarian",
       "contentLanguageEN": "EN — English",
       "contentLanguageBG": "BG — Bulgarian",
       "contentLanguageDefaultHint": "Language is taken from {channel}'s settings.",
+      "contentLanguageDefaultHintCompany": "Language is taken from the company brand default.",
+      "image": "Image",
+      "imageInherit": "Use channel setting",
+      "imageGenerate": "Generate image",
+      "imageSkip": "Do not generate image",
+      "imageRequiredWarning": "This channel requires an image to publish. The draft will still be created — attach or generate an image before publishing it.",
       "generateDraft": "Generate Draft",
       "generating": "Generating…",
       "sourceLink": "Source link",

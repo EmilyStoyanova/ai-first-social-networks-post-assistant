@@ -15,6 +15,9 @@ const bodySchema = z.object({
   contentLanguage: z.enum(["en", "bg"]).optional(),
   // Manual source-link override (v2-1); omitted = inherit source/channel config.
   includeSourceLink: z.boolean().optional(),
+  // Manual image override; omitted = inherit the channel's autoGenerateImage.
+  // true forces an image, false suppresses one, for this generation only.
+  generateImage: z.boolean().optional(),
   // Explicit per-generation LLM config (v2-5); omitted = env-var default provider.
   llmConfigId: z.string().min(1).optional(),
   // "Content source" choice: a sentinel (company rules / company mission) or an
@@ -65,6 +68,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     {
       contentLanguage: parsed.data.contentLanguage,
       includeSourceLinkOverride: parsed.data.includeSourceLink,
+      autoGenerateImageOverride: parsed.data.generateImage,
       llmConfigId: parsed.data.llmConfigId,
       contentSource: parseManualContentSource(parsed.data.contentSource),
     }

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
@@ -8,8 +9,11 @@ import { Button } from "@/components/ui/Button";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { GenerationWarnings } from "@/lib/services/ai/generate-draft-post.service";
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
+import type { GenerationChannelOption } from "@/lib/posts/generation-channels";
 import { COMPANY_MISSION_VALUE, COMPANY_RULES_VALUE } from "@/lib/ai/manual-content-source";
 
+// Labels and display order only — which of these are actually offered is decided
+// by the company's enabled Buffer profiles (see `availableChannels`).
 const CHANNELS = [
   { value: "FACEBOOK", label: "Facebook" },
   { value: "LINKEDIN", label: "LinkedIn" },
@@ -21,6 +25,9 @@ type Channel = (typeof CHANNELS)[number]["value"];
 
 /** Three-state override: inherit the source/channel setting, or force on/off. */
 type SourceLinkOverride = "inherit" | "include" | "exclude";
+
+/** Three-state image override: inherit the channel setting, or force on/off. */
+type ImageOverride = "inherit" | "generate" | "skip";
 
 /** A selectable LLM returned by GET /companies/[slug]/available-llms (v2-5). */
 interface AvailableLlm {
@@ -55,17 +62,47 @@ interface Props {
   hasRssFeedItems: boolean;
   /** Enabled RSS sources offered in the "Content source" dropdown. */
   contentSources: GenerationSourceOption[];
+  /**
+   * Channels backed by an enabled Buffer profile. Empty means the company has
+   * connected nothing yet — the form then explains that instead of offering
+   * four channels it cannot publish to.
+   */
+  availableChannels: GenerationChannelOption[];
+  /** Company.defaultLang — names the resolved "Default" language option. */
+  companyDefaultLang: "en" | "bg";
 }
 
-export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSources }: Props) {
+export function GeneratePostForm({
+  slug,
+  onGenerated,
+  hasRssFeedItems,
+  contentSources,
+  availableChannels,
+  companyDefaultLang,
+}: Props) {
   const t = useTranslations("posts.generate");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
-  const [channel, setChannel] = useState<Channel>("FACEBOOK");
+
+  // CHANNELS drives label and order; availableChannels decides membership. The
+  // intersection is taken in CHANNELS order so the list never reshuffles when a
+  // company connects a new profile.
+  const channelOptions = useMemo(() => {
+    const byChannel = new Map(availableChannels.map((c) => [c.channel, c]));
+    return CHANNELS.flatMap((c) => {
+      const config = byChannel.get(c.value);
+      return config ? [{ value: c.value, label: c.label, config }] : [];
+    });
+  }, [availableChannels]);
+
+  // "" only when there is nothing to pick — generation is disabled in that case,
+  // so the empty value never reaches the API.
+  const [channel, setChannel] = useState<Channel | "">(() => channelOptions[0]?.value ?? "");
   // "default" = inherit the selected channel's configured posting language;
   // "en"/"bg" = explicit one-time override.
   const [contentLanguage, setContentLanguage] = useState<"default" | "en" | "bg">("default");
   const [sourceLinkOverride, setSourceLinkOverride] = useState<SourceLinkOverride>("inherit");
+  const [imageOverride, setImageOverride] = useState<ImageOverride>("inherit");
   // The "Content source" choice: a sentinel, or an RSS source id. Defaults to
   // company rules, which is the behaviour the form has always had.
   const [contentSource, setContentSource] = useState<string>(COMPANY_RULES_VALUE);
@@ -75,6 +112,23 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [warnings, setWarnings] = useState<GenerationWarnings | null>(null);
+
+  const noChannels = channelOptions.length === 0;
+  const selectedChannel = channelOptions.find((c) => c.value === channel) ?? null;
+
+  // The language "Default" resolves to, mirroring the server's order:
+  // ChannelConfig.postingLanguage → Company.defaultLang. Naming it in the option
+  // label means the user can see what "Default" means without opening settings.
+  const channelLanguage = selectedChannel?.config.postingLanguage;
+  const languageFromChannel = channelLanguage === "en" || channelLanguage === "bg";
+  const resolvedDefaultLang: "en" | "bg" = languageFromChannel
+    ? channelLanguage
+    : companyDefaultLang;
+
+  // Only the explicit "do not generate" choice warns. Inheriting a channel that
+  // simply has auto-generation off is the pre-existing default for most
+  // companies, so warning on it would fire on nearly every first load.
+  const imageWarning = imageOverride === "skip" && selectedChannel?.config.imageRequired === true;
 
   // Load the company's selectable LLMs once. Failure is silent — the dropdown
   // simply stays at "System default", preserving the pre-v2-5 behaviour. When the
@@ -115,6 +169,9 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
   }
 
   async function handleGenerate() {
+    // Belt-and-braces: the button is already disabled without a channel.
+    if (!channel) return;
+
     setGenerating(true);
     setError("");
     setWarnings(null);
@@ -129,6 +186,9 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
           ...(hasRssFeedItems && sourceLinkOverride !== "inherit"
             ? { includeSourceLink: sourceLinkOverride === "include" }
             : {}),
+          // Omit when inheriting so the server keeps reading the channel's
+          // autoGenerateImage setting, exactly as cron does.
+          ...(imageOverride !== "inherit" ? { generateImage: imageOverride === "generate" } : {}),
           contentSource,
           // Omit entirely when "System default" is selected so the server keeps
           // its env-var default provider path unchanged (v2-5).
@@ -161,6 +221,20 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
         </Alert>
       )}
 
+      {/* Nothing to generate for: say so once, at the top, instead of letting the
+          user fill in four dropdowns before finding out. */}
+      {noChannels && (
+        <Alert variant="info" className="mb-4">
+          {t("noChannels")}{" "}
+          <Link
+            href={`/companies/${slug}/settings/buffer`}
+            className="font-semibold underline underline-offset-2"
+          >
+            {t("noChannelsCta")}
+          </Link>
+        </Alert>
+      )}
+
       {warnings?.duplicate.flagged && (
         <Alert variant="warning" className="mb-3">
           {t("duplicateWarning", { score: warnings.duplicate.similarityScore?.toFixed(2) ?? "0" })}
@@ -188,10 +262,11 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
               setChannel(e.target.value as Channel);
               setWarnings(null);
             }}
-            disabled={generating}
+            disabled={generating || noChannels}
             className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {CHANNELS.map((c) => (
+            {noChannels && <option value="">{t("noChannelsPlaceholder")}</option>}
+            {channelOptions.map((c) => (
               <option key={c.value} value={c.value}>
                 {c.label}
               </option>
@@ -213,9 +288,33 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
             disabled={generating}
             className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <option value="default">{t("contentLanguageDefault")}</option>
+            <option value="default">
+              {t("contentLanguageDefaultResolved", {
+                language: t(resolvedDefaultLang === "bg" ? "languageNameBG" : "languageNameEN"),
+              })}
+            </option>
             <option value="en">{t("contentLanguageEN")}</option>
             <option value="bg">{t("contentLanguageBG")}</option>
+          </select>
+        </div>
+
+        <div className="min-w-[180px]">
+          <label
+            htmlFor="generate-image"
+            className="text-fg-muted mb-1.5 block text-sm font-medium"
+          >
+            {t("image")}
+          </label>
+          <select
+            id="generate-image"
+            value={imageOverride}
+            onChange={(e) => setImageOverride(e.target.value as ImageOverride)}
+            disabled={generating}
+            className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <option value="inherit">{t("imageInherit")}</option>
+            <option value="generate">{t("imageGenerate")}</option>
+            <option value="skip">{t("imageSkip")}</option>
           </select>
         </div>
 
@@ -295,16 +394,29 @@ export function GeneratePostForm({ slug, onGenerated, hasRssFeedItems, contentSo
           </div>
         )}
 
-        <Button variant="primary" loading={generating} onClick={handleGenerate}>
+        <Button
+          variant="primary"
+          loading={generating}
+          disabled={noChannels}
+          onClick={handleGenerate}
+        >
           {generating ? t("generating") : t("generateDraft")}
         </Button>
       </div>
 
-      {contentLanguage === "default" && (
+      {/* Advisory, never blocking: the draft is still worth having, and an image
+          can be generated or attached from the post card before publishing. */}
+      {imageWarning && (
+        <Alert variant="warning" className="mt-3">
+          {t("imageRequiredWarning")}
+        </Alert>
+      )}
+
+      {contentLanguage === "default" && selectedChannel && (
         <p className="text-fg-faint mt-3 text-xs">
-          {t("contentLanguageDefaultHint", {
-            channel: CHANNELS.find((c) => c.value === channel)?.label ?? channel,
-          })}
+          {languageFromChannel
+            ? t("contentLanguageDefaultHint", { channel: selectedChannel.label })
+            : t("contentLanguageDefaultHintCompany")}
         </p>
       )}
     </div>

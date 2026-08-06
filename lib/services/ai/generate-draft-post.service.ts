@@ -264,6 +264,14 @@ export interface GeneratePostOptions {
    */
   llmConfigId?: string;
   /**
+   * Manual per-generation image override chosen in the generation form. When set
+   * it replaces the channel's `autoGenerateImage` for this generation only —
+   * true forces an image on a channel that has not opted in, false suppresses
+   * one on a channel that has. Undefined = inherit the channel setting, which is
+   * the only value cron ever uses, so scheduled generation is unchanged.
+   */
+  autoGenerateImageOverride?: boolean;
+  /**
    * The acting user's saved preferred LLM config id (persistent). Consulted only
    * when no explicit llmConfigId is given, and only if it is still active — an
    * unavailable preference falls back to the admin default (never an error).
@@ -280,7 +288,7 @@ export async function generateDraftPost(
   isGlobalAdmin: boolean,
   options: Pick<
     GeneratePostOptions,
-    "contentLanguage" | "includeSourceLinkOverride" | "llmConfigId"
+    "contentLanguage" | "includeSourceLinkOverride" | "llmConfigId" | "autoGenerateImageOverride"
   > & {
     /**
      * The form's "Content source" choice. Omitted = company rules, i.e. the
@@ -332,6 +340,7 @@ export async function generateDraftPost(
     contentLanguage: options.contentLanguage,
     includeSourceLinkOverride: options.includeSourceLinkOverride,
     llmConfigId: options.llmConfigId,
+    autoGenerateImageOverride: options.autoGenerateImageOverride,
     preferredLlmConfigId,
     generatedById: userId,
   });
@@ -908,7 +917,9 @@ export async function generatePostFromContext(
       autoImage({
         postId: post.id,
         companyId,
-        enabled: context.channel.autoGenerateImage,
+        // The manual form override wins when present; cron never sends one, so
+        // scheduled generation still reads the channel setting.
+        enabled: options.autoGenerateImageOverride ?? context.channel.autoGenerateImage,
         generatedById,
       })
     );

@@ -20,6 +20,7 @@ import {
 } from "@/lib/posts/post-status-filter";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
+import type { GenerationChannelOption } from "@/lib/posts/generation-channels";
 import type { PostRole } from "@/lib/posts/post-actions";
 import {
   disabledMetrics,
@@ -34,6 +35,10 @@ interface Props {
   bufferConnected: boolean;
   hasRssFeedItems: boolean;
   contentSources: GenerationSourceOption[];
+  /** Channels backed by an enabled Buffer profile — empty disables generation. */
+  availableChannels: GenerationChannelOption[];
+  /** Company.defaultLang, used to name the resolved "Default" language option. */
+  companyDefaultLang: "en" | "bg";
   /** Engagement metrics by post id (v2-7). Loaded server-side for the whole tab. */
   postMetrics: Record<string, PostMetricsView>;
   /** Owners see the "add a key" nudge on the disabled state. */
@@ -50,6 +55,8 @@ export function GeneratedPostsSection({
   bufferConnected,
   hasRssFeedItems,
   contentSources,
+  availableChannels,
+  companyDefaultLang,
   postMetrics,
   canManageAnalyticsKey,
   initialStatusFilter,
@@ -136,6 +143,8 @@ export function GeneratedPostsSection({
         onGenerated={handleGenerated}
         hasRssFeedItems={hasRssFeedItems}
         contentSources={contentSources}
+        availableChannels={availableChannels}
+        companyDefaultLang={companyDefaultLang}
       />
 
       {/* Hidden when there is nothing to filter — a toolbar over an empty grid

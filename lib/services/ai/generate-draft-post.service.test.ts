@@ -1083,6 +1083,58 @@ describe("generatePostFromContext — automatic image generation", () => {
     assert.equal(result.post.mediaUrl, null);
   });
 
+  it("lets the manual override force an image on a channel that has not opted in", async () => {
+    const { deps, autoImaged } = makeDeps();
+
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { autoGenerateImageOverride: true },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(autoImaged()?.enabled, true);
+    assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png");
+  });
+
+  it("lets the manual override suppress an image on a channel that has opted in", async () => {
+    const { deps, autoImaged } = makeDeps();
+    const ctx = makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+    });
+
+    const result = await generatePostFromContext(
+      ctx,
+      "co-1",
+      { autoGenerateImageOverride: false },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(autoImaged()?.enabled, false);
+    assert.equal(result.post.mediaUrl, null);
+  });
+
+  it("falls back to the channel setting when the override is undefined", async () => {
+    const { deps, autoImaged } = makeDeps();
+    const ctx = makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+    });
+
+    // An omitted override is what cron always sends, so this is the guarantee
+    // that scheduled generation still reads the channel setting.
+    const result = await generatePostFromContext(
+      ctx,
+      "co-1",
+      { autoGenerateImageOverride: undefined, scheduleId: "sched-1" },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(autoImaged()?.enabled, true);
+  });
+
   it("still returns a successful post when image generation throws", async () => {
     const { deps } = makeDeps();
     // Harsher than production: autoGeneratePostImage swallows its own errors, so
