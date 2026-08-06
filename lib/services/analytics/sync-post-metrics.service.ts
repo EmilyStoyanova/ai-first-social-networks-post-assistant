@@ -1,4 +1,3 @@
-import { prisma } from "@/lib/db/client";
 import { Prisma } from "@prisma/client";
 import { getBufferAnalyticsClient } from "@/lib/buffer/buffer-analytics-provider";
 import type { BufferAnalyticsClient } from "@/lib/buffer/buffer-analytics-client";
@@ -9,6 +8,7 @@ import {
   AnalyticsScopeError,
 } from "@/lib/buffer/buffer-analytics-errors";
 import { normalizeMetrics } from "@/lib/buffer/metric-normalizer";
+import { prismaMetricsSyncStore, startOfDay, type MetricsSyncStore } from "./_metrics-sync-store";
 
 /**
  * Reads engagement metrics for a company's published posts and stores them.
@@ -17,28 +17,45 @@ import { normalizeMetrics } from "@/lib/buffer/metric-normalizer";
  * `bufferUpdateId IS NOT NULL` plus a published status. A post that was never
  * sent has no Buffer counterpart to ask about.
  *
- * Bounded by design. Buffer refreshes metrics once daily, so re-reading more
- * often returns byte-identical data while consuming the 250-requests/day budget
- * that publishing also draws on. The cron therefore syncs a small batch per run,
- * oldest-collected first, and skips posts already synced today.
+ * Bounded, but fair. Buffer refreshes metrics once daily, so a post is read at
+ * most once per calendar day; within that, a run takes the STALEST posts first
+ * (never-read ones ahead of everything else). Ordering by recency instead — as
+ * this did originally — handed every run the same newest posts and left older
+ * ones permanently unread once the backlog grew past one batch.
+ *
+ * Coverage across a day is therefore a property of repeated runs, not of one big
+ * run: each run reads what is still pending, and `collectedAt` carries the cursor
+ * from one run to the next. runAnalyticsCron drives that loop across companies.
+ *
+ * This is the ONLY path that refreshes metrics after setup — there is no manual
+ * refresh — so a failed read must never destroy what a previous read stored.
+ * Failures are logged and recorded on the row; the figures themselves are left
+ * standing (see observationColumns in _metrics-sync-store.ts).
  */
 
 export interface SyncPostMetricsOptions {
   companyId: string;
-  /** Max posts per run. Each costs exactly one Buffer request. */
+  /** Max posts this run may read. Each costs exactly one Buffer request. */
   limit?: number;
   /**
-   * Re-read posts already synced today.
+   * Re-read posts already read today.
    *
    * The cron leaves this false: Buffer refreshes metrics once daily, so a second
    * automatic pass would return identical data and spend quota for nothing.
-   * A manual "sync now" sets it true — otherwise a first run that legitimately
-   * came back empty (Buffer had not ingested the posts yet) would make every
-   * retry that day a no-op, which reads as the button being broken.
+   * Only the first sync after a key is saved sets it true — that key may well be
+   * added after the day's runs, and without force every post would count as
+   * "already read today" and nothing would import.
    */
   force?: boolean;
+  /**
+   * Cooperative deadline, checked between posts. A run that stops early is not a
+   * failure: the posts it did not reach keep their old `collectedAt` and are
+   * therefore first in line next time.
+   */
+  shouldStop?: () => boolean;
   /** Injected in tests. */
   client?: BufferAnalyticsClient;
+  store?: MetricsSyncStore;
   now?: Date;
 }
 
@@ -52,12 +69,23 @@ export interface SyncPostMetricsSummary {
   forbidden: number;
   notFound: number;
   failed: number;
+  /**
+   * Eligible posts still awaiting today's read once this run finished. Zero means
+   * the company is fully covered for the day; anything else is the backlog the
+   * next run picks up, and the number an operator should watch.
+   */
+  remaining: number;
+  /** True when `shouldStop` cut the run short rather than the batch running out. */
+  stoppedEarly: boolean;
 }
 
+/**
+ * Per-run batch when a caller does not say otherwise. Deliberately small: this is
+ * the size used by the generation cron's opportunistic top-up, where analytics
+ * shares a time budget with LLM work. The analytics cron passes its own, larger
+ * limit — see run-analytics-cron.service.ts.
+ */
 const DEFAULT_LIMIT = 15;
-
-/** Posts in these statuses have been sent to Buffer and can carry metrics. */
-const SYNCABLE_STATUSES = ["sent_to_buffer", "published"] as const;
 
 function emptySummary(): SyncPostMetricsSummary {
   return {
@@ -68,19 +96,42 @@ function emptySummary(): SyncPostMetricsSummary {
     forbidden: 0,
     notFound: 0,
     failed: 0,
+    remaining: 0,
+    stoppedEarly: false,
   };
 }
 
-/** Midnight-anchored so "already synced today" is stable within a calendar day. */
-function startOfDay(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+interface StopContext {
+  summary: SyncPostMetricsSummary;
+  store: MetricsSyncStore;
+  companyId: string;
+  today: Date;
+}
+
+/**
+ * Ends the run early because the key itself cannot be used, logging why.
+ *
+ * These conditions persist until someone fixes the key, and nothing in the UI
+ * reports them any more, so the log line is the only signal an operator gets.
+ * No stored metrics are touched: the posts simply keep the figures they had, and
+ * the backlog is still reported so the run reads as interrupted, not as done.
+ */
+async function stopWithReason(
+  { summary, store, companyId, today }: StopContext,
+  reason: NonNullable<SyncPostMetricsSummary["reason"]>
+): Promise<SyncPostMetricsSummary> {
+  console.error(`[analytics] Metrics sync stopped for company ${companyId}: ${reason}`);
+  return { ...(await withRemaining(summary, store, companyId, today)), skipped: true, reason };
 }
 
 export async function syncPostMetrics(
   options: SyncPostMetricsOptions
 ): Promise<SyncPostMetricsSummary> {
   const { companyId, limit = DEFAULT_LIMIT } = options;
+  const store = options.store ?? prismaMetricsSyncStore;
+  const shouldStop = options.shouldStop ?? (() => false);
   const now = options.now ?? new Date();
+  const today = startOfDay(now);
   const summary = emptySummary();
 
   // ── Resolve the analytics client ───────────────────────────────────────────
@@ -94,62 +145,61 @@ export async function syncPostMetrics(
     throw err;
   }
 
-  const today = startOfDay(now);
-
-  // Eligible: published through Buffer, and either never synced or last synced
-  // before today. Oldest first so a backlog drains fairly across runs rather
-  // than the same few posts being refreshed repeatedly.
-  const posts = await prisma.post.findMany({
-    where: {
-      companyId,
-      bufferUpdateId: { not: null },
-      status: { in: [...SYNCABLE_STATUSES] },
-      ...(options.force
-        ? {}
-        : { OR: [{ metrics: { is: null } }, { metrics: { collectedAt: { lt: today } } }] }),
-    },
-    select: { id: true, bufferUpdateId: true },
-    orderBy: [{ publishedAt: "desc" }],
-    take: limit,
+  const posts = await store.selectPosts({
+    companyId,
+    limit,
+    before: options.force ? null : today,
   });
 
   for (const post of posts) {
+    // Checked before the request, never after: a run that stops here has spent
+    // nothing on this post, and leaves it stalest-first for the next run.
+    if (shouldStop()) {
+      summary.stoppedEarly = true;
+      break;
+    }
+
     summary.examined += 1;
-    const bufferPostId = post.bufferUpdateId!;
 
     let result: Awaited<ReturnType<BufferAnalyticsClient["getPostMetrics"]>>;
     try {
-      result = await client.getPostMetrics(bufferPostId);
+      result = await client.getPostMetrics(post.bufferUpdateId);
     } catch (err) {
       // These three are properties of the KEY, not of this post. Continuing would
       // burn one request per remaining post to learn the same thing, so stop and
-      // let the next run retry.
-      if (err instanceof AnalyticsKeyInvalidError) {
-        return { ...summary, skipped: true, reason: "INVALID_KEY" };
-      }
-      if (err instanceof AnalyticsScopeError) {
-        return { ...summary, skipped: true, reason: "INSUFFICIENT_SCOPE" };
-      }
+      // let the next run retry. Logged rather than thrown: with no manual refresh
+      // left, the cron log is where an operator learns why a company went quiet.
+      const stop: StopContext = { summary, store, companyId, today };
+      if (err instanceof AnalyticsKeyInvalidError) return stopWithReason(stop, "INVALID_KEY");
+      if (err instanceof AnalyticsScopeError) return stopWithReason(stop, "INSUFFICIENT_SCOPE");
       if (err instanceof AnalyticsRateLimitError) {
-        return { ...summary, skipped: true, reason: "RATE_LIMITED" };
+        // Buffer is the one saying stop. Backing off for the rest of the run is
+        // what keeps the remaining daily budget intact for publishing.
+        return stopWithReason(stop, "RATE_LIMITED");
       }
 
+      const reason = err instanceof Error ? err.message : "Unknown error.";
+      console.error(
+        `[analytics] Metrics read failed for post ${post.id} (company ${companyId}): ${reason}`
+      );
       summary.failed += 1;
-      await recordSyncOutcome({
+      // Records the failure WITHOUT touching the stored figures — a transient
+      // Buffer error must not blank a post's engagement numbers. It still stamps
+      // collectedAt, so a post that fails repeatedly cannot monopolise the batch.
+      await store.recordOutcome({
         postId: post.id,
         companyId,
         collectedAt: now,
         syncStatus: "error",
-        syncError: err instanceof Error ? err.message.slice(0, 500) : "Unknown error.",
+        syncError: reason.slice(0, 500),
       });
       continue;
     }
 
     switch (result.status) {
       case "ok": {
-        const normalized = normalizeMetrics(result.metrics);
         summary.updated += 1;
-        await recordSyncOutcome({
+        await store.recordOutcome({
           postId: post.id,
           companyId,
           collectedAt: now,
@@ -158,14 +208,14 @@ export async function syncPostMetrics(
           // Buffer's channelService, never Post.channel — they disagree in real data.
           channelService: result.channelService,
           metricsUpdatedAt: result.metricsUpdatedAt ? new Date(result.metricsUpdatedAt) : null,
-          metrics: normalized,
+          metrics: normalizeMetrics(result.metrics),
           raw: result.metrics as unknown as Prisma.InputJsonValue,
         });
         break;
       }
       case "no_data": {
         summary.noData += 1;
-        await recordSyncOutcome({
+        await store.recordOutcome({
           postId: post.id,
           companyId,
           collectedAt: now,
@@ -180,7 +230,7 @@ export async function syncPostMetrics(
         // The key's Buffer organization does not own this post. Recorded so the
         // UI can say so precisely instead of showing a generic failure.
         summary.forbidden += 1;
-        await recordSyncOutcome({
+        await store.recordOutcome({
           postId: post.id,
           companyId,
           collectedAt: now,
@@ -191,7 +241,7 @@ export async function syncPostMetrics(
       }
       case "not_found": {
         summary.notFound += 1;
-        await recordSyncOutcome({
+        await store.recordOutcome({
           postId: post.id,
           companyId,
           collectedAt: now,
@@ -206,94 +256,18 @@ export async function syncPostMetrics(
   // Stamp the key as working if anything at all came back. FORBIDDEN counts:
   // the key authenticated fine, it simply does not cover that post.
   if (summary.updated + summary.noData + summary.forbidden > 0) {
-    await prisma.bufferConnection.updateMany({
-      where: { companyId },
-      data: { analyticsKeyLastValidAt: now },
-    });
+    await store.stampKeyValid(companyId, now);
   }
 
-  return summary;
+  return withRemaining(summary, store, companyId, today);
 }
 
-// ─── Persistence ──────────────────────────────────────────────────────────────
-
-interface RecordOutcomeInput {
-  postId: string;
-  companyId: string;
-  collectedAt: Date;
-  syncStatus: "ok" | "no_data" | "forbidden" | "not_found" | "error";
-  syncError: string | null;
-  channelService?: string | null;
-  metricsUpdatedAt?: Date | null;
-  metrics?: ReturnType<typeof normalizeMetrics>;
-  raw?: Prisma.InputJsonValue;
-}
-
-/**
- * Writes the current-state row and, when there are real metrics, appends a
- * history snapshot.
- *
- * Snapshots exist because Buffer returns cumulative lifetime totals with no
- * time-series surface — day-over-day movement can only come from our own
- * sampling, and cannot be reconstructed after the fact. Only `ok` results are
- * snapshotted: recording a forbidden or errored read as history would put
- * gaps into the series that look like engagement dropping to nothing.
- */
-async function recordSyncOutcome(input: RecordOutcomeInput): Promise<void> {
-  const m = input.metrics;
-
-  const metricColumns = {
-    reactions: m?.reactions ?? null,
-    comments: m?.comments ?? null,
-    shares: m?.shares ?? null,
-    impressions: m?.impressions ?? null,
-    clicks: m?.clicks ?? null,
-    reach: m?.reach ?? null,
-    views: m?.views ?? null,
-    saves: m?.saves ?? null,
-    follows: m?.follows ?? null,
-    engagementRate: m?.engagementRate ?? null,
-    engagementRateDenominator: m?.engagementRateDenominator ?? null,
-  };
-
-  await prisma.postMetric.upsert({
-    where: { postId: input.postId },
-    create: {
-      postId: input.postId,
-      companyId: input.companyId,
-      channelService: input.channelService ?? null,
-      metricsUpdatedAt: input.metricsUpdatedAt ?? null,
-      collectedAt: input.collectedAt,
-      syncStatus: input.syncStatus,
-      syncError: input.syncError,
-      raw: input.raw ?? Prisma.JsonNull,
-      ...metricColumns,
-    },
-    update: {
-      channelService: input.channelService ?? null,
-      metricsUpdatedAt: input.metricsUpdatedAt ?? null,
-      collectedAt: input.collectedAt,
-      syncStatus: input.syncStatus,
-      syncError: input.syncError,
-      raw: input.raw ?? Prisma.JsonNull,
-      ...metricColumns,
-    },
-  });
-
-  if (input.syncStatus !== "ok" || !m) return;
-
-  // One snapshot per post per day: the unique index makes a same-day re-run
-  // update in place rather than inflating the series with duplicates.
-  const snapshotAt = startOfDay(input.collectedAt);
-  await prisma.postMetricSnapshot.upsert({
-    where: { postId_snapshotAt: { postId: input.postId, snapshotAt } },
-    create: {
-      postId: input.postId,
-      companyId: input.companyId,
-      channelService: input.channelService ?? null,
-      snapshotAt,
-      ...metricColumns,
-    },
-    update: { channelService: input.channelService ?? null, ...metricColumns },
-  });
+/** Attaches the day's outstanding backlog — the signal that drives the next run. */
+async function withRemaining(
+  summary: SyncPostMetricsSummary,
+  store: MetricsSyncStore,
+  companyId: string,
+  today: Date
+): Promise<SyncPostMetricsSummary> {
+  return { ...summary, remaining: await store.countRemaining(companyId, today) };
 }

@@ -852,19 +852,18 @@
     "pendingOnCard": "Waiting for the first metrics sync.",
     "noDataOnCard": "Buffer has not reported any metrics for this post.",
     "forbiddenOnCard": "This API key does not have access to the Buffer account this post was published from. Please use a Personal API Key from that same Buffer account.",
-    "syncNow": "Refresh metrics",
-    "syncing": "Syncing…",
+    "autoRefreshNote": "Statistics refresh automatically once a day, least recently checked first. With many published posts, a full round can take longer than a day.",
     "syncDone": "Updated {updated} of {examined} posts.",
     "syncNoPosts": "No published posts to sync yet.",
-    "syncNoDataYet": "Checked {examined} posts — Buffer has no metrics for them yet. It updates once a day, so try again tomorrow.",
+    "syncNoDataYet": "Checked {examined} posts — Buffer has no metrics for them yet. It updates once a day, so they will appear at one of the next automatic refreshes.",
     "syncAllForbidden": "This API key does not have access to the Buffer account these posts were published from. Please use a Personal API Key from that same Buffer account.",
     "syncSkipped": {
       "NO_KEY": "No analytics key is configured.",
       "INVALID_KEY": "Buffer rejected the key. It may have been revoked — add it again.",
       "INSUFFICIENT_SCOPE": "This key cannot read analytics. Check that it is a Personal API Key.",
-      "RATE_LIMITED": "Buffer is rate limiting requests. Try again in a few minutes."
+      "RATE_LIMITED": "Buffer is rate limiting requests. The next automatic refresh will try again."
     },
     "savingAndSyncing": "Saving and syncing…",
-    "syncFailedAfterSave": "The key was saved, but metrics could not be synced yet. Use “Sync now” to retry."
+    "syncFailedAfterSave": "The key was saved, but metrics could not be synced yet. The next automatic refresh will try again."
   }
 }

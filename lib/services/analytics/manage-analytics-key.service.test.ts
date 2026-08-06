@@ -44,6 +44,8 @@ function summary(over: Partial<SyncPostMetricsSummary> = {}): SyncPostMetricsSum
     forbidden: 0,
     notFound: 0,
     failed: 0,
+    remaining: 0,
+    stoppedEarly: false,
     ...over,
   };
 }

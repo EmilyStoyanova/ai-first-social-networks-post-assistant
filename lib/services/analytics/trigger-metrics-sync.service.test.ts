@@ -8,9 +8,9 @@ import type { SyncPostMetricsOptions, SyncPostMetricsSummary } from "./sync-post
  * pass force=true.
  *
  * Without it, a key saved after that day's cron run would find every post
- * already "synced today" and import nothing — the exact failure the automatic
- * sync exists to prevent, and one that would look like the feature silently not
- * working rather than an error.
+ * already "synced today" and import nothing. With no manual refresh to fall back
+ * on, the owner would then stare at an empty analytics card until the next day's
+ * cron — indistinguishable from the feature not working.
  */
 
 let captured: SyncPostMetricsOptions[];
@@ -26,6 +26,8 @@ async function fakeSync(options: SyncPostMetricsOptions): Promise<SyncPostMetric
     forbidden: 0,
     notFound: 0,
     failed: 0,
+    remaining: 0,
+    stoppedEarly: false,
   };
 }
 
@@ -63,6 +65,8 @@ describe("runForcedMetricsSync", () => {
       forbidden: 2,
       notFound: 0,
       failed: 0,
+      remaining: 0,
+      stoppedEarly: false,
     }));
 
     assert.equal(result.examined, 9);

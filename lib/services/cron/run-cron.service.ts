@@ -88,7 +88,15 @@ export async function runCron(): Promise<CronRunSummary> {
     // Buffer refreshes metrics once daily, so the batch is small by design —
     // re-reading sooner returns identical data and spends the shared 250/day
     // request budget that publishing also draws on.
-    actions.syncMetrics = await syncPostMetrics({ companyId: company.id, limit: 15 });
+    // Isolated: a Buffer outage must not fail an otherwise good run. The sync
+    // itself preserves each post's previous figures when a read fails.
+    try {
+      actions.syncMetrics = await syncPostMetrics({ companyId: company.id, limit: 15 });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "Unknown error.";
+      console.error(`[cron] Metrics sync failed for ${company.slug}: ${reason}`);
+      actions.syncMetrics = { failedWith: reason };
+    }
 
     await completeRun(run.id, actions);
     return {

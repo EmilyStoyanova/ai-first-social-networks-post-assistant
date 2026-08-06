@@ -13,15 +13,40 @@ posts were generated.
 The pipeline is split into three orchestrators that share the **same underlying step
 services** (no business logic duplicated):
 
-| Cron            | Route                             | Service              | Schedule (Hobby: 1×/day) |
-| --------------- | --------------------------------- | -------------------- | ------------------------ |
-| RSS ingestion   | `/api/v1/internal/cron/ingest`    | `runIngestionCron`   | 05:00 UTC (`0 5 * * *`)  |
-| Translation     | `/api/v1/internal/cron/translate` | `runTranslationCron` | 06:00 UTC (`0 6 * * *`)  |
-| Post generation | `/api/v1/internal/cron/generate`  | `runGenerationCron`  | 07:00 UTC (`0 7 * * *`)  |
+| Cron             | Route                             | Service              | Schedule (Hobby: 1×/day)      |
+| ---------------- | --------------------------------- | -------------------- | ----------------------------- |
+| RSS ingestion    | `/api/v1/internal/cron/ingest`    | `runIngestionCron`   | 05:00 UTC (`0 5 * * *`)       |
+| Translation      | `/api/v1/internal/cron/translate` | `runTranslationCron` | 06:00 UTC (`0 6 * * *`)       |
+| Post generation  | `/api/v1/internal/cron/generate`  | `runGenerationCron`  | 07:00 UTC (`0 7 * * *`)       |
+| Buffer analytics | `/api/v1/internal/cron/analytics` | `runAnalyticsCron`   | **not scheduled** — see below |
 
 The order matters: ingest fetches fresh articles, translate drains the queue those articles
 created, generate then draws from already-translated content. Each is an hour apart so a
 slow stage can overrun without colliding with the next.
+
+### Buffer analytics — a fourth job on the third schedule
+
+The engagement refresh is a **separate queue job** (`ANALYTICS_SYNC_JOB_TYPE` →
+`runAnalyticsCron`) but has **no `vercel.json` entry**: Hobby allows very few scheduled crons,
+so the generation cron tick enqueues both jobs via
+[`enqueueGenerationCycle`](../../lib/services/queue/enqueue-generation-cycle.service.ts).
+Consolidated scheduling, not merged execution — analytics keeps its own job type, dedupe key,
+retry policy, `CronRun` record, diagnostics and failure isolation, and never runs inline inside
+the generation job. Enqueue order is generation first, and the analytics enqueue is wrapped, so
+a queue failure there cannot cost the day its posts (`analytics: null` + `analyticsError` in
+the route's response).
+
+`/api/v1/internal/cron/analytics` remains for manual / internal triggering — same job, same
+dedupe key, so it cannot behave differently from the automatic path. Extra passes are cheap:
+posts already read today are filtered out, so an idle run makes zero Buffer requests.
+
+Coverage comes from fair batching rather than frequency: within a company the stalest posts go
+first (never-read ahead of everything else), across companies the stalest company goes first,
+and `collectedAt` is the cursor — so one run per day drains up to `PER_COMPANY_RUN_LIMIT` (100)
+posts per company, and a larger backlog rotates over successive days rather than starving.
+`DAILY_REQUEST_BUDGET` (200) caps a company's daily spend against Buffer's 250/day allowance,
+which publishing shares. Watch `remainingPosts` in the job diagnostics: a value that never
+reaches zero means the backlog has outgrown one daily pass.
 
 Routes:
 
@@ -117,8 +142,9 @@ Execution order:
 3. For each, until the soft time budget is hit:
    - **Claim (lock):** CAS `updateMany({ where:{ id, lastCronProcessedAt: prev },
 data:{ lastCronProcessedAt: now } })`. Loser → `skipped` (the locking signal).
-   - **Process (steps 3–8, unchanged):** `generateWeeklySchedule` → `autoApprovePosts` →
-     `publishScheduledPosts` → `retryFailedPosts` → `backfillEmbeddings` → `syncPostMetrics`.
+   - **Process (steps 3–7):** `generateWeeklySchedule` → `autoApprovePosts` →
+     `publishScheduledPosts` → `retryFailedPosts` → `backfillEmbeddings`. The metrics sync
+     that used to end this list is no longer inline — see “Buffer analytics” below.
      `shouldStop` is threaded into `processCompany`: it goes into `generateWeeklySchedule` (the
      LLM/image loop stops **between posts** at the deadline) and is checked between the later
      steps, so a company crossing the budget defers its remaining maintenance steps to the
@@ -161,8 +187,8 @@ Two more layers now enforce the deadline out-of-band ([lib/http/request-deadline
    the ~60s reserve (240s → 300s) for that persistence and the HTTP response.
 
 The same ambient context accumulates **per-phase timings** (`recordPhase`) — `weeklyGeneration`,
-`llm`, `image`, `approval`, `publishing`, `retry`, `backfill`, `analyticsSync` — surfaced in
-`timings` alongside `companySelection`, `databaseWrites`, `cleanup`, and `total`.
+`llm`, `image`, `approval`, `publishing`, `retry`, `backfill` — surfaced in `timings` alongside
+`companySelection`, `databaseWrites`, `cleanup`, and `total`.
 
 Preserved behavior:
 

@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
 import { verifyCronRequest } from "@/lib/security/cron-auth";
-import { enqueueJob } from "@/lib/services/queue/enqueue-job.service";
-import { POST_GENERATION_JOB_TYPE, POST_GENERATION_DEDUPE_KEY } from "@/lib/queue/job-types";
+import { enqueueGenerationCycle } from "@/lib/services/queue/enqueue-generation-cycle.service";
 
 // Cron work must never be cached or statically optimized.
 export const dynamic = "force-dynamic";
-// The route no longer runs generation inline — it only enqueues one job and returns.
-// A short cap is ample for a single INSERT; the background worker owns the run (which
-// keeps its own 240s soft time budget and out-of-band deadline, both unchanged).
+// The route no longer runs generation inline — it only enqueues jobs and returns.
+// A short cap is ample for two INSERTs; the background worker owns the runs (each
+// keeps its own soft time budget and out-of-band deadline, both unchanged).
 export const maxDuration = 60;
 
 async function handle(request: Request) {
@@ -30,20 +29,27 @@ async function handle(request: Request) {
     );
   }
 
-  // Enqueue a single post generation job for the worker to run. The stable dedupeKey
-  // means an overlapping cron tick returns { deduplicated: true } instead of
-  // creating a second concurrent run.
-  const result = await enqueueJob({
-    type: POST_GENERATION_JOB_TYPE,
-    dedupeKey: POST_GENERATION_DEDUPE_KEY,
-  });
+  // Enqueues the day's generation job AND the Buffer analytics job — two separate
+  // queue jobs, one trigger. Vercel Hobby allows very few scheduled crons, so
+  // analytics rides on this tick rather than owning a schedule entry; it is still
+  // never run inline inside generation. Each job's stable dedupeKey means an
+  // overlapping tick returns { deduplicated: true } instead of a second run.
+  const cycle = await enqueueGenerationCycle();
 
   return NextResponse.json({
     data: {
       kind: "generation",
-      enqueued: result.enqueued,
-      deduplicated: result.deduplicated,
-      jobId: result.jobId,
+      enqueued: cycle.generation.enqueued,
+      deduplicated: cycle.generation.deduplicated,
+      jobId: cycle.generation.jobId,
+      // Reported alongside, never in place of: a failed analytics enqueue leaves
+      // generation queued and shows up here as `analytics: null` with a reason.
+      analytics: cycle.analytics && {
+        enqueued: cycle.analytics.enqueued,
+        deduplicated: cycle.analytics.deduplicated,
+        jobId: cycle.analytics.jobId,
+      },
+      ...(cycle.analyticsError ? { analyticsError: cycle.analyticsError } : {}),
     },
   });
 }

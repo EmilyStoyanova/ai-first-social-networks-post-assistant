@@ -10,7 +10,7 @@ import { Card } from "@/components/ui/Card";
 import { formatDate } from "@/lib/i18n/format-date";
 import type { AnalyticsKeyStatus } from "@/lib/services/analytics/manage-analytics-key.service";
 
-/** The sync summary both the save and the sync endpoints return. */
+/** The sync summary the save endpoint returns for its automatic first sync. */
 interface SyncSummary {
   skipped: boolean;
   reason?: string;
@@ -130,44 +130,12 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage, canReadStatus
     }
   }
 
-  const [syncing, setSyncing] = useState(false);
-
   /**
-   * Manual retry / refresh. No longer required for initial setup — saving a key
-   * already runs this same forced sync server-side — but it stays for re-reading
-   * after Buffer's daily ingestion has caught up.
-   */
-  async function handleSync() {
-    setSyncing(true);
-    setError("");
-    setSuccess("");
-    try {
-      const res = await fetch(`/api/v1/companies/${slug}/analytics/sync`, { method: "POST" });
-      const json = (await res.json()) as {
-        data?: SyncSummary;
-        error?: { message?: string };
-      };
-
-      if (!res.ok || !json.data) {
-        throw new Error(json.error?.message ?? tCommon("somethingWentWrong"));
-      }
-
-      const outcome = describeSync(json.data);
-      if (outcome.kind === "warning") setError(outcome.message);
-      else {
-        setSuccess(outcome.message);
-        if (outcome.refresh) router.refresh();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  /**
-   * Single interpretation of a sync summary, shared by the automatic first sync
-   * and the manual button so the two can never drift apart.
+   * Interpretation of the automatic first sync that follows a save.
+   *
+   * There is no manual refresh: after this one setup sync, metrics are re-read by
+   * the daily cron, so every message here describes a one-off setup outcome and
+   * never asks the user to press anything.
    *
    * A null summary means the sync threw server-side; the key is still saved.
    */
@@ -249,6 +217,9 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage, canReadStatus
                     <dd className="text-fg">{formatDate(String(status.addedAt))}</dd>
                   </div>
                 )}
+                {/* "Last checked" — stamped by the daily sync every time Buffer
+                    answers, so it is also the proof that the automatic refresh is
+                    running. Left untouched by a failed refresh. */}
                 <div className="flex items-center gap-2 text-sm">
                   <dt className="text-fg-muted">{t("lastVerified")}</dt>
                   <dd className="text-fg">
@@ -256,6 +227,12 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage, canReadStatus
                   </dd>
                 </div>
               </dl>
+            )}
+
+            {/* There is no refresh button by design. Saying so pre-empts the
+                search for one, and sets the expectation of a daily cadence. */}
+            {status.configured && !editing && (
+              <p className="text-fg-muted mb-4 text-xs">{t("autoRefreshNote")}</p>
             )}
 
             {showForm && (
@@ -312,9 +289,6 @@ export function AnalyticsKeyCard({ slug, initialStatus, canManage, canReadStatus
 
                 {status.configured && !editing && !confirmRemove && (
                   <>
-                    <Button variant="primary" loading={syncing} onClick={handleSync}>
-                      {syncing ? t("syncing") : t("syncNow")}
-                    </Button>
                     <Button variant="secondary" onClick={() => setEditing(true)}>
                       {t("replaceKey")}
                     </Button>

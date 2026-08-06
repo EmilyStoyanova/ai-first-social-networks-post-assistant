@@ -76,7 +76,15 @@ Migration: `add_analytics_tables`
 
 ## Sync Architecture
 
-### Cron Step 8 (last, bounded)
+### Cron Step 8 (last, bounded) — SUPERSEDED
+
+> **As built, this is no longer a step of the generation cron.** The sync is its own queue job
+> (`ANALYTICS_SYNC_JOB_TYPE` → `runAnalyticsCron`), enqueued by the generation cron tick and
+> also triggerable at `/api/v1/internal/cron/analytics`. It is never executed inline inside the
+> generation run. Batch sizes are `PER_COMPANY_RUN_LIMIT` (100/company/run) under a
+> `DAILY_REQUEST_BUDGET` (200/company/day), not 15, and selection is stalest-first rather than
+> the ordering sketched below. There is also no manual "refresh" button — the daily job is the
+> only refresh path. See [v2-9-split-cron.md](./v2-9-split-cron.md#buffer-analytics--a-fourth-job-on-the-third-schedule).
 
 - Runs after all other cron steps; skippable on 60s timeout
 - Processes up to `METRIC_SYNC_BATCH_SIZE` posts per run (default: 15, product decision required)

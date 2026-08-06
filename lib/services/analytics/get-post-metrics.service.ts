@@ -57,6 +57,33 @@ export function disabledMetrics(): PostMetricsView {
   return { state: "disabled", ...EMPTY };
 }
 
+/** The row fields the state decision looks at. */
+interface StateInput {
+  syncStatus: string;
+  /** True when the row still holds figures from an earlier successful read. */
+  hasFigures: boolean;
+}
+
+/**
+ * Decides what a row means to the card.
+ *
+ * Stored figures win over the latest attempt's status. A failed refresh leaves
+ * the previous numbers in place (see sync-post-metrics.service), and they are
+ * still the truth as of the last successful read — hiding them behind "waiting
+ * for the first sync" would turn one transient Buffer error into a post that
+ * looks like it never had any engagement, with no manual refresh to recover it.
+ *
+ * An errored read with nothing stored is shown as pending on purpose: it is
+ * transient and retried by the next daily run, so "analytics failed" would be
+ * noise to an owner who can do nothing about it.
+ */
+export function metricsStateFor({ syncStatus, hasFigures }: StateInput): PostMetricsState {
+  if (syncStatus === "ok" || hasFigures) return "ready";
+  if (syncStatus === "no_data") return "no_data";
+  if (syncStatus === "forbidden") return "forbidden";
+  return "pending";
+}
+
 /**
  * Batch-loads metrics for a set of posts, keyed by post id.
  *
@@ -92,19 +119,22 @@ export async function getPostMetricsForPosts(
       continue;
     }
 
-    // An errored read is shown as pending on purpose: it is transient and will be
-    // retried next run, so telling an owner "analytics failed" would be noise.
-    const state: PostMetricsState =
-      row.syncStatus === "ok"
-        ? "ready"
-        : row.syncStatus === "no_data"
-          ? "no_data"
-          : row.syncStatus === "forbidden"
-            ? "forbidden"
-            : "pending";
+    // Figures left over from an earlier successful read still count as ready —
+    // a failed refresh preserves them rather than clearing the row.
+    const hasFigures =
+      row.reactions !== null ||
+      row.comments !== null ||
+      row.shares !== null ||
+      row.impressions !== null ||
+      row.clicks !== null ||
+      row.reach !== null ||
+      row.views !== null ||
+      row.saves !== null ||
+      row.follows !== null ||
+      row.engagementRate !== null;
 
     out.set(id, {
-      state,
+      state: metricsStateFor({ syncStatus: row.syncStatus, hasFigures }),
       channelService: row.channelService,
       reactions: row.reactions,
       comments: row.comments,

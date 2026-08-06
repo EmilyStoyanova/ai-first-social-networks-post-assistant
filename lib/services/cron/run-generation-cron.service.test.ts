@@ -92,7 +92,6 @@ describe("runGenerationCron — bounded deterministic batching", () => {
       "publishingMs",
       "retryMs",
       "backfillMs",
-      "analyticsSyncMs",
     ] as const) {
       assert.equal(typeof s.timings[key], "number");
     }

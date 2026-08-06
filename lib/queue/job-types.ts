@@ -43,3 +43,18 @@ export const POST_GENERATION_JOB_TYPE = "post-generation";
  * on `Post.primaryFeedItemId`) live inside `runGenerationCron` and are unchanged.
  */
 export const POST_GENERATION_DEDUPE_KEY = "cron:post-generation";
+
+/** Buffer analytics fan-out: refresh engagement metrics across all companies. */
+export const ANALYTICS_SYNC_JOB_TYPE = "analytics-sync";
+
+/**
+ * Stable dedupe key for the recurring analytics job. Same guarantee as the others:
+ * the partial unique index `jobs_dedupe_active_key` rejects a second enqueue while
+ * one analytics job is still queued or running.
+ *
+ * It matters more here than elsewhere: this job is enqueued by the generation cron
+ * tick AND can be triggered manually from /api/v1/internal/cron/analytics, so two
+ * runs really can be asked for at once — and they would read the same stalest
+ * posts twice, spending Buffer's daily allowance on duplicate requests.
+ */
+export const ANALYTICS_SYNC_DEDUPE_KEY = "cron:analytics-sync";

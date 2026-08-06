@@ -2,11 +2,9 @@ import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { GET, POST } from "./route";
 
-// These exercise ONLY the auth gate, which returns before any enqueue (and thus
-// before any DB access). The two-job enqueue — generation plus the analytics job
-// that no longer has its own cron entry — is covered by
-// lib/services/queue/enqueue-generation-cycle.service.test.ts, and dedupe by the
-// enqueue-job service unit tests.
+// These exercise ONLY the auth gate, which returns before enqueueJob (and thus
+// before any DB access). The enqueue + dedupe behaviour is covered by the
+// enqueue-job service unit tests, and the run itself by run-analytics-cron.
 
 const ORIGINAL = process.env.CRON_SECRET;
 
@@ -16,10 +14,10 @@ afterEach(() => {
 });
 
 function req(headers: Record<string, string> = {}): Request {
-  return new Request("https://app.test/api/v1/internal/cron/generate", { headers });
+  return new Request("https://app.test/api/v1/internal/cron/analytics", { headers });
 }
 
-describe("cron/generate route — authentication", () => {
+describe("cron/analytics route — authentication", () => {
   it("returns 500 CONFIGURATION_ERROR when CRON_SECRET is not set", async () => {
     delete process.env.CRON_SECRET;
     const res = await GET(req());

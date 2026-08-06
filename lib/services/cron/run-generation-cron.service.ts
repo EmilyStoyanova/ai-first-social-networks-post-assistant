@@ -6,7 +6,6 @@ import { autoApprovePosts } from "./auto-approve-posts.service";
 import { publishScheduledPosts } from "./publish-scheduled-posts.service";
 import { retryFailedPosts } from "./retry-failed-posts.service";
 import { backfillEmbeddings } from "./backfill-embeddings.service";
-import { syncPostMetrics } from "@/lib/services/analytics/sync-post-metrics.service";
 import {
   createRequestDeadline,
   runInRequestDeadline,
@@ -85,8 +84,6 @@ export interface GenerationTimings {
   retryMs: number;
   /** backfillEmbeddings (embedding worker). */
   backfillMs: number;
-  /** syncPostMetrics (Buffer analytics). */
-  analyticsSyncMs: number;
 }
 
 export interface GenerationCronSummary {
@@ -127,7 +124,7 @@ export interface GenerationCronDeps {
   selectCompanies?: (limit: number) => Promise<GenerationCronCompany[]>;
   /** Atomic claim: CAS on lastCronProcessedAt. Returns true iff this run won the company. */
   claimCompany?: (id: string, previous: Date | null) => Promise<boolean>;
-  /** Runs steps 3–8 for one company and returns their per-step diagnostics. */
+  /** Runs steps 3–7 for one company and returns their per-step diagnostics. */
   processCompany?: (
     company: GenerationCronCompany,
     options: { shouldStop: () => boolean }
@@ -205,9 +202,13 @@ async function defaultCountRemaining(processedBefore: Date): Promise<number> {
 }
 
 /**
- * Steps 3–8, identical to the legacy runCron: schedule → auto-approve → publish → retry
- * → backfill embeddings → sync metrics. Kept as one seam so the orchestrator's batching /
- * fairness / locking can be unit-tested without a real DB or LLM.
+ * Steps 3–7: schedule → auto-approve → publish → retry → backfill embeddings. Kept as one
+ * seam so the orchestrator's batching / fairness / locking can be unit-tested without a
+ * real DB or LLM.
+ *
+ * The legacy runCron ended with a metrics sync; that step now lives in its own queue job
+ * (runAnalyticsCron), enqueued by the same cron tick — see the note at the end of this
+ * function.
  *
  * `shouldStop` is threaded into generateWeeklySchedule so its LLM/image loop stops between
  * posts at the deadline, and checked between the subsequent steps so a company crossing the
@@ -237,10 +238,12 @@ async function defaultProcessCompany(
   actions.backfillEmbeddings = await recordPhase("backfill", () =>
     backfillEmbeddings({ companyId: company.id, limit: 25 })
   );
-  if (shouldStop()) return actions;
-  actions.syncMetrics = await recordPhase("analyticsSync", () =>
-    syncPostMetrics({ companyId: company.id, limit: 15 })
-  );
+  // Analytics deliberately does NOT run here. It is its own queue job
+  // (ANALYTICS_SYNC_JOB_TYPE → runAnalyticsCron), enqueued by the same cron tick
+  // that enqueues this one. Running it inline would put a Buffer outage on
+  // generation's retry policy, spend generation's time budget on metric reads, and
+  // — because both jobs can run concurrently — double-read the same posts against
+  // a per-company daily request budget that only the analytics cron accounts for.
   return actions;
 }
 
@@ -255,7 +258,6 @@ function mergePhaseTimings(timings: GenerationTimings, phases: Record<string, nu
   timings.publishingMs = phases.publishing ?? 0;
   timings.retryMs = phases.retry ?? 0;
   timings.backfillMs = phases.backfill ?? 0;
-  timings.analyticsSyncMs = phases.analyticsSync ?? 0;
 }
 
 function toActions(summary: GenerationCronSummary): Record<string, unknown> {
@@ -276,10 +278,10 @@ function toActions(summary: GenerationCronSummary): Record<string, unknown> {
 
 /**
  * Post generation cron (v2-9, Hobby-safe). Generates and fills weekly schedules from
- * already-ingested, already-translated content, then auto-approves, publishes, retries,
- * backfills embeddings and syncs metrics — the exact steps 3–8 of the legacy runCron,
- * unchanged. Companies are processed oldest-first in a bounded batch, each failure-isolated,
- * each claimed with a compare-and-swap so concurrent runs never double-generate.
+ * already-ingested, already-translated content, then auto-approves, publishes, retries and
+ * backfills embeddings. Companies are processed oldest-first in a bounded batch, each
+ * failure-isolated, each claimed with a compare-and-swap so concurrent runs never
+ * double-generate. The Buffer metrics refresh is a sibling job, not a step here.
  *
  * Hobby-safety comes from a wall-clock deadline enforced at FOUR granularities (a soft,
  * cooperative deadline alone cannot interrupt an in-flight network call):
@@ -340,7 +342,6 @@ export async function runGenerationCron(
     publishingMs: 0,
     retryMs: 0,
     backfillMs: 0,
-    analyticsSyncMs: 0,
   };
   async function timed<T>(bucket: keyof GenerationTimings, fn: () => Promise<T>): Promise<T> {
     const t = performance.now();

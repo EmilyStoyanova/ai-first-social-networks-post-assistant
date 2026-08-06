@@ -42,7 +42,6 @@ function summary(overrides: Partial<GenerationCronSummary> = {}): GenerationCron
       publishingMs: 0,
       retryMs: 0,
       backfillMs: 0,
-      analyticsSyncMs: 0,
     },
     companies: [],
     companyFailures: [],
@@ -127,7 +126,11 @@ describe("postGenerationHandler", () => {
     // failedCompanies > 0 but the run completed — must not trigger a retry. Those
     // companies resume on the next cron tick, exactly as they did inline.
     const handler = createPostGenerationHandler(async () =>
-      summary({ status: "completed", failed: 1, companyFailures: [{ slug: "acme", message: "boom" }] })
+      summary({
+        status: "completed",
+        failed: 1,
+        companyFailures: [{ slug: "acme", message: "boom" }],
+      })
     );
     await assert.doesNotReject(() => handler({ job: job(), logger: silentLogger }));
   });
