@@ -68,6 +68,13 @@ export interface FeedItemContext {
   content: string | null;
   url: string;
   publishedAt: Date | null;
+  /**
+   * Name of the content source this item came from, frozen into the post's
+   * origin snapshot at generation time. Optional so contexts assembled before
+   * this field existed (and test fixtures) stay valid — a missing name yields a
+   * source post with no name rather than no origin at all.
+   */
+  sourceName?: string;
   /** ContentSource.config.includeSourceLink of the item's source; undefined = inherit. */
   sourceLinkPreference?: boolean;
   /**

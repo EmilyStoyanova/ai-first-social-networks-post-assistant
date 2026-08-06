@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db/client";
+import { resolvePostOrigin } from "@/lib/posts/post-origin";
 import type { PostItem } from "./list-posts.service";
 
 /**
@@ -182,6 +183,14 @@ export async function getOverviewData(
         scheduledFor: true,
         createdAt: true,
         mediaAsset: { select: { url: true } },
+        // Frozen provenance first; the join is the legacy fallback.
+        originType: true,
+        originSourceName: true,
+        originSourceTitle: true,
+        originSourceUrl: true,
+        primaryFeedItem: {
+          select: { title: true, url: true, source: { select: { name: true } } },
+        },
       },
     }),
     prisma.postMetric.findMany({
@@ -252,6 +261,7 @@ export async function getOverviewData(
       approvedById: r.approvedById,
       publishedPostUrl: r.publishedPostUrl,
       mediaUrl: r.mediaAsset?.url ?? null,
+      origin: resolvePostOrigin(r, r.primaryFeedItem),
       scheduledFor: r.scheduledFor?.toISOString() ?? null,
       createdAt: r.createdAt.toISOString(),
     })),

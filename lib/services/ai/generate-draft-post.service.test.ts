@@ -1152,6 +1152,102 @@ describe("generatePostFromContext — automatic image generation", () => {
   });
 });
 
+// ─── Post origin ─────────────────────────────────────────────────────────────
+
+describe("generatePostFromContext — post origin", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  /** A context whose single article carries a source name. */
+  function articleCtx() {
+    return makeContext({
+      feedItems: [
+        {
+          id: "feed-1",
+          title: "Apple ships M5",
+          content: "The new chip lands in October.",
+          url: "https://example.com/m5",
+          publishedAt: null,
+          sourceName: "TechCrunch",
+        },
+      ],
+      hasArticleSources: true,
+    });
+  }
+
+  it("freezes the source name and article onto the post row", async () => {
+    const { deps, created } = makeDeps();
+
+    const result = await generatePostFromContext(articleCtx(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    const data = created();
+    assert.equal(data?.originType, "content_source");
+    assert.equal(data?.originSourceName, "TechCrunch");
+    assert.equal(data?.originSourceTitle, "Apple ships M5");
+    assert.equal(data?.originSourceUrl, "https://example.com/m5");
+  });
+
+  it("returns the frozen origin on the response, with no read-back", async () => {
+    const { deps } = makeDeps();
+
+    const result = await generatePostFromContext(articleCtx(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(result.post.origin.kind, "source");
+    assert.equal(result.post.origin.sourceName, "TechCrunch");
+    assert.equal(result.post.origin.articleTitle, "Apple ships M5");
+    assert.equal(result.post.origin.articleUrl, "https://example.com/m5");
+  });
+
+  it("writes brand_setup with null source fields for a mission post", async () => {
+    const { deps, created } = makeDeps();
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    const data = created();
+    assert.equal(data?.originType, "brand_setup");
+    assert.equal(data?.originSourceName, null);
+    assert.equal(data?.originSourceTitle, null);
+    assert.equal(data?.originSourceUrl, null);
+    assert.equal(result.post.origin.kind, "brand_setup");
+  });
+
+  it("still records the article when the context carries no source name", async () => {
+    const { deps, created } = makeDeps();
+    const ctx = makeContext({
+      feedItems: [
+        {
+          id: "feed-1",
+          title: "Untitled feed",
+          content: "Body.",
+          url: "https://example.com/x",
+          publishedAt: null,
+        },
+      ],
+      hasArticleSources: true,
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success);
+    // A source post with an unknown name beats losing the origin entirely.
+    assert.equal(created()?.originType, "content_source");
+    assert.equal(created()?.originSourceName, null);
+    assert.equal(result.post.origin.kind, "source");
+  });
+});
+
 // ─── Source binding: text, URL and reservation are one article ───────────────
 
 describe("generatePostFromContext — the post links to the article it was written from", () => {

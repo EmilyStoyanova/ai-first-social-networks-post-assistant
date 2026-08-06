@@ -49,6 +49,14 @@ enum ScheduleStatus {
   completed
 }
 
+// Where a post was written from, captured at generation time. Lowercase to match
+// every other enum in this schema; the API/UI uppercase for display exactly as
+// they do for PostStatus and SocialChannel.
+enum PostOriginType {
+  brand_setup
+  content_source
+}
+
 enum PostStatus {
   draft
   pending_approval
@@ -434,6 +442,24 @@ model Post {
   // leave that null, so without this column the scheduler could not tell which
   // quota a generated post consumed.
   contentSourceId  String?       @map("content_source_id")
+  // ── Origin snapshot ────────────────────────────────────────────────────────
+  // What this post was ACTUALLY written from, copied in at generation time and
+  // never updated afterwards. The relations above cannot answer this durably:
+  // deleting a ContentSource cascades to its FeedItems, which nulls
+  // primaryFeedItemId and SetNulls contentSourceId, silently rewriting the
+  // history of every post drawn from it — and renaming a source would
+  // retroactively relabel old posts. A deliberate denormalization so a published
+  // post's provenance is immutable.
+  //
+  // NULL originType = a post generated before this column existed and not
+  // reached by the migration's backfill. Those fall back to the live relations
+  // (see lib/posts/post-origin.ts) and are the only posts whose displayed origin
+  // can still change.
+  originType        PostOriginType? @map("origin_type")
+  // All three are NULL for a brand_setup post — there is no source to name.
+  originSourceName  String?       @map("origin_source_name")
+  originSourceTitle String?       @map("origin_source_title")
+  originSourceUrl   String?       @map("origin_source_url")
   channel          SocialChannel
   content          String
   language         String        @default("en")

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db/client";
+import { resolvePostOrigin, type PostOriginView } from "@/lib/posts/post-origin";
 
 export interface PostItem {
   id: string;
@@ -16,6 +17,8 @@ export interface PostItem {
   publishedPostUrl: string | null;
   /** When the post is due to go out. Null for drafts that were never scheduled. */
   scheduledFor: string | null;
+  /** Where the post was written from — a content source, or Brand Setup. */
+  origin: PostOriginView;
   createdAt: string;
 }
 
@@ -38,6 +41,13 @@ const SELECT = {
   scheduledFor: true,
   createdAt: true,
   mediaAsset: { select: { url: true } },
+  // Frozen provenance — authoritative, and immune to a later source rename or
+  // delete. The join below is the fallback for posts generated before it.
+  originType: true,
+  originSourceName: true,
+  originSourceTitle: true,
+  originSourceUrl: true,
+  primaryFeedItem: { select: { title: true, url: true, source: { select: { name: true } } } },
 } as const;
 
 function toItem(r: {
@@ -54,6 +64,11 @@ function toItem(r: {
   approvedById: string | null;
   publishedPostUrl: string | null;
   mediaAsset: { url: string } | null;
+  originType: "brand_setup" | "content_source" | null;
+  originSourceName: string | null;
+  originSourceTitle: string | null;
+  originSourceUrl: string | null;
+  primaryFeedItem: { title: string | null; url: string; source: { name: string } } | null;
   scheduledFor: Date | null;
   createdAt: Date;
 }): PostItem {
@@ -71,6 +86,7 @@ function toItem(r: {
     approvedById: r.approvedById,
     publishedPostUrl: r.publishedPostUrl,
     mediaUrl: r.mediaAsset?.url ?? null,
+    origin: resolvePostOrigin(r, r.primaryFeedItem),
     scheduledFor: r.scheduledFor?.toISOString() ?? null,
     createdAt: r.createdAt.toISOString(),
   };

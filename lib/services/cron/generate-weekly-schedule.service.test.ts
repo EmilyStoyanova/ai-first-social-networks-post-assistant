@@ -9,6 +9,7 @@ import {
 import type { GenerationContext } from "@/lib/ai/types";
 import type { GenerateDraftPostResult } from "@/lib/services/ai/generate-draft-post.service";
 import type { SourceScope } from "@/lib/services/ai/build-generation-context.service";
+import { brandSetupOrigin } from "@/lib/posts/post-origin";
 
 // ─── In-memory doubles ────────────────────────────────────────────────────────
 //
@@ -188,6 +189,7 @@ class Harness {
         llmProvider: "mock",
         llmModel: "mock",
         mediaUrl: null,
+        origin: brandSetupOrigin(),
         createdAt: new Date(),
       },
       warnings: {

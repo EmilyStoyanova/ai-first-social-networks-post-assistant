@@ -519,9 +519,22 @@
   },
   "postActivity": {
     "title": "Post Activity",
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "origin": {
+      "label": "Generated from",
+      "brandSetup": "Brand Setup",
+      "brandSetupHint": "Written from the company's own mission and brand guidelines — no source article behind it.",
+      "sourceUnknown": "Content source",
+      "article": "Article",
+      "articleUnknown": "Article no longer available"
+    }
   },
   "posts": {
+    "origin": {
+      "brandSetup": "Brand Setup",
+      "source": "Content source",
+      "tooltip": "Where this post was generated from"
+    },
     "statuses": {
       "DRAFT": "Draft",
       "PENDING_APPROVAL": "Pending Approval",

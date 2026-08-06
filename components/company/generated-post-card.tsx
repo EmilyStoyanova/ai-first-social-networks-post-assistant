@@ -108,6 +108,14 @@ export function GeneratedPostCard({
     variant: "neutral" as BadgeVariant,
   };
 
+  // Origin badge — the feed name for a post written from an article, otherwise
+  // Brand Setup. Text-only, matching the channel and status badges beside it.
+  // The article headline rides along as a tooltip; the full detail (source,
+  // article, link) lives in the activity modal.
+  const origin = post.origin;
+  const originLabel =
+    origin.kind === "source" ? (origin.sourceName ?? t("origin.source")) : t("origin.brandSetup");
+
   const actions = resolvePostActions({ role, status: localStatus, bufferConnected });
 
   const isDraft = localStatus === "DRAFT";
@@ -306,6 +314,15 @@ export function GeneratedPostCard({
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant={channelMeta.variant}>{channelMeta.label}</Badge>
           <StatusBadge status={localStatus.toLowerCase() as PostStatusValue} />
+          <span
+            title={
+              origin.kind === "source" && origin.articleTitle
+                ? origin.articleTitle
+                : t("origin.tooltip")
+            }
+          >
+            <Badge variant={origin.kind === "source" ? "accent" : "readonly"}>{originLabel}</Badge>
+          </span>
         </div>
         <span className="text-fg-faint text-xs">{formatDateTime(post.createdAt)}</span>
       </div>
@@ -601,6 +618,9 @@ export function GeneratedPostCard({
       {activityOpen && (
         <PostActivityModal
           postId={post.id}
+          // Passed down rather than refetched: the card already holds it, and a
+          // second source of truth could disagree with the badge above.
+          origin={origin}
           open={activityOpen}
           onClose={() => setActivityOpen(false)}
         />

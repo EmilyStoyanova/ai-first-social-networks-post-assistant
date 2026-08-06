@@ -202,7 +202,9 @@ async function loadContext(
             translatedTitle: true,
             translatedContent: true,
             translationStatus: true,
-            source: { select: { type: true, config: true } },
+            // `name` rides along on a join that already exists — it is frozen
+            // into the post's origin snapshot at generation time.
+            source: { select: { name: true, type: true, config: true } },
           },
         }),
     // Does the company have an ARTICLE source (rss/product_page) configured at
@@ -276,6 +278,7 @@ async function loadContext(
         content: resolved.content,
         url: f.url,
         publishedAt: f.publishedAt,
+        sourceName: f.source.name,
         sourceLinkPreference: extractSourceLinkPreference(f.source.config),
         // rss/product_page → single-use article; prompt/calendar_event → evergreen.
         consumable: isConsumableSourceType(f.source.type),

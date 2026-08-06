@@ -45,6 +45,11 @@ import {
   type SemanticCalibrationInput,
 } from "./semantic-calibration.service";
 import { recordPhase } from "@/lib/http/request-deadline";
+import {
+  buildOriginSnapshot,
+  resolvePostOrigin,
+  type PostOriginView,
+} from "@/lib/posts/post-origin";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -76,6 +81,9 @@ export interface GeneratedPostDTO {
    * render the new post straight from this response with no refetch.
    */
   mediaUrl: string | null;
+  /** Where the post was written from — mirrors PostItem.origin so the client
+   *  can render the new card from this response with no refetch. */
+  origin: PostOriginView;
   createdAt: Date;
 }
 
@@ -739,6 +747,11 @@ export async function generatePostFromContext(
   // ── Save post ─────────────────────────────────────────────────────────────
   const feedItemIds = context.feedItems.map((f) => f.id);
 
+  // Frozen provenance. Taken from the article the post was actually built on —
+  // `primary.item`, not the form's dropdown value and not the FK, which a later
+  // source deletion would null out from under us.
+  const originSnapshot = buildOriginSnapshot(primary.item);
+
   const post = await db.post.create({
     data: {
       companyId,
@@ -753,6 +766,7 @@ export async function generatePostFromContext(
       // outside the mix path entirely; the scheduler only counts posts within
       // the current schedule, so a legacy null can never be miscounted.
       contentSourceId: options.contentSourceId ?? null,
+      ...originSnapshot,
       status: resolvedStatus,
       approvedAt,
       content: finalContent,
@@ -958,6 +972,9 @@ export async function generatePostFromContext(
       llmProvider: post.llmProvider,
       llmModel: post.llmModel,
       mediaUrl,
+      // Straight from what was just written — no read-back needed, and the
+      // client renders the new card from this response with no refetch.
+      origin: resolvePostOrigin(originSnapshot, null),
       createdAt: post.createdAt,
     },
     warnings,
