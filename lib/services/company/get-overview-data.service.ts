@@ -1,5 +1,10 @@
 import { prisma } from "@/lib/db/client";
 import { resolvePostOrigin } from "@/lib/posts/post-origin";
+import {
+  eligiblePerformanceChannels,
+  normalizeChannel,
+  resolvePerformanceChannel,
+} from "@/lib/analytics/performance-channels";
 import type { PostItem } from "./list-posts.service";
 
 /**
@@ -61,8 +66,19 @@ export interface OverviewData {
   kpis: OverviewKpis;
   upcoming: PostItem[];
   performance: ChannelPerformance | null;
-  /** Channels with metrics, so the UI can offer a per-channel switch. */
+  /**
+   * Channels the per-channel switch may offer: Buffer-connected *and* having
+   * published at least once. See lib/analytics/performance-channels.ts for why
+   * the list is not derived from the metrics table.
+   */
   availableChannels: string[];
+  /**
+   * Whether any metrics exist at all. Separate from `availableChannels`, which
+   * can be non-empty before the first sync has run — a caller inferring "the
+   * analytics key works" from the channel list would otherwise be wrong for the
+   * whole first day.
+   */
+  hasMetrics: boolean;
   /** Unread, still-enabled feed items per source id. Absent means zero. */
   newItemsBySource: Record<string, number>;
 }
@@ -131,6 +147,7 @@ export async function getOverviewData(
     channels,
     sources,
     upcomingRows,
+    publishedChannelRows,
     metricRows,
   ] = await Promise.all([
     prisma.post.count({ where: { companyId, createdAt: { gte: monthStart } } }),
@@ -152,7 +169,12 @@ export async function getOverviewData(
         publishedAt: { gte: prevMonthStart, lt: monthStart },
       },
     }),
-    prisma.channelConfig.findMany({ where: { companyId }, select: { enabled: true } }),
+    // Also the source of the performance switcher's channel list, so the KPI
+    // tile and the switcher can never disagree about what is configured.
+    prisma.channelConfig.findMany({
+      where: { companyId },
+      select: { enabled: true, isActive: true, channel: true, bufferProfileId: true },
+    }),
     prisma.contentSource.findMany({
       where: { companyId, type: "rss" as never },
       select: { id: true, lastFetchedAt: true },
@@ -194,6 +216,13 @@ export async function getOverviewData(
         },
       },
     }),
+    // Which channels have ever reached Buffer. Grouped rather than counted per
+    // channel so one query answers for all four.
+    prisma.post.groupBy({
+      by: ["channel"],
+      where: { companyId, status: { in: PUBLISHED_STATUSES as never } },
+      _count: { _all: true },
+    }),
     prisma.postMetric.findMany({
       where: { companyId },
       select: {
@@ -225,16 +254,21 @@ export async function getOverviewData(
 
   const byChannel = new Map<string, typeof metricRows>();
   for (const row of metricRows) {
-    const key = row.channelService?.toUpperCase();
+    const key = row.channelService ? normalizeChannel(row.channelService) : null;
     if (!key) continue; // Buffer did not tell us the network; not attributable.
     byChannel.set(key, [...(byChannel.get(key) ?? []), row]);
   }
 
-  const availableChannels = [...byChannel.keys()].sort();
-  const channel =
-    selectedChannel && byChannel.has(selectedChannel.toUpperCase())
-      ? selectedChannel.toUpperCase()
-      : availableChannels[0];
+  const availableChannels = eligiblePerformanceChannels({
+    bufferConnected: channels
+      // A Buffer profile is what makes metrics obtainable. `enabled` is not
+      // required: it governs future automated posting, and pausing a channel
+      // must not hide the performance of what it already published.
+      .filter((c) => c.isActive && c.bufferProfileId)
+      .map((c) => c.channel),
+    withPublishedPosts: publishedChannelRows.map((r) => r.channel),
+  });
+  const channel = resolvePerformanceChannel(availableChannels, selectedChannel);
 
   return {
     kpis: {
@@ -266,8 +300,12 @@ export async function getOverviewData(
       scheduledFor: r.scheduledFor?.toISOString() ?? null,
       createdAt: r.createdAt.toISOString(),
     })),
-    performance: channel ? sumChannel(channel, byChannel.get(channel)!) : null,
+    // An eligible channel with no metric rows yet sums to zero posts and all
+    // nulls, which the panel renders as "no metrics collected yet" — the honest
+    // answer while the first sync is still pending.
+    performance: channel ? sumChannel(channel, byChannel.get(channel) ?? []) : null,
     availableChannels,
+    hasMetrics: byChannel.size > 0,
     newItemsBySource: Object.fromEntries(newItemRows.map((r) => [r.sourceId, r._count._all])),
   };
 }

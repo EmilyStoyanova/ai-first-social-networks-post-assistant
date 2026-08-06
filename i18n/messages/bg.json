@@ -275,6 +275,7 @@
       "notConfigured": "Анализите не са свързани.",
       "notConfiguredOwnerHint": "Добави Buffer ключ в Настройки → Buffer, за да събираш статистика.",
       "noData": "Още няма събрана статистика.",
+      "channelSelector": "Показан канал",
       "scopeNote": "Общо за {channel} от {count, plural, one {# публикация} other {# публикации}}. Данните на различните канали не са сравними и затова не се сумират заедно.",
       "metrics": {
         "impressions": "Показвания",

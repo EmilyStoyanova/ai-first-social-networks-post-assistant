@@ -1,8 +1,9 @@
 import { getTranslations } from "next-intl/server";
 import { BarChart3 } from "lucide-react";
 import type { ChannelPerformance } from "@/lib/services/company/get-overview-data.service";
+import { channelLabel } from "@/lib/analytics/performance-channels";
 import { OverviewPanel } from "./overview-panel";
-import { ChannelMonogram } from "./channel-monogram";
+import { ChannelPerformanceSelect } from "./channel-performance-select";
 
 interface Props {
   slug: string;
@@ -11,13 +12,6 @@ interface Props {
   analyticsConfigured: boolean;
   canManageKey: boolean;
 }
-
-const CHANNEL_LABELS: Record<string, string> = {
-  FACEBOOK: "Facebook",
-  LINKEDIN: "LinkedIn",
-  INSTAGRAM: "Instagram",
-  TIKTOK: "TikTok",
-};
 
 function compact(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
@@ -68,11 +62,10 @@ export async function OverviewPerformance({
       icon={BarChart3}
       title={t("title")}
       action={
-        performance && availableChannels.length > 0 ? (
-          <span className="bg-surface-subtle text-fg-muted rounded-control inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium">
-            <ChannelMonogram channel={performance.channel} className="h-5 w-5 text-[9px]" />
-            {CHANNEL_LABELS[performance.channel] ?? performance.channel}
-          </span>
+        // Hidden while analytics are unconnected: switching channels there
+        // would only move between identical "not connected" panels.
+        analyticsConfigured && performance && availableChannels.length > 0 ? (
+          <ChannelPerformanceSelect channels={availableChannels} selected={performance.channel} />
         ) : null
       }
       footerHref={`/companies/${slug}/posts?status=published`}
@@ -101,7 +94,7 @@ export async function OverviewPerformance({
           </dl>
           <p className="text-fg-faint mt-5 text-xs leading-relaxed">
             {t("scopeNote", {
-              channel: CHANNEL_LABELS[performance!.channel] ?? performance!.channel,
+              channel: channelLabel(performance!.channel),
               count: performance!.postCount,
             })}
           </p>

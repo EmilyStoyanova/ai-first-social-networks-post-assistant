@@ -275,6 +275,7 @@
       "notConfigured": "Analytics are not connected.",
       "notConfiguredOwnerHint": "Add a Buffer analytics key in Settings → Buffer to collect metrics.",
       "noData": "No metrics collected yet.",
+      "channelSelector": "Channel shown",
       "scopeNote": "{channel} totals across {count, plural, one {# published post} other {# published posts}}. Metrics are not comparable between channels, so they are never combined.",
       "metrics": {
         "impressions": "Impressions",

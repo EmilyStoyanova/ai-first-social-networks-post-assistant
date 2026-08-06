@@ -20,6 +20,7 @@ import { OverviewPerformance } from "@/components/company/overview-performance";
 import { OverviewSources, type OverviewSourceRow } from "@/components/company/overview-sources";
 import { OverviewActivity } from "@/components/company/overview-activity";
 import { resolveLegacyTabRedirect } from "@/lib/companies/legacy-tab-redirect";
+import { PERFORMANCE_CHANNEL_PARAM } from "@/lib/analytics/performance-channels";
 import { pendingApprovalsHref } from "@/lib/posts/post-status-filter";
 
 interface Props {
@@ -62,7 +63,9 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   const t = await getTranslations("overview");
   const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
 
-  const channelParam = Array.isArray(sp.channel) ? sp.channel[0] : sp.channel;
+  const channelParam = Array.isArray(sp[PERFORMANCE_CHANNEL_PARAM])
+    ? sp[PERFORMANCE_CHANNEL_PARAM][0]
+    : sp[PERFORMANCE_CHANNEL_PARAM];
 
   const [
     brandGuidelines,
@@ -89,9 +92,11 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   // That is a permission fact, not a setup fact, so it must not be read as
   // "no key configured" — an editor still sees whatever metrics exist (§2.4).
   const analyticsReadable = analyticsStatus.success;
+  // The fallback asks whether metrics exist, not whether channels are eligible:
+  // a company can be eligible on day one, before any sync has run.
   const analyticsConfigured = analyticsReadable
     ? analyticsStatus.data.configured
-    : overview.availableChannels.length > 0;
+    : overview.hasMetrics;
 
   const rssRows: OverviewSourceRow[] = sources
     .filter((s) => s.type === "rss")
