@@ -183,8 +183,17 @@ export interface GenerateDraftPostDb {
       where: { companyId: string; channel: SocialChannel };
       orderBy: { createdAt: "desc" };
       take: number;
-      select: { id: true; content: true; promptSnapshot: true };
-    }) => Promise<Array<{ id: string; content: string; promptSnapshot: Prisma.JsonValue | null }>>;
+      select: { id: true; content: true; promptSnapshot: true; imagePrompt: true };
+      // imagePrompt is optional in the row so existing fakes (and legacy posts,
+      // which have none) stay valid — it only feeds the visual-diversity block.
+    }) => Promise<
+      Array<{
+        id: string;
+        content: string;
+        promptSnapshot: Prisma.JsonValue | null;
+        imagePrompt?: string | null;
+      }>
+    >;
     create: (args: {
       data: Prisma.PostUncheckedCreateInput;
       select: {
@@ -446,7 +455,9 @@ export async function generatePostFromContext(
     where: { companyId, channel: context.channel.channel as SocialChannel },
     orderBy: { createdAt: "desc" },
     take: TOPIC_MEMORY_SIZE,
-    select: { id: true, content: true, promptSnapshot: true },
+    // imagePrompt rides along on the query that was already being made: it is
+    // what the recent IMAGES looked like, which the post text cannot express.
+    select: { id: true, content: true, promptSnapshot: true, imagePrompt: true },
   });
 
   // Topic Memory — normalized conceptual topics from the last 30 posts. Fed to
@@ -614,7 +625,7 @@ export async function generatePostFromContext(
     context,
     primary.item,
     contentLanguage,
-    recentRows10.slice(0, 5).map((r) => ({ text: r.content })),
+    recentRows10.slice(0, 5).map((r) => ({ text: r.content, imagePrompt: r.imagePrompt ?? null })),
     {
       angle: initialAngle,
       pattern: initialPattern,

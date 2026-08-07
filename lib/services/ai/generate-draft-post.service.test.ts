@@ -48,6 +48,8 @@ interface RecentRow {
   id: string;
   content: string;
   promptSnapshot: Prisma.JsonValue | null;
+  /** Absent on legacy rows — it only feeds the visual-diversity block. */
+  imagePrompt?: string | null;
 }
 
 function makeDeps(
@@ -1092,6 +1094,52 @@ describe("generatePostFromContext — Topic Memory", () => {
     const snapshot = created()!.promptSnapshot as Record<string, unknown>;
     const gate = snapshot.semanticGate as Record<string, unknown>;
     assert.equal(gate.topicRepeated, false);
+  });
+});
+
+// ─── Visual diversity ──────────────────────────────────────────────────────────
+
+describe("generatePostFromContext — recent visuals reach the prompt", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const PREVIOUS_VISUAL =
+    "A baker slides a loaded peel into a stone oven, flour hazing the light from the door.";
+
+  it("carries the stored imagePrompt of recent posts into the user prompt", async () => {
+    // The whole anti-repetition mechanism: no new table, no extra query, no
+    // second LLM call — just one more column on the recent-posts read that was
+    // already happening, because post text cannot describe a picture.
+    const { deps, created } = makeDeps([
+      { id: "p1", content: "post one", promptSnapshot: null, imagePrompt: PREVIOUS_VISUAL },
+    ]);
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+    assert.ok(result.success);
+
+    const userPrompt = (created()!.promptSnapshot as Record<string, unknown>).userPrompt as string;
+    assert.match(userPrompt, /Recent image prompts — do not repeat these visuals/);
+    assert.ok(userPrompt.includes(PREVIOUS_VISUAL), "the previous visual must reach the model");
+  });
+
+  it("adds no visual block for legacy rows that never stored an imagePrompt", async () => {
+    const { deps, created } = makeDeps([{ id: "p1", content: "post one", promptSnapshot: null }]);
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+    assert.ok(result.success);
+
+    const userPrompt = (created()!.promptSnapshot as Record<string, unknown>).userPrompt as string;
+    assert.ok(!userPrompt.includes("Recent image prompts"));
+    assert.ok(userPrompt.includes("post one"), "the recent-text block is unaffected");
   });
 });
 

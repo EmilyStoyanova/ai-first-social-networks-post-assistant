@@ -1,4 +1,4 @@
-import type { FeedItemContext, GenerationContext } from "./types";
+import type { BrandContext, FeedItemContext, GenerationContext } from "./types";
 import { type ContentAngle, ANGLE_INSTRUCTIONS } from "./content-angle";
 import {
   type PostPattern,
@@ -17,6 +17,15 @@ export interface BuiltPrompts {
 
 export interface RecentPostContext {
   text: string;
+  /**
+   * The imagePrompt this post was generated with, when it has one.
+   *
+   * Already persisted on Post — no new store, no extra query, no second LLM
+   * call. It is the only record of what the recent IMAGES looked like: the text
+   * of a post says nothing about the room, the framing, or the light, so
+   * de-duplicating post text cannot stop two posts converging on one picture.
+   */
+  imagePrompt?: string | null;
 }
 
 export interface PromptDiversityHints {
@@ -65,6 +74,146 @@ function optional(label: string, value: string | null | undefined): string {
 
 function lines(...parts: string[]): string {
   return parts.filter(Boolean).join("\n");
+}
+
+// ─── Image prompt instruction ─────────────────────────────────────────────────
+
+/**
+ * The example of a scene built the way this section asks for one. Long enough to
+ * demonstrate the target length rather than merely assert it, and drawn from a
+ * deliberately unrelated domain so it reads as a shape to copy, not a subject.
+ */
+const IMAGE_PROMPT_GOOD_EXAMPLE =
+  "A warehouse supervisor in a navy polo shirt scans a pallet label with a handheld " +
+  "barcode reader, the other hand steadying a stack of shrink-wrapped cartons. Behind " +
+  "them steel racking runs five levels high into the depth of the frame, half-loaded " +
+  "with blue and grey crates; a forklift waits out of focus at the far end of the aisle. " +
+  "Medium shot from slightly below, the supervisor placed off-centre to the left so the " +
+  "racking leads the eye back into the space. Cool overhead fluorescent light mixed with " +
+  "daylight spilling in from a loading door on the right. Calm, orderly, mid-shift " +
+  "atmosphere — competent work already in progress, not a posed portrait.";
+
+/** The stock-photo fallbacks the field kept collapsing into. */
+const IMAGE_PROMPT_CLICHES = [
+  "a person using a laptop",
+  "a person sitting at a desk",
+  "a generic office",
+  "a notebook and a computer",
+  "people looking at screens",
+] as const;
+
+/**
+ * The axes along which two image prompts have to differ before the pictures do.
+ *
+ * Shared verbatim by the system-prompt rule and the user-prompt block that lists
+ * the recent visuals, so the standard the model is held to is stated once.
+ */
+const VISUAL_VARIETY_AXES =
+  "environment and room type, subject type, main action, composition, camera distance, " +
+  "lighting setup, dominant objects, and visual metaphor";
+
+/**
+ * The motifs the model drifts back to once the topic stops pulling hard — the
+ * ones the previous richer instruction did not, on its own, prevent.
+ */
+const IMAGE_PROMPT_DEFAULT_MOTIFS = [
+  "a laptop on a desk",
+  "a person at a workstation",
+  "a warm modern office",
+  "plants beside a window",
+  "a person centred behind a table",
+  "a glowing screen as the focal point",
+] as const;
+
+/**
+ * What the model must put in the "imagePrompt" field.
+ *
+ * The field used to be specified by a single clause inside the JSON block —
+ * "concise English visual description" — and that adjective was doing real
+ * damage: the model answered it literally, with one generic stock-photo sentence
+ * ("A person with a notebook and laptop working on AI concepts in a quiet
+ * room."), and near-identical images came out post after post.
+ *
+ * Nothing here adds context. Everything the scene needs is already in the
+ * prompt: the model's own coreMessage, the mined content aspect, the concrete
+ * nouns of the primary source, and the brand. What was missing was the
+ * instruction to USE it, and the order to use it in.
+ *
+ * Deliberately carries no quality, resolution, or anatomy wording, and none of
+ * the "avoid deformed/blurry/…" exclusions: buildImagePrompt() appends the
+ * quality suffix and assembles the negative prompt downstream, and a model that
+ * writes its own would only duplicate or contradict them.
+ */
+function buildImagePromptSection(brand: BrandContext | null): string {
+  const brandColors = [brand?.primaryColor, brand?.secondaryColor].filter((c): c is string =>
+    Boolean(c)
+  );
+
+  // Brand colours are useful to an image model only as the colour of something
+  // real in the frame. Named without that instruction they invite a swatch, a
+  // gradient background, or a branded graphic — none of which is a photograph.
+  const paletteLine =
+    brandColors.length > 0
+      ? `- Colour palette: the brand colours are ${brandColors.join(" and ")}. Let them lead the scene's dominant tones where the subject genuinely allows it, as the colour of real things in the shot — clothing, packaging, walls, machinery, sky — never as an overlay, swatch, or graphic element.`
+      : "- Colour palette: the dominant tones of the scene, and how they carry its mood.";
+
+  // Joined directly rather than through lines(): the blank separators are load
+  // bearing for a block this long, and lines() filters empty strings out.
+  return section(
+    "Image Prompt",
+    [
+      'The "imagePrompt" field is the complete prompt handed to an image generation model. It is a description of a single photographable scene — not a caption, not a restatement of the post, and not a topic label.',
+      "",
+      "**Build the scene from what you already know, in this order:**",
+      '1. Your own "coreMessage" and the meaning of the post you just wrote. The image must show the situation your central claim describes — someone reading the post and seeing the image should recognise them as the same idea.',
+      "2. The content aspect's visual concept and focus, when this generation was given one. It is mandatory, not a suggestion: the scene must be recognisably that concept, expanded into a full setting rather than quoted as a phrase.",
+      "3. Concrete nouns from the primary source: the actual objects, places, professions, activities, products, or events it names. Use its specifics, not the category they belong to.",
+      "4. What kind of source it is. An event is people gathered in a real venue; a product page is the product itself, in use; a brief is the subject the brief names.",
+      "5. The company description and target audience above, when they make the setting or the people in it more specific. Skip them when they would only add vagueness.",
+      "",
+      "**Describe all of the following, as flowing English prose — not a bulleted list and not `key: value` pairs:**",
+      "- Main subject: who or what the image is of.",
+      "- Specific action: what that subject is actually doing, at this moment. Not a state, not a pose.",
+      "- Environment / setting: the real place it happens in.",
+      "- Relevant objects: the things that belong in that place and in that action.",
+      "- Composition and framing: shot distance, camera angle, where the subject sits in the frame, what is in the foreground and background.",
+      "- Lighting: source, direction, quality, time of day.",
+      "- Mood / atmosphere.",
+      paletteLine,
+      "",
+      "**Length: roughly 80–180 English words.** One sentence is not an image prompt.",
+      "",
+      "**Be concrete.** A generic stock-photo concept is a failure even when it is technically related to the topic — it produces the same picture for every post. Do not fall back on " +
+        IMAGE_PROMPT_CLICHES.map((c) => `"${c}"`).join(", ") +
+        ", or any equivalent, unless that is genuinely what the source is about.",
+      "",
+      // Being concrete is not the same as being different: a faithful, specific
+      // scene can still be the eighth faithful, specific scene set in the same
+      // room. This rule is about the picture only — the post text and topic have
+      // their own repetition rules elsewhere, and passing those proves nothing here.
+      "**Be different from the recent images.** This is a separate requirement from the post text and topic repetition rules: two posts on different topics still fail if they produce the same picture. When recent image prompts are listed in the user message, treat them as visuals to move away from, and vary the " +
+        VISUAL_VARIETY_AXES +
+        ".",
+      "- Do not reach for " +
+        IMAGE_PROMPT_DEFAULT_MOTIFS.map((m) => `"${m}"`).join(", ") +
+        " unless the source genuinely requires it.",
+      "- The variety must come from the source, never from randomness. The scene must still depict this post's coreMessage and source faithfully — an unrelated or arbitrary scene is a worse failure than a repeated one. Where several faithful scenes are possible, choose the one that differs most from the recent visuals.",
+      "",
+      'Bad: "A person with a notebook and laptop working on AI concepts in a quiet room." (one line, no specific action, no real place, and it would illustrate any post ever written)',
+      `Good: "${IMAGE_PROMPT_GOOD_EXAMPLE}"`,
+      "",
+      "**Rules:**",
+      "- Write it in English, always, whatever language the post text is in.",
+      "- Describe only what the source supports. Do not invent facts, places, people, or events it does not state.",
+      "- No text overlays, lettering, captions, signage, logos, or watermarks anywhere in the scene.",
+      "- No emojis, no hashtags, no UI or tooling instructions, no camera brand or model names.",
+      // The section sits in the same message as Competitor Positioning, and a
+      // brand name in a visual prompt is an invitation to imitate its logo and
+      // house style — the reason competitors are kept out of image generation.
+      "- Never name a company, brand, or competitor in the scene. Describe what a thing looks like, not whose it is.",
+      "- Do not add image-quality, resolution, or anatomy wording, and do not list things to avoid. Those are appended automatically after you — writing your own only contradicts them.",
+    ].join("\n")
+  );
 }
 
 // ─── System prompt ────────────────────────────────────────────────────────────
@@ -172,6 +321,8 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
     )
   );
 
+  const imagePromptSection = buildImagePromptSection(brand);
+
   const bulgarianQualitySection =
     lang === "BG"
       ? section(
@@ -198,6 +349,7 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
     automationSection,
     writingRules,
     coreMessageSection,
+    imagePromptSection,
     bulgarianQualitySection,
   ].filter(Boolean);
 
@@ -207,6 +359,21 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
 // ─── User prompt ──────────────────────────────────────────────────────────────
 
 const TOTAL_FEED_CHAR_LIMIT = 5000;
+
+/**
+ * How many recent image prompts to show, and how much of each.
+ *
+ * An imagePrompt is now 80–180 words, so listing five in full would add more
+ * text than the source article itself. Three openings are enough to expose a
+ * motif: subject, action, and setting — the parts that actually repeat — are
+ * stated first, and the tail (framing, light, mood) varies more freely anyway.
+ */
+const RECENT_VISUAL_LIMIT = 3;
+const RECENT_VISUAL_CHAR_LIMIT = 300;
+
+function truncate(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max).trimEnd()}…`;
+}
 
 /**
  * Renders a feed item as a `**title**` + body block (empty when it has neither).
@@ -220,9 +387,13 @@ function excerptFor(item: FeedItemContext): string {
 }
 
 function buildJsonFormatInstruction(imageRequired: boolean): string {
+  // The word "concise" used to sit in both branches and was answered literally:
+  // a single generic sentence, and the same image every time. The field's real
+  // specification now lives in the Image Prompt section of the system prompt;
+  // these lines point at it instead of restating a length.
   const imagePromptLine = imageRequired
-    ? `  "imagePrompt": "REQUIRED — concise English visual description for an image generation model (no text, no emojis, no hashtags, no UI instructions; always in English regardless of post language)"`
-    : `  "imagePrompt": "optional — if provided, must be a concise English visual description for an image generation model (no text, no emojis, no hashtags; always in English regardless of post language)"`;
+    ? `  "imagePrompt": "REQUIRED — a detailed English visual scene of roughly 80–180 words, built as the Image Prompt section instructs (no text overlays, no emojis, no hashtags, no UI instructions; always in English regardless of post language)"`
+    : `  "imagePrompt": "optional — if provided, a detailed English visual scene of roughly 80–180 words, built as the Image Prompt section instructs (no text overlays, no emojis, no hashtags, no UI instructions; always in English regardless of post language)"`;
 
   return `Return ONLY a JSON object in this exact format (no markdown, no explanation):
 {
@@ -307,6 +478,26 @@ function buildUserPrompt(
         ].join("\n")
       : "";
 
+  // The visuals of the recent posts, from the imagePrompt already stored on each
+  // one. Rendered separately from recentSection on purpose: that block asks for a
+  // different post, and a model that obliges can still ask for the same picture.
+  const recentVisuals = recentPosts
+    .map((p) => p.imagePrompt?.trim())
+    .filter((v): v is string => Boolean(v))
+    .slice(0, RECENT_VISUAL_LIMIT);
+
+  const recentVisualSection =
+    recentVisuals.length > 0
+      ? [
+          "**Recent image prompts — do not repeat these visuals**",
+          `These are the images already generated for this channel. Your imagePrompt must differ from every one of them in ${VISUAL_VARIETY_AXES}. This is about the picture, not the post text — writing a different post is a separate requirement and does not satisfy this one.`,
+          "Stay faithful to the current source: choose a different accurate scene, not an unrelated or random one.",
+          "---",
+          ...recentVisuals.map((v) => `- ${truncate(v, RECENT_VISUAL_CHAR_LIMIT)}`),
+          "---",
+        ].join("\n")
+      : "";
+
   // Keyed off the primary, not the array: with no primary there is no feed
   // section, so asking for a post "about" nothing would leave the model to
   // invent a subject.
@@ -342,6 +533,9 @@ function buildUserPrompt(
         "You MUST build this post around this specific focus. Do NOT replace it with a more prominent theme from the source content. The focus is the conceptual core of this post, not a suggestion.",
         "Your coreMessage MUST express the concrete differentiator of this focus as one specific, testable claim — not broad praise about the overall subject.",
         `Your imagePrompt MUST visually anchor to: ${aspect.visualConcept}`,
+        // The anchor line alone was read as something to paste in and stop. It
+        // stays verbatim — the Image Prompt section is what it now hands off to.
+        "That visual concept is the SUBJECT of the image, not a phrase to append to it. Expand it into the full scene the Image Prompt section describes: subject, specific action, setting, objects, framing, lighting, and mood.",
       ].join("\n")
     : "";
 
@@ -349,6 +543,7 @@ function buildUserPrompt(
     intro,
     feedSection,
     recentSection,
+    recentVisualSection,
     angleSection,
     patternSection,
     topicSection,
