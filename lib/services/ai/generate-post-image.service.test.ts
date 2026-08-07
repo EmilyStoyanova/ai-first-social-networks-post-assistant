@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { generatePostImageCore } from "./generate-post-image.service";
+import { generatePostImageCore, channelDimensions } from "./generate-post-image.service";
 import type { GeneratePostImageDb, GeneratePostImageDeps } from "./generate-post-image.service";
 import type { IImageProvider } from "@/lib/ai/image/image-provider";
 import { IMAGE_STYLE_INSTRUCTIONS } from "@/lib/ai/image/image-style";
@@ -98,6 +98,40 @@ describe("generatePostImageCore — image style persistence", () => {
     const { deps, generatedNegativePrompt } = makeDeps();
     await generatePostImageCore("post-1", USER_ACTOR, undefined, deps);
     assert.ok(generatedNegativePrompt()?.includes("deformed anatomy"));
+  });
+});
+
+describe("channelDimensions", () => {
+  // The image worker rejects sizes that are not positive multiples of 8, and the
+  // model's latent is downsampled by 8 regardless of provider.
+  it("returns positive multiples of 8 for every channel and the fallback", () => {
+    for (const channel of ["instagram", "linkedin", "facebook", "tiktok", "mastodon", ""]) {
+      const { width, height } = channelDimensions(channel);
+      for (const [name, value] of [
+        ["width", width],
+        ["height", height],
+      ] as const) {
+        assert.ok(
+          Number.isInteger(value) && value > 0,
+          `${channel} ${name} must be a positive int`
+        );
+        assert.equal(value % 8, 0, `${channel} ${name} (${value}) must be a multiple of 8`);
+      }
+    }
+  });
+
+  it("keeps each channel's aspect ratio within 1% of the platform spec", () => {
+    const specs: Record<string, number> = {
+      instagram: 1080 / 1080,
+      linkedin: 1200 / 627,
+      facebook: 1200 / 630,
+      tiktok: 1080 / 1920,
+    };
+    for (const [channel, spec] of Object.entries(specs)) {
+      const { width, height } = channelDimensions(channel);
+      const drift = Math.abs(width / height - spec) / spec;
+      assert.ok(drift < 0.01, `${channel} drifted ${(drift * 100).toFixed(2)}% from its spec`);
+    }
   });
 });
 

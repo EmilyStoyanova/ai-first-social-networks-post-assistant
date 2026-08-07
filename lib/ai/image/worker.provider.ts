@@ -26,12 +26,20 @@ export class WorkerImageProvider implements IImageProvider {
     // slow image generation cannot run past the function timeout.
     const TIMEOUT_MS = 120_000;
 
-    // The worker runs a ComfyUI graph, whose sampler takes a negative
-    // conditioning input. Omitted entirely when we have nothing to exclude, so
-    // an older worker build keeps seeing the exact request shape it expects.
+    // The worker runs a ComfyUI graph: the sampler takes a negative conditioning
+    // input, and the latent is sized from width/height (both must be positive
+    // multiples of 8 — see channelDimensions in generate-post-image.service).
+    // Each optional field is omitted when absent, so an older worker build keeps
+    // seeing the exact request shape it expects and falls back to its defaults.
     const body: Record<string, unknown> = { prompt };
     if (options?.negativePrompt) {
       body.negativePrompt = options.negativePrompt;
+    }
+    if (options?.width !== undefined) {
+      body.width = options.width;
+    }
+    if (options?.height !== undefined) {
+      body.height = options.height;
     }
 
     let res: Response;

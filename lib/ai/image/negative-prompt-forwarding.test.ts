@@ -58,7 +58,8 @@ describe("negativePrompt — Worker/ComfyUI provider", () => {
 
     await provider.generate("a coffee cup", { width: 1024, height: 1024 });
 
-    assert.deepEqual(bodies[0], { prompt: "a coffee cup" });
+    assert.ok(!("negativePrompt" in (bodies[0] ?? {})));
+    assert.equal(bodies[0]?.prompt, "a coffee cup");
   });
 });
 

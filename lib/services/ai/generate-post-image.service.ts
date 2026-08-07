@@ -253,14 +253,22 @@ function logImageProviderFailure(err: ImageProviderError): void {
   }
 }
 
-function channelDimensions(channel: string): { width: number; height: number } {
+/**
+ * Every value must be a positive multiple of 8: diffusion models work on a
+ * latent downsampled by 8, and the image worker rejects anything else.
+ *
+ * LinkedIn's own spec is 1200x627 and Facebook's is 1200x630 — neither divides
+ * by 8, so each is rounded to the nearest multiple. Both stay inside 0.5% of the
+ * platform's 1.91:1 card, which no crop will show.
+ */
+export function channelDimensions(channel: string): { width: number; height: number } {
   switch (channel) {
     case "instagram":
       return { width: 1080, height: 1080 };
     case "linkedin":
-      return { width: 1200, height: 627 };
+      return { width: 1200, height: 624 };
     case "facebook":
-      return { width: 1200, height: 630 };
+      return { width: 1200, height: 632 };
     case "tiktok":
       return { width: 1080, height: 1920 };
     default:
