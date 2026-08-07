@@ -77,6 +77,51 @@ describe("content-source schema — calendar event URL", () => {
   });
 });
 
+describe("content-source schema — the calendar event's name is the organizer", () => {
+  it("still requires it, and says which field it means", () => {
+    const result = contentSourceSchema.safeParse({
+      type: "calendar_event",
+      name: "",
+      config: { title: "DEV.BG All in One 2026", date: "2026-08-29" },
+    });
+
+    assert.equal(result.success, false);
+    const issue = result.success ? null : result.error.issues.find((i) => i.path[0] === "name");
+    assert.equal(issue?.message, "Organizer is required.");
+  });
+
+  it("accepts an organizer name and keeps it on the same key", () => {
+    // Terminology only — the payload key and the column behind it are unchanged.
+    const result = calendarEvent({});
+
+    assert.ok(result.success);
+    assert.equal(result.data.name, "DEV.BG events");
+  });
+
+  it("leaves the other types saying 'Name'", () => {
+    const result = contentSourceSchema.safeParse({
+      type: "rss",
+      name: "",
+      config: { url: "https://news.example.com/feed.xml" },
+    });
+
+    assert.equal(result.success, false);
+    const issue = result.success ? null : result.error.issues.find((i) => i.path[0] === "name");
+    assert.equal(issue?.message, "Name is required.");
+  });
+
+  it("keeps the 200-character limit", () => {
+    assert.equal(
+      contentSourceSchema.safeParse({
+        type: "calendar_event",
+        name: "x".repeat(201),
+        config: { title: "T", date: "2026-08-29" },
+      }).success,
+      false
+    );
+  });
+});
+
 describe("content-source schema — other types are unchanged", () => {
   it("still accepts an RSS source", () => {
     assert.ok(

@@ -50,6 +50,10 @@ const publicHttpUrl = z
 const calendarEventSchema = z.object({
   type: z.literal("calendar_event"),
   ...baseFields,
+  // Same column, same constraints — only the wording. For a calendar event the
+  // name is the organizer (DEV.BG, Tuk-Tam), which is what the form asks for,
+  // and a message saying "Name" would not point at any field on screen.
+  name: z.string().min(1, "Organizer is required.").max(200),
   config: z.object({
     title: z.string().min(1, "Event title is required.").max(500),
     date: z.string().min(1, "Event date is required."),

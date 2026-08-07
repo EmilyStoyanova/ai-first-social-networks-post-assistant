@@ -108,6 +108,11 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
   }
 
   const isEdit = !!initialData;
+  // The shared `name` column holds different things per source type. For a
+  // calendar event it is who runs the event (DEV.BG, Tuk-Tam) — the event's own
+  // name lives in `config.title` — so the field is labelled for that, not
+  // "Name". Terminology only: the payload key is unchanged.
+  const isCalendar = type === "calendar_event";
 
   return (
     <form onSubmit={handleSubmit} noValidate className="space-y-4">
@@ -133,17 +138,20 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
         )}
       </div>
 
-      {/* Name */}
+      {/* Name — "Organizer" for a calendar event */}
       <div>
-        <label className="text-fg-muted mb-1.5 block text-sm font-medium">{t("name")}</label>
+        <label className="text-fg-muted mb-1.5 block text-sm font-medium">
+          {isCalendar ? t("organizer") : t("name")}
+        </label>
         <input
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder={t("namePlaceholder")}
+          placeholder={isCalendar ? t("organizerPlaceholder") : t("namePlaceholder")}
           className={`${BASE} ${NORMAL}`}
           required
         />
+        {isCalendar && <p className="text-fg-faint mt-1 text-xs">{t("organizerHelp")}</p>}
       </div>
 
       {/* RSS / Product Page — URL */}
