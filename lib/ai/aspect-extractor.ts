@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { ILlmProvider, FeedItemContext } from "./types";
 import { validateAspects, type ContentAspect } from "./content-aspect";
+import { renderFeedItemContent } from "./source-content";
 
 // ─── Context fingerprint ───────────────────────────────────────────────────────
 
@@ -26,22 +27,21 @@ export function buildPrimaryFingerprint(primary: FeedItemContext | null): string
 
 // ─── Extraction prompt ────────────────────────────────────────────────────────
 
-const CONTENT_PER_ITEM_LIMIT = 900;
-
 /**
- * The primary article's text, and nothing else.
+ * The primary source's text, and nothing else.
  *
  * Background items are deliberately excluded. An aspect is injected into the
  * generation prompt as a MANDATORY constraint ("build this post around this
  * focus, do NOT replace it"), so an aspect mined from a background article is an
  * instruction to write about an article the post does not link to.
+ *
+ * Rendered by the SAME function the generation prompt uses (source-content.ts).
+ * If the two diverged, the mandatory constraint would describe a text the model
+ * writing the post was never shown — which is how a calendar event whose stored
+ * JSON reached this extractor raw came back as "product launch date".
  */
 function buildSourceContent(primary: FeedItemContext): string {
-  const title = primary.title?.trim() ?? "";
-  const raw = primary.content?.trim() ?? "";
-  const excerpt =
-    raw.length > CONTENT_PER_ITEM_LIMIT ? raw.slice(0, CONTENT_PER_ITEM_LIMIT) + "…" : raw;
-  return [title ? `**${title}**` : null, excerpt || null].filter(Boolean).join("\n");
+  return renderFeedItemContent(primary);
 }
 
 // ─── Response parsing ─────────────────────────────────────────────────────────
@@ -111,6 +111,11 @@ export async function extractAspects(
     "- Prefer narrow, actionable sub-aspects over broad themes — 'shallow calm bays suit toddlers' beats 'great for families'\n" +
     "- Each focus must identify ONE distinct fact, benefit, problem, audience need, or takeaway — not a mood or generic praise\n" +
     "- Each focus must be specific to the source content and grounded in it — avoid generic themes like 'innovation' or 'success', and do not invent facts the source does not support\n" +
+    // A short source (a calendar event is often a title and a date) used to be
+    // padded out by reframing it as something richer — an event became a
+    // "product launch". The aspect then overrode the real subject downstream.
+    "- Keep the source as the kind of thing it says it is: an event is an event, a brief is a brief. Never recast it as a product launch, announcement, or campaign the source does not describe\n" +
+    "- If the source states only a few facts, return only the aspects those facts support — one aspect is a correct answer for a sparse source\n" +
     "- Reject aspects that differ only by wording: two focuses that make the same point with different words are the SAME aspect — return only one\n" +
     "- Minimum 3 distinct words per focus — no one-word or two-word focuses\n" +
     "- visualConcept must be photorealistic and concrete — not abstract\n" +

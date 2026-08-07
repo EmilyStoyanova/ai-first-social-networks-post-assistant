@@ -17,6 +17,9 @@ function makeItem(overrides: Partial<FeedItemContext> & { id: string }): FeedIte
     publishedAt: overrides.publishedAt ?? null,
     sourceLinkPreference: overrides.sourceLinkPreference,
     consumable: overrides.consumable,
+    // Left absent unless a case sets it, so the article fixtures keep exercising
+    // the pre-existing "derive the link from `url`" behaviour.
+    ...("publicUrl" in overrides ? { publicUrl: overrides.publicUrl } : {}),
   };
 }
 
@@ -152,6 +155,98 @@ describe("resolvePrimarySelection", () => {
   it("has no primary when a direct source has nothing stored", () => {
     const selection = resolvePrimarySelection([], { action: "direct" });
     assert.deepEqual(selection, { item: null, claimedFeedItemId: null, sourceUrl: null });
+  });
+});
+
+// ─── Calendar events and their optional Event URL ─────────────────────────────
+//
+// A calendar item's `url` is always the internal `event:<sourceId>` key. Its
+// public address, when it has one, is resolved by the context builder onto
+// `publicUrl` — so linkability is a property of the item, not of its storage key.
+
+describe("resolvePrimarySelection — calendar events", () => {
+  const EVENT_URL = "https://www.events.dev.bg/allinone/2026";
+
+  function calendarItem(publicUrl: string | null): FeedItemContext {
+    return makeItem({
+      id: "cal-1",
+      title: "DEV.BG All in One 2026",
+      content: '{"title":"DEV.BG All in One 2026","date":"2026-08-29","description":null}',
+      url: "event:src-cal",
+      consumable: false,
+      publicUrl,
+    });
+  }
+
+  it("links a directly-picked event that has an Event URL", () => {
+    const selection = resolvePrimarySelection([calendarItem(EVENT_URL)], { action: "direct" });
+
+    assert.equal(selection.item?.id, "cal-1");
+    assert.equal(selection.claimedFeedItemId, null, "an event is never consumed");
+    assert.equal(selection.sourceUrl, EVENT_URL);
+  });
+
+  it("links an event picked through the evergreen (cron) path too", () => {
+    // Same rule wherever the event is reached from — scheduled generation must
+    // not silently drop a link the manual path would attach.
+    const selection = resolvePrimarySelection([calendarItem(EVENT_URL)], { action: "evergreen" });
+
+    assert.equal(selection.item?.id, "cal-1");
+    assert.equal(selection.sourceUrl, EVENT_URL);
+  });
+
+  it("has no link for an event whose Event URL was left blank", () => {
+    // Every calendar source created before the field existed.
+    for (const action of ["direct", "evergreen"] as const) {
+      const selection = resolvePrimarySelection([calendarItem(null)], { action });
+      assert.equal(selection.item?.id, "cal-1", `${action}: still generates from the event`);
+      assert.equal(selection.sourceUrl, null, `${action}: nothing to link`);
+    }
+  });
+
+  it("never leaks the event: key, whether or not an Event URL is set", () => {
+    for (const publicUrl of [EVENT_URL, null]) {
+      for (const action of ["direct", "evergreen"] as const) {
+        const selection = resolvePrimarySelection([calendarItem(publicUrl)], { action });
+        assert.ok(
+          !selection.sourceUrl?.startsWith("event:"),
+          `${action}/${publicUrl}: the storage key must never be the link`
+        );
+      }
+    }
+  });
+
+  it("appends the Event URL to the post text through the source-link resolver", () => {
+    const primary = resolvePrimarySelection([calendarItem(EVENT_URL)], { action: "direct" });
+    const link = resolvePostSourceLink({
+      primary,
+      text: "Ще се видим на конференцията.",
+      manualOverride: undefined,
+      channelDefault: true,
+      maxTextLength: null,
+    });
+
+    assert.ok(link.ok);
+    if (!link.ok) return;
+    assert.ok(link.data.finalContent.includes(EVENT_URL));
+    assert.equal(link.data.sourceUrl, EVENT_URL);
+    assert.equal(link.data.primaryFeedItemId, null, "still nothing reserved");
+  });
+
+  it("appends nothing for an event with no Event URL", () => {
+    const primary = resolvePrimarySelection([calendarItem(null)], { action: "direct" });
+    const link = resolvePostSourceLink({
+      primary,
+      text: "Ще се видим на конференцията.",
+      manualOverride: undefined,
+      channelDefault: true,
+      maxTextLength: null,
+    });
+
+    assert.ok(link.ok);
+    if (!link.ok) return;
+    assert.equal(link.data.finalContent, "Ще се видим на конференцията.");
+    assert.equal(link.data.sourceUrl, null);
   });
 });
 

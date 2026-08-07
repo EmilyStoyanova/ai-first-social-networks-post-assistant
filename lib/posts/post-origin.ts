@@ -14,6 +14,8 @@
  * it never used.
  */
 
+import { hasPublicUrl, publicUrlOf } from "@/lib/ai/source-types";
+
 /** Mirrors Prisma's ContentSourceType. Duplicated so client components that
  *  render an origin need not pull in the Prisma client. */
 export type OriginSourceType = "rss" | "prompt" | "product_page" | "calendar_event";
@@ -30,7 +32,12 @@ export interface PostOriginView {
   sourceName: string | null;
   /** Article headline; null for an article that was ingested without one. */
   articleTitle: string | null;
-  /** Article URL — present for a source post, absent for brand_setup. */
+  /**
+   * A real, openable page for the source — rendered as a link. Null for
+   * brand_setup, and for any source with no public address of its own (a prompt
+   * source; a calendar event with no Event URL). Never a `prompt:`/`event:`
+   * storage key, whatever an older row happens to hold.
+   */
   articleUrl: string | null;
 }
 
@@ -104,7 +111,11 @@ export function resolvePostOrigin(
       // An article ingested without a headline still has a URL, which is enough
       // to point at it — the title is what degrades, not the link.
       articleTitle: snapshot.originSourceTitle,
-      articleUrl: snapshot.originSourceUrl,
+      // Filtered on the way out, not only on the way in: posts written before
+      // the Event URL existed froze `event:<id>` into this column, and the UI
+      // renders it as an href. One guard here covers every historical row with
+      // no backfill.
+      articleUrl: hasPublicUrl(snapshot.originSourceUrl) ? snapshot.originSourceUrl : null,
     };
   }
 
@@ -116,7 +127,7 @@ export function resolvePostOrigin(
     sourceType: toOriginSourceType(primaryFeedItem.source.type),
     sourceName: primaryFeedItem.source.name,
     articleTitle: primaryFeedItem.title,
-    articleUrl: primaryFeedItem.url,
+    articleUrl: hasPublicUrl(primaryFeedItem.url) ? primaryFeedItem.url : null,
   };
 }
 
@@ -129,6 +140,12 @@ export function brandSetupOrigin(): PostOriginView {
 export interface GeneratedFromArticle {
   title: string | null;
   url: string;
+  /**
+   * The item's public address, when it differs from `url` — a calendar event's
+   * Event URL. Undefined on a context assembled before the field existed, which
+   * `publicUrlOf` resolves from `url` instead.
+   */
+  publicUrl?: string | null;
   /** Undefined on a context assembled before FeedItemContext carried these. */
   sourceType?: string | null;
   sourceName?: string | null;
@@ -160,6 +177,9 @@ export function buildOriginSnapshot(article: GeneratedFromArticle | null): PostO
     originSourceType: toOriginSourceType(article.sourceType),
     originSourceName: article.sourceName ?? null,
     originSourceTitle: article.title,
-    originSourceUrl: article.url,
+    // The public address or nothing. Freezing a `prompt:`/`event:` key here is
+    // what put a dead link in the post activity modal; the column is for a page
+    // a reader can open, and a source without one simply has no link.
+    originSourceUrl: publicUrlOf(article),
   };
 }

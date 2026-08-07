@@ -54,6 +54,10 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
   const [eventTitle, setEventTitle] = useState(asText(initialData?.config.title));
   const [eventDate, setEventDate] = useState(asText(initialData?.config.date));
   const [eventDescription, setEventDescription] = useState(asText(initialData?.config.description));
+  // Optional public page for the event. Shares the `url` config key with the
+  // RSS/product-page field but never the same input — only one of the two is
+  // ever submitted, decided by `type`.
+  const [eventUrl, setEventUrl] = useState(asText(initialData?.config.url));
   const [sourceLinkPref, setSourceLinkPref] = useState<SourceLinkPref>(
     initialSourceLinkPref(initialData?.config.includeSourceLink)
   );
@@ -94,6 +98,9 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
         title: eventTitle.trim(),
         date: eventDate.trim(),
         ...(eventDescription.trim() ? { description: eventDescription.trim() } : {}),
+        // Omitted entirely when blank — the field is optional, and an empty
+        // string would fail the URL validation instead of meaning "not set".
+        ...(eventUrl.trim() ? { url: eventUrl.trim() } : {}),
       };
     }
 
@@ -269,6 +276,19 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
               placeholder={t("eventDescPlaceholder")}
               className={`${BASE} ${NORMAL} resize-none`}
             />
+          </div>
+          <div>
+            <label className="text-fg-muted mb-1.5 block text-sm font-medium">
+              {t("eventUrl")} <span className="text-fg-faint font-normal">{t("eventUrlHint")}</span>
+            </label>
+            <input
+              type="url"
+              value={eventUrl}
+              onChange={(e) => setEventUrl(e.target.value)}
+              placeholder="https://example.com/events/2026"
+              className={`${BASE} ${NORMAL}`}
+            />
+            <p className="text-fg-faint mt-1 text-xs">{t("eventUrlHelp")}</p>
           </div>
         </>
       )}

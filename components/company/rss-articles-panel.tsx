@@ -128,15 +128,20 @@ function ArticleRow({ slug, sourceId, item, canManage, onToggle }: ArticleRowPro
           >
             {item.title ?? t("noTitle")}
           </p>
-          <a
-            href={item.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-fg-faint hover:text-accent shrink-0 transition-colors"
-            aria-label={t("viewOriginal")}
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-          </a>
+          {/* Only when there is a real page behind it. A prompt or calendar
+              item's stored url is an internal key, not somewhere to send a
+              user. */}
+          {item.publicUrl && (
+            <a
+              href={item.publicUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-fg-faint hover:text-accent shrink-0 transition-colors"
+              aria-label={t("viewOriginal")}
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          )}
         </div>
 
         {item.publishedAt && (

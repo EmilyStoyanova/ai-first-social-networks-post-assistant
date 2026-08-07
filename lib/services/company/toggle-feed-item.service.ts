@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db/client";
+import { resolveItemPublicUrl } from "@/lib/ai/source-types";
 import type { FeedItemRow } from "./list-feed-items.service";
 
 export type ToggleFeedItemResult =
@@ -39,6 +40,10 @@ export interface ToggleFeedItemDb {
         translationStatus: true;
         translationLanguage: true;
         translationError: true;
+        // Rides along on the row's own relation — no extra query. Needed only to
+        // resolve `publicUrl` the same way listFeedItems does, so the toggled
+        // row and the listed row describe the same link.
+        source: { select: { config: true } };
       };
     }) => Promise<{
       id: string;
@@ -52,6 +57,7 @@ export interface ToggleFeedItemDb {
       translationStatus: string | null;
       translationLanguage: string | null;
       translationError: string | null;
+      source: { config: unknown };
     }>;
   };
 }
@@ -104,6 +110,7 @@ export async function toggleFeedItemCore(
       translationStatus: true,
       translationLanguage: true,
       translationError: true,
+      source: { select: { config: true } },
     },
   });
 
@@ -115,6 +122,7 @@ export async function toggleFeedItemCore(
       title: row.title,
       content: row.content,
       url: row.url,
+      publicUrl: resolveItemPublicUrl(row.url, row.source.config),
       publishedAt: row.publishedAt?.toISOString() ?? null,
       enabled: row.enabled,
       createdAt: row.createdAt.toISOString(),

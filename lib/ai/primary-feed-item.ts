@@ -1,5 +1,5 @@
 import type { FeedItemContext } from "./types";
-import { hasPublicUrl, isConsumableItem } from "./source-types";
+import { isConsumableItem, publicUrlOf } from "./source-types";
 import type { FeedItemPlan } from "./feed-item-reservation";
 
 /**
@@ -29,10 +29,10 @@ export interface PrimarySelection {
    */
   claimedFeedItemId: string | null;
   /**
-   * The URL to append to the post. Null unless the primary is a claimed article
-   * or a directly-read content source with a real page behind it — prompt and
-   * calendar sources carry synthetic urls like `prompt:<id>` that must never
-   * reach a reader.
+   * The URL to append to the post — always a real page, never the synthetic
+   * `prompt:<id>` / `event:<id>` storage key. Null when the primary has no
+   * public address at all: a prompt source, or a calendar event whose optional
+   * Event URL was left blank.
    */
   sourceUrl: string | null;
 }
@@ -68,7 +68,7 @@ export function resolvePrimarySelection(
       claimedFeedItemId: item.id,
       // A claimed item is always consumable (candidates are filtered on it), so
       // this is defence in depth rather than a real branch.
-      sourceUrl: isConsumableItem(item) ? item.url : null,
+      sourceUrl: isConsumableItem(item) ? publicUrlOf(item) : null,
     };
   }
 
@@ -79,13 +79,13 @@ export function resolvePrimarySelection(
     //
     // Nothing is claimed — claimedFeedItemId stays null, and so does
     // Post.primaryFeedItemId — but the URL is kept when the source has a real
-    // page (a product page does; a prompt or calendar event does not), so a
-    // product-page post can still link to the product it is about.
+    // page: a product page always does, and a calendar event does when its
+    // optional Event URL is set.
     const item = feedItems[0] ?? null;
     return {
       item,
       claimedFeedItemId: null,
-      sourceUrl: item && hasPublicUrl(item.url) ? item.url : null,
+      sourceUrl: item ? publicUrlOf(item) : null,
     };
   }
 
@@ -93,8 +93,11 @@ export function resolvePrimarySelection(
     // Reusable prompt/calendar content. Articles are excluded entirely: one may
     // have been claimable when the context was built and raced away since, and
     // it must not become the subject of a post it no longer backs.
+    //
+    // Linkable by the same rule as everywhere else, which for these types means
+    // only a calendar event carrying an Event URL — a prompt source has no page.
     const item = feedItems.find((f) => !isConsumableItem(f)) ?? null;
-    return { item, claimedFeedItemId: null, sourceUrl: null };
+    return { item, claimedFeedItemId: null, sourceUrl: item ? publicUrlOf(item) : null };
   }
 
   // "mission" / "skip" — no article behind the post.

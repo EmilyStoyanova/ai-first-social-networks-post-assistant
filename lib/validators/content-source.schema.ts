@@ -36,6 +36,17 @@ const productPageSchema = z.object({
   config: z.object({ url: z.string().url("Must be a valid URL.") }),
 });
 
+/**
+ * A URL that will be rendered as a link and appended to published posts, so the
+ * scheme is checked rather than just the shape: `new URL()` (what `.url()` uses)
+ * happily accepts `javascript:` and `mailto:`, neither of which is a page a
+ * reader can open.
+ */
+const publicHttpUrl = z
+  .string()
+  .url("Must be a valid URL.")
+  .refine((v) => /^https?:\/\//i.test(v), "Must start with http:// or https://");
+
 const calendarEventSchema = z.object({
   type: z.literal("calendar_event"),
   ...baseFields,
@@ -43,6 +54,12 @@ const calendarEventSchema = z.object({
     title: z.string().min(1, "Event title is required.").max(500),
     date: z.string().min(1, "Event date is required."),
     description: z.string().max(5000).optional(),
+    /**
+     * Optional public page for the event. Kept in the source config rather than
+     * on the feed item: FeedItem.url stays the internal `event:<sourceId>`
+     * uniqueness key, and editing the URL takes effect without re-ingesting.
+     */
+    url: publicHttpUrl.optional(),
   }),
 });
 

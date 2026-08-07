@@ -1,11 +1,22 @@
 import { prisma } from "@/lib/db/client";
+import { resolveItemPublicUrl } from "@/lib/ai/source-types";
 
 export interface FeedItemRow {
   id: string;
   sourceId: string;
   title: string | null;
   content: string | null;
+  /**
+   * The stored url — for a prompt or calendar source this is the internal
+   * `prompt:<id>` / `event:<id>` key, so never render it. Use `publicUrl`.
+   */
   url: string;
+  /**
+   * The page a reader could open: the item's own url for rss/product_page, the
+   * source's Event URL for a calendar event, null when there is none. The panel
+   * shows its "view original" link only when this is set.
+   */
+  publicUrl: string | null;
   publishedAt: string | null;
   enabled: boolean;
   createdAt: string;
@@ -24,7 +35,10 @@ async function resolveCompanyAndSource(
   sourceId: string,
   userId: string,
   isGlobalAdmin: boolean
-): Promise<{ ok: true; companyId: string } | { ok: false; code: "NOT_FOUND" | "FORBIDDEN" }> {
+): Promise<
+  | { ok: true; companyId: string; sourceConfig: unknown }
+  | { ok: false; code: "NOT_FOUND" | "FORBIDDEN" }
+> {
   let companyId: string;
 
   if (isGlobalAdmin) {
@@ -42,11 +56,13 @@ async function resolveCompanyAndSource(
 
   const source = await prisma.contentSource.findFirst({
     where: { id: sourceId, companyId },
-    select: { id: true },
+    select: { id: true, config: true },
   });
   if (!source) return { ok: false, code: "NOT_FOUND" };
 
-  return { ok: true, companyId };
+  // Carried through for the same reason generation reads it: a calendar event's
+  // optional Event URL lives here, because its items hold only `event:<id>`.
+  return { ok: true, companyId, sourceConfig: source.config };
 }
 
 const ITEMS_LIMIT = 50;
@@ -102,6 +118,7 @@ export async function listFeedItems(
       title: r.title,
       content: r.content,
       url: r.url,
+      publicUrl: resolveItemPublicUrl(r.url, ctx.sourceConfig),
       publishedAt: r.publishedAt?.toISOString() ?? null,
       enabled: r.enabled,
       createdAt: r.createdAt.toISOString(),

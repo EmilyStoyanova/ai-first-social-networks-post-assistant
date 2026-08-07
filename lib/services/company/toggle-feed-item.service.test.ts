@@ -7,19 +7,41 @@ import type { ToggleFeedItemDb } from "./toggle-feed-item.service";
 
 const NOW = new Date("2026-01-15T10:00:00Z");
 
-function makeFeedItemRow(enabled: boolean) {
+/**
+ * A toggled row as Prisma returns it. `url` + `source.config` are what decide
+ * the row's public link, so both are overridable: an RSS article carries its own
+ * url, a calendar item carries `event:<id>` and borrows its source's Event URL.
+ */
+function makeFeedItemRow(
+  enabled: boolean,
+  overrides: { url?: string; config?: unknown } = {}
+): {
+  id: string;
+  sourceId: string;
+  title: string | null;
+  content: string | null;
+  url: string;
+  publishedAt: Date | null;
+  enabled: boolean;
+  createdAt: Date;
+  translationStatus: string | null;
+  translationLanguage: string | null;
+  translationError: string | null;
+  source: { config: unknown };
+} {
   return {
     id: "item-1",
     sourceId: "src-1",
     title: "Test Article",
     content: "Article body text.",
-    url: "https://example.com/article-1",
+    url: overrides.url ?? "https://example.com/article-1",
     publishedAt: NOW,
     enabled,
     createdAt: NOW,
     translationStatus: null,
     translationLanguage: null,
     translationError: null,
+    source: { config: overrides.config ?? { url: "https://example.com/feed.xml" } },
   };
 }
 
@@ -28,6 +50,7 @@ function makeDb(opts: {
   membership?: { companyId: string; role: string } | null;
   feedItem?: { id: string } | null;
   updatedEnabled?: boolean;
+  row?: { url?: string; config?: unknown };
 }): ToggleFeedItemDb {
   const updatedEnabled = opts.updatedEnabled ?? true;
   return {
@@ -39,7 +62,7 @@ function makeDb(opts: {
     },
     feedItem: {
       findFirst: async () => opts.feedItem ?? null,
-      update: async ({ data }) => makeFeedItemRow(data.enabled ?? updatedEnabled),
+      update: async ({ data }) => makeFeedItemRow(data.enabled ?? updatedEnabled, opts.row),
     },
   };
 }

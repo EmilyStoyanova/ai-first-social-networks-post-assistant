@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { buildPrompts } from "./prompt-builder";
 import { CHANNEL_POLICIES } from "./channel-policy";
-import type { BrandContext, GenerationContext } from "./types";
+import type { BrandContext, FeedItemContext, GenerationContext } from "./types";
 
 function makeCtx(overrides: {
   imageRequired?: boolean;
@@ -351,6 +351,180 @@ describe("prompt-builder — channel policy (v2-3)", () => {
     const { systemPrompt } = buildPrompts(makeCtx({ channel: "myspace" }), null, "en");
     assert.ok(systemPrompt.includes("## Channel: myspace"));
     assert.ok(systemPrompt.includes("Post language: EN"));
+  });
+});
+
+// ─── Primary source rendering ─────────────────────────────────────────────────
+//
+// A calendar event reached the model as its raw stored JSON, under a heading
+// calling it an "article" and promising a link that is never attached. With a
+// null description that left almost nothing to write about, and generation
+// drifted onto unrelated company/brand themes.
+
+describe("prompt-builder — calendar event as primary source", () => {
+  const EVENT_TITLE = "DEV.BG All in One 2026";
+  const EVENT_DESCRIPTION =
+    "Bulgaria's largest IT conference — AI, software engineering and career tracks across six halls.";
+
+  function eventItem(description: string | null): FeedItemContext {
+    // Exactly what ingestion writes for a calendar_event source.
+    return {
+      id: "event-item-1",
+      title: EVENT_TITLE,
+      content: JSON.stringify({ title: EVENT_TITLE, date: "2026-08-29", description }),
+      url: "event:src-cal",
+      publishedAt: new Date("2026-08-29T00:00:00.000Z"),
+      sourceType: "calendar_event",
+      sourceName: "DEV.BG events",
+      consumable: false,
+    };
+  }
+
+  function eventPrompt(description: string | null): string {
+    const primary = eventItem(description);
+    const ctx = { ...makeCtx({ channel: "facebook" }), feedItems: [primary] };
+    return buildPrompts(ctx, primary, "bg").userPrompt;
+  }
+
+  it("carries the event title, date, and description into the prompt", () => {
+    const userPrompt = eventPrompt(EVENT_DESCRIPTION);
+
+    assert.ok(userPrompt.includes(EVENT_TITLE), "the event title must reach the model");
+    assert.ok(userPrompt.includes("29.08.2026"), "the event date must reach the model");
+    assert.ok(userPrompt.includes(EVENT_DESCRIPTION), "the event description must reach the model");
+  });
+
+  it("does not dump the stored JSON into the prompt", () => {
+    const userPrompt = eventPrompt(EVENT_DESCRIPTION);
+
+    assert.ok(!userPrompt.includes('{"title"'), "the raw JSON payload must not reach the model");
+  });
+
+  it("introduces it as an event rather than as an article", () => {
+    const userPrompt = eventPrompt(EVENT_DESCRIPTION);
+
+    assert.ok(userPrompt.includes("CALENDAR EVENT"));
+    assert.ok(
+      !userPrompt.includes("PRIMARY SOURCE ARTICLE"),
+      "an event is not an article — the wrong label is what invited the wrong reading"
+    );
+  });
+
+  it("promises no link for an event, whose url is a storage key", () => {
+    const userPrompt = eventPrompt(EVENT_DESCRIPTION);
+
+    assert.ok(
+      !userPrompt.includes("A link to this exact article will be attached"),
+      "no url is appended for a calendar event, so the prompt must not claim one"
+    );
+    assert.ok(!userPrompt.includes("event:src-cal"), "the synthetic url never reaches the model");
+  });
+
+  it("says so explicitly when the event has no description", () => {
+    const userPrompt = eventPrompt(null);
+
+    assert.ok(userPrompt.includes(EVENT_TITLE));
+    assert.ok(userPrompt.includes("29.08.2026"));
+    assert.ok(userPrompt.includes("No description was provided"));
+    assert.ok(!userPrompt.includes("null"), "a null field must never surface as the word 'null'");
+  });
+});
+
+describe("prompt-builder — other primary source kinds", () => {
+  function primaryPrompt(primary: FeedItemContext): string {
+    return buildPrompts({ ...makeCtx({}), feedItems: [primary] }, primary).userPrompt;
+  }
+
+  const article: FeedItemContext = {
+    id: "rss-1",
+    title: "Rates hold steady",
+    content: "The central bank left rates unchanged for a third meeting.",
+    url: "https://news.example.com/rates",
+    publishedAt: null,
+    sourceType: "rss",
+    sourceName: "Econ Daily",
+    consumable: true,
+  };
+
+  it("leaves the RSS article block byte-identical", () => {
+    // Locked deliberately: this text drives every RSS and cron generation, and
+    // a change here changes their output.
+    assert.ok(
+      primaryPrompt(article).includes(
+        [
+          "**PRIMARY SOURCE ARTICLE — the post MUST be based on THIS article and no other.**",
+          "The topic, facts, and angle of the post must come from this article. A link to this exact article will be attached to the post, so the post text must be about it.",
+          "---",
+          "**Rates hold steady**",
+          "The central bank left rates unchanged for a third meeting.",
+          "---",
+        ].join("\n")
+      )
+    );
+  });
+
+  it("renders a product page's stored fields, not its JSON", () => {
+    const userPrompt = primaryPrompt({
+      ...article,
+      id: "pp-1",
+      title: "Pro Plan",
+      content: JSON.stringify({
+        title: "Pro Plan",
+        description: "Everything in Starter, plus SSO.",
+        image: "https://cdn.example.com/og.png",
+      }),
+      url: "https://shop.example.com/pro-plan",
+      sourceType: "product_page",
+    });
+
+    assert.ok(userPrompt.includes("Everything in Starter, plus SSO."));
+    assert.ok(!userPrompt.includes('{"title"'));
+    assert.ok(!userPrompt.includes("cdn.example.com"), "the image url is dropped");
+    // A product page IS a linkable page, so it keeps the article framing.
+    assert.ok(userPrompt.includes("PRIMARY SOURCE ARTICLE"));
+  });
+
+  it("introduces a prompt source as a brief and keeps its text verbatim", () => {
+    const userPrompt = primaryPrompt({
+      ...article,
+      id: "prompt-1",
+      title: "Weekly tip",
+      content: "Share one concrete productivity tip.",
+      url: "prompt:src-1",
+      sourceType: "prompt",
+      consumable: false,
+    });
+
+    assert.ok(userPrompt.includes("CONTENT BRIEF"));
+    assert.ok(userPrompt.includes("Share one concrete productivity tip."));
+    assert.ok(!userPrompt.includes("prompt:src-1"));
+  });
+
+  it("keeps background items readable too", () => {
+    const primary = article;
+    const background: FeedItemContext = {
+      id: "event-bg",
+      title: "DEV.BG All in One 2026",
+      content: JSON.stringify({
+        title: "DEV.BG All in One 2026",
+        date: "2026-08-29",
+        description: null,
+      }),
+      url: "event:src-cal",
+      publishedAt: null,
+      sourceType: "calendar_event",
+      sourceName: "DEV.BG events",
+      consumable: false,
+    };
+
+    const { userPrompt } = buildPrompts(
+      { ...makeCtx({}), feedItems: [primary, background] },
+      primary
+    );
+
+    assert.ok(userPrompt.includes("Additional background context"));
+    assert.ok(userPrompt.includes("29.08.2026"));
+    assert.ok(!userPrompt.includes('{"title"'));
   });
 });
 

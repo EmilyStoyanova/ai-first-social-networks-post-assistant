@@ -80,6 +80,17 @@ export interface FeedItemContext {
   /** ContentSource.config.includeSourceLink of the item's source; undefined = inherit. */
   sourceLinkPreference?: boolean;
   /**
+   * The public web address a reader could open for this item, or null when it
+   * has none.
+   *
+   * Separate from `url`, which for a prompt or calendar source is the internal
+   * `prompt:<id>` / `event:<id>` uniqueness key and must never reach a reader.
+   * For rss and product_page the two are the same value; a calendar event fills
+   * this from its optional Event URL. Undefined on a context assembled before
+   * this field existed, which `publicUrlOf` treats as "derive it from `url`".
+   */
+  publicUrl?: string | null;
+  /**
    * Whether this item is a single-use article (rss/product_page) governed by the
    * one-post-per-article reservation, or evergreen (prompt/calendar_event) and
    * therefore reusable and never consumed. Omitted defaults to consumable so

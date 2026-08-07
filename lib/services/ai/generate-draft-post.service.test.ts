@@ -825,6 +825,226 @@ describe("generatePostFromContext — direct content sources", () => {
   });
 });
 
+// ─── Calendar events, end to end ──────────────────────────────────────────────
+//
+// The bug: picking a calendar event produced a post with nothing to do with the
+// event. The origin badge was right (the event WAS the primary), but the prompt
+// carried its stored row as a raw `{"title":…,"date":…,"description":null}` blob
+// under a heading calling it an article — so the model had almost nothing to
+// write from and drifted onto general business themes.
+//
+// These assert against `promptSnapshot.userPrompt`, which is the verbatim prompt
+// sent to the provider, so they cover the whole path rather than the badge.
+
+describe("generatePostFromContext — a calendar event reaches the LLM prompt", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const EVENT_TITLE = "DEV.BG All in One 2026";
+  const EVENT_DESCRIPTION =
+    "Bulgaria's largest IT conference — AI, software engineering and career tracks across six halls.";
+
+  /**
+   * The context the builder assembles for a manually picked calendar source:
+   * exactly one item, that source's stored extraction, read directly.
+   */
+  function calendarContext(
+    description: string | null = EVENT_DESCRIPTION,
+    /** The source's optional Event URL, as the context builder resolves it. */
+    publicUrl: string | null = null
+  ): GenerationContext {
+    return makeContext({
+      feedItems: [
+        {
+          id: "cal-item-1",
+          title: EVENT_TITLE,
+          // Byte-for-byte what runSourceIngestion writes for a calendar_event.
+          content: JSON.stringify({ title: EVENT_TITLE, date: "2026-08-29", description }),
+          url: "event:src-cal",
+          publicUrl,
+          publishedAt: new Date("2026-08-29T00:00:00.000Z"),
+          sourceType: "calendar_event",
+          sourceName: "DEV.BG events",
+          consumable: false,
+        },
+      ],
+      hasArticleSources: false,
+      directContentSource: true,
+    });
+  }
+
+  /** The prompt actually sent to the provider, as frozen onto the post. */
+  function promptOf(created: Prisma.PostUncheckedCreateInput): string {
+    return (created.promptSnapshot as Record<string, unknown>).userPrompt as string;
+  }
+
+  it("sends the event title, date, and description to the model", async () => {
+    const { deps, created } = makeSpyDeps();
+
+    const result = await generatePostFromContext(calendarContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    const userPrompt = promptOf(created()!);
+    assert.ok(userPrompt.includes(EVENT_TITLE), "the event title must be in the prompt");
+    assert.ok(userPrompt.includes("29.08.2026"), "the event date must be in the prompt");
+    assert.ok(userPrompt.includes(EVENT_DESCRIPTION), "the description must be in the prompt");
+  });
+
+  it("never sends the stored JSON payload", async () => {
+    const { deps, created } = makeSpyDeps();
+
+    const result = await generatePostFromContext(calendarContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.ok(!promptOf(created()!).includes('{"title"'));
+  });
+
+  it("introduces it as an event, with no promise of a link", async () => {
+    const { deps, created } = makeSpyDeps();
+
+    const result = await generatePostFromContext(calendarContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    const userPrompt = promptOf(created()!);
+    assert.ok(userPrompt.includes("CALENDAR EVENT"));
+    assert.ok(!userPrompt.includes("PRIMARY SOURCE ARTICLE"));
+    assert.ok(!userPrompt.includes("A link to this exact article will be attached"));
+  });
+
+  it("keeps the event as the only source in the prompt", async () => {
+    // The window is scoped to the picked source, and nothing downstream may add
+    // company or pooled content back in as a competing subject.
+    const { deps, created } = makeSpyDeps();
+
+    const result = await generatePostFromContext(calendarContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    const data = created()!;
+    const snapshot = data.promptSnapshot as Record<string, unknown>;
+    assert.deepEqual(snapshot.feedItemIds, ["cal-item-1"]);
+    assert.ok(!promptOf(data).includes("Additional background context"));
+  });
+
+  it("still carries title and date when the event has no description", async () => {
+    // The reported case: description null. The model must still be given the two
+    // facts the event does state, and be told there are no others.
+    const { deps, created } = makeSpyDeps();
+
+    const result = await generatePostFromContext(calendarContext(null), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    const userPrompt = promptOf(created()!);
+    assert.ok(userPrompt.includes(EVENT_TITLE));
+    assert.ok(userPrompt.includes("29.08.2026"));
+    assert.ok(userPrompt.includes("No description was provided"));
+  });
+
+  it("consumes nothing and records the event as the origin", async () => {
+    const { deps, created, claimCalls } = makeSpyDeps();
+
+    const result = await generatePostFromContext(
+      calendarContext(),
+      "co-1",
+      { contentSourceId: "src-cal" },
+      deps
+    );
+
+    assert.ok(result.success);
+    const data = created()!;
+    assert.equal(claimCalls(), 0, "an event is evergreen — nothing is reserved");
+    assert.equal(data.primaryFeedItemId, null);
+    assert.equal(data.contentSourceId, "src-cal");
+    assert.equal(data.originSourceType, "calendar_event");
+    assert.equal(data.originSourceTitle, EVENT_TITLE);
+  });
+
+  // ── The optional Event URL ──────────────────────────────────────────────────
+
+  const EVENT_URL = "https://www.events.dev.bg/allinone/2026";
+
+  it("appends the Event URL to the post and freezes it as the origin", async () => {
+    const { deps, created } = makeSpyDeps();
+    const ctx = calendarContext(EVENT_DESCRIPTION, EVENT_URL);
+    ctx.channel.includeSourceLink = true;
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success);
+    const data = created()!;
+    assert.ok((data.content as string).includes(EVENT_URL), "the link reaches the post text");
+    assert.equal((data.promptSnapshot as Record<string, unknown>).sourceUrl, EVENT_URL);
+    assert.equal(data.originSourceUrl, EVENT_URL, "the origin snapshot records the real page");
+    assert.equal(result.post.origin.articleUrl, EVENT_URL, "and the response renders it");
+    assert.equal(data.primaryFeedItemId, null, "linking still consumes nothing");
+  });
+
+  it("honours an explicit no-link override even when an Event URL exists", async () => {
+    const { deps, created } = makeSpyDeps();
+    const ctx = calendarContext(EVENT_DESCRIPTION, EVENT_URL);
+    ctx.channel.includeSourceLink = true;
+
+    const result = await generatePostFromContext(
+      ctx,
+      "co-1",
+      { includeSourceLinkOverride: false },
+      deps
+    );
+
+    assert.ok(result.success);
+    const data = created()!;
+    assert.ok(!(data.content as string).includes(EVENT_URL), "no link in the text");
+    // Still frozen on the row: the origin records where the post came from,
+    // which is true whether or not the post chose to link it.
+    assert.equal(data.originSourceUrl, EVENT_URL);
+  });
+
+  it("still generates, and links nothing, when the Event URL is blank", async () => {
+    // Every calendar source created before the field existed.
+    const { deps, created } = makeSpyDeps();
+    const ctx = calendarContext(EVENT_DESCRIPTION, null);
+    ctx.channel.includeSourceLink = true;
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success, "a URL-less event must still back a post");
+    const data = created()!;
+    assert.equal((data.promptSnapshot as Record<string, unknown>).sourceUrl, null);
+    assert.equal(data.originSourceUrl, null);
+    assert.equal(result.post.origin.articleUrl, null);
+    assert.equal(result.post.origin.sourceType, "calendar_event", "the origin still stands");
+  });
+
+  it("never lets event:<id> reach the post, the snapshot, or the response", async () => {
+    for (const publicUrl of [EVENT_URL, null]) {
+      const { deps, created } = makeSpyDeps();
+      const ctx = calendarContext(EVENT_DESCRIPTION, publicUrl);
+      ctx.channel.includeSourceLink = true;
+
+      const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+      assert.ok(result.success);
+      const data = created()!;
+      const label = `publicUrl=${publicUrl}`;
+      assert.ok(!(data.content as string).includes("event:"), `${label}: post text`);
+      assert.ok(
+        !JSON.stringify(data.promptSnapshot).includes("event:src-cal"),
+        `${label}: snapshot`
+      );
+      assert.notEqual(data.originSourceUrl, "event:src-cal", `${label}: origin column`);
+      assert.ok(!result.post.origin.articleUrl?.startsWith("event:"), `${label}: response`);
+    }
+  });
+});
+
 // ─── Topic Memory ──────────────────────────────────────────────────────────────
 
 describe("generatePostFromContext — Topic Memory", () => {

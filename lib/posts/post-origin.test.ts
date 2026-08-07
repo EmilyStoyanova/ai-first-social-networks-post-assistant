@@ -44,6 +44,133 @@ const LIVE_ARTICLE: PrimaryFeedItemRow = {
   source: { name: "TechPowerUp", type: "rss" },
 };
 
+/** The optional public page of a calendar event source. */
+const EVENT_URL_FIXTURE = "https://www.events.dev.bg/allinone/2026";
+
+// ─── Synthetic urls never reach a reader ──────────────────────────────────────
+//
+// `origin.articleUrl` is rendered as an href in the post activity modal. A
+// prompt or calendar source's stored url is `prompt:<id>` / `event:<id>` — a
+// storage key, not a page — so it is filtered on the way in AND on the way out,
+// the latter because posts written before the Event URL existed already froze
+// one into the column.
+
+describe("post origin — synthetic source urls", () => {
+  const EVENT_URL = "https://www.events.dev.bg/allinone/2026";
+
+  it("shows a calendar event's Event URL when the post recorded one", () => {
+    const origin = resolvePostOrigin(
+      sourceSnapshot({ originSourceType: "calendar_event", originSourceUrl: EVENT_URL }),
+      null
+    );
+
+    assert.equal(origin.articleUrl, EVENT_URL);
+  });
+
+  it("shows no link for an event whose Event URL was blank", () => {
+    const origin = resolvePostOrigin(
+      sourceSnapshot({ originSourceType: "calendar_event", originSourceUrl: null }),
+      null
+    );
+
+    assert.equal(origin.articleUrl, null);
+    assert.equal(origin.kind, "source", "the origin itself still stands");
+    assert.equal(origin.sourceName, "TechPowerUp", "and still names its source");
+  });
+
+  it("suppresses an event: key frozen into an older post's snapshot", () => {
+    // No backfill: one guard on read covers every historical row.
+    const origin = resolvePostOrigin(
+      sourceSnapshot({
+        originSourceType: "calendar_event",
+        originSourceUrl: "event:96c4827f-3fa0-44d1-ad01-7777aaae3787",
+      }),
+      null
+    );
+
+    assert.equal(origin.articleUrl, null);
+  });
+
+  it("suppresses a prompt: key frozen into an older post's snapshot", () => {
+    const origin = resolvePostOrigin(
+      sourceSnapshot({ originSourceType: "prompt", originSourceUrl: "prompt:src-1" }),
+      null
+    );
+
+    assert.equal(origin.articleUrl, null);
+  });
+
+  it("suppresses a synthetic url reached through the legacy relation fallback", () => {
+    const origin = resolvePostOrigin(LEGACY, {
+      title: "Weekly tip",
+      url: "prompt:src-1",
+      source: { name: "Ideas", type: "prompt" },
+    });
+
+    assert.equal(origin.kind, "source");
+    assert.equal(origin.sourceName, "Ideas");
+    assert.equal(origin.articleUrl, null);
+  });
+
+  it("leaves real article urls untouched on both paths", () => {
+    assert.equal(resolvePostOrigin(sourceSnapshot(), null).articleUrl, "https://example.com/m5");
+    assert.equal(resolvePostOrigin(LEGACY, LIVE_ARTICLE).articleUrl, "https://example.com/m5");
+  });
+});
+
+describe("buildOriginSnapshot — which url is frozen", () => {
+  it("freezes a calendar event's Event URL, not its storage key", () => {
+    const snapshot = buildOriginSnapshot({
+      title: "DEV.BG All in One 2026",
+      url: "event:src-cal",
+      publicUrl: EVENT_URL_FIXTURE,
+      sourceType: "calendar_event",
+      sourceName: "DEV.BG events",
+    });
+
+    assert.equal(snapshot.originSourceUrl, EVENT_URL_FIXTURE);
+    assert.equal(snapshot.originSourceType, "calendar_event");
+    assert.equal(snapshot.originSourceTitle, "DEV.BG All in One 2026");
+  });
+
+  it("freezes null for an event with no Event URL", () => {
+    const snapshot = buildOriginSnapshot({
+      title: "DEV.BG All in One 2026",
+      url: "event:src-cal",
+      publicUrl: null,
+      sourceType: "calendar_event",
+      sourceName: "DEV.BG events",
+    });
+
+    assert.equal(snapshot.originSourceUrl, null);
+    assert.equal(snapshot.originType, "content_source", "it is still a source post");
+  });
+
+  it("freezes null for a prompt source rather than its storage key", () => {
+    const snapshot = buildOriginSnapshot({
+      title: "Weekly tip",
+      url: "prompt:src-1",
+      publicUrl: null,
+      sourceType: "prompt",
+      sourceName: "Ideas",
+    });
+
+    assert.equal(snapshot.originSourceUrl, null);
+  });
+
+  it("still freezes an article's own url when no publicUrl is supplied", () => {
+    // A context assembled before the field existed — every article path unchanged.
+    const snapshot = buildOriginSnapshot({
+      title: "Apple ships M5",
+      url: "https://example.com/m5",
+      sourceType: "rss",
+      sourceName: "TechPowerUp",
+    });
+
+    assert.equal(snapshot.originSourceUrl, "https://example.com/m5");
+  });
+});
+
 describe("resolvePostOrigin — Brand Setup post", () => {
   it("reports brand_setup from the snapshot", () => {
     const origin = resolvePostOrigin(BRAND_SETUP_SNAPSHOT, null);

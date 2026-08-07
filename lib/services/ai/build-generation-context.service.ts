@@ -1,6 +1,10 @@
 import { prisma } from "@/lib/db/client";
 import type { GenerationContext } from "@/lib/ai/types";
-import { CONSUMABLE_SOURCE_TYPES, isConsumableSourceType } from "@/lib/ai/source-types";
+import {
+  CONSUMABLE_SOURCE_TYPES,
+  isConsumableSourceType,
+  resolveItemPublicUrl,
+} from "@/lib/ai/source-types";
 import { resolveFeedItemContent } from "@/lib/ai/feed-item-translation";
 
 const VALID_CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const;
@@ -305,6 +309,10 @@ async function loadContext(
         title: resolved.title,
         content: resolved.content,
         url: f.url,
+        // Resolved HERE, alongside the text, so nothing downstream has to know
+        // that a calendar event keeps its public address on the source rather
+        // than on the item.
+        publicUrl: resolveItemPublicUrl(f.url, f.source.config),
         publishedAt: f.publishedAt,
         sourceType: f.source.type,
         sourceName: f.source.name,

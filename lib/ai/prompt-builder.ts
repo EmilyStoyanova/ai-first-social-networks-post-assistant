@@ -8,6 +8,7 @@ import {
 } from "./post-pattern";
 import type { ContentAspect } from "./content-aspect";
 import { getChannelPolicy } from "./channel-policy";
+import { framePrimarySource, renderFeedItemContent } from "./source-content";
 
 export interface BuiltPrompts {
   systemPrompt: string;
@@ -205,16 +206,17 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
 
 // ─── User prompt ──────────────────────────────────────────────────────────────
 
-const CONTENT_PER_ITEM_LIMIT = 900;
 const TOTAL_FEED_CHAR_LIMIT = 5000;
 
-/** Renders a feed item as a `**title**` + trimmed excerpt block (empty when it has neither). */
+/**
+ * Renders a feed item as a `**title**` + body block (empty when it has neither).
+ *
+ * Shaped by the item's source type — see source-content.ts. Plain-text sources
+ * are unchanged; the JSON-backed ones (product page, calendar event) are turned
+ * into readable fields instead of being dumped as a raw object.
+ */
 function excerptFor(item: FeedItemContext): string {
-  const title = item.title?.trim() ?? "";
-  const raw = item.content?.trim() ?? "";
-  const excerpt =
-    raw.length > CONTENT_PER_ITEM_LIMIT ? raw.slice(0, CONTENT_PER_ITEM_LIMIT) + "…" : raw;
-  return [title ? `**${title}**` : null, excerpt || null].filter(Boolean).join("\n");
+  return renderFeedItemContent(item);
 }
 
 function buildJsonFormatInstruction(imageRequired: boolean): string {
@@ -269,11 +271,15 @@ function buildUserPrompt(
       secondaryBlocks.push(block);
     }
 
+    // An article, an event, and a brief are three different things, and the
+    // heading is the model's only cue which one it is holding.
+    const framing = framePrimarySource(primary);
+
     const primarySection = [
-      "**PRIMARY SOURCE ARTICLE — the post MUST be based on THIS article and no other.**",
-      "The topic, facts, and angle of the post must come from this article. A link to this exact article will be attached to the post, so the post text must be about it.",
+      framing.heading,
+      framing.instruction,
       "---",
-      primaryBlock || "(no excerpt available for the primary article)",
+      primaryBlock || "(no excerpt available for the primary source)",
       "---",
     ].join("\n");
 
