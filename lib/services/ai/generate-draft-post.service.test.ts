@@ -138,6 +138,61 @@ function makeDeps(
   };
 }
 
+/**
+ * Deps whose feedItem.updateMany records every call, so a test can prove which
+ * items are claimed (consumed) and which are not: article items ARE, evergreen
+ * and directly-read content sources are NOT.
+ */
+function makeSpyDeps(): {
+  deps: GenerateDraftPostDeps;
+  created: () => Prisma.PostUncheckedCreateInput | null;
+  claimCalls: () => number;
+} {
+  let createdData: Prisma.PostUncheckedCreateInput | null = null;
+  let claims = 0;
+  const db: GenerateDraftPostDb = {
+    post: {
+      findMany: async () => [],
+      create: async (args) => {
+        createdData = args.data;
+        return {
+          id: "post-1",
+          companyId: args.data.companyId,
+          channel: args.data.channel as SocialChannel,
+          status: "draft",
+          content: args.data.content,
+          hashtags: [],
+          imagePrompt: null,
+          notes: null,
+          llmProvider: null,
+          llmModel: null,
+          createdAt: new Date(),
+        };
+      },
+    },
+    feedItem: {
+      updateMany: async () => {
+        claims++;
+        return { count: 1 };
+      },
+    },
+  };
+  return {
+    deps: {
+      db,
+      auditLog: async () => {},
+      embed: async () => ({ status: "embedded" }),
+      recordCalibration: async () => {},
+      semanticGate: ACCEPT_GATE,
+      // A working system always has an admin default; provide one so these tests
+      // resolve a provider (the env-var fallback has been removed).
+      loadDefaultLlmConfig: async () => ({ id: "default-cfg", provider: "grok" }),
+    },
+    created: () => createdData,
+    claimCalls: () => claims,
+  };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("generatePostFromContext — coreMessage persistence (Phase 1.1)", () => {
@@ -448,58 +503,6 @@ describe("generatePostFromContext — evergreen prompt sources", () => {
   const PROMPT_TEXT =
     "Share one concrete productivity tip our small-business audience can use today.";
 
-  // Deps whose feedItem.updateMany records every call, so we can prove evergreen
-  // items are NEVER claimed/consumed while article items ARE.
-  function makeSpyDeps(): {
-    deps: GenerateDraftPostDeps;
-    created: () => Prisma.PostUncheckedCreateInput | null;
-    claimCalls: () => number;
-  } {
-    let createdData: Prisma.PostUncheckedCreateInput | null = null;
-    let claims = 0;
-    const db: GenerateDraftPostDb = {
-      post: {
-        findMany: async () => [],
-        create: async (args) => {
-          createdData = args.data;
-          return {
-            id: "post-1",
-            companyId: args.data.companyId,
-            channel: args.data.channel as SocialChannel,
-            status: "draft",
-            content: args.data.content,
-            hashtags: [],
-            imagePrompt: null,
-            notes: null,
-            llmProvider: null,
-            llmModel: null,
-            createdAt: new Date(),
-          };
-        },
-      },
-      feedItem: {
-        updateMany: async () => {
-          claims++;
-          return { count: 1 };
-        },
-      },
-    };
-    return {
-      deps: {
-        db,
-        auditLog: async () => {},
-        embed: async () => ({ status: "embedded" }),
-        recordCalibration: async () => {},
-        semanticGate: ACCEPT_GATE,
-        // A working system always has an admin default; provide one so these tests
-        // resolve a provider (the env-var fallback has been removed).
-        loadDefaultLlmConfig: async () => ({ id: "default-cfg", provider: "grok" }),
-      },
-      created: () => createdData,
-      claimCalls: () => claims,
-    };
-  }
-
   function promptContext(): GenerationContext {
     return makeContext({
       feedItems: [
@@ -618,6 +621,207 @@ describe("generatePostFromContext — evergreen prompt sources", () => {
     assert.ok(result.success, "no-source generation should produce a mission post");
     assert.equal(claimCalls(), 0);
     assert.equal(created()!.primaryFeedItemId, null);
+  });
+});
+
+// ─── Direct content sources (product page / prompt / calendar picked manually) ─
+//
+// The bug these cover: a product page could be added and successfully extracted
+// but never generated from. Under the article path its single stored row would
+// be reserved and consumed by the first post, leaving the source permanently
+// dry; `directContentSource` reads that row instead and consumes nothing.
+
+describe("generatePostFromContext — direct content sources", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const PAGE_URL = "https://shop.example.com/pro-plan";
+  const PAGE_CONTENT = '{"title":"Pro Plan","description":"Everything in Starter, plus SSO."}';
+
+  /**
+   * A product page as the context builder assembles it for the `content_source`
+   * scope: the source's stored extraction, still typed as a consumable article
+   * (it genuinely is one), with the direct flag deciding what happens to it.
+   */
+  function productPageContext(overrides: Partial<GenerationContext> = {}): GenerationContext {
+    return makeContext({
+      feedItems: [
+        {
+          id: "pp-item-1",
+          title: "Pro Plan",
+          content: PAGE_CONTENT,
+          url: PAGE_URL,
+          publishedAt: null,
+          sourceType: "product_page",
+          sourceName: "Pricing Page",
+          consumable: true,
+        },
+      ],
+      hasArticleSources: true,
+      directContentSource: true,
+      ...overrides,
+    });
+  }
+
+  it("generates from a product page without reserving a feed item", async () => {
+    const { deps, created, claimCalls } = makeSpyDeps();
+
+    const result = await generatePostFromContext(productPageContext(), "co-1", {}, deps);
+
+    assert.ok(result.success, "a product page must be able to back a post");
+    assert.equal(claimCalls(), 0, "no reservation is attempted for a direct content source");
+    assert.ok(created(), "the post is persisted");
+  });
+
+  it("leaves primaryFeedItemId null for a product-page post", async () => {
+    // Nothing was consumed, so nothing may claim the column whose unique index
+    // means "this article backs exactly one post".
+    const { deps, created } = makeSpyDeps();
+
+    const result = await generatePostFromContext(productPageContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(created()!.primaryFeedItemId, null);
+  });
+
+  it("stays available: a second generation still succeeds and still claims nothing", async () => {
+    // The regression that made non-RSS sources unusable — one post and the
+    // source went dry. The context builder omits the usedInPost filter for this
+    // scope, and nothing here marks the row used, so the second run is identical.
+    const first = makeSpyDeps();
+    const second = makeSpyDeps();
+
+    const a = await generatePostFromContext(productPageContext(), "co-1", {}, first.deps);
+    const b = await generatePostFromContext(productPageContext(), "co-1", {}, second.deps);
+
+    assert.ok(a.success);
+    assert.ok(b.success);
+    assert.equal(first.claimCalls() + second.claimCalls(), 0);
+  });
+
+  it("propagates the product page URL into the prompt and onto the post", async () => {
+    // The URL travels with the content: into the prompt the model sees, into the
+    // appended source link, and into the post's frozen origin snapshot.
+    const { deps, created } = makeSpyDeps();
+    const ctx = productPageContext();
+    ctx.channel.includeSourceLink = true;
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success);
+    const data = created()!;
+    const snapshot = data.promptSnapshot as Record<string, unknown>;
+    assert.equal(snapshot.sourceUrl, PAGE_URL, "the link resolution used the page URL");
+    assert.ok(
+      (data.content as string).includes(PAGE_URL),
+      "the page URL is appended to the post text"
+    );
+    assert.equal(data.originSourceUrl, PAGE_URL, "the origin snapshot records the page URL");
+    assert.ok(
+      (snapshot.userPrompt as string).includes("Pro Plan"),
+      "the extracted content reaches the prompt"
+    );
+  });
+
+  it("records the product page as the post's origin", async () => {
+    const { deps, created } = makeSpyDeps();
+
+    const result = await generatePostFromContext(productPageContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    const data = created()!;
+    assert.equal(data.originType, "content_source");
+    assert.equal(data.originSourceType, "product_page");
+    assert.equal(data.originSourceName, "Pricing Page");
+    assert.equal(result.post.origin.kind, "source");
+    assert.equal(result.post.origin.sourceType, "product_page");
+  });
+
+  it("links the post to the picked source via contentSourceId", async () => {
+    // With primaryFeedItemId null, this FK is the only durable relation back to
+    // what the post was written from.
+    const { deps, created } = makeSpyDeps();
+
+    const result = await generatePostFromContext(
+      productPageContext(),
+      "co-1",
+      { contentSourceId: "src-pp" },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(created()!.contentSourceId, "src-pp");
+  });
+
+  it("reports NO_FEED_ITEMS_AVAILABLE when the source has nothing extracted", async () => {
+    // Never a drift to a mission post: the user picked this source explicitly.
+    // The manual flow turns this into SELECTED_SOURCE_UNAVAILABLE.
+    const { deps, created } = makeSpyDeps();
+
+    const result = await generatePostFromContext(
+      productPageContext({ feedItems: [] }),
+      "co-1",
+      {},
+      deps
+    );
+
+    assert.ok(!result.success);
+    assert.equal(result.code, "NO_FEED_ITEMS_AVAILABLE");
+    assert.equal(created(), null, "no post is written");
+  });
+
+  it("keeps a directly-picked prompt source's synthetic URL off the post", async () => {
+    // A prompt source can be picked directly too, but `prompt:<id>` is a storage
+    // key, not a link — it must never reach a reader.
+    const { deps, created } = makeSpyDeps();
+    const ctx = productPageContext({
+      feedItems: [
+        {
+          id: "prompt-item-1",
+          title: "Weekly tip",
+          content: "Share one concrete productivity tip.",
+          url: "prompt:src-1",
+          publishedAt: null,
+          sourceType: "prompt",
+          sourceName: "Ideas",
+          consumable: false,
+        },
+      ],
+    });
+    ctx.channel.includeSourceLink = true;
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success);
+    const data = created()!;
+    assert.ok(!(data.content as string).includes("prompt:"), "no synthetic url in the post text");
+    assert.equal((data.promptSnapshot as Record<string, unknown>).sourceUrl, null);
+  });
+
+  it("does not change the article path when the flag is absent", async () => {
+    // Same single consumable item, no directContentSource: the reservation runs
+    // exactly as before. Guards the RSS and cron paths against this change.
+    const { deps, created, claimCalls } = makeSpyDeps();
+
+    const result = await generatePostFromContext(
+      productPageContext({ directContentSource: undefined }),
+      "co-1",
+      {},
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(claimCalls(), 1, "the item is claimed, as it always was");
+    assert.equal(created()!.primaryFeedItemId, "pp-item-1");
   });
 });
 

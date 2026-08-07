@@ -60,6 +60,16 @@ const EVERGREEN = makeItem({
   consumable: false,
 });
 
+// A product page's stored extraction. Consumable by TYPE (it is an article
+// source), but read directly when the user picks it — the "direct" plan. Its URL
+// is a real page, unlike the synthetic one an evergreen item carries.
+const PRODUCT_PAGE = makeItem({
+  id: "pp-1",
+  title: "Pro Plan",
+  content: '{"title":"Pro Plan","description":"Everything in Starter, plus SSO."}',
+  url: "https://shop.example.com/pro-plan",
+});
+
 // ─── resolvePrimarySelection ──────────────────────────────────────────────────
 
 describe("resolvePrimarySelection", () => {
@@ -112,6 +122,35 @@ describe("resolvePrimarySelection", () => {
 
   it("has no primary for a mission post", () => {
     const selection = resolvePrimarySelection([], { action: "mission" });
+    assert.deepEqual(selection, { item: null, claimedFeedItemId: null, sourceUrl: null });
+  });
+
+  it("reads a direct content source's latest item, claiming nothing", () => {
+    // A manually picked product page. The window is already scoped to that one
+    // source and ordered newest-first, so the first item IS its latest
+    // extraction — and nothing is reserved, so primaryFeedItemId stays null.
+    const selection = resolvePrimarySelection([PRODUCT_PAGE], { action: "direct" });
+    assert.equal(selection.item?.id, "pp-1");
+    assert.equal(selection.claimedFeedItemId, null, "a direct source is never consumed");
+    assert.equal(selection.sourceUrl, PRODUCT_PAGE.url, "the product page URL is linkable");
+  });
+
+  it("keeps the real page URL on a direct product-page post", () => {
+    // Unlike the evergreen path, which suppresses the URL because prompt:/event:
+    // urls are synthetic, a product page has an actual page a reader can open.
+    const selection = resolvePrimarySelection([PRODUCT_PAGE], { action: "direct" });
+    assert.equal(selection.sourceUrl, "https://shop.example.com/pro-plan");
+  });
+
+  it("suppresses the synthetic URL of a directly-picked prompt source", () => {
+    // Picking a prompt source directly is allowed; linking `prompt:<id>` is not.
+    const selection = resolvePrimarySelection([EVERGREEN], { action: "direct" });
+    assert.equal(selection.item?.id, "prompt-1");
+    assert.equal(selection.sourceUrl, null);
+  });
+
+  it("has no primary when a direct source has nothing stored", () => {
+    const selection = resolvePrimarySelection([], { action: "direct" });
     assert.deepEqual(selection, { item: null, claimedFeedItemId: null, sourceUrl: null });
   });
 });

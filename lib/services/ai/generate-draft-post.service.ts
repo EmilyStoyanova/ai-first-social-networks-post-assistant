@@ -23,14 +23,19 @@ import { buildTopicMemory, TOPIC_MEMORY_SIZE } from "@/lib/ai/topic-memory";
 import { resolvePostSourceLink } from "@/lib/ai/source-link";
 import { resolvePrimarySelection } from "@/lib/ai/primary-feed-item";
 import {
+  planDirectContentSource,
   planFeedItemUsage,
   releaseFeedItem,
+  type FeedItemPlan,
   type FeedItemReservationDb,
 } from "@/lib/ai/feed-item-reservation";
 import { isConsumableItem } from "@/lib/ai/source-types";
 import {
+  isPickedSource,
   isSelectedSourceUsable,
+  resolveManualContentSource,
   toSourceScope,
+  type ManualContentSourceRef,
   type ManualContentSourceSelection,
 } from "@/lib/ai/manual-content-source";
 import { embedPost, type EmbedPostInput, type EmbedPostOutcome } from "./embed-post.service";
@@ -150,10 +155,11 @@ export type GenerateDraftPostResult =
         // Source articles existed but every one was already claimed (concurrent
         // run / exhausted pool). Not an error — callers skip cleanly.
         | "NO_FEED_ITEMS_AVAILABLE"
-        // Manual generation only: the RSS source picked in the form can no longer
-        // back a post (its articles ran out, or it was disabled/deleted between
-        // the form rendering and the click). Never a silent fallback — an
-        // explicit pick that cannot be honoured is reported, not substituted.
+        // Manual generation only: the source picked in the form can no longer
+        // back a post — an RSS feed whose articles ran out, a non-RSS source with
+        // nothing extracted yet, or any source disabled/deleted between the form
+        // rendering and the click. Never a silent fallback — an explicit pick
+        // that cannot be honoured is reported, not substituted.
         | "SELECTED_SOURCE_UNAVAILABLE";
       message?: string;
       /** Set only for CANNOT_GENERATE_UNIQUE_POST — which guard forced the abort. */
@@ -299,15 +305,46 @@ export async function generateDraftPost(
     "contentLanguage" | "includeSourceLinkOverride" | "llmConfigId" | "autoGenerateImageOverride"
   > & {
     /**
-     * The form's "Content source" choice. Omitted = company rules, i.e. the
-     * pooled behaviour this flow has always had.
+     * The form's "Content source" choice, as it came off the wire. Omitted =
+     * company rules, i.e. the pooled behaviour this flow has always had.
      */
-    contentSource?: ManualContentSourceSelection;
+    contentSource?: ManualContentSourceRef;
   } = {}
 ): Promise<GenerateDraftPostResult> {
-  const selection: ManualContentSourceSelection = options.contentSource ?? {
-    kind: "company_rules",
-  };
+  const ref: ManualContentSourceRef = options.contentSource ?? { kind: "company_rules" };
+
+  // ── Resolve WHAT KIND of source was picked ────────────────────────────────
+  // The type decides the entire downstream pipeline — an RSS pick reserves and
+  // consumes one unused article, anything else reads the source's stored
+  // extraction and consumes nothing — so it is read from the database, never
+  // taken from the form. A client that could name the path could make one RSS
+  // article back two posts.
+  //
+  // The lookup is scoped by company slug AND membership, so a source belonging
+  // to another company resolves to null exactly like a deleted one: the caller
+  // learns "not available", never that it exists.
+  let selection: ManualContentSourceSelection;
+  if (ref.kind === "source") {
+    const picked = await prisma.contentSource.findFirst({
+      where: {
+        id: ref.sourceId,
+        enabled: true,
+        company: isGlobalAdmin ? { slug } : { slug, members: { some: { userId } } },
+      },
+      select: { type: true },
+    });
+    const resolved = resolveManualContentSource(ref, picked?.type ?? null);
+    if (!resolved) {
+      return {
+        success: false,
+        code: "SELECTED_SOURCE_UNAVAILABLE",
+        message: "The selected content source is no longer available.",
+      };
+    }
+    selection = resolved;
+  } else {
+    selection = ref;
+  }
 
   // Build context (also validates auth/access). The scope narrows the article
   // window to the chosen source — or to nothing at all for a mission post.
@@ -322,14 +359,14 @@ export async function generateDraftPost(
     return { success: false, code: contextResult.code };
   }
 
-  // Fail before spending an LLM call when the picked source has nothing left to
-  // write about. The window is already scoped to it, so this also catches a
-  // source disabled or deleted since the form loaded.
+  // Fail before spending an LLM call when the picked source has nothing to write
+  // from. The window is already scoped to it, so this also catches a source
+  // whose articles ran out (RSS) or that has never been extracted (non-RSS).
   if (!isSelectedSourceUsable(selection, contextResult.context.feedItems)) {
     return {
       success: false,
       code: "SELECTED_SOURCE_UNAVAILABLE",
-      message: "No new articles are available for the selected source.",
+      message: unavailableMessage(selection),
     };
   }
 
@@ -351,21 +388,35 @@ export async function generateDraftPost(
     autoGenerateImageOverride: options.autoGenerateImageOverride,
     preferredLlmConfigId,
     generatedById: userId,
+    // The picked source, recorded on the post as a durable FK. For a direct
+    // content-source post this is the ONLY relation back to what it was written
+    // from — primaryFeedItemId stays null because nothing was reserved. It can
+    // never disturb the content mix: the scheduler counts only posts carrying
+    // its own scheduleId, and a manual post has none.
+    contentSourceId: isPickedSource(selection) ? selection.sourceId : undefined,
   });
 
-  // The guard above found articles, but a concurrent run claimed the last of them
-  // before this one could. For a specific-source pick that is the same story the
-  // guard tells — the source has nothing left — so it gets the same answer rather
-  // than the pooled "no articles anywhere" message, which would be untrue.
-  if (!result.success && result.code === "NO_FEED_ITEMS_AVAILABLE" && selection.kind === "source") {
+  // The guard above found something to write from, but a concurrent run claimed
+  // the last article before this one could. For a specific-source pick that is
+  // the same story the guard tells — the source has nothing left — so it gets
+  // the same answer rather than the pooled "no articles anywhere" message, which
+  // would be untrue.
+  if (!result.success && result.code === "NO_FEED_ITEMS_AVAILABLE" && isPickedSource(selection)) {
     return {
       success: false,
       code: "SELECTED_SOURCE_UNAVAILABLE",
-      message: "No new articles are available for the selected source.",
+      message: unavailableMessage(selection),
     };
   }
 
   return result;
+}
+
+/** Why a picked source could not back a post, phrased for the kind picked. */
+function unavailableMessage(selection: ManualContentSourceSelection): string {
+  return selection.kind === "content_source"
+    ? "The selected content source has no extracted content yet. Fetch it and try again."
+    : "No new articles are available for the selected source.";
 }
 
 /**
@@ -489,18 +540,27 @@ export async function generatePostFromContext(
   //   • article source, no candidates → skip cleanly (all articles already used)
   //   • article candidate claimable   → claim one and generate from it
   //   • evergreen item available       → generate from it, no claim, reusable
+  //
+  // A manually picked non-RSS source bypasses the whole decision: its window is
+  // one source's stored extraction, which is read directly and never consumed.
+  // Routing it through the reservation would claim a product page's single row
+  // and leave the source permanently dry.
   const articleCandidateIds = context.feedItems.filter(isConsumableItem).map((f) => f.id);
   const hasEvergreenItems = context.feedItems.some((f) => !isConsumableItem(f));
-  const plan = await planFeedItemUsage(
-    articleCandidateIds,
-    context.hasArticleSources,
-    hasEvergreenItems,
-    db
-  );
+  const plan: FeedItemPlan = context.directContentSource
+    ? planDirectContentSource(context.feedItems)
+    : await planFeedItemUsage(
+        articleCandidateIds,
+        context.hasArticleSources,
+        hasEvergreenItems,
+        db
+      );
   if (plan.action === "skip") {
     // Article sources are configured but every eligible article is already used
     // (or a concurrent run claimed the last candidate) and no evergreen item is
-    // available. Not an error — the caller skips.
+    // available. For a direct content source: nothing has been extracted for it.
+    // Not an error — the caller skips (the manual flow reports it as
+    // SELECTED_SOURCE_UNAVAILABLE).
     return { success: false, code: "NO_FEED_ITEMS_AVAILABLE" };
   }
 

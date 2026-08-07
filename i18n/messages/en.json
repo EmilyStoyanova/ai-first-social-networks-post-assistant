@@ -625,6 +625,7 @@
       "contentSourceCompanyRules": "Use company rules (recommended)",
       "contentSourceCompanyMission": "Company Mission",
       "contentSourceNoArticles": "(No new articles)",
+      "contentSourceNoContent": "(No extracted content)",
       "duplicateWarning": "Similar post detected (score {score}). Review before publishing.",
       "safetyWarning": "Safety check flagged: {terms}. Draft saved — please review before approving.",
       "uniqueErrorTopicRepeated": "We couldn't find a fresh angle after {attempts} attempts — recent posts already cover this topic. Add new source material or try again later.",

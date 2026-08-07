@@ -7,9 +7,11 @@ import {
 } from "./list-generation-sources.service";
 
 // ─── Fake DB ───────────────────────────────────────────────────────────────────
-// contentSource.findMany honours the enabled/type filters, and feedItem.findMany
-// honours enabled/usedInPost + the sourceId window, so the tests prove the real
-// query's filters rather than a hand-rolled answer.
+// contentSource.findMany honours the enabled filter, and feedItem.findMany
+// honours enabled + the optional usedInPost filter and the sourceId window, so
+// the tests prove the real queries' filters rather than a hand-rolled answer.
+// The optional usedInPost is the crux: the RSS window sets it, the non-RSS
+// window deliberately omits it.
 
 interface SourceSeed {
   id: string;
@@ -31,8 +33,8 @@ function makeDb(sources: SourceSeed[], items: ItemSeed[] = []): GenerationSource
     contentSource: {
       findMany: async ({ where }) =>
         sources
-          .filter((s) => s.enabled === where.enabled && s.type === where.type)
-          .map((s) => ({ id: s.id, name: s.name })),
+          .filter((s) => s.enabled === where.enabled)
+          .map((s) => ({ id: s.id, name: s.name, type: s.type })),
     },
     feedItem: {
       findMany: async ({ where }) => {
@@ -40,7 +42,7 @@ function makeDb(sources: SourceSeed[], items: ItemSeed[] = []): GenerationSource
           (i) =>
             where.sourceId.in.includes(i.sourceId) &&
             i.enabled === where.enabled &&
-            i.usedInPost === where.usedInPost
+            (where.usedInPost === undefined || i.usedInPost === where.usedInPost)
         );
         // distinct: ["sourceId"]
         return [...new Set(matching.map((i) => i.sourceId))].map((sourceId) => ({ sourceId }));
@@ -49,18 +51,24 @@ function makeDb(sources: SourceSeed[], items: ItemSeed[] = []): GenerationSource
   };
 }
 
-const rss = (id: string, name: string, enabled = true): SourceSeed => ({
+const source = (id: string, name: string, type: ContentSourceType, enabled = true): SourceSeed => ({
   id,
   name,
-  type: "rss",
+  type,
   enabled,
 });
+
+const rss = (id: string, name: string, enabled = true) => source(id, name, "rss", enabled);
+const productPage = (id: string, name: string, enabled = true) =>
+  source(id, name, "product_page", enabled);
 
 const unusedArticle = (sourceId: string): ItemSeed => ({
   sourceId,
   enabled: true,
   usedInPost: false,
 });
+
+const usedItem = (sourceId: string): ItemSeed => ({ sourceId, enabled: true, usedInPost: true });
 
 describe("listGenerationSourcesCore", () => {
   it("lists enabled RSS sources with articles as selectable", async () => {
@@ -70,16 +78,16 @@ describe("listGenerationSourcesCore", () => {
 
     assert.ok(result.success);
     assert.deepEqual(result.sources, [
-      { id: "src-1", name: "Tech Weekly", hasAvailableArticles: true },
+      { id: "src-1", name: "Tech Weekly", type: "rss", available: true, unavailableReason: null },
     ]);
   });
 
-  it("still lists a source whose articles are all used, but marks it unselectable", async () => {
+  it("still lists an RSS source whose articles are all used, but marks it unselectable", async () => {
     // The requirement: a dry feed stays visible so the owner can see it exists
     // and is merely out of articles — the form renders it disabled.
     const db = makeDb(
       [rss("src-1", "Tech Weekly"), rss("src-2", "Design Notes")],
-      [unusedArticle("src-1"), { sourceId: "src-2", enabled: true, usedInPost: true }]
+      [unusedArticle("src-1"), usedItem("src-2")]
     );
 
     const result = await listGenerationSourcesCore("acme", "u-1", false, db);
@@ -87,10 +95,11 @@ describe("listGenerationSourcesCore", () => {
     assert.ok(result.success);
     const dry = result.sources.find((s) => s.id === "src-2");
     assert.ok(dry, "a source with no unused articles is still displayed");
-    assert.equal(dry.hasAvailableArticles, false, "but it cannot be selected");
+    assert.equal(dry.available, false, "but it cannot be selected");
+    assert.equal(dry.unavailableReason, "no_articles");
   });
 
-  it("treats a source whose only articles are disabled as having none", async () => {
+  it("treats an RSS source whose only articles are disabled as having none", async () => {
     // A disabled article is excluded from the generation window too, so offering
     // the source would promise an article generation would then refuse to use.
     const db = makeDb(
@@ -101,13 +110,112 @@ describe("listGenerationSourcesCore", () => {
     const result = await listGenerationSourcesCore("acme", "u-1", false, db);
 
     assert.ok(result.success);
-    assert.equal(result.sources[0].hasAvailableArticles, false);
+    assert.equal(result.sources[0].available, false);
+    assert.equal(result.sources[0].unavailableReason, "no_articles");
   });
 
   it("omits disabled sources entirely", async () => {
     // Switched off is not the same as dry: it is not offered at all.
     const db = makeDb(
-      [rss("src-1", "Tech Weekly"), rss("src-2", "Retired Feed", false)],
+      [
+        rss("src-1", "Tech Weekly"),
+        rss("src-2", "Retired Feed", false),
+        productPage("src-3", "Old Product", false),
+      ],
+      [unusedArticle("src-1"), unusedArticle("src-2"), unusedArticle("src-3")]
+    );
+
+    const result = await listGenerationSourcesCore("acme", "u-1", false, db);
+
+    assert.ok(result.success);
+    assert.deepEqual(
+      result.sources.map((s) => s.id),
+      ["src-1"],
+      "an inactive source never reaches the dropdown, whatever its type"
+    );
+  });
+
+  it("lists a product page alongside RSS, carrying its type", async () => {
+    // The bug this fixes: a perfectly good product page could be added and
+    // extracted but never appeared in the dropdown, making it unusable.
+    const db = makeDb(
+      [rss("src-1", "Tech Weekly"), productPage("src-2", "Pricing Page")],
+      [unusedArticle("src-1"), unusedArticle("src-2")]
+    );
+
+    const result = await listGenerationSourcesCore("acme", "u-1", false, db);
+
+    assert.ok(result.success);
+    const page = result.sources.find((s) => s.id === "src-2");
+    assert.ok(page, "the product page is offered");
+    assert.equal(page.type, "product_page");
+  });
+
+  it("keeps a product page selectable after a post has already used its content", async () => {
+    // A product page is not a one-shot article: it is read directly and consumed
+    // by nothing, so `usedInPost` must not gate it. Under the old RSS-only
+    // predicate this source would have gone permanently dry after one post.
+    const db = makeDb([productPage("src-1", "Pricing Page")], [usedItem("src-1")]);
+
+    const result = await listGenerationSourcesCore("acme", "u-1", false, db);
+
+    assert.ok(result.success);
+    assert.equal(result.sources[0].available, true);
+    assert.equal(result.sources[0].unavailableReason, null);
+  });
+
+  it("lists an active product page with extracted content as selectable", async () => {
+    const db = makeDb([productPage("src-1", "Pricing Page")], [unusedArticle("src-1")]);
+
+    const result = await listGenerationSourcesCore("acme", "u-1", false, db);
+
+    assert.ok(result.success);
+    assert.deepEqual(result.sources, [
+      {
+        id: "src-1",
+        name: "Pricing Page",
+        type: "product_page",
+        available: true,
+        unavailableReason: null,
+      },
+    ]);
+  });
+
+  it("disables a product page that has never been extracted", async () => {
+    // Added but never fetched: visible, so the owner sees it exists and knows to
+    // fetch it — and reported as missing CONTENT, not missing articles.
+    const db = makeDb([productPage("src-1", "Pricing Page")], []);
+
+    const result = await listGenerationSourcesCore("acme", "u-1", false, db);
+
+    assert.ok(result.success);
+    assert.equal(result.sources[0].available, false);
+    assert.equal(result.sources[0].unavailableReason, "no_content");
+  });
+
+  it("disables a product page whose only extracted item is disabled", async () => {
+    // A disabled item is out of the generation window, so the source cannot back
+    // a post even though something was once extracted for it.
+    const db = makeDb(
+      [productPage("src-1", "Pricing Page")],
+      [{ sourceId: "src-1", enabled: false, usedInPost: false }]
+    );
+
+    const result = await listGenerationSourcesCore("acme", "u-1", false, db);
+
+    assert.ok(result.success);
+    assert.equal(result.sources[0].available, false);
+    assert.equal(result.sources[0].unavailableReason, "no_content");
+  });
+
+  it("lists prompt and calendar sources too", async () => {
+    // Every supported type is offered — the dropdown is no longer RSS-only.
+    const db = makeDb(
+      [
+        source("src-1", "Ideas", "prompt"),
+        source("src-2", "Launch Day", "calendar_event"),
+        source("src-3", "Never fetched", "prompt"),
+      ],
       [unusedArticle("src-1"), unusedArticle("src-2")]
     );
 
@@ -115,28 +223,32 @@ describe("listGenerationSourcesCore", () => {
 
     assert.ok(result.success);
     assert.deepEqual(
-      result.sources.map((s) => s.id),
-      ["src-1"]
+      result.sources.map((s) => [s.id, s.type, s.available]),
+      [
+        ["src-1", "prompt", true],
+        ["src-2", "calendar_event", true],
+        ["src-3", "prompt", false],
+      ]
     );
   });
 
-  it("omits non-RSS sources", async () => {
+  it("applies each kind's own availability rule in one mixed list", async () => {
+    // The whole point of the split: the same `usedInPost: true` row means "dry"
+    // for RSS and "still fine" for a product page.
     const db = makeDb(
-      [rss("src-1", "Tech Weekly"), { id: "src-2", name: "Ideas", type: "prompt", enabled: true }],
-      [unusedArticle("src-1")]
+      [rss("rss-1", "Tech Weekly"), productPage("pp-1", "Pricing Page")],
+      [usedItem("rss-1"), usedItem("pp-1")]
     );
 
     const result = await listGenerationSourcesCore("acme", "u-1", false, db);
 
     assert.ok(result.success);
-    assert.deepEqual(
-      result.sources.map((s) => s.id),
-      ["src-1"]
-    );
+    assert.equal(result.sources.find((s) => s.id === "rss-1")?.available, false);
+    assert.equal(result.sources.find((s) => s.id === "pp-1")?.available, true);
   });
 
-  it("returns an empty list when the company has no RSS sources", async () => {
-    // The dropdown then shows only its two non-RSS choices.
+  it("returns an empty list when the company has no sources at all", async () => {
+    // The dropdown then shows only its two sentinel choices.
     let feedItemQueried = false;
     const db = makeDb([]);
     db.feedItem.findMany = async () => {
@@ -148,7 +260,23 @@ describe("listGenerationSourcesCore", () => {
 
     assert.ok(result.success);
     assert.deepEqual(result.sources, []);
-    assert.equal(feedItemQueried, false, "no article lookup without sources to look up");
+    assert.equal(feedItemQueried, false, "no item lookup without sources to look up");
+  });
+
+  it("skips the RSS lookup when every source is non-RSS", async () => {
+    // Each window is queried only when it has ids to ask about.
+    const queried: Array<false | undefined> = [];
+    const db = makeDb([productPage("src-1", "Pricing Page")], [unusedArticle("src-1")]);
+    const inner = db.feedItem.findMany;
+    db.feedItem.findMany = async (args) => {
+      queried.push(args.where.usedInPost);
+      return inner(args);
+    };
+
+    const result = await listGenerationSourcesCore("acme", "u-1", false, db);
+
+    assert.ok(result.success);
+    assert.deepEqual(queried, [undefined], "only the non-RSS window is queried");
   });
 
   it("returns NOT_FOUND when a non-member requests the list", async () => {

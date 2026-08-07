@@ -20,8 +20,10 @@ const bodySchema = z.object({
   generateImage: z.boolean().optional(),
   // Explicit per-generation LLM config (v2-5); omitted = env-var default provider.
   llmConfigId: z.string().min(1).optional(),
-  // "Content source" choice: a sentinel (company rules / company mission) or an
-  // RSS source id. Omitted = company rules, the long-standing pooled behaviour.
+  // "Content source" choice: a sentinel (company rules / company mission) or a
+  // ContentSource id of any type. Omitted = company rules, the long-standing
+  // pooled behaviour. The id's KIND is not accepted from the client — the
+  // service reads the source's type from the DB (see resolveManualContentSource).
   contentSource: z.string().min(1).optional(),
 });
 
@@ -191,7 +193,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
           {
             error: {
               code: "SELECTED_SOURCE_UNAVAILABLE",
-              message: result.message ?? "No new articles are available for the selected source.",
+              message: result.message ?? "The selected content source can no longer back a post.",
             },
           },
           { status: 409 }

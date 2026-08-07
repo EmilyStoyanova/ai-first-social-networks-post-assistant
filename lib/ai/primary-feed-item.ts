@@ -1,5 +1,5 @@
 import type { FeedItemContext } from "./types";
-import { isConsumableItem } from "./source-types";
+import { hasPublicUrl, isConsumableItem } from "./source-types";
 import type { FeedItemPlan } from "./feed-item-reservation";
 
 /**
@@ -29,9 +29,10 @@ export interface PrimarySelection {
    */
   claimedFeedItemId: string | null;
   /**
-   * The URL to append to the post. Null unless the primary is a claimable
-   * article — evergreen (prompt/calendar) items carry synthetic urls like
-   * `prompt:<id>` that must never reach a reader.
+   * The URL to append to the post. Null unless the primary is a claimed article
+   * or a directly-read content source with a real page behind it — prompt and
+   * calendar sources carry synthetic urls like `prompt:<id>` that must never
+   * reach a reader.
    */
   sourceUrl: string | null;
 }
@@ -68,6 +69,23 @@ export function resolvePrimarySelection(
       // A claimed item is always consumable (candidates are filtered on it), so
       // this is defence in depth rather than a real branch.
       sourceUrl: isConsumableItem(item) ? item.url : null,
+    };
+  }
+
+  if (plan.action === "direct") {
+    // A manually picked non-RSS source, read from its stored extraction. The
+    // window is already restricted to that one source and ordered newest-first,
+    // so the first item IS its latest extracted content.
+    //
+    // Nothing is claimed — claimedFeedItemId stays null, and so does
+    // Post.primaryFeedItemId — but the URL is kept when the source has a real
+    // page (a product page does; a prompt or calendar event does not), so a
+    // product-page post can still link to the product it is about.
+    const item = feedItems[0] ?? null;
+    return {
+      item,
+      claimedFeedItemId: null,
+      sourceUrl: item && hasPublicUrl(item.url) ? item.url : null,
     };
   }
 

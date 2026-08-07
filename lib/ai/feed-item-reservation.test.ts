@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   claimFeedItem,
+  planDirectContentSource,
   planFeedItemUsage,
   releaseFeedItem,
   type FeedItemReservationDb,
@@ -347,5 +348,30 @@ describe("planFeedItemUsage — four-way source decision", () => {
     );
 
     assert.deepStrictEqual(plan, { action: "evergreen" });
+  });
+});
+
+// ─── planDirectContentSource ──────────────────────────────────────────────────
+
+describe("planDirectContentSource", () => {
+  it("generates directly when the source has stored content", () => {
+    assert.deepStrictEqual(planDirectContentSource([{ id: "pp-1" }]), { action: "direct" });
+  });
+
+  it("skips when nothing has been extracted for the source", () => {
+    // The window is already scoped to the one picked source, so empty means the
+    // source has never been fetched — the manual flow reports that rather than
+    // drifting to another source or to a mission post.
+    assert.deepStrictEqual(planDirectContentSource([]), { action: "skip" });
+  });
+
+  it("is repeatable — the same source keeps planning the same way", () => {
+    // The bug this path exists to prevent: routing a product page through the
+    // reservation consumes its single stored row and leaves the source
+    // permanently dry. Nothing here consumes, so the second ask answers like the
+    // first. (It takes no db at all — there is no row it could mark used.)
+    const items = [{ id: "pp-1" }];
+    assert.deepStrictEqual(planDirectContentSource(items), planDirectContentSource(items));
+    assert.deepStrictEqual(planDirectContentSource(items), { action: "direct" });
   });
 });

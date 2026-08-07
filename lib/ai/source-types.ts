@@ -28,3 +28,15 @@ export function isConsumableSourceType(type: string): boolean {
 export function isConsumableItem(item: Pick<FeedItemContext, "consumable">): boolean {
   return item.consumable !== false;
 }
+
+/**
+ * Whether a feed item's url is a real web address a reader could open.
+ *
+ * Ingestion stores a synthetic url for every source that has no page of its own
+ * — `prompt:<sourceId>`, `event:<sourceId>` — purely as the per-source
+ * uniqueness key. Those must never be appended to a post, so only an http(s)
+ * url counts as linkable. rss and product_page items always carry a real one.
+ */
+export function hasPublicUrl(url: string | null | undefined): boolean {
+  return /^https?:\/\//i.test((url ?? "").trim());
+}

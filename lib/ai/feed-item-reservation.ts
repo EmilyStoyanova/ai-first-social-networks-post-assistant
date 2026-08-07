@@ -62,12 +62,16 @@ export async function claimFeedItem(
  *   • "generate"  — an article was reserved; generate from it (consumes a claim)
  *   • "evergreen" — no article claimed, but a reusable prompt/calendar item is
  *                   available; generate from it without claiming or consuming
+ *   • "direct"    — a manually picked non-RSS content source is being read
+ *                   directly from its stored extraction; nothing is claimed
+ *                   (see planDirectContentSource)
  */
 export type FeedItemPlan =
   | { action: "mission" }
   | { action: "skip" }
   | { action: "generate"; feedItemId: string }
-  | { action: "evergreen" };
+  | { action: "evergreen" }
+  | { action: "direct" };
 
 /**
  * Resolves the source decision, claiming an article item when one is available.
@@ -100,6 +104,25 @@ export async function planFeedItemUsage(
   if (hasEvergreenItems) return { action: "evergreen" };
   if (hasArticleSources) return { action: "skip" };
   return { action: "mission" };
+}
+
+/**
+ * The plan for a manually picked NON-RSS content source, which is read straight
+ * from the content ingestion stored for it.
+ *
+ * Deliberately claims nothing and touches no rows, so it needs no db at all: a
+ * product page, a prompt, or a calendar event is not a one-shot article, and
+ * ingestion writes a single row per such source. Consuming that row would make
+ * the source pickable exactly once and permanently dry afterwards — the bug
+ * this path exists to fix.
+ *
+ * The window is already scoped to the one source, so an empty one means the
+ * source has never been extracted (or its extraction is disabled): "skip", which
+ * the manual flow reports as SELECTED_SOURCE_UNAVAILABLE rather than drifting to
+ * some other source.
+ */
+export function planDirectContentSource(items: readonly { id: string }[]): FeedItemPlan {
+  return items.length > 0 ? { action: "direct" } : { action: "skip" };
 }
 
 /**

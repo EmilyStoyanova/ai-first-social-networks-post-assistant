@@ -109,4 +109,15 @@ export interface GenerationContext {
    * generate, not skip.
    */
   hasArticleSources: boolean;
+  /**
+   * Whether this context was built for a manually picked NON-RSS content source
+   * (product page, prompt, calendar event) — the `content_source` scope.
+   *
+   * Such a generation reads the content ingestion already stored for that source
+   * instead of reserving an article: no feed item is claimed or marked used, and
+   * `Post.primaryFeedItemId` stays null. Omitted (undefined) everywhere else, so
+   * cron, the pooled manual default, and an RSS pick keep the reservation path
+   * unchanged.
+   */
+  directContentSource?: boolean;
 }

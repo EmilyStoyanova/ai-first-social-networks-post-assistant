@@ -38,14 +38,25 @@ export type BuildGenerationContextResult =
  *                       companies and the manual flow's default choice use.
  *   • source          — exactly one content source, because a content-mix quota
  *                       for it is due, or a manual generation picked it.
- *                       Nothing else may leak into the context.
+ *                       Nothing else may leak into the context. The window keeps
+ *                       the one-post-per-article filter, so a post drawn here
+ *                       reserves and consumes an unused article.
+ *   • content_source  — exactly one NON-RSS source (product page, prompt,
+ *                       calendar), read directly from what ingestion stored for
+ *                       it. Same single-source window as `source` but WITHOUT
+ *                       the `usedInPost` filter: a product page's extraction is
+ *                       the page as it stands, not a one-shot article, so it
+ *                       stays available after the first post is written from it.
  *   • company_content — no sources at all, forcing the mission/brand post path.
  *
  * A discriminated union rather than a nullable sourceId: "no source" and "any
  * source" are opposites here, and null/undefined would not keep them apart.
  */
 export type SourceScope =
-  { kind: "pooled" } | { kind: "source"; sourceId: string } | { kind: "company_content" };
+  | { kind: "pooled" }
+  | { kind: "source"; sourceId: string }
+  | { kind: "content_source"; sourceId: string }
+  | { kind: "company_content" };
 
 const POOLED: SourceScope = { kind: "pooled" };
 
@@ -145,6 +156,17 @@ async function loadContext(
   // handles the new quota with no special case of its own.
   const companyContentOnly = scope.kind === "company_content";
 
+  // A manually picked non-RSS source is read DIRECTLY from its stored
+  // extraction: the window drops the one-post-per-article filter and generation
+  // reserves nothing (see planDirectContentSource). Flagged on the context so
+  // the single fact travels with the data it describes.
+  const directContentSource = scope.kind === "content_source";
+
+  // Both single-source scopes restrict the window to their one source; they
+  // differ only in whether used items still count (see directContentSource).
+  const scopedSourceId =
+    scope.kind === "source" || scope.kind === "content_source" ? scope.sourceId : null;
+
   // ── Parallel data load ────────────────────────────────────────────────────
   const [brand, channelConfig, feedItems, enabledSource] = await Promise.allSettled([
     prisma.brandGuidelines.findUnique({
@@ -181,13 +203,19 @@ async function loadContext(
           where: {
             companyId,
             enabled: true,
-            usedInPost: false,
+            // usedInPost:false — one-post-per-article. DROPPED for a direct
+            // content source: its stored extraction describes a page/prompt/event
+            // that does not stop existing once a post cites it, and ingestion
+            // writes only one row per such source, so keeping the filter would
+            // make the source selectable exactly once and dry forever after.
+            ...(directContentSource ? {} : { usedInPost: false }),
             source: { enabled: true },
             // v2-8 — when a specific source's quota is due, the window is restricted
             // to that source so a post can only ever consume the quota it was drawn
             // against. Without this the pooled window could hand RSS B's article to
-            // RSS A's slot, silently reassigning the quota.
-            ...(scope.kind === "source" ? { sourceId: scope.sourceId } : {}),
+            // RSS A's slot, silently reassigning the quota. A manual pick of either
+            // kind narrows the window the same way.
+            ...(scopedSourceId ? { sourceId: scopedSourceId } : {}),
           },
           orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
           take: 5,
@@ -223,7 +251,7 @@ async function loadContext(
             companyId,
             enabled: true,
             type: { in: [...CONSUMABLE_SOURCE_TYPES] },
-            ...(scope.kind === "source" ? { id: scope.sourceId } : {}),
+            ...(scopedSourceId ? { id: scopedSourceId } : {}),
           },
           select: { id: true },
         }),
@@ -287,6 +315,7 @@ async function loadContext(
       };
     }),
     hasArticleSources,
+    directContentSource,
   };
 
   return { success: true, context, companyId };

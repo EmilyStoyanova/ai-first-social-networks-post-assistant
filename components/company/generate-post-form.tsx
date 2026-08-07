@@ -60,7 +60,11 @@ interface Props {
   onGenerated: (post: PostItem) => void;
   /** Whether generation is based on an RSS feed item — gates the source-link override. */
   hasRssFeedItems: boolean;
-  /** Enabled RSS sources offered in the "Content source" dropdown. */
+  /**
+   * Every enabled content source offered in the "Content source" dropdown —
+   * RSS feeds, product pages, prompts, calendar events alike. Ones that cannot
+   * currently back a post arrive with `available: false` and render disabled.
+   */
   contentSources: GenerationSourceOption[];
   /**
    * Channels backed by an enabled Buffer profile. Empty means the company has
@@ -103,8 +107,8 @@ export function GeneratePostForm({
   const [contentLanguage, setContentLanguage] = useState<"default" | "en" | "bg">("default");
   const [sourceLinkOverride, setSourceLinkOverride] = useState<SourceLinkOverride>("inherit");
   const [imageOverride, setImageOverride] = useState<ImageOverride>("inherit");
-  // The "Content source" choice: a sentinel, or an RSS source id. Defaults to
-  // company rules, which is the behaviour the form has always had.
+  // The "Content source" choice: a sentinel, or a content source id of any type.
+  // Defaults to company rules, which is the behaviour the form has always had.
   const [contentSource, setContentSource] = useState<string>(COMPANY_RULES_VALUE);
   // Empty string = "System default (auto)"; otherwise an LlmConfig id (v2-5).
   const [llmConfigId, setLlmConfigId] = useState("");
@@ -334,12 +338,19 @@ export function GeneratePostForm({
           >
             <option value={COMPANY_RULES_VALUE}>{t("contentSourceCompanyRules")}</option>
             {contentSources.map((source) => (
-              // A dry source stays listed but unpickable, so it reads as "this
-              // feed has nothing new" rather than "this feed is gone".
-              <option key={source.id} value={source.id} disabled={!source.hasAvailableArticles}>
-                {source.hasAvailableArticles
+              // A source that cannot back a post stays listed but unpickable, so
+              // it reads as "this one has nothing to say right now" rather than
+              // "this one is gone". The label names which of the two it is: an
+              // RSS feed is waiting for new articles, anything else is waiting to
+              // be fetched.
+              <option key={source.id} value={source.id} disabled={!source.available}>
+                {source.available
                   ? source.name
-                  : `${source.name} ${t("contentSourceNoArticles")}`}
+                  : `${source.name} ${t(
+                      source.unavailableReason === "no_content"
+                        ? "contentSourceNoContent"
+                        : "contentSourceNoArticles"
+                    )}`}
               </option>
             ))}
             <option value={COMPANY_MISSION_VALUE}>{t("contentSourceCompanyMission")}</option>
