@@ -26,12 +26,20 @@ export class WorkerImageProvider implements IImageProvider {
     // slow image generation cannot run past the function timeout.
     const TIMEOUT_MS = 120_000;
 
+    // The worker runs a ComfyUI graph, whose sampler takes a negative
+    // conditioning input. Omitted entirely when we have nothing to exclude, so
+    // an older worker build keeps seeing the exact request shape it expects.
+    const body: Record<string, unknown> = { prompt };
+    if (options?.negativePrompt) {
+      body.negativePrompt = options.negativePrompt;
+    }
+
     let res: Response;
     try {
       res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-worker-api-key": this.apiKey },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify(body),
         signal: requestSignal(TIMEOUT_MS),
       });
     } catch (err) {

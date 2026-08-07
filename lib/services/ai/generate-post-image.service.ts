@@ -138,7 +138,7 @@ export async function generatePostImageCore(
   }
 
   const forbiddenWords = post.company.brandGuidelines?.forbiddenWords ?? [];
-  const prompt = buildImagePrompt({
+  const { prompt, negativePrompt } = buildImagePrompt({
     basePrompt,
     channel: post.channel,
     forbiddenWords,
@@ -160,7 +160,7 @@ export async function generatePostImageCore(
 
   let generated: Awaited<ReturnType<typeof provider.generate>>;
   try {
-    generated = await provider.generate(prompt, { width, height });
+    generated = await provider.generate(prompt, { width, height, negativePrompt });
   } catch (err) {
     if (err instanceof ImageProviderError) {
       logImageProviderFailure(err);

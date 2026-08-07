@@ -39,6 +39,10 @@ export class FalProvider implements IImageProvider {
         Authorization: `Key ${this.apiKey}`,
         "Content-Type": "application/json",
       },
+      // `options.negativePrompt` is deliberately dropped. The default model
+      // (FLUX schnell) is guidance-distilled and its fal schema has no
+      // `negative_prompt` field, so there is nothing to forward it to. Folding
+      // it into the positive prompt would summon the defects it lists.
       body: JSON.stringify({
         prompt,
         image_size: { width: w, height: h },

@@ -33,6 +33,9 @@ export class OpenAIImageProvider implements IImageProvider {
     const h = options?.height ?? 1024;
     const size = this.resolveSize(w, h);
 
+    // `options.negativePrompt` is deliberately dropped: the OpenAI Images API
+    // has no negative-prompt parameter on any model, and appending exclusions to
+    // the positive prompt is worse than omitting them.
     const body: Record<string, unknown> = {
       model: this.model,
       prompt,

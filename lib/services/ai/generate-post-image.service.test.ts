@@ -14,15 +14,18 @@ function makeDeps(): {
   deps: GeneratePostImageDeps;
   created: () => CreateArgs["data"] | null;
   generatedPrompt: () => string | null;
+  generatedNegativePrompt: () => string | undefined;
   membershipChecked: () => boolean;
 } {
   let createdData: CreateArgs["data"] | null = null;
   let prompt: string | null = null;
+  let negativePrompt: string | undefined;
   let checkedMembership = false;
 
   const provider: IImageProvider = {
-    async generate(p) {
+    async generate(p, options) {
       prompt = p;
+      negativePrompt = options?.negativePrompt;
       return {
         url: "https://cdn.example/x.png",
         width: 1080,
@@ -65,6 +68,7 @@ function makeDeps(): {
     deps: { db, getProvider: () => provider },
     created: () => createdData,
     generatedPrompt: () => prompt,
+    generatedNegativePrompt: () => negativePrompt,
     membershipChecked: () => checkedMembership,
   };
 }
@@ -88,6 +92,12 @@ describe("generatePostImageCore — image style persistence", () => {
     const { deps, generatedPrompt } = makeDeps();
     await generatePostImageCore("post-1", USER_ACTOR, "animated", deps);
     assert.ok(generatedPrompt()?.includes(IMAGE_STYLE_INSTRUCTIONS.animated));
+  });
+
+  it("passes the negative prompt to the provider alongside the dimensions", async () => {
+    const { deps, generatedNegativePrompt } = makeDeps();
+    await generatePostImageCore("post-1", USER_ACTOR, undefined, deps);
+    assert.ok(generatedNegativePrompt()?.includes("deformed anatomy"));
   });
 });
 

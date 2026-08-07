@@ -16,6 +16,13 @@ const ASPECT_DIMENSIONS: Record<IdeogramAspectRatio, { width: number; height: nu
   ASPECT_3_4: { width: 1024, height: 1365 },
 };
 
+/**
+ * Ideogram accepts `negative_prompt` on /generate only for the V_1 and V_2
+ * model families; newer models dropped the field. Sending it elsewhere would be
+ * inventing an API, so those models simply go without.
+ */
+const MODELS_SUPPORTING_NEGATIVE_PROMPT = new Set(["V_1", "V_1_TURBO", "V_2", "V_2_TURBO"]);
+
 interface IdeogramImageData {
   url: string;
   resolution?: string;
@@ -47,21 +54,24 @@ export class IdeogramProvider implements IImageProvider {
     const aspectRatio = this.resolveAspectRatio(w, h);
     const dims = ASPECT_DIMENSIONS[aspectRatio];
 
+    const imageRequest: Record<string, unknown> = {
+      prompt,
+      model: this.model,
+      aspect_ratio: aspectRatio,
+      num_images: 1,
+      magic_prompt_option: "AUTO",
+    };
+    if (options?.negativePrompt && MODELS_SUPPORTING_NEGATIVE_PROMPT.has(this.model)) {
+      imageRequest.negative_prompt = options.negativePrompt;
+    }
+
     const res = await fetch(`${this.base}/generate`, {
       method: "POST",
       headers: {
         "Api-Key": this.apiKey,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        image_request: {
-          prompt,
-          model: this.model,
-          aspect_ratio: aspectRatio,
-          num_images: 1,
-          magic_prompt_option: "AUTO",
-        },
-      }),
+      body: JSON.stringify({ image_request: imageRequest }),
     });
 
     if (!res.ok) {

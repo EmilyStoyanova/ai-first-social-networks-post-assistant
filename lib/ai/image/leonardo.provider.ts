@@ -33,11 +33,16 @@ export class LeonardoProvider implements IImageProvider {
     const width = options?.width ?? 1024;
     const height = options?.height ?? 1024;
 
-    const generationId = await this.startGeneration(prompt, width, height);
+    const generationId = await this.startGeneration(prompt, width, height, options?.negativePrompt);
     return this.pollUntilComplete(generationId, width, height);
   }
 
-  private async startGeneration(prompt: string, width: number, height: number): Promise<string> {
+  private async startGeneration(
+    prompt: string,
+    width: number,
+    height: number,
+    negativePrompt?: string
+  ): Promise<string> {
     const body: Record<string, unknown> = {
       prompt,
       width,
@@ -45,6 +50,8 @@ export class LeonardoProvider implements IImageProvider {
       num_images: 1,
     };
     if (this.modelId) body.modelId = this.modelId;
+    // Documented top-level field on POST /generations.
+    if (negativePrompt) body.negative_prompt = negativePrompt;
 
     const res = await fetch(`${this.base}/api/rest/v1/generations`, {
       method: "POST",
