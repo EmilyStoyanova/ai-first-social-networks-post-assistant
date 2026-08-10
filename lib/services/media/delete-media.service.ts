@@ -40,6 +40,13 @@ export async function deleteMedia(
     data: { mediaAssetId: null },
   });
 
+  // Also clear it from any post holding it in reserve after an image switch —
+  // that FK is RESTRICT, so a still-referenced asset would refuse to delete.
+  await prisma.post.updateMany({
+    where: { previousMediaAssetId: mediaId },
+    data: { previousMediaAssetId: null },
+  });
+
   await prisma.mediaAsset.delete({ where: { id: mediaId } });
 
   await createAuditLog({

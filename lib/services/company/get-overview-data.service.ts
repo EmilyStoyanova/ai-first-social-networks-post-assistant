@@ -296,6 +296,11 @@ export async function getOverviewData(
       approvedById: r.approvedById,
       publishedPostUrl: r.publishedPostUrl,
       mediaUrl: r.mediaAsset?.url ?? null,
+      // The overview's upcoming list is a read-only summary — it renders no
+      // image actions, so it does not query the article image at all.
+      sourceImageUrl: null,
+      usingSourceImage: false,
+      previousMediaUrl: null,
       origin: resolvePostOrigin(r, r.primaryFeedItem),
       scheduledFor: r.scheduledFor?.toISOString() ?? null,
       createdAt: r.createdAt.toISOString(),

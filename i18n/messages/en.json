@@ -67,7 +67,10 @@
     "MIX_CHANNEL_TARGETS_DIFFER": "All enabled channels must share the same weekly target to use one content mix.",
     "MIX_INVALID_VALUE": "Posts per week must be a whole number, zero or more.",
     "MIX_EXCEEDS_MAX": "The content mix exceeds the most posts a channel can generate in a week.",
-    "UNKNOWN_SOURCE": "That content source doesn't belong to this company."
+    "UNKNOWN_SOURCE": "That content source doesn't belong to this company.",
+    "NO_SOURCE_IMAGE": "The source article has no image we can use.",
+    "NO_PREVIOUS_IMAGE": "There is no earlier image to switch back to.",
+    "SOURCE_IMAGE_UNAVAILABLE": "The source article's image could not be used"
   },
   "brand": {
     "title": "New Post",
@@ -579,6 +582,10 @@
     "generateImage": "Generate Image",
     "generatingImage": "Generating image…",
     "regenerateImage": "Regenerate Image",
+    "useSourceImage": "Use Source Image",
+    "usingSourceImage": "Fetching image…",
+    "useAiImage": "Use AI Image",
+    "sourceImageAlt": "Image from the source article",
     "submitForApproval": "Submit for Approval",
     "submitting": "Submitting…",
     "approveAndPublish": "Approve & Publish to Buffer",

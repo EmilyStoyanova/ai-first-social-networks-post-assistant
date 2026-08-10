@@ -86,6 +86,14 @@ export interface GeneratedPostDTO {
    * render the new post straight from this response with no refetch.
    */
   mediaUrl: string | null;
+  /**
+   * The original article's image, mirroring `PostItem.sourceImageUrl`, so the
+   * new card can offer "Use source image" straight away. The two fields beside
+   * it in PostItem are constants for a post this young — it has just been given
+   * its AI image and has never been switched — so the response omits them and
+   * the client reads their falsy defaults.
+   */
+  sourceImageUrl: string | null;
   /** Where the post was written from — mirrors PostItem.origin so the client
    *  can render the new card from this response with no refetch. */
   origin: PostOriginView;
@@ -1046,6 +1054,7 @@ export async function generatePostFromContext(
       llmProvider: post.llmProvider,
       llmModel: post.llmModel,
       mediaUrl,
+      sourceImageUrl: primary.item?.sourceImageUrl ?? null,
       // Straight from what was just written — no read-back needed, and the
       // client renders the new card from this response with no refetch.
       origin: resolvePostOrigin(originSnapshot, null),

@@ -354,6 +354,18 @@ model FeedItem {
   usedInPost  Boolean   @default(false) @map("used_in_post")
   createdAt   DateTime  @default(now()) @map("created_at")
 
+  /// The main image of the ORIGINAL article, resolved once at ingestion so
+  /// "Use source image" never has to scrape the page again. Priority is
+  /// og:image → twitter:image → JSON-LD → feed enclosure → first substantial
+  /// in-content image; icons, logos, avatars and tracking pixels are rejected.
+  ///
+  /// NULL for: items ingested before this column existed, non-RSS sources, and
+  /// articles that genuinely have no usable image. Those simply do not offer the
+  /// action — nothing else about them changes. Re-ingesting an item never
+  /// overwrites a stored value with NULL, so a transient scrape failure cannot
+  /// take the image away from a post that was already using it.
+  sourceImageUrl String? @map("source_image_url")
+
   // Translation (v2-4). Written only for RSS sources with translation enabled.
   // `title` and `content` above always hold the ORIGINAL article text and are
   // never overwritten by translation; generation falls back to them unless
@@ -406,11 +418,25 @@ model MediaAsset {
   uploadedBy   String      @map("uploaded_by")
   createdAt    DateTime    @default(now()) @map("created_at")
 
+  /// The external address this image was IMPORTED from — set only for an image
+  /// pulled in from a source article (FeedItem.sourceImageUrl). NULL for AI
+  /// generations and user uploads.
+  ///
+  /// Two jobs: it is the dedupe key (re-importing the same article image reuses
+  /// this row instead of paying for another Cloudinary upload), and it is how the
+  /// UI knows the currently attached image IS the article's, which decides
+  /// whether the card offers "Use source image" or "Use AI image".
+  sourceUrl String? @map("source_url")
+
   company  Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
   uploader User    @relation(fields: [uploadedBy], references: [id])
-  posts    Post[]
+  posts    Post[]  @relation("PostMedia")
+  /// Posts holding this asset in reserve after a switch — see Post.previousMediaAssetId.
+  previousForPosts Post[] @relation("PostPreviousMedia")
 
   @@index([companyId])
+  /// Backs the import dedupe lookup (companyId + sourceUrl).
+  @@index([companyId, sourceUrl])
   @@map("media_assets")
 }
 
@@ -468,6 +494,16 @@ model Post {
   language         String        @default("en")
   hashtags         String[]
   mediaAssetId     String?       @map("media_asset_id")
+  // The image DISPLACED by the last switch between the AI image and the source
+  // article's image, kept so the user can go back without regenerating. Purely a
+  // second pointer: switching re-points these two columns and never deletes a
+  // MediaAsset, so an already-paid-for AI generation is never lost.
+  //
+  // Only the two switch services write it. A later "Regenerate image" leaves it
+  // pointing at an older asset, which is invisible: the card offers "Use AI
+  // image" only while the CURRENT asset is the imported one, and any switch
+  // rewrites the column first.
+  previousMediaAssetId String?   @map("previous_media_asset_id")
   status           PostStatus    @default(draft)
   bufferUpdateId   String?       @map("buffer_update_id")
   publishedPostUrl String?       @map("published_post_url")
@@ -501,7 +537,10 @@ model Post {
   // written from it. The post then reads as company content for quota counting,
   // which only affects the current week — a deleted source has no quota anyway.
   contentSource   ContentSource? @relation(fields: [contentSourceId], references: [id], onDelete: SetNull)
-  mediaAsset  MediaAsset?     @relation(fields: [mediaAssetId], references: [id])
+  mediaAsset  MediaAsset?     @relation("PostMedia", fields: [mediaAssetId], references: [id])
+  // Named only because a second Post→MediaAsset relation now exists; the FK and
+  // column are unchanged.
+  previousMediaAsset MediaAsset? @relation("PostPreviousMedia", fields: [previousMediaAssetId], references: [id])
   generatedBy User?           @relation("PostGenerator", fields: [generatedById], references: [id])
   approvedBy  User?           @relation("PostApprover", fields: [approvedById], references: [id])
   rejectedBy  User?           @relation("PostRejecter", fields: [rejectedById], references: [id])

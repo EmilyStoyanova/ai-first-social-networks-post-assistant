@@ -1,6 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
+import { selectContentImage, selectMetaImage } from "./article-image";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -74,24 +75,65 @@ export async function checkSsrf(url: URL, resolve: DnsResolver = lookup): Promis
   return true;
 }
 
-// ─── HTML → text ─────────────────────────────────────────────────────────────
+// ─── HTML → text + image ──────────────────────────────────────────────────────
+
+/** Everything one parse of an article page yields. Each part stands alone: a
+ *  paywalled page with no readable text can still advertise a perfectly good
+ *  og:image, and a page with plenty of text may have no image at all. */
+export interface ExtractedArticle {
+  /** Clean article text, or null when nothing substantial could be extracted. */
+  text: string | null;
+  /** The image the publisher declared for the page (og / twitter / JSON-LD). */
+  metaImageUrl: string | null;
+  /** A large image found inside the article body — the weakest candidate. */
+  contentImageUrl: string | null;
+}
+
+const EMPTY_ARTICLE: ExtractedArticle = {
+  text: null,
+  metaImageUrl: null,
+  contentImageUrl: null,
+};
 
 /**
- * Parses raw HTML with jsdom + Readability and returns clean article text,
- * or null if no substantial content can be extracted.
+ * Parses raw HTML with jsdom + Readability ONCE and returns both the article
+ * text and its image candidates.
+ *
+ * Order matters: the metadata is read before `Readability.parse()`, which
+ * rewrites the document it is handed. The in-content candidate is then taken
+ * from Readability's OWN output, so it is already free of navigation, sidebars
+ * and comment threads.
+ *
+ * Exported so tests can call it directly without network I/O.
+ */
+export function extractArticleParts(html: string, baseUrl: string): ExtractedArticle {
+  try {
+    const dom = new JSDOM(html, { url: baseUrl });
+    const doc = dom.window.document;
+
+    const metaImageUrl = selectMetaImage(doc, baseUrl);
+
+    const article = new Readability(doc).parse();
+    const text = article?.textContent?.trim() ?? null;
+
+    return {
+      text: text && text.length >= MIN_ARTICLE_LENGTH ? text : null,
+      metaImageUrl,
+      // Skipped when the publisher already declared one — scanning the body
+      // cannot beat an explicit og:image, and it is the more expensive path.
+      contentImageUrl: metaImageUrl ? null : selectContentImage(article?.content ?? null, baseUrl),
+    };
+  } catch {
+    return EMPTY_ARTICLE;
+  }
+}
+
+/**
+ * Clean article text only, or null if no substantial content can be extracted.
  * Exported so tests can call it directly without network I/O.
  */
 export function extractReadableText(html: string, baseUrl: string): string | null {
-  try {
-    const dom = new JSDOM(html, { url: baseUrl });
-    const reader = new Readability(dom.window.document);
-    const article = reader.parse();
-    const text = article?.textContent?.trim() ?? null;
-    if (!text || text.length < MIN_ARTICLE_LENGTH) return null;
-    return text;
-  } catch {
-    return null;
-  }
+  return extractArticleParts(html, baseUrl).text;
 }
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
@@ -104,26 +146,27 @@ export interface ExtractOptions {
 }
 
 /**
- * Fetches the article at `rawUrl` and extracts the main readable text.
- * Returns null on any failure (network, SSRF, non-HTML, thin/paywalled content).
- * Never throws — callers should fall back to the RSS summary on null.
+ * Fetches the article at `rawUrl` and extracts its text and image candidates.
+ * Returns empty parts on any failure (network, SSRF, non-HTML, unparseable).
+ * Never throws — callers fall back to the RSS summary on a null `text`, and
+ * simply store no source image on a null image.
  */
-export async function extractArticleContent(
+export async function extractArticle(
   rawUrl: string | null,
   options?: ExtractOptions
-): Promise<string | null> {
-  if (!rawUrl) return null;
+): Promise<ExtractedArticle> {
+  if (!rawUrl) return EMPTY_ARTICLE;
 
   let url: URL;
   try {
     url = new URL(rawUrl);
   } catch {
-    return null;
+    return EMPTY_ARTICLE;
   }
 
   const fetchFn = options?.fetch ?? fetch;
 
-  if (!(await checkSsrf(url, options?.resolve))) return null;
+  if (!(await checkSsrf(url, options?.resolve))) return EMPTY_ARTICLE;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -139,14 +182,28 @@ export async function extractArticleContent(
       redirect: "follow",
     });
     clearTimeout(timer);
-    if (!res.ok) return null;
+    if (!res.ok) return EMPTY_ARTICLE;
     const contentType = res.headers.get("content-type") ?? "";
-    if (!contentType.includes("text/html")) return null;
+    if (!contentType.includes("text/html")) return EMPTY_ARTICLE;
     html = await res.text();
   } catch {
     clearTimeout(timer);
-    return null;
+    return EMPTY_ARTICLE;
   }
 
-  return extractReadableText(html, rawUrl);
+  // Resolved against the FETCHED url, not the requested one, so a feed link that
+  // redirects to the publisher's domain still yields absolute image addresses.
+  return extractArticleParts(html, rawUrl);
+}
+
+/**
+ * Fetches the article at `rawUrl` and extracts the main readable text.
+ * Returns null on any failure (network, SSRF, non-HTML, thin/paywalled content).
+ * Never throws — callers should fall back to the RSS summary on null.
+ */
+export async function extractArticleContent(
+  rawUrl: string | null,
+  options?: ExtractOptions
+): Promise<string | null> {
+  return (await extractArticle(rawUrl, options)).text;
 }

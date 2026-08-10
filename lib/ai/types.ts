@@ -91,6 +91,14 @@ export interface FeedItemContext {
    */
   publicUrl?: string | null;
   /**
+   * The original article's own image, resolved at ingestion. Carried through
+   * generation for one reason only: so a post's card can offer "Use source
+   * image" immediately, without a refetch. It is NEVER an input to generation —
+   * the AI image is produced exactly as before, and swapping to this one is
+   * always a later, explicit choice.
+   */
+  sourceImageUrl?: string | null;
+  /**
    * Whether this item is a single-use article (rss/product_page) governed by the
    * one-post-per-article reservation, or evergreen (prompt/calendar_event) and
    * therefore reusable and never consumed. Omitted defaults to consumable so

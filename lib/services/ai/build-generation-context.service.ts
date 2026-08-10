@@ -229,6 +229,7 @@ async function loadContext(
             content: true,
             url: true,
             publishedAt: true,
+            sourceImageUrl: true,
             // v2-4 — translated text is preferred over the original only when the
             // translation completed; see resolveFeedItemContent below.
             translatedTitle: true,
@@ -314,6 +315,9 @@ async function loadContext(
         // than on the item.
         publicUrl: resolveItemPublicUrl(f.url, f.source.config),
         publishedAt: f.publishedAt,
+        // Only an RSS item has an "original article"; the others reach this map
+        // with a null column anyway, so the type check just makes it explicit.
+        sourceImageUrl: f.source.type === "rss" ? f.sourceImageUrl : null,
         sourceType: f.source.type,
         sourceName: f.source.name,
         sourceLinkPreference: extractSourceLinkPreference(f.source.config),

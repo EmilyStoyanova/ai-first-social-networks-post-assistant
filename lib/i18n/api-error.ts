@@ -62,6 +62,11 @@ export const API_ERROR_CODES = [
   "MIX_INVALID_VALUE",
   "MIX_EXCEEDS_MAX",
   "UNKNOWN_SOURCE",
+  // Source article image — the post has no article image to switch to, no
+  // earlier image to switch back to, or the publisher's image could not be used.
+  "NO_SOURCE_IMAGE",
+  "NO_PREVIOUS_IMAGE",
+  "SOURCE_IMAGE_UNAVAILABLE",
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
@@ -80,6 +85,10 @@ const DETAIL_CODES: ReadonlySet<string> = new Set([
   // a generic label would hide it. Before v2-3 this same guidance reached the
   // user as BUFFER_API_ERROR detail, so keeping it preserves the behaviour.
   "POLICY_VIOLATION",
+  // Names WHY the publisher's image failed — a dead link, a redirect to an HTML
+  // error page, a file over the size cap. Without the detail the user cannot
+  // tell a broken URL from a format we refuse.
+  "SOURCE_IMAGE_UNAVAILABLE",
 ]);
 
 export interface ApiErrorShape {

@@ -1,7 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { checkSsrf, extractReadableText, extractArticleContent } from "./article-extractor";
+import {
+  checkSsrf,
+  extractArticle,
+  extractArticleContent,
+  extractArticleParts,
+  extractReadableText,
+} from "./article-extractor";
 import type { DnsResolver } from "./article-extractor";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -293,5 +299,109 @@ describe("extractArticleContent — end-to-end (injected fetch + resolver)", () 
       fetch: mockFetch(200, ARTICLE_HTML),
     });
     assert.equal(result, null);
+  });
+});
+
+// ─── extractArticleParts — text and image from a single parse ────────────────
+
+describe("extractArticleParts — image candidates", () => {
+  const BODY = `
+    <article>
+      <h1>Breaking News</h1>
+      <p>${"Detailed reporting on the event with full context and analysis. ".repeat(8)}</p>
+    </article>`;
+
+  it("returns the text and the declared image together", () => {
+    const html = `<html><head>
+      <meta property="og:image" content="https://example.com/og.jpg">
+    </head><body>${BODY}</body></html>`;
+
+    const parts = extractArticleParts(html, ARTICLE_URL);
+    assert.ok(parts.text && parts.text.length >= 300, "the text extraction is unchanged");
+    assert.equal(parts.metaImageUrl, "https://example.com/og.jpg");
+  });
+
+  it("reads the metadata BEFORE Readability rewrites the document", () => {
+    // Readability.parse() consumes the DOM it is handed; reading <head> after it
+    // has run is how this silently returns null in production.
+    const html = `<html><head>
+      <meta name="twitter:image" content="https://example.com/card.jpg">
+    </head><body>${BODY}</body></html>`;
+
+    assert.equal(
+      extractArticleParts(html, ARTICLE_URL).metaImageUrl,
+      "https://example.com/card.jpg"
+    );
+  });
+
+  it("skips the body scan when the publisher already declared an image", () => {
+    const html = `<html><head>
+      <meta property="og:image" content="https://example.com/og.jpg">
+    </head><body><article><img src="https://example.com/inline.jpg">${BODY}</article></body></html>`;
+
+    const parts = extractArticleParts(html, ARTICLE_URL);
+    assert.equal(parts.metaImageUrl, "https://example.com/og.jpg");
+    assert.equal(parts.contentImageUrl, null, "the weaker candidate is not even looked for");
+  });
+
+  it("falls back to an in-content image when the page declares none", () => {
+    const html = `<html><head><title>Story</title></head><body>
+      <article>
+        <img src="https://example.com/lead-photo.jpg">
+        <p>${"Detailed reporting on the event with full context and analysis. ".repeat(8)}</p>
+      </article>
+    </body></html>`;
+
+    const parts = extractArticleParts(html, ARTICLE_URL);
+    assert.equal(parts.metaImageUrl, null);
+    assert.equal(parts.contentImageUrl, "https://example.com/lead-photo.jpg");
+  });
+
+  it("still reports the image when the text is too thin to use", () => {
+    // A paywalled page has no usable body but a perfectly good preview image —
+    // the two outcomes are independent.
+    const html = `<html><head>
+      <meta property="og:image" content="https://example.com/og.jpg">
+    </head><body><p>Subscribe to read.</p></body></html>`;
+
+    const parts = extractArticleParts(html, ARTICLE_URL);
+    assert.equal(parts.text, null);
+    assert.equal(parts.metaImageUrl, "https://example.com/og.jpg");
+  });
+
+  it("returns empty parts for unparseable input rather than throwing", () => {
+    const parts = extractArticleParts("", ARTICLE_URL);
+    assert.deepEqual(parts, { text: null, metaImageUrl: null, contentImageUrl: null });
+  });
+});
+
+describe("extractArticle — end-to-end image extraction", () => {
+  const HTML = `<html><head>
+      <meta property="og:image" content="https://example.com/og.jpg">
+    </head><body>${ARTICLE_HTML}</body></html>`;
+
+  it("returns the image alongside the text", async () => {
+    const result = await extractArticle(ARTICLE_URL, {
+      resolve: publicResolver,
+      fetch: mockFetch(200, HTML),
+    });
+    assert.equal(result.metaImageUrl, "https://example.com/og.jpg");
+    assert.ok(result.text);
+  });
+
+  it("returns no image when the fetch is blocked by the SSRF gate", async () => {
+    const result = await extractArticle(ARTICLE_URL, {
+      resolve: resolver("10.0.0.1", 4),
+      fetch: mockFetch(200, HTML),
+    });
+    assert.deepEqual(result, { text: null, metaImageUrl: null, contentImageUrl: null });
+  });
+
+  it("returns no image when the article 404s", async () => {
+    const result = await extractArticle(ARTICLE_URL, {
+      resolve: publicResolver,
+      fetch: mockFetch(404, HTML),
+    });
+    assert.equal(result.metaImageUrl, null);
   });
 });

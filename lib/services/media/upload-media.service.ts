@@ -1,6 +1,5 @@
-import crypto from "crypto";
 import { prisma } from "@/lib/db/client";
-import { requestSignal } from "@/lib/http/request-deadline";
+import { uploadImageToCloudinary } from "@/lib/integrations/cloudinary/upload-image";
 
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp"]);
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -26,25 +25,6 @@ export type UploadMediaResult =
         | "UPLOAD_FAILED";
       message?: string;
     };
-
-function buildSignature(params: Record<string, string>, secret: string): string {
-  const str = Object.keys(params)
-    .sort()
-    .map((k) => `${k}=${params[k]}`)
-    .join("&");
-  return crypto
-    .createHash("sha1")
-    .update(str + secret)
-    .digest("hex");
-}
-
-interface CloudinaryUploadResponse {
-  public_id: string;
-  secure_url: string;
-  width: number;
-  height: number;
-  error?: { message: string };
-}
 
 export async function uploadMedia(
   slug: string,
@@ -87,78 +67,20 @@ export async function uploadMedia(
     return { success: false, code: "INVALID_FILE", message: "File is empty." };
   }
 
-  // Cloudinary credentials
-  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-  const apiKey = process.env.CLOUDINARY_API_KEY;
-  const apiSecret = process.env.CLOUDINARY_API_SECRET;
-
-  if (!cloudName || !apiKey || !apiSecret) {
-    return {
-      success: false,
-      code: "UPLOAD_FAILED",
-      message:
-        "Image upload is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.",
-    };
-  }
-
-  // Build signed upload request
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const folder = `companies/${slug}`;
-  const signParams: Record<string, string> = { folder, timestamp };
-  const signature = buildSignature(signParams, apiSecret);
-
-  const form = new FormData();
-  form.append("file", file);
-  form.append("api_key", apiKey);
-  form.append("timestamp", timestamp);
-  form.append("signature", signature);
-  form.append("folder", folder);
-
-  let uploadRes: Response;
-  try {
-    uploadRes = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
-      method: "POST",
-      body: form,
-      signal: requestSignal(25_000),
-    });
-  } catch (err) {
-    const isTimeout =
-      err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-    return {
-      success: false,
-      code: "UPLOAD_FAILED",
-      message: isTimeout ? "Image upload timed out. Please try again." : "Upload request failed.",
-    };
-  }
-
-  let data: CloudinaryUploadResponse;
-  try {
-    data = (await uploadRes.json()) as CloudinaryUploadResponse;
-  } catch {
-    return {
-      success: false,
-      code: "UPLOAD_FAILED",
-      message: "Invalid response from image service.",
-    };
-  }
-
-  if (!uploadRes.ok || data.error) {
-    return {
-      success: false,
-      code: "UPLOAD_FAILED",
-      message: data.error?.message ?? "Image upload failed.",
-    };
+  const uploaded = await uploadImageToCloudinary(file, `companies/${slug}`);
+  if (!uploaded.success) {
+    return { success: false, code: "UPLOAD_FAILED", message: uploaded.message };
   }
 
   // Persist MediaAsset record
   const asset = await prisma.mediaAsset.create({
     data: {
       companyId,
-      cloudinaryId: data.public_id,
-      url: data.secure_url,
+      cloudinaryId: uploaded.asset.publicId,
+      url: uploaded.asset.url,
       thumbnailUrl: null,
-      width: data.width,
-      height: data.height,
+      width: uploaded.asset.width,
+      height: uploaded.asset.height,
       generatedBy: "user_upload",
       uploadedBy: userId,
     },

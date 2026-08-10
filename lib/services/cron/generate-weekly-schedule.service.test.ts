@@ -189,6 +189,7 @@ class Harness {
         llmProvider: "mock",
         llmModel: "mock",
         mediaUrl: null,
+        sourceImageUrl: null,
         origin: brandSetupOrigin(),
         createdAt: new Date(),
       },

@@ -1,7 +1,8 @@
 import { prisma } from "@/lib/db/client";
 import { parseFeed } from "@/lib/integrations/rss/parser";
 import { scrapeProductPage } from "@/lib/integrations/product-page/scraper";
-import { extractArticleContent } from "@/lib/integrations/rss/article-extractor";
+import { extractArticle } from "@/lib/integrations/rss/article-extractor";
+import { pickSourceImage } from "@/lib/integrations/rss/article-image";
 import {
   computeTranslationHash,
   isTranslatableSourceType,
@@ -88,7 +89,9 @@ async function upsertFeedItem(
   publishedAt: Date | null,
   existingUrls: Set<string>,
   translation: TranslationConfig | null,
-  existingTranslations: Map<string, ExistingTranslation>
+  existingTranslations: Map<string, ExistingTranslation>,
+  /** The article's own image. Only RSS resolves one; every other type passes null. */
+  sourceImageUrl: string | null = null
 ): Promise<{ outcome: "created" | "updated"; requiresTranslation: boolean }> {
   // Same input the translation hash is computed from everywhere (title+content+target).
   const hash = computeTranslationHash(title, content, translation?.targetLanguage ?? "");
@@ -102,6 +105,11 @@ async function upsertFeedItem(
         title,
         content,
         publishedAt,
+        // Written only when this run actually found one. A publisher outage, a
+        // paywall, or a redesign that drops the og:image must not erase an image
+        // a post may already be using — the stored value stands until a run
+        // resolves a better one.
+        ...(sourceImageUrl ? { sourceImageUrl } : {}),
         ...translationFieldsForUpdate(translation, hash, existing),
       },
     });
@@ -118,6 +126,7 @@ async function upsertFeedItem(
         title,
         content,
         publishedAt,
+        sourceImageUrl,
         ...translationFieldsForCreate(translation),
       },
     });
@@ -215,8 +224,15 @@ export async function runSourceIngestion(
       if (!item.url) continue;
       if (processed.has(item.url)) continue;
       processed.add(item.url);
-      const extracted = await extractArticleContent(item.url);
-      const content = extracted ?? item.summary;
+      const extracted = await extractArticle(item.url);
+      const content = extracted.text ?? item.summary;
+      // Each candidate has already been filtered for icons, avatars and
+      // tracking pixels; pickSourceImage only chooses between them.
+      const sourceImageUrl = pickSourceImage({
+        metaImageUrl: extracted.metaImageUrl,
+        feedImageUrl: item.imageUrl,
+        contentImageUrl: extracted.contentImageUrl,
+      });
       const { outcome, requiresTranslation } = await upsertFeedItem(
         sourceId,
         companyId,
@@ -226,7 +242,8 @@ export async function runSourceIngestion(
         item.publishedAt,
         existingUrls,
         translation,
-        existingTranslations
+        existingTranslations,
+        sourceImageUrl
       );
       if (outcome === "created") created++;
       else updated++;

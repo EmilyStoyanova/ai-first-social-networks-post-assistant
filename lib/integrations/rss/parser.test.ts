@@ -41,7 +41,9 @@ function rssFeed(items: string): string {
 
 describe("parseFeedXml — RSS 2.0", () => {
   it("resolves the link from the item's own <link>text</link>, ignoring embedded HTML", () => {
-    const xml = rssFeed(startupNationItem("start-your-business/mvp-on-a-budget", "MVP on a budget"));
+    const xml = rssFeed(
+      startupNationItem("start-your-business/mvp-on-a-budget", "MVP on a budget")
+    );
     const items = parseFeedXml(xml);
 
     assert.equal(items.length, 1);
@@ -182,5 +184,95 @@ describe("parseFeedXml — Atom", () => {
 
     assert.equal(items.length, 1);
     assert.equal(items[0].url, "https://example.com/atom/relless");
+  });
+});
+
+// ─── Item images ──────────────────────────────────────────────────────────────
+
+describe("parseFeedXml — item images", () => {
+  function rssWith(itemBody: string): string {
+    return `<?xml version="1.0"?><rss version="2.0"><channel><item>
+      <title>Story</title>
+      <link>https://example.com/story</link>
+      ${itemBody}
+    </item></channel></rss>`;
+  }
+
+  it("reads an image enclosure", () => {
+    const items = parseFeedXml(
+      rssWith(
+        `<enclosure url="https://example.com/img/lead.jpg" type="image/jpeg" length="12345"/>`
+      )
+    );
+    assert.equal(items[0].imageUrl, "https://example.com/img/lead.jpg");
+  });
+
+  it("ignores a podcast enclosure — an enclosure is not necessarily an image", () => {
+    const items = parseFeedXml(
+      rssWith(
+        `<enclosure url="https://example.com/audio/ep1.mp3" type="audio/mpeg" length="9999"/>`
+      )
+    );
+    assert.equal(items[0].imageUrl, null);
+  });
+
+  it("reads media:content declared as an image", () => {
+    const items = parseFeedXml(
+      rssWith(
+        `<media:content url="https://example.com/img/media.jpg" medium="image" width="1200"/>`
+      )
+    );
+    assert.equal(items[0].imageUrl, "https://example.com/img/media.jpg");
+  });
+
+  it("ignores media:content that is a video", () => {
+    const items = parseFeedXml(
+      rssWith(`<media:content url="https://example.com/clip.mp4" medium="video"/>`)
+    );
+    assert.equal(items[0].imageUrl, null);
+  });
+
+  it("reads media:thumbnail", () => {
+    const items = parseFeedXml(
+      rssWith(`<media:thumbnail url="https://example.com/img/thumb.jpg"/>`)
+    );
+    assert.equal(items[0].imageUrl, "https://example.com/img/thumb.jpg");
+  });
+
+  it("prefers media:content over media:thumbnail — the thumbnail is the cropped one", () => {
+    const items = parseFeedXml(
+      rssWith(`
+        <media:thumbnail url="https://example.com/img/thumb.jpg"/>
+        <media:content url="https://example.com/img/full.jpg" medium="image"/>
+      `)
+    );
+    assert.equal(items[0].imageUrl, "https://example.com/img/full.jpg");
+  });
+
+  it("does not mistake an image inside the article body for the item's own", () => {
+    // Same class of bug as the Mailchimp stylesheet hijacking link resolution:
+    // a signup form or ad embedded in content:encoded must not supply the image.
+    const items = parseFeedXml(
+      rssWith(
+        `<content:encoded><![CDATA[<p>Body</p><img src="https://ads.example.net/banner.jpg">]]></content:encoded>`
+      )
+    );
+    assert.equal(items[0].imageUrl, null);
+  });
+
+  it("resolves a relative enclosure against the item's own link", () => {
+    const items = parseFeedXml(rssWith(`<enclosure url="/img/lead.jpg" type="image/png"/>`));
+    assert.equal(items[0].imageUrl, "https://example.com/img/lead.jpg");
+  });
+
+  it("rejects a tracking pixel dressed as an enclosure", () => {
+    const items = parseFeedXml(
+      rssWith(`<enclosure url="https://example.com/img/pixel.gif" type="image/gif"/>`)
+    );
+    assert.equal(items[0].imageUrl, null);
+  });
+
+  it("reports null for an item with no image at all", () => {
+    assert.equal(parseFeedXml(rssWith(`<description>Text only.</description>`))[0].imageUrl, null);
   });
 });

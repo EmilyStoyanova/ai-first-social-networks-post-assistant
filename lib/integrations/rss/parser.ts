@@ -1,8 +1,17 @@
+import { resolveImageUrl } from "./article-image";
+
 export interface ParsedFeedItem {
   title: string | null;
   url: string | null;
   summary: string | null;
   publishedAt: Date | null;
+  /**
+   * An image the FEED itself supplies — `<media:content>`, `<media:thumbnail>`
+   * or an image `<enclosure>`. A weaker signal than the article's own og:image
+   * (feeds often carry a cropped thumbnail), so ingestion uses it only when the
+   * page declared nothing.
+   */
+  imageUrl: string | null;
 }
 
 /** Which flavour of feed an item came from — drives how its link is resolved. */
@@ -130,6 +139,48 @@ function extractLink(xml: string, kind: FeedKind): string | null {
   return text ? text[1].trim() || null : null;
 }
 
+/**
+ * The item's own image, if the feed bothered to attach one.
+ *
+ * Read from the SAME body-stripped copy link resolution uses: an article that
+ * embeds a newsletter form or an ad in `<content:encoded>` must not have that
+ * markup's imagery mistaken for the item's picture.
+ *
+ * `<enclosure>` is podcast-shaped and carries audio and video too, so only an
+ * explicitly image-typed one counts. Media RSS `medium="image"` is treated the
+ * same way, while a `<media:thumbnail>` is an image by definition.
+ */
+function extractFeedImage(strippedXml: string, baseUrl: string | null): string | null {
+  const candidates: Array<string | null> = [];
+
+  for (const match of strippedXml.matchAll(/<media:content\b([^>]*?)\/?>/gi)) {
+    const attrs = match[1];
+    const type = attrs.match(/\btype=["']([^"']+)["']/i)?.[1]?.toLowerCase() ?? "";
+    const medium = attrs.match(/\bmedium=["']([^"']+)["']/i)?.[1]?.toLowerCase() ?? "";
+    if (medium && medium !== "image") continue;
+    if (type && !type.startsWith("image/")) continue;
+    if (!medium && !type) continue; // Unlabelled: could be the audio track.
+    candidates.push(attrs.match(/\burl=["']([^"']+)["']/i)?.[1] ?? null);
+  }
+
+  for (const match of strippedXml.matchAll(/<media:thumbnail\b([^>]*?)\/?>/gi)) {
+    candidates.push(match[1].match(/\burl=["']([^"']+)["']/i)?.[1] ?? null);
+  }
+
+  for (const match of strippedXml.matchAll(/<enclosure\b([^>]*?)\/?>/gi)) {
+    const attrs = match[1];
+    const type = attrs.match(/\btype=["']([^"']+)["']/i)?.[1]?.toLowerCase() ?? "";
+    if (!type.startsWith("image/")) continue;
+    candidates.push(attrs.match(/\burl=["']([^"']+)["']/i)?.[1] ?? null);
+  }
+
+  for (const candidate of candidates) {
+    const resolved = resolveImageUrl(candidate, baseUrl);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
 function parseDate(raw: string | null): Date | null {
   if (!raw) return null;
   const d = new Date(raw);
@@ -157,11 +208,15 @@ export function parseFeedXml(xml: string): ParsedFeedItem[] {
       extractText(item, "updated") ??
       extractText(item, "dc:date");
 
+    // Link and image resolution both run on a copy with the article body
+    // stripped out, so embedded HTML can never influence either.
+    const stripped = stripEmbeddedContent(item);
+    const url = extractLink(stripped, kind);
+
     return {
       title: extractText(item, "title"),
-      // Link resolution runs on a copy with the article body stripped out, so
-      // embedded HTML links can never influence it.
-      url: extractLink(stripEmbeddedContent(item), kind),
+      url,
+      imageUrl: extractFeedImage(stripped, url),
       summary:
         extractText(item, "description") ??
         extractText(item, "summary") ??

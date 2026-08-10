@@ -17,6 +17,18 @@ export interface PostItem {
   llmProvider: string | null;
   llmModel: string | null;
   mediaUrl?: string | null;
+  /**
+   * The main image of the original article, when this post came from an RSS
+   * article that had one. Null everywhere else — a brand-setup post, a prompt /
+   * calendar / product-page source, an article with no usable image, or an item
+   * ingested before the column existed. Null means the card never offers the
+   * action at all.
+   */
+  sourceImageUrl: string | null;
+  /** True when the attached image IS the article's — the card then offers the way back. */
+  usingSourceImage: boolean;
+  /** The image a switch displaced, restorable without regenerating. */
+  previousMediaUrl: string | null;
   approvedById: string | null;
   publishedPostUrl: string | null;
   /** When the post is due to go out. Null for drafts that were never scheduled. */
@@ -44,7 +56,8 @@ const SELECT = {
   publishedPostUrl: true,
   scheduledFor: true,
   createdAt: true,
-  mediaAsset: { select: { url: true } },
+  mediaAsset: { select: { url: true, sourceUrl: true } },
+  previousMediaAsset: { select: { url: true } },
   // Frozen provenance — authoritative, and immune to a later source rename or
   // delete. The join below is the fallback for posts generated before it.
   originType: true,
@@ -53,9 +66,36 @@ const SELECT = {
   originSourceTitle: true,
   originSourceUrl: true,
   primaryFeedItem: {
-    select: { title: true, url: true, source: { select: { name: true, type: true } } },
+    select: {
+      title: true,
+      url: true,
+      sourceImageUrl: true,
+      source: { select: { name: true, type: true } },
+    },
   },
 } as const;
+
+/**
+ * The article image this post could switch to.
+ *
+ * Deliberately read from the LIVE feed item rather than the frozen origin
+ * snapshot: unlike provenance, this is an action the user is about to take, so
+ * it must reflect what is actually available now. A post whose source was
+ * deleted has no feed item and therefore no offer — correct, since the article
+ * it pointed at is gone.
+ *
+ * Restricted to `rss`. A prompt or calendar event has no original article at
+ * all, and ingestion resolves an image for neither.
+ */
+export function resolveSourceImageUrl(
+  primaryFeedItem: {
+    sourceImageUrl: string | null;
+    source: { type: string };
+  } | null
+): string | null {
+  if (!primaryFeedItem || primaryFeedItem.source.type !== "rss") return null;
+  return primaryFeedItem.sourceImageUrl;
+}
 
 function toItem(r: {
   id: string;
@@ -70,7 +110,8 @@ function toItem(r: {
   llmModel: string | null;
   approvedById: string | null;
   publishedPostUrl: string | null;
-  mediaAsset: { url: string } | null;
+  mediaAsset: { url: string; sourceUrl: string | null } | null;
+  previousMediaAsset: { url: string } | null;
   originType: "brand_setup" | "content_source" | null;
   originSourceType: OriginSourceType | null;
   originSourceName: string | null;
@@ -79,11 +120,13 @@ function toItem(r: {
   primaryFeedItem: {
     title: string | null;
     url: string;
+    sourceImageUrl: string | null;
     source: { name: string; type: string };
   } | null;
   scheduledFor: Date | null;
   createdAt: Date;
 }): PostItem {
+  const sourceImageUrl = resolveSourceImageUrl(r.primaryFeedItem);
   return {
     id: r.id,
     companyId: r.companyId,
@@ -98,6 +141,12 @@ function toItem(r: {
     approvedById: r.approvedById,
     publishedPostUrl: r.publishedPostUrl,
     mediaUrl: r.mediaAsset?.url ?? null,
+    sourceImageUrl,
+    // The attached asset was imported from THIS article's image — not merely
+    // imported from somewhere, which is why the two URLs are compared rather
+    // than just checking that sourceUrl is set.
+    usingSourceImage: sourceImageUrl !== null && r.mediaAsset?.sourceUrl === sourceImageUrl,
+    previousMediaUrl: r.previousMediaAsset?.url ?? null,
     origin: resolvePostOrigin(r, r.primaryFeedItem),
     scheduledFor: r.scheduledFor?.toISOString() ?? null,
     createdAt: r.createdAt.toISOString(),
