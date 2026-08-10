@@ -736,6 +736,11 @@
       "animated": "Animated"
     },
     "attachThis": "Attach This Image",
+    "existingAiHeading": "Already generated for this post",
+    "existingAiHint": "Attach one of these instead of generating a new image.",
+    "currentImage": "Current image",
+    "thisPostImage": "Used by this post",
+    "inUse": "In use",
     "regenerate": "Regenerate",
     "generateImage": "Generate Image",
     "generatingImage": "Generating image…",

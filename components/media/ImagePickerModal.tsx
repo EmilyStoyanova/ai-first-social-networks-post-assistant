@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/Button";
 import { Alert } from "@/components/ui/Alert";
 import { IMAGE_STYLES, type ImageStyle } from "@/lib/ai/image/image-style";
 import { formatDate } from "@/lib/i18n/format-date";
+import { orderGalleryWithPostFirst } from "@/lib/media/post-media-ordering";
+import type { PostMediaItem } from "@/lib/services/posts/list-post-media.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,6 +28,21 @@ type Tab = "gallery" | "ai" | "source" | "upload";
 export interface AttachedMedia {
   id: string;
   url: string;
+}
+
+// ─── Shared attach call ───────────────────────────────────────────────────────
+
+/**
+ * Point the post at an asset that already exists. Used by the gallery, by the
+ * upload tab and by the "images this post already has" strip — one image is
+ * attached one way, whichever list it was picked from.
+ */
+async function attachMedia(postId: string, mediaId: string): Promise<Response> {
+  return fetch(`/api/v1/posts/${postId}/attach-media`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mediaId }),
+  });
 }
 
 interface Props {
@@ -99,6 +116,7 @@ function TabBar({
 function GalleryTab({
   postId,
   items,
+  postMedia,
   loading,
   error,
   onRetry,
@@ -106,6 +124,8 @@ function GalleryTab({
 }: {
   postId: string;
   items: GalleryMediaItem[];
+  /** The post's own images — floated to the front and labelled. */
+  postMedia: PostMediaItem[];
   loading: boolean;
   error: string;
   onRetry: () => void;
@@ -122,11 +142,7 @@ function GalleryTab({
     setAttachingId(item.id);
     setAttachError("");
     try {
-      const res = await fetch(`/api/v1/posts/${postId}/attach-media`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mediaId: item.id }),
-      });
+      const res = await attachMedia(postId, item.id);
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
         throw new Error(apiError(json.error));
@@ -139,13 +155,19 @@ function GalleryTab({
     }
   }
 
+  // The post's images lead the company's, whether or not the loaded gallery page
+  // happened to contain them.
+  const ordered = orderGalleryWithPostFirst<GalleryMediaItem>(postMedia, items);
+  const currentId = postMedia.find((m) => m.isCurrent)?.id ?? null;
+  const postMediaIds = new Set(postMedia.map((m) => m.id));
+
   const filtered = search
-    ? items.filter(
+    ? ordered.filter(
         (i) =>
           i.provider.toLowerCase().includes(search.toLowerCase()) ||
           formatDate(i.createdAt).toLowerCase().includes(search.toLowerCase())
       )
-    : items;
+    : ordered;
 
   if (loading) {
     return <p className="text-fg-faint py-12 text-center text-sm">{t("loadingGallery")}</p>;
@@ -196,6 +218,11 @@ function GalleryTab({
                 />
               </div>
               <div className="px-2 pt-2 pb-1">
+                {postMediaIds.has(item.id) && (
+                  <p className="text-accent truncate text-xs font-semibold">
+                    {item.id === currentId ? t("currentImage") : t("thisPostImage")}
+                  </p>
+                )}
                 <p className="text-fg-faint truncate text-xs">{formatDate(item.createdAt)}</p>
                 <p className="text-fg-muted truncate text-xs font-medium">{item.provider}</p>
               </div>
@@ -204,11 +231,15 @@ function GalleryTab({
                   variant="primary"
                   size="sm"
                   loading={attachingId === item.id}
-                  disabled={attachingId !== null}
+                  disabled={attachingId !== null || item.id === currentId}
                   onClick={() => void handleSelect(item)}
                   className="w-full"
                 >
-                  {attachingId === item.id ? tCommon("attaching") : tCommon("attach")}
+                  {attachingId === item.id
+                    ? tCommon("attaching")
+                    : item.id === currentId
+                      ? t("inUse")
+                      : tCommon("attach")}
                 </Button>
               </div>
             </div>
@@ -221,13 +252,115 @@ function GalleryTab({
 
 // ─── AI Generate Tab ──────────────────────────────────────────────────────────
 
+/**
+ * The AI images this post already owns, offered before the controls that would
+ * make another one.
+ *
+ * A post whose article image took the lead still has its AI image — displaced,
+ * not deleted — and putting it back is a pointer swap, not a generation. Showing
+ * it here is what makes that visible; without it the only affordance on this tab
+ * is "Generate", which spends credits to recreate something the post is already
+ * holding.
+ */
+function ExistingAiImages({
+  postId,
+  items,
+  onAttached,
+}: {
+  postId: string;
+  items: PostMediaItem[];
+  onAttached: (media: AttachedMedia) => void;
+}) {
+  const t = useTranslations("imagePicker");
+  const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
+  const [attachingId, setAttachingId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  async function handleSelect(item: PostMediaItem) {
+    setAttachingId(item.id);
+    setError("");
+    try {
+      const res = await attachMedia(postId, item.id);
+      if (!res.ok) {
+        const json = (await res.json()) as { error?: { message?: string } };
+        throw new Error(apiError(json.error));
+      }
+      onAttached({ id: item.id, url: item.url });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
+    } finally {
+      setAttachingId(null);
+    }
+  }
+
+  if (items.length === 0) return null;
+
+  return (
+    <div className="border-border space-y-3 border-b pb-5">
+      <div>
+        <p className="text-fg-faint text-xs font-semibold tracking-wide uppercase">
+          {t("existingAiHeading")}
+        </p>
+        <p className="text-fg-muted mt-1 text-xs leading-relaxed">{t("existingAiHint")}</p>
+      </div>
+
+      {error && <Alert variant="error">{error}</Alert>}
+
+      <div className="grid grid-cols-3 gap-3">
+        {items.map((item) => (
+          <div
+            key={item.id}
+            className="rounded-card border-border bg-surface-subtle overflow-hidden border"
+          >
+            <div className="bg-surface-subtle relative aspect-square w-full overflow-hidden">
+              <Image
+                src={item.url}
+                alt={t("generatedPreviewAlt")}
+                fill
+                className="object-cover"
+                unoptimized
+                loading="lazy"
+              />
+            </div>
+            <div className="px-2 pt-2 pb-2">
+              {item.isCurrent && (
+                <p className="text-accent mb-1 truncate text-xs font-semibold">
+                  {t("currentImage")}
+                </p>
+              )}
+              <Button
+                variant="primary"
+                size="sm"
+                loading={attachingId === item.id}
+                disabled={attachingId !== null || item.isCurrent}
+                onClick={() => void handleSelect(item)}
+                className="w-full"
+              >
+                {attachingId === item.id
+                  ? tCommon("attaching")
+                  : item.isCurrent
+                    ? t("inUse")
+                    : t("attachThis")}
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AiGenerateTab({
   postId,
   postImagePrompt,
+  existingAiMedia,
   onAttached,
 }: {
   postId: string;
   postImagePrompt: string | null;
+  /** AI assets this post already holds — shown above the controls. */
+  existingAiMedia: PostMediaItem[];
   onAttached: (media: AttachedMedia) => void;
 }) {
   const t = useTranslations("imagePicker");
@@ -269,6 +402,8 @@ function AiGenerateTab({
 
   return (
     <div className="space-y-4">
+      <ExistingAiImages postId={postId} items={existingAiMedia} onAttached={onAttached} />
+
       <div>
         <div className="mb-1 flex items-baseline justify-between gap-2">
           <label
@@ -538,11 +673,7 @@ function UploadTab({
       }
       const { media } = (await uploadRes.json()) as { media: { id: string; url: string } };
 
-      const attachRes = await fetch(`/api/v1/posts/${postId}/attach-media`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mediaId: media.id }),
-      });
+      const attachRes = await attachMedia(postId, media.id);
       if (!attachRes.ok) {
         const json = (await attachRes.json()) as { error?: { message?: string } };
         throw new Error(apiError(json.error));
@@ -663,6 +794,29 @@ export function ImagePickerModal({
   const t = useTranslations("imagePicker");
   const [tab, setTab] = useState<Tab>("gallery");
 
+  // The images this post already holds — its current one and the one a switch
+  // displaced. Fetched once here rather than per tab: both the gallery and the AI
+  // tab need the same answer, and two fetches could disagree.
+  const [postMedia, setPostMedia] = useState<PostMediaItem[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Failure is silent on purpose. This only ADDS shortcuts to images the user
+    // can already reach through the gallery, so a lost fetch must not put an
+    // error banner over a picker that works perfectly well without it.
+    fetch(`/api/v1/posts/${postId}/media`)
+      .then((res) => (res.ok ? (res.json() as Promise<{ media: PostMediaItem[] }>) : null))
+      .then((json) => {
+        if (!cancelled && json) setPostMedia(json.media);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [postId]);
+
+  const existingAiMedia = postMedia.filter((m) => m.generatedBy === "ai");
+
   function handleAttached(media: AttachedMedia) {
     onAttached(media);
     onClose();
@@ -676,6 +830,7 @@ export function ImagePickerModal({
         <GalleryTab
           postId={postId}
           items={galleryItems}
+          postMedia={postMedia}
           loading={galleryLoading}
           error={galleryError}
           onRetry={onGalleryRetry}
@@ -686,6 +841,7 @@ export function ImagePickerModal({
         <AiGenerateTab
           postId={postId}
           postImagePrompt={postImagePrompt}
+          existingAiMedia={existingAiMedia}
           onAttached={handleAttached}
         />
       )}

@@ -39,7 +39,8 @@ function isValidChannel(v: string): v is (typeof VALID_CHANNELS)[number] {
   return (VALID_CHANNELS as readonly string[]).includes(v);
 }
 
-function deriveProvider(
+/** Exported so the post-scoped media list labels an asset identically. */
+export function deriveProvider(
   cloudinaryId: string,
   generatedBy: string
 ): "LEONARDO" | "MOCK" | "USER_UPLOAD" {

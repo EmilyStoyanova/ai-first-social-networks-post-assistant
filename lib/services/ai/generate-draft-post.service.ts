@@ -44,6 +44,11 @@ import {
   type AutoGenerateImageInput,
   type AutoGenerateImageOutcome,
 } from "./auto-generate-post-image.service";
+import {
+  autoApplySourceImage,
+  type AutoApplySourceImageInput,
+  type AutoApplySourceImageOutcome,
+} from "./auto-apply-source-image.service";
 import { createSemanticGate } from "./semantic-gate.service";
 import {
   recordSemanticCalibration,
@@ -241,6 +246,11 @@ export interface GenerateDraftPostDeps {
   embed?: (input: EmbedPostInput) => Promise<EmbedPostOutcome>;
   /** Best-effort automatic image generation. Injected in tests. */
   autoImage?: (input: AutoGenerateImageInput) => Promise<AutoGenerateImageOutcome>;
+  /**
+   * Best-effort import of the source article's own image, which then leads.
+   * Injected in tests.
+   */
+  autoSourceImage?: (input: AutoApplySourceImageInput) => Promise<AutoApplySourceImageOutcome>;
   /** Best-effort semantic-gate calibration write (Phase 1.5). Injected in tests. */
   recordCalibration?: (input: SemanticCalibrationInput) => Promise<void>;
   /**
@@ -451,6 +461,7 @@ export async function generatePostFromContext(
   const auditLog = deps.auditLog ?? createAuditLog;
   const embed = deps.embed ?? embedPost;
   const autoImage = deps.autoImage ?? autoGeneratePostImage;
+  const autoSourceImage = deps.autoSourceImage ?? autoApplySourceImage;
   const recordCalibration = deps.recordCalibration ?? recordSemanticCalibration;
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
@@ -1025,6 +1036,40 @@ export async function generatePostFromContext(
       `[auto-image] Post ${post.id} auto image generation failed (non-fatal):`,
       err instanceof Error ? err.message : err
     );
+  }
+
+  // ── The article's own image takes the lead ────────────────────────────────
+  // For a post written from an article, the article's real photograph beats a
+  // drawing of it, so it becomes the post's image. Deliberately AFTER the block
+  // above rather than instead of it: the AI image is still generated, and the
+  // import displaces it into `previousMediaAssetId` — kept, linked to the post,
+  // and one click away in the picker. Nothing is deleted or overwritten.
+  //
+  // Non-article posts are untouched. The service reads the image through
+  // `primaryFeedItem` behind an `rss` check, so brand-setup, prompt,
+  // calendar-event and product-page posts report `no_source_image` and keep
+  // exactly the image they had before this block existed.
+  //
+  // Same best-effort contract as above: it never throws, and a failed import
+  // leaves a post that still has its AI image.
+  //
+  // Gated on the image already being known rather than asked for unconditionally:
+  // ingestion resolves it onto the FeedItem, so a post with nothing here has no
+  // article image to import and the call would be a DB round-trip that can only
+  // answer "no". A legacy item whose image was never resolved is not lost either
+  // — the picker's "Source article" tab still scrapes it on demand.
+  if (primary.item?.sourceImageUrl) {
+    try {
+      const outcome = await recordPhase("image", () =>
+        autoSourceImage({ postId: post.id, companyId, generatedById })
+      );
+      if (outcome.status === "applied") mediaUrl = outcome.media.url;
+    } catch (err) {
+      console.error(
+        `[source-image] Post ${post.id} article image import failed (non-fatal):`,
+        err instanceof Error ? err.message : err
+      );
+    }
   }
 
   const warnings: GenerationWarnings = {

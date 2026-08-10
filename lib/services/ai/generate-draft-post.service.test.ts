@@ -7,6 +7,7 @@ import type { GenerateDraftPostDb, GenerateDraftPostDeps } from "./generate-draf
 import type { EmbedPostInput } from "./embed-post.service";
 import type { SemanticCalibrationInput } from "./semantic-calibration.service";
 import type { AutoGenerateImageInput } from "./auto-generate-post-image.service";
+import type { AutoApplySourceImageInput } from "./auto-apply-source-image.service";
 import type { SemanticGate } from "@/lib/ai/generate-with-retry";
 import type { GenerationContext } from "@/lib/ai/types";
 
@@ -68,11 +69,13 @@ function makeDeps(
   embedded: () => EmbedPostInput | null;
   calibrated: () => SemanticCalibrationInput | null;
   autoImaged: () => AutoGenerateImageInput | null;
+  sourceImaged: () => AutoApplySourceImageInput | null;
 } {
   let createdData: Prisma.PostUncheckedCreateInput | null = null;
   let embeddedInput: EmbedPostInput | null = null;
   let calibrationInput: SemanticCalibrationInput | null = null;
   let autoImageInput: AutoGenerateImageInput | null = null;
+  let sourceImageInput: AutoApplySourceImageInput | null = null;
 
   const db: GenerateDraftPostDb = {
     post: {
@@ -126,6 +129,12 @@ function makeDeps(
             }
           : { status: "skipped", reason: "disabled" };
       },
+      // Captured so no test reaches the real import pipeline. Skipping is what a
+      // post with no article reports, which is what these fixtures describe.
+      autoSourceImage: async (input) => {
+        sourceImageInput = input;
+        return { status: "skipped", reason: "no_source_image" };
+      },
       // Default: accept (no semantic history) so these Phase 1.1/1.2 tests are
       // unaffected by the Phase 1.4 gate. Overridable for gate-specific tests.
       semanticGate,
@@ -137,6 +146,7 @@ function makeDeps(
     embedded: () => embeddedInput,
     calibrated: () => calibrationInput,
     autoImaged: () => autoImageInput,
+    sourceImaged: () => sourceImageInput,
   };
 }
 
@@ -1622,6 +1632,177 @@ describe("generatePostFromContext — automatic image generation", () => {
     const result = await generatePostFromContext(ctx, "co-1", {}, deps);
 
     assert.ok(result.success, "a failed image must never fail the post");
+  });
+});
+
+// ─── The article's image leads ───────────────────────────────────────────────
+// An article post shows the article's real photograph, not a drawing of it. The
+// AI image is still generated and still linked — displaced, never deleted.
+
+describe("generatePostFromContext — source article image", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const ARTICLE_IMAGE = "https://cdn.example.com/story-lead.jpg";
+
+  /** A context whose article carries a resolved image, with AI images switched on. */
+  function articleContext(sourceImageUrl: string | null = ARTICLE_IMAGE): GenerationContext {
+    return makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+      feedItems: [
+        {
+          id: "article-1",
+          title: "Launch incoming",
+          content: "We are preparing something big.",
+          url: "https://news.example.com/launch",
+          publishedAt: null,
+          consumable: true,
+          sourceImageUrl,
+        },
+      ],
+      hasArticleSources: true,
+    });
+  }
+
+  const APPLIED = {
+    status: "applied" as const,
+    media: { id: "asset-article", url: ARTICLE_IMAGE, width: 1200, height: 630 },
+    previousMediaId: "asset-1",
+  };
+
+  it("makes the article image the post's image, over the AI one", async () => {
+    const { deps } = makeDeps();
+    deps.autoSourceImage = async () => APPLIED;
+
+    const result = await generatePostFromContext(articleContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    // The AI image generated moments earlier is what this replaced — and the
+    // import pipeline kept it on previousMediaAssetId.
+    assert.equal(result.post.mediaUrl, ARTICLE_IMAGE);
+  });
+
+  it("runs after AI generation so the AI asset is the one displaced", async () => {
+    const order: string[] = [];
+    const { deps } = makeDeps();
+    deps.autoImage = async () => {
+      order.push("ai");
+      return {
+        status: "generated",
+        media: { id: "asset-1", url: "https://cdn.example/auto.png", width: 1, height: 1 },
+      };
+    };
+    deps.autoSourceImage = async () => {
+      order.push("source");
+      return APPLIED;
+    };
+
+    await generatePostFromContext(articleContext(), "co-1", {}, deps);
+
+    assert.deepEqual(order, ["ai", "source"]);
+  });
+
+  it("targets the post that was just created", async () => {
+    let seen: AutoApplySourceImageInput | null = null;
+    const { deps, created } = makeDeps();
+    deps.autoSourceImage = async (input) => {
+      seen = input;
+      return APPLIED;
+    };
+
+    const result = await generatePostFromContext(articleContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.ok(created());
+    assert.equal(seen!.postId, result.post.id);
+    assert.equal(seen!.companyId, "co-1");
+  });
+
+  it("passes the acting user through, and omits it for cron", async () => {
+    const seen: Array<string | undefined> = [];
+    const { deps } = makeDeps();
+    deps.autoSourceImage = async (input) => {
+      seen.push(input.generatedById);
+      return APPLIED;
+    };
+
+    await generatePostFromContext(articleContext(), "co-1", { generatedById: "u-1" }, deps);
+    await generatePostFromContext(articleContext(), "co-1", { scheduleId: "sched-1" }, deps);
+
+    assert.deepEqual(seen, ["u-1", undefined]);
+  });
+
+  it("never asks when the article has no image", async () => {
+    // Ingestion resolves the image, so nothing here means nothing to import —
+    // and asking anyway would be a DB round-trip that can only answer "no".
+    let called = false;
+    const { deps } = makeDeps();
+    deps.autoSourceImage = async () => {
+      called = true;
+      return APPLIED;
+    };
+
+    const result = await generatePostFromContext(articleContext(null), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(called, false);
+    assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png", "the AI image stands");
+  });
+
+  it("leaves a post with no article alone", async () => {
+    const { deps, sourceImaged } = makeDeps();
+    const ctx = makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(sourceImaged(), null, "a mission/brand post has no article to import from");
+    assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png");
+  });
+
+  it("keeps the AI image when the import reports nothing usable", async () => {
+    const { deps } = makeDeps();
+    deps.autoSourceImage = async () => ({ status: "skipped", reason: "no_source_image" });
+
+    const result = await generatePostFromContext(articleContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png");
+  });
+
+  it("keeps the AI image when the import fails", async () => {
+    const { deps } = makeDeps();
+    deps.autoSourceImage = async () => ({ status: "failed", code: "FETCH_FAILED" });
+
+    const result = await generatePostFromContext(articleContext(), "co-1", {}, deps);
+
+    assert.ok(result.success, "a failed import must never fail the post");
+    assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png");
+  });
+
+  it("still returns a successful post when the import throws", async () => {
+    const { deps } = makeDeps();
+    // Harsher than production: autoApplySourceImage swallows its own errors, so
+    // this proves generation survives even if that contract is ever broken.
+    deps.autoSourceImage = async () => {
+      throw new Error("cloudinary exploded");
+    };
+
+    const result = await generatePostFromContext(articleContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png");
   });
 });
 
