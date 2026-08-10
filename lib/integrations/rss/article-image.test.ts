@@ -504,3 +504,148 @@ describe("selectContentImage — <picture> support", () => {
     assert.equal(selectContentImage(html, BASE), "https://example.com/img/lead.jpg");
   });
 });
+
+// ─── "the article's image", not "an image on the page" ────────────────────────
+
+describe("selectContentImage — rejects site furniture", () => {
+  const LEAD = "https://example.com/media/8f3c2a91.jpg";
+
+  it("skips an ad slot whose URL gives nothing away", () => {
+    // The decisive signal is the class: the address is an opaque CDN hash, so
+    // path filtering alone would hand back the advert.
+    const html = `
+      <div class="ad-slot"><img src="/media/aaa111.jpg"></div>
+      <img src="/media/8f3c2a91.jpg">
+    `;
+    assert.equal(selectContentImage(html, BASE), LEAD);
+  });
+
+  it("skips a related-content rail", () => {
+    const html = `
+      <div class="related-posts"><img src="/media/other-story.jpg"></div>
+      <img src="/media/8f3c2a91.jpg">
+    `;
+    assert.equal(selectContentImage(html, BASE), LEAD);
+  });
+
+  it("skips a newsletter promo block", () => {
+    const html = `
+      <section id="newsletter-signup"><img src="/media/envelope-art.jpg"></section>
+      <img src="/media/8f3c2a91.jpg">
+    `;
+    assert.equal(selectContentImage(html, BASE), LEAD);
+  });
+
+  it("skips a site-wide hero banner above the article", () => {
+    const html = `
+      <div class="page-header masthead"><img src="/media/site-hero.jpg"></div>
+      <img src="/media/8f3c2a91.jpg">
+    `;
+    assert.equal(selectContentImage(html, BASE), LEAD);
+  });
+
+  it("skips an <aside> entirely", () => {
+    const html = `<aside><img src="/media/sidebar-pic.jpg"></aside><img src="/media/8f3c2a91.jpg">`;
+    assert.equal(selectContentImage(html, BASE), LEAD);
+  });
+
+  it("skips navigation imagery", () => {
+    const html = `<nav><img src="/media/menu-art.jpg"></nav><img src="/media/8f3c2a91.jpg">`;
+    assert.equal(selectContentImage(html, BASE), LEAD);
+  });
+
+  it("skips an image marked as chrome by its own class", () => {
+    const html = `
+      <img class="site-logo" src="/media/bbb222.jpg">
+      <img class="share-icon" src="/media/ccc333.jpg">
+      <img src="/media/8f3c2a91.jpg">
+    `;
+    assert.equal(selectContentImage(html, BASE), LEAD);
+  });
+
+  it("skips a sponsored figure and its caption", () => {
+    const html = `
+      <figure class="sponsored-content"><img src="/media/ddd444.jpg"></figure>
+      <img src="/media/8f3c2a91.jpg">
+    `;
+    assert.equal(selectContentImage(html, BASE), LEAD);
+  });
+
+  it("returns null when the body holds nothing but furniture", () => {
+    const html = `
+      <aside><img src="/media/eee555.jpg"></aside>
+      <div class="promo"><img src="/media/fff666.jpg"></div>
+    `;
+    assert.equal(selectContentImage(html, BASE), null);
+  });
+});
+
+describe("selectContentImage — keeps genuine article images", () => {
+  it("keeps a photograph in a plain figure", () => {
+    const html = `<figure><img src="/media/8f3c2a91.jpg"><figcaption>The scene</figcaption></figure>`;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/media/8f3c2a91.jpg");
+  });
+
+  it("keeps WordPress's featured image, whose class says 'thumbnail'", () => {
+    // attachment-post-thumbnail IS the featured image on a large share of the
+    // web; treating "thumbnail" as junk would throw away the best candidate.
+    const html = `<img class="attachment-post-thumbnail wp-post-image" src="/media/8f3c2a91.jpg">`;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/media/8f3c2a91.jpg");
+  });
+
+  it("keeps an image whose class merely contains a junk word inside a word", () => {
+    const html = `<img class="download-preview" src="/media/8f3c2a91.jpg">`;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/media/8f3c2a91.jpg");
+  });
+
+  it("does not strip a container whose class merely contains a junk word", () => {
+    // "adaptive" contains "ad"; "unrelated" contains "related".
+    const html = `<div class="adaptive unrelated-wrapper"><img src="/media/8f3c2a91.jpg"></div>`;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/media/8f3c2a91.jpg");
+  });
+
+  it("keeps an article image about advertising, described in prose", () => {
+    // alt/title are human prose and are deliberately not consulted.
+    const html = `<img alt="Ad campaign billboard" src="/media/8f3c2a91.jpg">`;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/media/8f3c2a91.jpg");
+  });
+});
+
+describe("selectContentImage — prefers the featured image", () => {
+  it("prefers a figure-wrapped photo over an earlier bare image", () => {
+    const html = `
+      <img src="/media/bare-first.jpg">
+      <figure><img src="/media/8f3c2a91.jpg"></figure>
+    `;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/media/8f3c2a91.jpg");
+  });
+
+  it("prefers an image the publisher marked as featured", () => {
+    const html = `
+      <img src="/media/bare-first.jpg">
+      <img class="article-hero" src="/media/8f3c2a91.jpg">
+    `;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/media/8f3c2a91.jpg");
+  });
+
+  it("takes the earliest marked image when several are marked", () => {
+    const html = `
+      <figure><img src="/media/first-figure.jpg"></figure>
+      <figure><img src="/media/second-figure.jpg"></figure>
+    `;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/media/first-figure.jpg");
+  });
+
+  it("falls back to document order when nothing is marked", () => {
+    const html = `<img src="/media/first.jpg"><img src="/media/second.jpg">`;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/media/first.jpg");
+  });
+
+  it("does not let a marked image inside an ad block win", () => {
+    const html = `
+      <div class="promo-box"><figure><img src="/media/promo-art.jpg"></figure></div>
+      <img src="/media/8f3c2a91.jpg">
+    `;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/media/8f3c2a91.jpg");
+  });
+});

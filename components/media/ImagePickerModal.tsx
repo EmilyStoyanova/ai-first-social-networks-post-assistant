@@ -26,11 +26,6 @@ type Tab = "gallery" | "ai" | "source" | "upload";
 export interface AttachedMedia {
   id: string;
   url: string;
-  /** Set only when the image came from the source article, so the caller can
-   *  keep its "Use AI image" affordance in step with the picker. */
-  origin?: "source_article";
-  /** The asset this displaced — what switching back would restore. */
-  previousMediaId?: string | null;
 }
 
 interface Props {
@@ -437,15 +432,10 @@ function SourceArticleTab({
       const res = await fetch(`/api/v1/posts/${postId}/use-source-image`, { method: "POST" });
       const json = (await res.json()) as {
         media?: { id: string; url: string };
-        previousMediaId?: string | null;
         error?: { message?: string };
       };
       if (!res.ok || !json.media) throw new Error(apiError(json.error));
-      onAttached({
-        ...json.media,
-        origin: "source_article",
-        previousMediaId: json.previousMediaId ?? null,
-      });
+      onAttached(json.media);
     } catch (err) {
       // Nothing was written server-side on a failed download or upload, so the
       // post still has exactly the image it had when the modal opened.

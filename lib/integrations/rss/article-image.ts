@@ -298,12 +298,134 @@ export function selectMetaImage(doc: Document, baseUrl: string): string | null {
 
 // ─── In-content fallback ──────────────────────────────────────────────────────
 
-/** `<source>` is matched too — it is where `<picture>` keeps the real image. */
-const MEDIA_TAG = /<(img|source)\b[^>]*>/gi;
+/**
+ * One pass over the article body, tracking `<figure>` nesting as it goes —
+ * `<figure>` is how nearly every publisher marks a real photograph, so knowing
+ * whether a candidate sits inside one is what separates the article's own lead
+ * image from whatever else survived the cleanup.
+ */
+const MEDIA_TAG = /<(\/?)(figure|img|source)\b([^>]*)>/gi;
 
 function attr(tag: string, name: string): string | null {
   const match = tag.match(new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`, "i"));
   return match?.[1]?.trim() ?? null;
+}
+
+/**
+ * Wrappers whose contents are never the article's own story. Removed outright
+ * before anything is scanned.
+ *
+ * `<header>` is deliberately NOT here: inside an article it usually holds the
+ * headline AND the featured image (`<header class="entry-header">`), so
+ * stripping it would throw away the very picture we are looking for. A
+ * site-level masthead is caught by its class instead, and Readability has
+ * already discarded page chrome by this point.
+ */
+const NON_ARTICLE_TAGS = ["aside", "nav", "footer", "form"];
+
+/**
+ * Class/id fragments that mark a container or an image as decoration rather than
+ * content: ad slots, promo strips, "related stories" rails, share bars, sidebars.
+ *
+ * Checked on the TAG'S OWN attributes, which is often the only honest signal
+ * available — a CDN address like `/media/8f3c2a91.jpg` says nothing at all,
+ * while `class="related-posts__thumb"` says everything. `alt` and `title` are
+ * NOT consulted: they are human prose, and a photo captioned "Ad campaign
+ * billboard" is a real article image.
+ */
+const JUNK_ATTR_WORDS = [
+  "ad",
+  "ads",
+  "advert",
+  "advertisement",
+  "avatar",
+  "banner",
+  "footer",
+  "icon",
+  "logo",
+  "masthead",
+  "menu",
+  "nav",
+  "navigation",
+  "newsletter",
+  "page-header",
+  "promo",
+  "promotion",
+  "recirc",
+  "related",
+  "share",
+  "sidebar",
+  "site-header",
+  "social",
+  "sponsor",
+  "sponsored",
+  "subscribe",
+  "teaser",
+  "widget",
+];
+
+/**
+ * Class/id fragments publishers use for the article's featured image. A hit
+ * promotes a candidate ahead of images that merely appear earlier — it never
+ * rejects anything, so an unfamiliar theme simply falls back to document order.
+ *
+ * "thumbnail" is absent on purpose: WordPress marks the FEATURED image
+ * `attachment-post-thumbnail`, so treating it as junk would discard the best
+ * candidate on a large share of the web.
+ */
+const FEATURED_ATTR_WORDS = [
+  "article-image",
+  "article__image",
+  "entry-image",
+  "feature",
+  "featured",
+  "hero",
+  "lead",
+  "lede",
+  "main-image",
+  "post-image",
+  "post-thumbnail",
+  "wp-post-image",
+];
+
+function attrsHaveWord(tag: string, words: readonly string[]): boolean {
+  return hasWord(attr(tag, "class") ?? "", words) || hasWord(attr(tag, "id") ?? "", words);
+}
+
+/**
+ * Removes the blocks an article image can never legitimately come from.
+ *
+ * Nesting is handled naively — a junk container closes at the first matching end
+ * tag, so a deeply nested one is only partly removed. That errs towards keeping
+ * markup, which is the safe direction: the per-image checks downstream still get
+ * their say, whereas over-removal would silently lose real photographs.
+ */
+export function stripNonArticleBlocks(html: string): string {
+  let out = html;
+  for (const tag of NON_ARTICLE_TAGS) {
+    out = out.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}>`, "gi"), "");
+  }
+
+  const opening = /<(div|section|ul|ol|figure)\b[^>]*>/gi;
+  const lower = out.toLowerCase();
+  let result = "";
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = opening.exec(out)) !== null) {
+    if (match.index < cursor) continue; // Already inside something removed.
+    if (!attrsHaveWord(match[0], JUNK_ATTR_WORDS)) continue;
+
+    const closeTag = `</${match[1].toLowerCase()}>`;
+    const closeAt = lower.indexOf(closeTag, opening.lastIndex);
+    const end = closeAt === -1 ? out.length : closeAt + closeTag.length;
+
+    result += out.slice(cursor, match.index);
+    cursor = end;
+    opening.lastIndex = end;
+  }
+
+  return result + out.slice(cursor);
 }
 
 /**
@@ -360,30 +482,65 @@ export function srcsetCandidates(value: string | null | undefined): string[] {
 }
 
 /**
- * Last resort: the first genuinely large image inside the article body Readability
- * kept. Readability has already discarded navigation, sidebars and comment
- * threads, so what is left is at least in the right part of the page.
+ * The article's OWN image, found inside the body Readability kept.
+ *
+ * "Inside the body" is not enough on its own — a cleaned article still carries
+ * ad slots, "related stories" rails, promo strips and share bars, and picking
+ * the first `<img>` in document order lands on those as often as on the
+ * photograph the piece is actually about. Three things narrow it down:
+ *
+ *  1. Decorative CONTAINERS are removed first (`stripNonArticleBlocks`).
+ *  2. An image whose own class or id marks it as chrome is skipped, however
+ *     innocent its URL looks.
+ *  3. What remains is ranked: an image the publisher marked as the featured one,
+ *     or wrapped in a `<figure>`, beats one that merely came first. Only if
+ *     nothing is marked does document order decide, exactly as before.
  *
  * An image is taken only when it does NOT look small. A declared `width`/`height`
  * under 200px is a decisive reject; no declared size at all is accepted, because
  * most publishers omit the attributes on their lead image.
  *
  * `<picture>` is walked as well: its `<source>` elements carry the real art, and
- * the `<img>` inside it is only the fallback. They are read in document order,
- * so a `<source>` still yields to an earlier, larger image.
+ * the `<img>` inside it is only the fallback.
  */
 export function selectContentImage(contentHtml: string | null, baseUrl: string): string | null {
   if (!contentHtml) return null;
 
-  for (const match of contentHtml.matchAll(MEDIA_TAG)) {
+  const html = stripNonArticleBlocks(contentHtml);
+
+  let featured: string | null = null;
+  let firstUsable: string | null = null;
+  let figureDepth = 0;
+  // The depth at which a junk `<figure>` opened, while we are still inside it.
+  let junkFigureAt: number | null = null;
+
+  for (const match of html.matchAll(MEDIA_TAG)) {
     const tag = match[0];
-    const isSource = match[1].toLowerCase() === "source";
+    const closing = match[1] === "/";
+    const name = match[2].toLowerCase();
+
+    if (name === "figure") {
+      if (closing) {
+        if (junkFigureAt === figureDepth) junkFigureAt = null;
+        figureDepth = Math.max(0, figureDepth - 1);
+      } else {
+        figureDepth++;
+        if (junkFigureAt === null && attrsHaveWord(tag, JUNK_ATTR_WORDS)) {
+          junkFigureAt = figureDepth;
+        }
+      }
+      continue;
+    }
+
+    if (junkFigureAt !== null) continue;
+    if (attrsHaveWord(tag, JUNK_ATTR_WORDS)) continue;
 
     const width = Number(attr(tag, "width"));
     const height = Number(attr(tag, "height"));
     if (Number.isFinite(width) && width > 0 && width < MIN_EDGE_PX) continue;
     if (Number.isFinite(height) && height > 0 && height < MIN_EDGE_PX) continue;
 
+    const isSource = name === "source";
     // <source> also belongs to <video> and <audio>. Those declare their track in
     // `src` with a non-image `type`, so requiring a srcset and refusing a
     // declared non-image type keeps an MP4 out of the post.
@@ -399,11 +556,21 @@ export function selectContentImage(contentHtml: string | null, baseUrl: string):
       ? fromSrcset
       : [attr(tag, "data-src"), attr(tag, "data-original"), ...fromSrcset, attr(tag, "src")];
 
+    let resolved: string | null = null;
     for (const candidate of candidates) {
-      const resolved = resolveImageUrl(candidate, baseUrl);
-      if (resolved) return resolved;
+      resolved = resolveImageUrl(candidate, baseUrl);
+      if (resolved) break;
+    }
+    if (!resolved) continue;
+
+    firstUsable ??= resolved;
+    if (figureDepth > 0 || attrsHaveWord(tag, FEATURED_ATTR_WORDS)) {
+      // The strongest signal there is, and the earliest one wins — a later
+      // photograph cannot be more "the article's image" than the first.
+      featured = resolved;
+      break;
     }
   }
 
-  return null;
+  return featured ?? firstUsable;
 }

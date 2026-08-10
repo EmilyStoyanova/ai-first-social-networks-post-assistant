@@ -77,19 +77,6 @@ export function GeneratedPostCard({
   const [generatingImage, setGeneratingImage] = useState(false);
   const [imageError, setImageError] = useState("");
 
-  // ── Source-article image state ────────────────────────────────────────────
-  // The article's image is offered only as an ALTERNATIVE to the AI image, on a
-  // post that already exists. Nothing here ever runs on its own: switching is
-  // always a click, and a failure leaves the current image untouched.
-  const [swappingImage, setSwappingImage] = useState(false);
-  const [usingSourceImage, setUsingSourceImage] = useState(post.usingSourceImage ?? false);
-  const [previousImageUrl, setPreviousImageUrl] = useState<string | null>(
-    post.previousMediaUrl ?? null
-  );
-  // A source image that 404s should not leave a broken thumbnail sitting next to
-  // the button — the action goes away with it, which is the honest signal.
-  const [sourceThumbBroken, setSourceThumbBroken] = useState(false);
-
   // ── Edit state ────────────────────────────────────────────────────────────
   const [localText, setLocalText] = useState(post.text);
   const [localHashtags, setLocalHashtags] = useState<string[]>(post.hashtags);
@@ -236,56 +223,22 @@ export function GeneratedPostCard({
   }
 
   // ── Source article image ──────────────────────────────────────────────────
-  // Both directions share one handler: each endpoint re-points the post at an
-  // asset and hands back the one it displaced, so the card only has to record
-  // which way round it now is.
-  async function handleSwapImage(direction: "source" | "previous") {
-    setSwappingImage(true);
-    setImageError("");
-    try {
-      const endpoint = direction === "source" ? "use-source-image" : "use-previous-image";
-      const res = await fetch(`/api/v1/posts/${post.id}/${endpoint}`, { method: "POST" });
-      if (!res.ok) {
-        const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(apiError(json.error));
-      }
-      const json = (await res.json()) as {
-        media: { id: string; url: string };
-        previousMediaId: string | null;
-      };
-      const displaced = imageUrl;
-      setImageUrl(json.media.url);
-      setUsingSourceImage(direction === "source");
-      // Null only when the post had no image at all to displace.
-      setPreviousImageUrl(json.previousMediaId ? displaced : null);
-    } catch (err) {
-      // The post keeps whatever it had — no server write happens on a failed
-      // download or upload — so only the message changes here.
-      setImageError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
-    } finally {
-      setSwappingImage(false);
-    }
-  }
-
-  // Offered only for a post written from an article that actually has a usable
-  // image. Brand-setup, prompt, calendar and product-page posts never reach here
-  // because the API leaves `sourceImageUrl` null for all of them.
+  // No action for it here, on purpose. Changing a post's image is one job with
+  // one entry point — the image picker — where the article's image is a tab
+  // beside the gallery, AI generation and upload. The card's only part in it is
+  // deciding whether that tab is worth offering.
   const sourceImageUrl = post.sourceImageUrl ?? null;
-  const canUseSourceImage = sourceImageUrl !== null && !sourceThumbBroken && !usingSourceImage;
+
   /**
    * Whether the picker offers a "Source article" tab.
    *
-   * Broader than `canUseSourceImage` on purpose: the tab is offered whenever
-   * there IS an original article, even with no image stored yet, because items
-   * ingested before the column existed only get one when the tab asks the server
-   * to resolve it. A known image implies an article, which covers a legacy post
-   * whose frozen origin never recorded the source's kind.
+   * Offered whenever there IS an original article, even with no image stored
+   * yet: items ingested before the column existed only get one when the tab asks
+   * the server to resolve it. A known image implies an article, which covers a
+   * legacy post whose frozen origin never recorded the source's kind.
    */
   const hasArticleSource =
     sourceImageUrl !== null || (origin.kind === "source" && origin.sourceType === "rss");
-  // Going back is possible only while the article's image is the one showing —
-  // it is the sole state in which "the previous image" means the AI image.
-  const canUsePreviousImage = usingSourceImage && previousImageUrl !== null;
 
   // ── Gallery fetch (triggered from click handler, not a hook) ────────────
   async function loadGallery() {
@@ -579,43 +532,6 @@ export function GeneratedPostCard({
           </Button>
         )}
 
-        {/* Source article image — sits beside the AI image actions, because it is
-            the answer to "I don't like the generated one". The thumbnail shows
-            what the click would put in its place. */}
-        {canUseSourceImage && (
-          <span className="flex items-center gap-2">
-            <span className="rounded-control border-border bg-surface-subtle relative block h-8 w-8 shrink-0 overflow-hidden border">
-              <Image
-                src={sourceImageUrl}
-                alt={t("sourceImageAlt")}
-                fill
-                sizes="32px"
-                className="object-cover"
-                unoptimized
-                onError={() => setSourceThumbBroken(true)}
-              />
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              loading={swappingImage}
-              onClick={() => void handleSwapImage("source")}
-            >
-              {swappingImage ? t("usingSourceImage") : t("useSourceImage")}
-            </Button>
-          </span>
-        )}
-        {canUsePreviousImage && (
-          <Button
-            variant="ghost"
-            size="sm"
-            loading={swappingImage}
-            onClick={() => void handleSwapImage("previous")}
-          >
-            {t("useAiImage")}
-          </Button>
-        )}
-
         {/* Edit — draft / pending / rejected */}
         {isEditable && (
           <Button variant="ghost" size="sm" onClick={() => setEditOpen(true)}>
@@ -742,13 +658,7 @@ export function GeneratedPostCard({
           onGalleryRetry={() => void loadGallery()}
           onClose={() => setPickerOpen(false)}
           onAttached={(media) => {
-            const displaced = imageUrl;
             setImageUrl(media.url);
-            // Keeps the inline "Use AI image" affordance honest after a switch
-            // made from inside the modal. Any other tab leaves the post with an
-            // image that is not the article's, which is the same reset.
-            setUsingSourceImage(media.origin === "source_article");
-            setPreviousImageUrl(media.previousMediaId ? displaced : null);
             setPickerOpen(false);
           }}
         />
