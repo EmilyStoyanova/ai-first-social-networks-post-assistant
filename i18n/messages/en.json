@@ -722,6 +722,7 @@
     "title": "Choose Image",
     "galleryTab": "Company Gallery",
     "aiTab": "AI Generate",
+    "sourceTab": "Source Article",
     "uploadTab": "Upload",
     "loadingGallery": "Loading gallery…",
     "noImages": "No images in the gallery yet.",
@@ -750,7 +751,13 @@
     "dropzoneHint": "or click to browse — JPG, PNG, WebP · max 10 MB",
     "galleryImageAlt": "Gallery image",
     "generatedPreviewAlt": "AI-generated image preview",
-    "uploadPreviewAlt": "Upload preview"
+    "uploadPreviewAlt": "Upload preview",
+    "sourcePreviewAlt": "Image from the source article",
+    "sourceHint": "The main image of the article this post was written from. It is copied into your media library — the post never links to the publisher's site.",
+    "sourceResolving": "Looking for the article's image…",
+    "sourceNoImage": "This article has no image we can use.",
+    "sourceUse": "Use This Image",
+    "sourceUsing": "Fetching image…"
   },
   "createCompany": {
     "title": "Create Company",

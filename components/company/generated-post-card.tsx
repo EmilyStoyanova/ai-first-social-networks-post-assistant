@@ -272,6 +272,17 @@ export function GeneratedPostCard({
   // because the API leaves `sourceImageUrl` null for all of them.
   const sourceImageUrl = post.sourceImageUrl ?? null;
   const canUseSourceImage = sourceImageUrl !== null && !sourceThumbBroken && !usingSourceImage;
+  /**
+   * Whether the picker offers a "Source article" tab.
+   *
+   * Broader than `canUseSourceImage` on purpose: the tab is offered whenever
+   * there IS an original article, even with no image stored yet, because items
+   * ingested before the column existed only get one when the tab asks the server
+   * to resolve it. A known image implies an article, which covers a legacy post
+   * whose frozen origin never recorded the source's kind.
+   */
+  const hasArticleSource =
+    sourceImageUrl !== null || (origin.kind === "source" && origin.sourceType === "rss");
   // Going back is possible only while the article's image is the one showing —
   // it is the sole state in which "the previous image" means the AI image.
   const canUsePreviousImage = usingSourceImage && previousImageUrl !== null;
@@ -723,13 +734,21 @@ export function GeneratedPostCard({
           postId={post.id}
           companySlug={slug}
           postImagePrompt={post.imagePrompt ?? null}
+          hasArticleSource={hasArticleSource}
+          sourceImageUrl={sourceImageUrl}
           galleryItems={galleryItems}
           galleryLoading={galleryLoading}
           galleryError={galleryError}
           onGalleryRetry={() => void loadGallery()}
           onClose={() => setPickerOpen(false)}
           onAttached={(media) => {
+            const displaced = imageUrl;
             setImageUrl(media.url);
+            // Keeps the inline "Use AI image" affordance honest after a switch
+            // made from inside the modal. Any other tab leaves the post with an
+            // image that is not the article's, which is the same reset.
+            setUsingSourceImage(media.origin === "source_article");
+            setPreviousImageUrl(media.previousMediaId ? displaced : null);
             setPickerOpen(false);
           }}
         />

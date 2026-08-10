@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import Image from "next/image";
 import { useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
@@ -21,17 +21,34 @@ export interface GalleryMediaItem {
   provider: string;
 }
 
-type Tab = "gallery" | "ai" | "upload";
+type Tab = "gallery" | "ai" | "source" | "upload";
 
-interface AttachedMedia {
+export interface AttachedMedia {
   id: string;
   url: string;
+  /** Set only when the image came from the source article, so the caller can
+   *  keep its "Use AI image" affordance in step with the picker. */
+  origin?: "source_article";
+  /** The asset this displaced — what switching back would restore. */
+  previousMediaId?: string | null;
 }
 
 interface Props {
   postId: string;
   companySlug: string;
   postImagePrompt: string | null;
+  /**
+   * Whether this post was written from an RSS article at all. False for brand
+   * setup, prompt, calendar-event and product-page posts — they have no original
+   * article, so the tab is not offered.
+   */
+  hasArticleSource: boolean;
+  /**
+   * The article image already known to the caller, when it has one. Null means
+   * "not known yet", not "none": the tab asks the server, which may still find
+   * one on an item ingested before the column existed.
+   */
+  sourceImageUrl?: string | null;
   // Gallery state passed from parent (loaded in the click handler that opens the modal)
   galleryItems: GalleryMediaItem[];
   galleryLoading: boolean;
@@ -45,11 +62,20 @@ interface Props {
 
 // ─── Tab bar ──────────────────────────────────────────────────────────────────
 
-function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void }) {
+function TabBar({
+  active,
+  onChange,
+  showSource,
+}: {
+  active: Tab;
+  onChange: (t: Tab) => void;
+  showSource: boolean;
+}) {
   const t = useTranslations("imagePicker");
   const tabs: { value: Tab; label: string }[] = [
     { value: "gallery", label: t("galleryTab") },
     { value: "ai", label: t("aiTab") },
+    ...(showSource ? [{ value: "source" as const, label: t("sourceTab") }] : []),
     { value: "upload", label: t("uploadTab") },
   ];
   return (
@@ -345,6 +371,128 @@ function AiGenerateTab({
   );
 }
 
+// ─── Source Article Tab ───────────────────────────────────────────────────────
+
+/**
+ * The image the original article uses, offered as an alternative to the AI one.
+ *
+ * The address is resolved on open rather than assumed: items ingested before the
+ * column existed carry no stored image, and the server scrapes the article once
+ * to fill the gap. Picking it downloads the file server-side and pushes it
+ * through the same Cloudinary/MediaAsset pipeline as an upload — the post never
+ * hotlinks a publisher's CDN, and the AI image it replaces is kept.
+ */
+function SourceArticleTab({
+  postId,
+  knownImageUrl,
+  onAttached,
+}: {
+  postId: string;
+  knownImageUrl: string | null;
+  onAttached: (media: AttachedMedia) => void;
+}) {
+  const t = useTranslations("imagePicker");
+  const tCommon = useTranslations("common");
+  const apiError = useApiErrorMessage();
+  const [imageUrl, setImageUrl] = useState<string | null>(knownImageUrl);
+  const [resolving, setResolving] = useState(knownImageUrl === null);
+  const [applying, setApplying] = useState(false);
+  const [error, setError] = useState("");
+  // A URL that will not render is no use to the user even if the server accepted
+  // it — treated exactly like having found nothing.
+  const [broken, setBroken] = useState(false);
+
+  useEffect(() => {
+    if (knownImageUrl !== null) return;
+    let cancelled = false;
+    // `resolving` already starts true in exactly this case — setting it here
+    // would only add a cascading render.
+    fetch(`/api/v1/posts/${postId}/source-image`)
+      .then(async (res) => {
+        const json = (await res.json()) as {
+          sourceImageUrl?: string | null;
+          error?: { message?: string };
+        };
+        if (cancelled) return;
+        if (!res.ok) throw new Error(apiError(json.error));
+        setImageUrl(json.sourceImageUrl ?? null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
+      })
+      .finally(() => {
+        if (!cancelled) setResolving(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleUse() {
+    setApplying(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/v1/posts/${postId}/use-source-image`, { method: "POST" });
+      const json = (await res.json()) as {
+        media?: { id: string; url: string };
+        previousMediaId?: string | null;
+        error?: { message?: string };
+      };
+      if (!res.ok || !json.media) throw new Error(apiError(json.error));
+      onAttached({
+        ...json.media,
+        origin: "source_article",
+        previousMediaId: json.previousMediaId ?? null,
+      });
+    } catch (err) {
+      // Nothing was written server-side on a failed download or upload, so the
+      // post still has exactly the image it had when the modal opened.
+      setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  if (resolving) {
+    return <p className="text-fg-faint py-12 text-center text-sm">{t("sourceResolving")}</p>;
+  }
+
+  if (!imageUrl || broken) {
+    return (
+      <div className="space-y-3">
+        {error && <Alert variant="error">{error}</Alert>}
+        <p className="text-fg-faint py-8 text-center text-sm">{t("sourceNoImage")}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {error && <Alert variant="error">{error}</Alert>}
+
+      <p className="text-fg-muted text-xs leading-relaxed">{t("sourceHint")}</p>
+
+      <div className="rounded-card border-border bg-surface-subtle overflow-hidden border">
+        <Image
+          src={imageUrl}
+          alt={t("sourcePreviewAlt")}
+          width={800}
+          height={450}
+          className="w-full object-cover"
+          unoptimized
+          onError={() => setBroken(true)}
+        />
+      </div>
+
+      <Button variant="primary" size="sm" loading={applying} onClick={() => void handleUse()}>
+        {applying ? t("sourceUsing") : t("sourceUse")}
+      </Button>
+    </div>
+  );
+}
+
 // ─── Upload Tab ───────────────────────────────────────────────────────────────
 
 function UploadTab({
@@ -513,6 +661,8 @@ export function ImagePickerModal({
   postId,
   companySlug,
   postImagePrompt,
+  hasArticleSource,
+  sourceImageUrl = null,
   galleryItems,
   galleryLoading,
   galleryError,
@@ -530,7 +680,7 @@ export function ImagePickerModal({
 
   return (
     <Modal open onClose={onClose} title={t("title")} maxWidth="xl">
-      <TabBar active={tab} onChange={setTab} />
+      <TabBar active={tab} onChange={setTab} showSource={hasArticleSource} />
 
       {tab === "gallery" && (
         <GalleryTab
@@ -546,6 +696,13 @@ export function ImagePickerModal({
         <AiGenerateTab
           postId={postId}
           postImagePrompt={postImagePrompt}
+          onAttached={handleAttached}
+        />
+      )}
+      {tab === "source" && hasArticleSource && (
+        <SourceArticleTab
+          postId={postId}
+          knownImageUrl={sourceImageUrl}
           onAttached={handleAttached}
         />
       )}
