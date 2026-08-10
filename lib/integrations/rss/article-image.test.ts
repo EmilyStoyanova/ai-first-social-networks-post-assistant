@@ -2,10 +2,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import {
+  isGenericImageUrl,
   pickSourceImage,
   resolveImageUrl,
   selectContentImage,
   selectMetaImage,
+  srcsetCandidates,
 } from "./article-image";
 
 const BASE = "https://example.com/news/story";
@@ -70,6 +72,14 @@ describe("resolveImageUrl — junk rejection", () => {
     ["a 1x1 spacer", "https://example.com/img/1x1.gif"],
     ["a declared 64px thumbnail", "https://example.com/img/lead.jpg?w=64&h=64"],
     ["a 100x100 crop in the path", "https://example.com/img/100x100/lead.jpg"],
+    ["a page banner", "https://example.com/img/banner.jpg"],
+    ["an ad creative", "https://example.com/ads/summer-sale.jpg"],
+    ["an ad in a singular directory", "https://example.com/ad/300x600.jpg"],
+    ["a promo strip", "https://example.com/img/promo-newsletter.png"],
+    ["a sponsor mark", "https://example.com/img/sponsor-acme.png"],
+    ["a related-posts thumbnail", "https://example.com/related/other-story.jpg"],
+    ["a share graphic", "https://example.com/img/share.png"],
+    ["a widget decoration", "https://example.com/widget/weather.png"],
   ] as const;
 
   for (const [label, url] of junk) {
@@ -88,6 +98,25 @@ describe("resolveImageUrl — junk rejection", () => {
       resolveImageUrl("https://example.com/blog/logout-guide-hero.jpg", BASE),
       "https://example.com/blog/logout-guide-hero.jpg"
     );
+  });
+
+  it("keeps headline slugs that merely contain a new junk word", () => {
+    // Each of these embeds "ad", "related" or "share" inside a real word — the
+    // short additions to the list are the ones most able to misfire.
+    const keep = [
+      "https://example.com/2026/roadmap-leaked/hero.jpg",
+      "https://example.com/news/shareholders-revolt/lead.jpg",
+      "https://example.com/img/unrelatedly-large-photo.jpg",
+      "https://example.com/blog/download-numbers/chart.png",
+    ];
+    for (const url of keep) {
+      assert.equal(resolveImageUrl(url, BASE), url, `${url} is a real article image`);
+    }
+  });
+
+  it("still finds a junk word that appears after an unbounded one", () => {
+    // "ad" occurs inside "download" first; the scan must not stop at that hit.
+    assert.equal(resolveImageUrl("https://example.com/download/ads/728.jpg", BASE), null);
   });
 
   it("keeps a large image that declares its size", () => {
@@ -140,6 +169,127 @@ describe("pickSourceImage — candidate priority", () => {
       pickSourceImage({ metaImageUrl: null, feedImageUrl: null, contentImageUrl: null }),
       null
     );
+  });
+});
+
+// ─── The site-wide fallback demotion ──────────────────────────────────────────
+
+describe("isGenericImageUrl", () => {
+  const generic = [
+    "https://example.com/img/default.jpg",
+    "https://example.com/assets/default-image.png",
+    "https://example.com/img/fallback-hero.jpg",
+    "https://example.com/static/og-default.png",
+    "https://example.com/img/og-image.jpg",
+    "https://example.com/wp-content/uploads/social-card.png",
+    "https://example.com/img/no-image.png",
+    "https://example.com/opengraph/card.jpg",
+  ];
+  for (const url of generic) {
+    it(`flags ${url.replace("https://example.com", "")}`, () => {
+      assert.equal(isGenericImageUrl(url), true);
+    });
+  }
+
+  it("does not flag a real article image", () => {
+    assert.equal(isGenericImageUrl("https://example.com/2026/01/rtx-benchmark.jpg"), false);
+  });
+
+  it("does not flag a headline slug that merely contains a generic word", () => {
+    // "defaults" and "socially" are words, not the site's stock picture.
+    assert.equal(isGenericImageUrl("https://example.com/news/loan-defaults/chart.jpg"), false);
+    assert.equal(isGenericImageUrl("https://example.com/news/socially-awkward/lead.jpg"), false);
+  });
+
+  it("says no rather than throwing on a value that is not a URL", () => {
+    assert.equal(isGenericImageUrl("not a url"), false);
+    assert.equal(isGenericImageUrl(null), false);
+  });
+});
+
+describe("pickSourceImage — a generic metadata image is demoted", () => {
+  // A stock CMS fallback. Note this is DEMOTED, not rejected: a name that also
+  // trips the hard junk list (`/img/social-share.png`) never gets this far.
+  const GENERIC_META = "https://example.com/static/og-default.png";
+  const FEED = "https://example.com/enclosure.jpg";
+  const CONTENT = "https://example.com/body.jpg";
+
+  it("prefers a real in-content image over the site's stock og:image", () => {
+    assert.equal(
+      pickSourceImage({ metaImageUrl: GENERIC_META, contentImageUrl: CONTENT }),
+      CONTENT
+    );
+  });
+
+  it("prefers the feed's own attachment over the site's stock og:image", () => {
+    assert.equal(
+      pickSourceImage({ metaImageUrl: GENERIC_META, feedImageUrl: FEED, contentImageUrl: CONTENT }),
+      FEED,
+      "the feed attachment keeps its place ahead of a body scan"
+    );
+  });
+
+  it("still uses the generic image when it is the only candidate", () => {
+    // Demoted, never discarded — a bland picture beats no picture.
+    assert.equal(pickSourceImage({ metaImageUrl: GENERIC_META }), GENERIC_META);
+    assert.equal(
+      pickSourceImage({ metaImageUrl: GENERIC_META, feedImageUrl: null, contentImageUrl: null }),
+      GENERIC_META
+    );
+  });
+
+  it("leaves a normal og:image at the front, as before", () => {
+    assert.equal(
+      pickSourceImage({
+        metaImageUrl: "https://example.com/og.jpg",
+        feedImageUrl: FEED,
+        contentImageUrl: CONTENT,
+      }),
+      "https://example.com/og.jpg"
+    );
+  });
+});
+
+// ─── srcset ───────────────────────────────────────────────────────────────────
+
+describe("srcsetCandidates — largest first", () => {
+  it("orders width descriptors from largest to smallest", () => {
+    assert.deepEqual(srcsetCandidates("/a.jpg 320w, /b.jpg 1600w, /c.jpg 800w"), [
+      "/b.jpg",
+      "/c.jpg",
+      "/a.jpg",
+    ]);
+  });
+
+  it("orders pixel densities when that is all the author wrote", () => {
+    assert.deepEqual(srcsetCandidates("/a.jpg 1x, /b.jpg 3x, /c.jpg 2x"), [
+      "/b.jpg",
+      "/c.jpg",
+      "/a.jpg",
+    ]);
+  });
+
+  it("keeps the author's order when no candidate declares a size", () => {
+    assert.deepEqual(srcsetCandidates("/a.jpg, /b.jpg"), ["/a.jpg", "/b.jpg"]);
+  });
+
+  it("splits on a comma with no space after the descriptor", () => {
+    assert.deepEqual(srcsetCandidates("/a.jpg 320w,/b.jpg 640w"), ["/b.jpg", "/a.jpg"]);
+  });
+
+  it("does not split inside a CDN transformation path", () => {
+    const value =
+      "https://res.cloudinary.com/d/image/upload/w_300,h_200/a.jpg 300w, " +
+      "https://res.cloudinary.com/d/image/upload/w_1200,h_800/a.jpg 1200w";
+    assert.deepEqual(srcsetCandidates(value), [
+      "https://res.cloudinary.com/d/image/upload/w_1200,h_800/a.jpg",
+      "https://res.cloudinary.com/d/image/upload/w_300,h_200/a.jpg",
+    ]);
+  });
+
+  it("returns nothing for an empty or missing srcset", () => {
+    assert.deepEqual(srcsetCandidates(null), []);
+    assert.deepEqual(srcsetCandidates("   "), []);
   });
 });
 
@@ -267,9 +417,9 @@ describe("selectContentImage — in-content fallback", () => {
     assert.equal(selectContentImage(html, BASE), "https://example.com/real.jpg");
   });
 
-  it("reads the first entry of a srcset", () => {
+  it("takes the largest entry of a srcset, not the first", () => {
     const html = `<img srcset="https://example.com/w800.jpg 800w, https://example.com/w1600.jpg 1600w">`;
-    assert.equal(selectContentImage(html, BASE), "https://example.com/w800.jpg");
+    assert.equal(selectContentImage(html, BASE), "https://example.com/w1600.jpg");
   });
 
   it("resolves a relative src against the article URL", () => {
@@ -287,5 +437,70 @@ describe("selectContentImage — in-content fallback", () => {
   it("returns null when every image in the body is junk", () => {
     const html = `<img src="/img/icon-share.png"><img src="/img/avatar.jpg">`;
     assert.equal(selectContentImage(html, BASE), null);
+  });
+
+  it("falls through to the next srcset entry when the largest is junk", () => {
+    const html = `<img srcset="/img/watermark-2000.jpg 2000w, /img/lead-1200.jpg 1200w">`;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/img/lead-1200.jpg");
+  });
+
+  it("reads a data-srcset, largest first", () => {
+    const html = `<img src="/img/placeholder.gif" data-srcset="/img/a-400.jpg 400w, /img/a-1800.jpg 1800w">`;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/img/a-1800.jpg");
+  });
+});
+
+describe("selectContentImage — <picture> support", () => {
+  it("takes the source's largest candidate rather than the img fallback", () => {
+    const html = `
+      <picture>
+        <source srcset="/img/wide-800.webp 800w, /img/wide-2000.webp 2000w" type="image/webp">
+        <img src="/img/fallback-small.jpg">
+      </picture>
+    `;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/img/wide-2000.webp");
+  });
+
+  it("falls back to the img inside the picture when the source yields nothing", () => {
+    const html = `
+      <picture>
+        <source srcset="/img/logo.svg" type="image/svg+xml">
+        <img src="/img/lead.jpg">
+      </picture>
+    `;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/img/lead.jpg");
+  });
+
+  it("ignores a video track declared with <source>", () => {
+    // <source src="…mp4" type="video/mp4"> must never become the post's image.
+    const html = `
+      <video><source src="/media/clip.mp4" type="video/mp4"></video>
+      <img src="/img/lead.jpg">
+    `;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/img/lead.jpg");
+  });
+
+  it("ignores a bare <source> with no srcset at all", () => {
+    // An untyped <source src="…"> is audio/video shaped; only srcset is picture.
+    const html = `<source src="/media/clip.webm"><img src="/img/lead.jpg">`;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/img/lead.jpg");
+  });
+
+  it("respects document order — an earlier real image beats a later picture", () => {
+    const html = `
+      <img src="/img/lead.jpg">
+      <picture><source srcset="/img/later-2000.jpg 2000w"></picture>
+    `;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/img/lead.jpg");
+  });
+
+  it("skips a source that declares a small size", () => {
+    const html = `
+      <picture>
+        <source srcset="/img/tiny.jpg" width="80" height="80">
+        <img src="/img/lead.jpg">
+      </picture>
+    `;
+    assert.equal(selectContentImage(html, BASE), "https://example.com/img/lead.jpg");
   });
 });

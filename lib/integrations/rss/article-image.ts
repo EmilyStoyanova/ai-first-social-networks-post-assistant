@@ -27,8 +27,12 @@ const REJECTED_EXTENSIONS = /\.(svg|svgz|ico|bmp|tif|tiff|pdf)(?:$|[?#])/i;
  * the match is anchored to a path SEGMENT boundary.
  */
 const JUNK_PATH_WORDS = [
+  "ad",
+  "ads",
+  "advert",
   "avatar",
   "badge",
+  "banner",
   "beacon",
   "blank",
   "button",
@@ -40,11 +44,44 @@ const JUNK_PATH_WORDS = [
   "pixel",
   "placeholder",
   "profile-pic",
+  "promo",
+  "related",
+  "share",
+  "sponsor",
+  "sponsored",
   "sprite",
   "spacer",
   "thumb-default",
   "tracking",
   "watermark",
+  "widget",
+];
+
+/**
+ * Words that mark a SITE-WIDE image rather than this article's own — the single
+ * fallback picture a CMS stamps into og:image on every page that forgot to set
+ * one. That is the commonest way this feature picks something bland but legal:
+ * the URL is a perfectly good image, just not a picture OF anything here.
+ *
+ * Deliberately softer than the list above. Such a URL is not rejected — it is
+ * only demoted below a real in-content image, and still used when there is
+ * nothing else. Over-rejecting here would cost real lead images; over-demoting
+ * costs nothing, because the alternative had to exist to win.
+ */
+const GENERIC_PATH_WORDS = [
+  "default",
+  "default-image",
+  "fallback",
+  "generic",
+  "no-image",
+  "noimage",
+  "og-default",
+  "og-image",
+  "og_image",
+  "opengraph",
+  "site-image",
+  "sitewide",
+  "social",
 ];
 
 /** 1x1 (and other degenerate) sizes spelled into the filename or query. */
@@ -53,17 +90,39 @@ const DEGENERATE_SIZE = /(?:^|[^0-9])[123]x[123](?:[^0-9]|$)/i;
 /** The smallest edge we accept when a size is actually known. */
 const MIN_EDGE_PX = 200;
 
-function hasJunkWord(pathname: string): boolean {
+function hasWord(pathname: string, words: readonly string[]): boolean {
   const lower = pathname.toLowerCase();
-  return JUNK_PATH_WORDS.some((word) => {
-    const at = lower.indexOf(word);
-    if (at === -1) return false;
-    // Require a non-alphanumeric boundary on both sides so "logo" matches
-    // "/site-logo.png" and "/logo/x.png" but not "/blog/other.png".
-    const before = at === 0 ? "" : lower[at - 1];
-    const after = lower[at + word.length] ?? "";
-    return !/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after);
+  return words.some((word) => {
+    let at = lower.indexOf(word);
+    while (at !== -1) {
+      // Require a non-alphanumeric boundary on both sides so "logo" matches
+      // "/site-logo.png" and "/logo/x.png" but not "/blog/other.png".
+      const before = at === 0 ? "" : lower[at - 1];
+      const after = lower[at + word.length] ?? "";
+      if (!/[a-z0-9]/.test(before) && !/[a-z0-9]/.test(after)) return true;
+      // Keep looking: an early unbounded hit must not hide a later real one,
+      // which "/blog/ads/x.png" ("ad" inside "blog" first) depends on.
+      at = lower.indexOf(word, at + 1);
+    }
+    return false;
   });
+}
+
+function hasJunkWord(pathname: string): boolean {
+  return hasWord(pathname, JUNK_PATH_WORDS);
+}
+
+/**
+ * True when a URL looks like a site-wide fallback rather than this page's own
+ * picture. Only ever demotes a candidate — see GENERIC_PATH_WORDS.
+ */
+export function isGenericImageUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    return hasWord(new URL(url).pathname, GENERIC_PATH_WORDS);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -128,13 +187,21 @@ export function resolveImageUrl(
  * represent the article. The feed's own attachment comes next: real, but often a
  * cropped thumbnail sized for a reader app. Scanning the article body is last,
  * because it is the only candidate nobody nominated.
+ *
+ * The one exception: a metadata image that looks like the site's stock fallback
+ * (`/img/default-share.png` and friends) is NOT the image the publisher chose
+ * for this article — it is the one they chose for every article. It drops to the
+ * back of the queue, so a genuine picture from the feed or the body beats it,
+ * and it is still used when there is nothing else. Nothing is discarded.
  */
 export function pickSourceImage(candidates: {
   metaImageUrl?: string | null;
   feedImageUrl?: string | null;
   contentImageUrl?: string | null;
 }): string | null {
-  return candidates.metaImageUrl ?? candidates.feedImageUrl ?? candidates.contentImageUrl ?? null;
+  const meta = candidates.metaImageUrl ?? null;
+  if (meta && !isGenericImageUrl(meta)) return meta;
+  return candidates.feedImageUrl ?? candidates.contentImageUrl ?? meta ?? null;
 }
 
 // ─── Metadata candidates ──────────────────────────────────────────────────────
@@ -231,11 +298,65 @@ export function selectMetaImage(doc: Document, baseUrl: string): string | null {
 
 // ─── In-content fallback ──────────────────────────────────────────────────────
 
-const IMG_TAG = /<img\b[^>]*>/gi;
+/** `<source>` is matched too — it is where `<picture>` keeps the real image. */
+const MEDIA_TAG = /<(img|source)\b[^>]*>/gi;
 
 function attr(tag: string, name: string): string | null {
   const match = tag.match(new RegExp(`\\b${name}\\s*=\\s*["']([^"']*)["']`, "i"));
   return match?.[1]?.trim() ?? null;
+}
+
+/**
+ * Splits a srcset on the commas that separate candidates, and not on the ones
+ * inside a URL — CDN transformation paths like `/upload/w_300,h_200/pic.jpg` are
+ * full of those. A comma counts as a separator when it follows a `320w`/`2x`
+ * descriptor, when whitespace follows it, or when the next candidate visibly
+ * starts an address.
+ */
+const SRCSET_SEPARATOR = /(?<=[0-9][wx])\s*,\s*|\s*,\s+|,(?=(?:https?:)?\/)/i;
+
+/**
+ * The candidates of a srcset, LARGEST FIRST.
+ *
+ * srcset is written smallest-first by convention, so taking the head of the list
+ * reliably picked the phone-sized crop — a 320px-wide thumbnail standing in for
+ * the article's lead image. Width descriptors decide when present, pixel
+ * densities when they are all there is, and document order when the author wrote
+ * neither.
+ *
+ * Every entry is returned, not just the winner, so the caller's junk filter can
+ * fall through to the next-largest rather than giving up on the tag.
+ */
+export function srcsetCandidates(value: string | null | undefined): string[] {
+  if (!value) return [];
+
+  const entries: Array<{ url: string; width: number | null; density: number | null }> = [];
+  for (const part of value.split(SRCSET_SEPARATOR)) {
+    const [url, descriptor] = part.trim().split(/\s+/);
+    if (!url) continue;
+    const width = descriptor?.match(/^([0-9.]+)w$/i);
+    const density = descriptor?.match(/^([0-9.]+)x$/i);
+    entries.push({
+      url,
+      width: width ? Number(width[1]) : null,
+      density: density ? Number(density[1]) : null,
+    });
+  }
+
+  const key = entries.some((e) => e.width !== null)
+    ? (e: (typeof entries)[number]) => e.width ?? 0
+    : entries.some((e) => e.density !== null)
+      ? (e: (typeof entries)[number]) => e.density ?? 0
+      : null;
+
+  // Undescribed candidates carry no size information at all — reordering them
+  // would only be guesswork, so the author's order stands.
+  if (!key) return entries.map((e) => e.url);
+
+  return entries
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => key(b.entry) - key(a.entry) || a.index - b.index)
+    .map(({ entry }) => entry.url);
 }
 
 /**
@@ -246,27 +367,37 @@ function attr(tag: string, name: string): string | null {
  * An image is taken only when it does NOT look small. A declared `width`/`height`
  * under 200px is a decisive reject; no declared size at all is accepted, because
  * most publishers omit the attributes on their lead image.
+ *
+ * `<picture>` is walked as well: its `<source>` elements carry the real art, and
+ * the `<img>` inside it is only the fallback. They are read in document order,
+ * so a `<source>` still yields to an earlier, larger image.
  */
 export function selectContentImage(contentHtml: string | null, baseUrl: string): string | null {
   if (!contentHtml) return null;
 
-  for (const match of contentHtml.matchAll(IMG_TAG)) {
+  for (const match of contentHtml.matchAll(MEDIA_TAG)) {
     const tag = match[0];
+    const isSource = match[1].toLowerCase() === "source";
+
     const width = Number(attr(tag, "width"));
     const height = Number(attr(tag, "height"));
     if (Number.isFinite(width) && width > 0 && width < MIN_EDGE_PX) continue;
     if (Number.isFinite(height) && height > 0 && height < MIN_EDGE_PX) continue;
 
+    // <source> also belongs to <video> and <audio>. Those declare their track in
+    // `src` with a non-image `type`, so requiring a srcset and refusing a
+    // declared non-image type keeps an MP4 out of the post.
+    if (isSource) {
+      const type = attr(tag, "type")?.toLowerCase() ?? "";
+      if (type && !type.startsWith("image/")) continue;
+    }
+
     // Lazy-loading markup keeps the real address in data-src / srcset and leaves
     // `src` as a placeholder, so those are read first.
-    const srcset = attr(tag, "srcset") ?? attr(tag, "data-srcset");
-    const firstFromSrcset = srcset?.split(",")[0]?.trim().split(/\s+/)[0] ?? null;
-    const candidates = [
-      attr(tag, "data-src"),
-      attr(tag, "data-original"),
-      firstFromSrcset,
-      attr(tag, "src"),
-    ];
+    const fromSrcset = srcsetCandidates(attr(tag, "srcset") ?? attr(tag, "data-srcset"));
+    const candidates = isSource
+      ? fromSrcset
+      : [attr(tag, "data-src"), attr(tag, "data-original"), ...fromSrcset, attr(tag, "src")];
 
     for (const candidate of candidates) {
       const resolved = resolveImageUrl(candidate, baseUrl);

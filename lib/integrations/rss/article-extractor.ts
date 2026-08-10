@@ -1,7 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
-import { selectContentImage, selectMetaImage } from "./article-image";
+import { isGenericImageUrl, selectContentImage, selectMetaImage } from "./article-image";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -116,12 +116,19 @@ export function extractArticleParts(html: string, baseUrl: string): ExtractedArt
     const article = new Readability(doc).parse();
     const text = article?.textContent?.trim() ?? null;
 
+    // Skipped when the publisher declared a real one — scanning the body cannot
+    // beat a deliberate og:image, and it is the more expensive path. A metadata
+    // image that is only the site's stock fallback does NOT count as declared,
+    // so the body is searched for something that actually depicts this article;
+    // pickSourceImage decides between the two.
+    const needsContentImage = !metaImageUrl || isGenericImageUrl(metaImageUrl);
+
     return {
       text: text && text.length >= MIN_ARTICLE_LENGTH ? text : null,
       metaImageUrl,
-      // Skipped when the publisher already declared one — scanning the body
-      // cannot beat an explicit og:image, and it is the more expensive path.
-      contentImageUrl: metaImageUrl ? null : selectContentImage(article?.content ?? null, baseUrl),
+      contentImageUrl: needsContentImage
+        ? selectContentImage(article?.content ?? null, baseUrl)
+        : null,
     };
   } catch {
     return EMPTY_ARTICLE;

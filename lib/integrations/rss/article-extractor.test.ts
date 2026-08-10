@@ -9,6 +9,7 @@ import {
   extractReadableText,
 } from "./article-extractor";
 import type { DnsResolver } from "./article-extractor";
+import { pickSourceImage } from "./article-image";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -372,6 +373,54 @@ describe("extractArticleParts — image candidates", () => {
   it("returns empty parts for unparseable input rather than throwing", () => {
     const parts = extractArticleParts("", ARTICLE_URL);
     assert.deepEqual(parts, { text: null, metaImageUrl: null, contentImageUrl: null });
+  });
+
+  it("still scans the body when og:image is only the site's stock picture", () => {
+    // The commonest cause of a bland, wrong image: a CMS that stamps one
+    // fallback into og:image on every page. Both candidates are reported and
+    // pickSourceImage prefers the real one.
+    const html = `<html><head>
+      <meta property="og:image" content="https://example.com/static/og-default.png">
+    </head><body><article>
+      <img src="https://example.com/lead-photo.jpg">
+      <p>${"Detailed reporting on the event with full context and analysis. ".repeat(8)}</p>
+    </article></body></html>`;
+
+    const parts = extractArticleParts(html, ARTICLE_URL);
+    assert.equal(parts.metaImageUrl, "https://example.com/static/og-default.png");
+    assert.equal(parts.contentImageUrl, "https://example.com/lead-photo.jpg");
+    assert.equal(
+      pickSourceImage(parts),
+      "https://example.com/lead-photo.jpg",
+      "the article's own photo wins"
+    );
+  });
+
+  it("keeps the stock picture when the body offers nothing better", () => {
+    const html = `<html><head>
+      <meta property="og:image" content="https://example.com/static/og-default.png">
+    </head><body><article>
+      <p>${"Detailed reporting on the event with full context and analysis. ".repeat(8)}</p>
+    </article></body></html>`;
+
+    const parts = extractArticleParts(html, ARTICLE_URL);
+    assert.equal(parts.contentImageUrl, null);
+    assert.equal(pickSourceImage(parts), "https://example.com/static/og-default.png");
+  });
+
+  it("takes the largest srcset entry from a <picture> in the body", () => {
+    const html = `<html><head><title>Story</title></head><body><article>
+      <picture>
+        <source srcset="https://example.com/w400.jpg 400w, https://example.com/w2000.jpg 2000w">
+        <img src="https://example.com/fallback.jpg">
+      </picture>
+      <p>${"Detailed reporting on the event with full context and analysis. ".repeat(8)}</p>
+    </article></body></html>`;
+
+    assert.equal(
+      extractArticleParts(html, ARTICLE_URL).contentImageUrl,
+      "https://example.com/w2000.jpg"
+    );
   });
 });
 
