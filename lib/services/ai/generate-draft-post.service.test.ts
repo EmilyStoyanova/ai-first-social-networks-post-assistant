@@ -195,6 +195,9 @@ function makeSpyDeps(): {
       auditLog: async () => {},
       embed: async () => ({ status: "embedded" }),
       recordCalibration: async () => {},
+      // Every context here has feed items, so the import IS reached — stub it so
+      // no test touches the real resolver or Cloudinary.
+      autoSourceImage: async () => ({ status: "skipped", reason: "no_source_image" }),
       semanticGate: ACCEPT_GATE,
       // A working system always has an admin default; provide one so these tests
       // resolve a provider (the env-var fallback has been removed).
@@ -392,6 +395,7 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
       auditLog: async () => {},
       embed: async () => ({ status: "embedded" }),
       recordCalibration: async () => {},
+      autoSourceImage: async () => ({ status: "skipped", reason: "no_source_image" }),
       semanticGate: regenerateGate,
       // A working system always has an admin default; provide one so these tests
       // resolve a provider (the env-var fallback has been removed).
@@ -1654,7 +1658,11 @@ describe("generatePostFromContext — source article image", () => {
 
   const ARTICLE_IMAGE = "https://cdn.example.com/story-lead.jpg";
 
-  /** A context whose article carries a resolved image, with AI images switched on. */
+  /**
+   * A context built from an RSS article, with AI images switched on. Pass null
+   * for `sourceImageUrl` to model an item ingested before images were resolved —
+   * the article may still HAVE an image; nothing has stored it yet.
+   */
   function articleContext(sourceImageUrl: string | null = ARTICLE_IMAGE): GenerationContext {
     return makeContext({
       channel: { ...makeContext().channel, autoGenerateImage: true },
@@ -1666,6 +1674,7 @@ describe("generatePostFromContext — source article image", () => {
           url: "https://news.example.com/launch",
           publishedAt: null,
           consumable: true,
+          sourceType: "rss",
           sourceImageUrl,
         },
       ],
@@ -1741,9 +1750,11 @@ describe("generatePostFromContext — source article image", () => {
     assert.deepEqual(seen, ["u-1", undefined]);
   });
 
-  it("never asks when the article has no image", async () => {
-    // Ingestion resolves the image, so nothing here means nothing to import —
-    // and asking anyway would be a DB round-trip that can only answer "no".
+  it("asks even when nothing was stored, so the article can still be scraped", async () => {
+    // The regression. A stored `sourceImageUrl` of null does NOT mean the article
+    // has no image — only that ingestion never resolved one. Skipping here is
+    // exactly what left these posts on their AI image while the picker's
+    // "Source article" tab, which resolves on demand, showed the real photograph.
     let called = false;
     const { deps } = makeDeps();
     deps.autoSourceImage = async () => {
@@ -1754,8 +1765,12 @@ describe("generatePostFromContext — source article image", () => {
     const result = await generatePostFromContext(articleContext(null), "co-1", {}, deps);
 
     assert.ok(result.success);
-    assert.equal(called, false);
-    assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png", "the AI image stands");
+    assert.equal(
+      called,
+      true,
+      "the service resolves on demand; the call site must not pre-empt it"
+    );
+    assert.equal(result.post.mediaUrl, ARTICLE_IMAGE);
   });
 
   it("leaves a post with no article alone", async () => {
@@ -1771,13 +1786,43 @@ describe("generatePostFromContext — source article image", () => {
     assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png");
   });
 
-  it("keeps the AI image when the import reports nothing usable", async () => {
+  it("keeps the AI image when the article turns out to have none", async () => {
+    // Nothing stored and nothing scraped — the service's commonest answer for an
+    // article whose page carries no usable image.
     const { deps } = makeDeps();
     deps.autoSourceImage = async () => ({ status: "skipped", reason: "no_source_image" });
 
-    const result = await generatePostFromContext(articleContext(), "co-1", {}, deps);
+    const result = await generatePostFromContext(articleContext(null), "co-1", {}, deps);
 
     assert.ok(result.success);
+    assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png");
+  });
+
+  it("leaves a non-RSS post on its AI image", async () => {
+    // A product-page item still reaches the service — the gate only
+    // asks whether the post came from a content item at all — and the service
+    // answers `no_source_image` behind its own `rss` check. Nothing changes.
+    const { deps, sourceImaged } = makeDeps();
+    const ctx = makeContext({
+      channel: { ...makeContext().channel, autoGenerateImage: true },
+      feedItems: [
+        {
+          id: "product-1",
+          title: "Autumn campaign",
+          content: "The autumn range, in three colours.",
+          url: "https://acme.example.com/autumn",
+          publishedAt: null,
+          consumable: true,
+          sourceType: "product_page",
+          sourceImageUrl: null,
+        },
+      ],
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.ok(sourceImaged(), "the gate does not try to classify the item itself");
     assert.equal(result.post.mediaUrl, "https://cdn.example/auto.png");
   });
 

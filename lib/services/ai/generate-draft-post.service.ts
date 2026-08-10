@@ -1053,12 +1053,16 @@ export async function generatePostFromContext(
   // Same best-effort contract as above: it never throws, and a failed import
   // leaves a post that still has its AI image.
   //
-  // Gated on the image already being known rather than asked for unconditionally:
-  // ingestion resolves it onto the FeedItem, so a post with nothing here has no
-  // article image to import and the call would be a DB round-trip that can only
-  // answer "no". A legacy item whose image was never resolved is not lost either
-  // — the picker's "Source article" tab still scrapes it on demand.
-  if (primary.item?.sourceImageUrl) {
+  // The gate asks only "was this post written from a content item at all?",
+  // which is the one part the call site can answer for free. Whether that item is
+  // an article, and whether the article has a usable image, belongs to the
+  // service — it resolves the image on demand, scraping the article when
+  // ingestion stored nothing. Gating here on `sourceImageUrl` instead is exactly
+  // what used to skip the import on any item ingested before images were
+  // resolved, while the picker's "Source article" tab found the image happily.
+  // The price of asking is one indexed read on a prompt/calendar post, against
+  // an LLM call that has already happened.
+  if (primary.item) {
     try {
       const outcome = await recordPhase("image", () =>
         autoSourceImage({ postId: post.id, companyId, generatedById })
