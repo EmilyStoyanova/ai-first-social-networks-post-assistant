@@ -15,6 +15,7 @@ import {
   validateCustomDistribution,
 } from "./bulk-schedule";
 import { toAppDateTimeLocal } from "./app-datetime-local";
+import { isSlotAligned } from "./time-slots";
 
 /** The worked example from the feature request. 2026-08-17 is a Monday. */
 const START = "2026-08-17";
@@ -761,8 +762,18 @@ describe("defaultTimesForDay — seeding the editor's inputs", () => {
     );
   });
 
-  it("steps an hour past the last window when more posts are asked for", () => {
-    assert.deepEqual(defaultTimesForDay("2026-08-17", 3, MON_WED), ["09:00", "10:00", "11:00"]);
+  it("steps to the next slot past the last window when more posts are asked for", () => {
+    assert.deepEqual(defaultTimesForDay("2026-08-17", 3, MON_WED), ["09:00", "09:30", "10:00"]);
+  });
+
+  it("seeds a slot even from a window configured between two", () => {
+    // The editor offers slots and nothing else, so a seed of 09:15 would be a
+    // starting value the user could not get back to. Forward, like every other
+    // snap: 09:15 is published by the 09:30 sweep anyway.
+    assert.deepEqual(
+      defaultTimesForDay("2026-08-17", 2, [{ day: "MONDAY", start: "09:15", end: "11:00" }]),
+      ["09:30", "10:00"]
+    );
   });
 
   it("uses the channel's usual hour for a day it has no window for", () => {
@@ -773,19 +784,27 @@ describe("defaultTimesForDay — seeding the editor's inputs", () => {
 
   it("falls back to 10:00 with nothing usable configured", () => {
     for (const windows of [undefined, [], { nonsense: true }]) {
-      assert.deepEqual(defaultTimesForDay("2026-08-18", 2, windows), ["10:00", "11:00"]);
+      assert.deepEqual(defaultTimesForDay("2026-08-18", 2, windows), ["10:00", "10:30"]);
     }
   });
 
-  it("stays distinct once the 23:00 clamp is reached", () => {
-    // Stepping by the hour stops moving at 23:00, so it steps by the minute
-    // instead — otherwise the editor would open on a duplicate_slot the user has
-    // to fix before anything previews.
+  it("uses the day's remaining slots up to the 23:30 clamp", () => {
     const times = defaultTimesForDay("2026-08-17", 4, [
       { day: "MONDAY", start: "22:00", end: "23:30" },
     ]);
-    assert.deepEqual(times, ["22:00", "23:00", "23:01", "23:02"]);
+    assert.deepEqual(times, ["22:00", "22:30", "23:00", "23:30"]);
     assert.equal(new Set(times).size, times.length);
+  });
+
+  it("repeats the last slot rather than moving a post onto the next day", () => {
+    // A day genuinely runs out: four slots left, ten posts asked for. The editor
+    // shows the collision and validateCustomDistribution refuses it — which is a
+    // better answer than seeding a time the picker does not offer, or silently
+    // scheduling for tomorrow.
+    const times = defaultTimesForDay("2026-08-17", 6, [
+      { day: "MONDAY", start: "22:00", end: "23:30" },
+    ]);
+    assert.deepEqual(times, ["22:00", "22:30", "23:00", "23:30", "23:30", "23:30"]);
   });
 
   it("gives every position a real time of day, up to a full batch", () => {
@@ -793,6 +812,22 @@ describe("defaultTimesForDay — seeding the editor's inputs", () => {
       const times = defaultTimesForDay("2026-08-17", MAX_BULK_POSTS, windows);
       assert.equal(times.length, MAX_BULK_POSTS);
       for (const time of times) assert.notEqual(parseTimeOfDay(time), null, time);
+    }
+  });
+
+  it("seeds only times the editor's pickers offer", () => {
+    // Every seed is a starting value in a slot picker, so every seed has to be a
+    // slot — including the ones produced by the overflow and clamp branches.
+    for (const windows of [
+      undefined,
+      MON_WED,
+      [{ day: "MONDAY", start: "09:15", end: "11:00" }],
+      [{ day: "MONDAY", start: "22:47", end: "23:59" }],
+      [{ day: "MONDAY", start: "25:00", end: "26:00" }],
+    ]) {
+      for (const time of defaultTimesForDay("2026-08-17", MAX_BULK_POSTS, windows)) {
+        assert.equal(isSlotAligned(time), true, `${time} is not a slot`);
+      }
     }
   });
 

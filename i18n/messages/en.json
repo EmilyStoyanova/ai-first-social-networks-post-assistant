@@ -616,7 +616,10 @@
       "newTime": "New publish time",
       "save": "Save time",
       "saving": "Saving…",
-      "timeZoneHint": "Times are shown in {zone}."
+      "timeZoneHint": "Times are shown in {zone}.",
+      "newDate": "New publish date",
+      "newTimeOfDay": "New publish time of day",
+      "slotHint": "Publishing runs every {minutes} minutes, so times are set on the hour or the half hour."
     },
     "generate": {
       "title": "Generate a draft post",
@@ -705,7 +708,8 @@
         "stopped_provider_error": "The AI provider could not complete the next generation.",
         "stopped_configuration": "No usable AI model is configured for this generation.",
         "stopped_channel_limit": "The next post exceeded this channel's character limit.",
-        "stopped_access": "This company or channel is not available."
+        "stopped_access": "This company or channel is not available.",
+        "slotHint": "Publishing runs every {minutes} minutes, so times are set on the hour or the half hour."
       }
     }
   },

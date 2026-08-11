@@ -5,11 +5,13 @@ import { useTranslations } from "next-intl";
 import { CalendarClock } from "lucide-react";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
+import { TimeSlotSelect } from "@/components/ui/TimeSlotSelect";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { APP_TIME_ZONE, formatDateTime } from "@/lib/i18n/format-date";
 import { decidePublish } from "@/lib/scheduling/publish-window";
 import { canReschedule } from "@/lib/scheduling/reschedule-policy";
 import { fromAppDateTimeLocal, toAppDateTimeLocal } from "@/lib/scheduling/app-datetime-local";
+import { SLOT_MINUTES, snapToSlot } from "@/lib/scheduling/time-slots";
 import type { PostRole } from "@/lib/posts/post-actions";
 
 /** A store that never changes — only the server/client snapshot split is wanted. */
@@ -43,7 +45,11 @@ export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props)
 
   const [when, setWhen] = useState(scheduledFor);
   const [open, setOpen] = useState(false);
-  const [value, setValue] = useState("");
+  // The chosen instant, split the way it is chosen: a calendar day, and one of
+  // the times the publishing sweep can hit. Both are business-zone wall clock,
+  // and only `fromAppDateTimeLocal` turns them back into an instant.
+  const [day, setDay] = useState("");
+  const [time, setTime] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -67,14 +73,26 @@ export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props)
 
   const rescheduleAllowed = canReschedule(status, role === "owner");
 
+  /**
+   * Opens the editor on the post's current time, with the time of day moved to a
+   * slot.
+   *
+   * Snapped rather than shown as-is because a post at 16:15 is published by the
+   * 16:30 sweep anyway — so 16:30 is what its time already meant, and it is the
+   * value the picker can offer. The post itself is untouched until Save; nothing
+   * migrates an existing off-slot time behind anyone's back, and the line above
+   * keeps reading back the real one.
+   */
   function handleOpen() {
-    setValue(toAppDateTimeLocal(when));
+    const local = toAppDateTimeLocal(when);
+    setDay(local.slice(0, 10));
+    setTime(snapToSlot(local.slice(11, 16)) ?? "");
     setError("");
     setOpen(true);
   }
 
   async function handleSave() {
-    const instant = fromAppDateTimeLocal(value);
+    const instant = day === "" || time === "" ? null : fromAppDateTimeLocal(`${day}T${time}`);
     if (instant === null) {
       setError(apiError({ code: "INVALID_SCHEDULE" }));
       return;
@@ -132,15 +150,30 @@ export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props)
           >
             {t("newTime")}
           </label>
-          <input
-            id={`reschedule-${postId}`}
-            type="datetime-local"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            disabled={saving}
-            className="rounded-control border-border bg-surface focus:border-accent focus:ring-accent/30 mb-2 w-full border px-3 py-2 text-xs outline-none focus:ring-2"
-          />
-          <p className="text-fg-faint mb-2 text-xs">{t("timeZoneHint", { zone: APP_TIME_ZONE })}</p>
+          {/* A date and a slot, not a datetime-local: the publishing sweep runs
+              every half hour, so those are the only times a post can actually
+              go out at. */}
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <input
+              id={`reschedule-${postId}`}
+              type="date"
+              value={day}
+              onChange={(e) => setDay(e.target.value)}
+              disabled={saving}
+              aria-label={t("newDate")}
+              className="rounded-control border-border bg-surface focus:border-accent focus:ring-accent/30 border px-3 py-2 text-xs outline-none focus:ring-2"
+            />
+            <TimeSlotSelect
+              value={time}
+              onChange={setTime}
+              disabled={saving}
+              aria-label={t("newTimeOfDay")}
+              className="px-3 py-2 text-xs"
+            />
+          </div>
+          <p className="text-fg-faint mb-2 text-xs">
+            {t("slotHint", { minutes: SLOT_MINUTES })} {t("timeZoneHint", { zone: APP_TIME_ZONE })}
+          </p>
           {error && (
             <Alert variant="error" className="mb-2">
               {error}
@@ -151,7 +184,7 @@ export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props)
               variant="primary"
               size="sm"
               loading={saving}
-              disabled={value === ""}
+              disabled={day === "" || time === ""}
               onClick={handleSave}
             >
               {saving ? t("saving") : t("save")}

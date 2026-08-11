@@ -3,6 +3,7 @@
 import { useTranslations } from "next-intl";
 import { CalendarClock } from "lucide-react";
 import { Alert } from "@/components/ui/Alert";
+import { TimeSlotSelect } from "@/components/ui/TimeSlotSelect";
 import { APP_TIME_ZONE, formatDate, formatDateTime } from "@/lib/i18n/format-date";
 import { clampDayCount, customTotal, enumerateDays, syncDayTimes } from "@/lib/posts/bulk-form";
 import {
@@ -11,6 +12,7 @@ import {
   type CustomDistributionError,
 } from "@/lib/scheduling/bulk-schedule";
 import { appZoneInstant } from "@/lib/scheduling/app-datetime-local";
+import { SLOT_MINUTES } from "@/lib/scheduling/time-slots";
 
 /** How the requested posts are laid out over the period. */
 export type BulkDistribution = "even" | "custom";
@@ -150,7 +152,7 @@ export function BulkGenerateFields({
     onChange({ ...plan, counts: { ...plan.counts, [date]: count }, times });
   }
 
-  /** One time input edited. Empty is kept as-is so the field can be cleared. */
+  /** One time picker changed; `value` is always one of the offered slots. */
   function updateDayTime(date: string, index: number, value: string) {
     const current = plan.times[date] ?? [];
     const next = current.map((time, i) => (i === index ? value : time));
@@ -249,8 +251,13 @@ export function BulkGenerateFields({
 
       {/* The dates are a period, not two publishing dates — said once, here,
           because it is the one thing about this form that is not obvious. */}
+      {/* The custom hint carries the slot rule with it: it is only in that mode
+          that anyone picks a time, so it is only there that the half hours the
+          pickers offer need explaining. */}
       <p className="text-fg-faint mt-2 text-xs">
-        {plan.distribution === "even" ? t("evenHint") : t("customHint")}
+        {plan.distribution === "even"
+          ? t("evenHint")
+          : `${t("customHint")} ${t("slotHint", { minutes: SLOT_MINUTES })}`}
       </p>
 
       {plan.distribution === "custom" && (
@@ -305,27 +312,19 @@ export function BulkGenerateFields({
                         request carries and what gets scheduled. */}
                     {count > 0 && (
                       <div className="mt-2 flex flex-wrap items-center gap-2 pl-1">
-                        {times.map((time, i) => {
-                          const past = isPastTime(date, time);
-                          return (
-                            <div key={i} className="flex items-center gap-1.5">
-                              <span className="text-fg-faint text-xs tabular-nums">{i + 1}.</span>
-                              <input
-                                type="time"
-                                value={time}
-                                onChange={(e) => updateDayTime(date, i, e.target.value)}
-                                disabled={disabled}
-                                aria-invalid={past || undefined}
-                                aria-label={t("timeForPost", { index: i + 1, date })}
-                                className={`rounded-control bg-surface focus:ring-accent/20 w-28 border px-2 py-1 text-sm outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60 ${
-                                  past
-                                    ? "border-status-danger-fg text-status-danger-fg"
-                                    : "border-border-strong focus:border-accent"
-                                }`}
-                              />
-                            </div>
-                          );
-                        })}
+                        {times.map((time, i) => (
+                          <div key={i} className="flex items-center gap-1.5">
+                            <span className="text-fg-faint text-xs tabular-nums">{i + 1}.</span>
+                            <TimeSlotSelect
+                              value={time}
+                              onChange={(value) => updateDayTime(date, i, value)}
+                              disabled={disabled}
+                              invalid={isPastTime(date, time)}
+                              aria-label={t("timeForPost", { index: i + 1, date })}
+                              className="w-24 px-2 py-1 text-sm"
+                            />
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>

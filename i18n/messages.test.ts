@@ -76,6 +76,21 @@ describe("i18n messages", () => {
     }
   });
 
+  it("names every field of the reschedule editor in both locales", () => {
+    // The editor is a date input plus a slot picker, each with an accessible name
+    // of its own, and a line explaining why only half hours are offered. A typo
+    // in one of these keys throws where the control should be.
+    for (const key of ["newTime", "newDate", "newTimeOfDay", "slotHint", "timeZoneHint"]) {
+      for (const [locale, messages] of [
+        ["en", en],
+        ["bg", bg],
+      ] as const) {
+        const value = lookup(messages, `posts.schedule.${key}`);
+        assert.equal(typeof value, "string", `posts.schedule.${key} missing from ${locale}`);
+      }
+    }
+  });
+
   it("labels the calendar event's name field as the organizer", () => {
     // The shared `name` column holds the organiser for a calendar event, not the
     // event's own title — that is `contentSources.eventTitle`.

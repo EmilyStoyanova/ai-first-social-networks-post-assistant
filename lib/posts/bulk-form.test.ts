@@ -13,6 +13,7 @@ import {
   type BulkBatchResponse,
 } from "./bulk-form";
 import { MAX_BULK_POSTS, type CustomDistributionError } from "@/lib/scheduling/bulk-schedule";
+import { isSlotAligned } from "@/lib/scheduling/time-slots";
 import en from "@/i18n/messages/en.json";
 import bg from "@/i18n/messages/bg.json";
 
@@ -162,18 +163,28 @@ describe("syncDayTimes", () => {
   it("seeds a new day from the channel's windows", () => {
     assert.deepEqual(syncDayTimes("2026-08-17", 3, undefined, MON_WED), [
       "09:00",
+      "09:30",
       "10:00",
-      "11:00",
     ]);
+  });
+
+  it("seeds only times the pickers offer", () => {
+    // The editor's time fields are slot pickers, so a seed that is not a slot
+    // would be a value the user cannot choose again once they change it.
+    for (const time of syncDayTimes("2026-08-17", MAX_BULK_POSTS, undefined, MON_WED)) {
+      assert.equal(isSlotAligned(time), true, time);
+    }
   });
 
   it("keeps the times already chosen when the count goes up", () => {
     // The two times on screen must not be renumbered or re-seeded because a third
-    // post was added; only the new position is filled in.
+    // post was added; only the new position is filled in. Times already in the
+    // state are kept exactly, slot or not — this resizes a list, it does not
+    // second-guess what is in it.
     assert.deepEqual(syncDayTimes("2026-08-17", 3, ["07:30", "16:45"], MON_WED), [
       "07:30",
       "16:45",
-      "11:00",
+      "10:00",
     ]);
   });
 
@@ -351,8 +362,10 @@ describe("the distribution errors are all translated", () => {
         const key = `distributionError_${code}`;
         assert.equal(typeof bulk[key], "string", `${locale} is missing posts.generate.bulk.${key}`);
       }
-      // The per-post time input's accessible name, built the same way.
+      // The per-post time picker's accessible name, built the same way, and the
+      // line explaining why it offers half hours and nothing between them.
       assert.equal(typeof bulk.timeForPost, "string", `${locale} is missing timeForPost`);
+      assert.equal(typeof bulk.slotHint, "string", `${locale} is missing slotHint`);
     }
   });
 });

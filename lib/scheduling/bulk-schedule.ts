@@ -52,6 +52,13 @@ import {
 } from "./posting-windows";
 import type { TimeOfDay } from "./posting-windows";
 import { appZoneClock, appZoneInstant, appZoneToday } from "./app-datetime-local";
+import {
+  LAST_SLOT_MINUTES,
+  SLOT_MINUTES,
+  minutesToTime,
+  snapMinutesToSlot,
+  timeToMinutes,
+} from "./time-slots";
 
 /**
  * Upper bound on one bulk request. Each post is a full generation — an LLM call
@@ -73,9 +80,6 @@ export const MAX_BULK_RANGE_DAYS = 366;
 
 /** Latest hour a same-day overflow post may be pushed to. */
 const LAST_HOUR_OF_DAY = 23;
-
-/** 23:59 as minutes past midnight — the last wall clock a day has. */
-const LAST_MINUTE_OF_DAY = LAST_HOUR_OF_DAY * 60 + 59;
 
 export interface BulkSlotPlan {
   /** Inclusive, `YYYY-MM-DD`, read as UTC. */
@@ -326,19 +330,22 @@ function pushPastPrevious(candidate: Date, previous: Date | null): Date {
 
 // ─── Custom distribution ───────────────────────────────────────────────────────
 
-const HH_MM = /^([01]\d|2[0-3]):([0-5]\d)$/;
-
 /**
  * A `HH:mm` wall clock → its parts, or null when it is not a real time of day.
  *
  * Stricter than the shape check `postingWindowsSchema` applies to stored
- * windows: this reads times a user typed for a specific post, and there is no
+ * windows: this reads times a user chose for a specific post, and there is no
  * sensible default to fall back to for a `"25:70"` — the request is simply wrong
  * and is refused (`invalid_time`).
+ *
+ * Note what is NOT checked: whether the time is one of the slots the pickers
+ * offer (lib/scheduling/time-slots.ts). Slot alignment is a UI guide for new
+ * choices, so a `16:15` — from a post scheduled before that guide existed, or
+ * from an API client — stays a perfectly valid time here and everywhere below.
  */
 export function parseTimeOfDay(value: string): TimeOfDay | null {
-  const match = HH_MM.exec(value);
-  return match === null ? null : { hour: Number(match[1]), minute: Number(match[2]) };
+  const minutes = timeToMinutes(value);
+  return minutes === null ? null : { hour: Math.floor(minutes / 60), minute: minutes % 60 };
 }
 
 /** A time of day → the `HH:mm` a time input shows and the request carries. */
@@ -506,14 +513,24 @@ export function planCustomSlots(days: readonly BulkCustomDay[]): Date[] {
  * of an input the user is free to overwrite.
  *
  * So a day's posts take that weekday's configured windows in order, and anything
- * past the last one steps an hour on from it — the same rule even distribution
- * overflows by, and clamped at 23:00 for the same reason (a seeded time must not
- * land on the next day). A day with no window of its own falls back to the
- * channel's usual hour via `resolveWindowStart`, or 10:00 with nothing
- * configured.
+ * past the last one steps on to the next slot — clamped at 23:30, because a
+ * seeded time must not land on a day the user did not choose. A day with no
+ * window of its own falls back to the channel's usual hour via
+ * `resolveWindowStart`, or 10:00 with nothing configured.
  *
- * Pure wall-clock arithmetic: no zone is involved in "an hour after 09:00", and
- * the times only become instants once `planCustomSlots` reads them.
+ * EVERY SEED IS SLOT-ALIGNED (lib/scheduling/time-slots.ts), including one taken
+ * from a window configured at 09:15: the editor's pickers offer only slots, so a
+ * seed that is not one would be a starting value the user cannot get back to.
+ * Stepping by one slot rather than by an hour comes from the same place, and it
+ * also leaves a day room for more distinct seeds before the clamp.
+ *
+ * A day can run out of slots — ten posts seeded from a 22:00 window have only
+ * four left — and past the clamp the seeds repeat. Nothing is lost: they are
+ * starting values, `validateCustomDistribution` refuses the collision, and the
+ * editor says so until the user spreads them out or moves some to another day.
+ *
+ * Pure wall-clock arithmetic: no zone is involved in "half an hour after 09:00",
+ * and the times only become instants once `planCustomSlots` reads them.
  */
 export function defaultTimesForDay(
   date: string,
@@ -537,20 +554,14 @@ export function defaultTimesForDay(
 
   for (let i = 0; i < count; i++) {
     const seed = seeds[Math.min(i, seeds.length - 1)];
-    let minutes = seed.hour * 60 + seed.minute;
+    let minutes = snapMinutesToSlot(seed.hour * 60 + seed.minute);
 
-    // Same shape as `pushPastPrevious`: an hour on from the previous one,
-    // keeping its minute, and never past 23:00.
-    if (minutes <= previous) {
-      minutes = Math.min(LAST_HOUR_OF_DAY, Math.floor(previous / 60) + 1) * 60 + (previous % 60);
-    }
-    // Once that hour is clamped, stepping by the hour stops moving — so step by
-    // the minute instead, and a seeded day stays free of the `duplicate_slot`
-    // the user would otherwise have to fix by hand. Only a day seeded at 23:59
-    // runs out of minutes; validation still refuses the collision.
-    if (minutes <= previous) minutes = Math.min(previous + 1, LAST_MINUTE_OF_DAY);
+    // Same shape as `pushPastPrevious`, at the sweep's granularity: the next slot
+    // after the one already taken, and never past 23:30. A previous value is
+    // always a slot, so adding one keeps it aligned.
+    if (minutes <= previous) minutes = Math.min(previous + SLOT_MINUTES, LAST_SLOT_MINUTES);
 
-    times.push(formatTimeOfDay({ hour: Math.floor(minutes / 60), minute: minutes % 60 }));
+    times.push(minutesToTime(minutes));
     previous = minutes;
   }
 
