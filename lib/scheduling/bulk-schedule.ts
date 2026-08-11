@@ -22,12 +22,16 @@
  * and windows whose days never occur in the period) and `planBulkSlots` for the
  * one used when there are fewer eligible slots than requested posts.
  *
- * `planCustomSlots` is the same idea with the user holding the calendar: they
- * say which days carry how many posts, and the channel's windows still decide
- * the time of day. Both planners run unchanged in the browser (to preview the
- * dates before generating) and on the server (to schedule them), which is why
- * this module stays pure — a second implementation in the form is exactly how a
- * preview starts lying.
+ * `planCustomSlots` is the other mode entirely, and the channel's windows have
+ * no say in it: the user holds the calendar AND the clock, naming a time for
+ * every single post. Nothing is derived there — the planner's whole job is to
+ * turn the wall clocks the user typed into instants, in order. The windows are
+ * still used to SEED those inputs (`defaultTimesForDay`), so the editor opens on
+ * the channel's usual hours rather than on empty fields, but a seed is a starting
+ * value the user can overwrite, not a schedule. Both planners run unchanged in
+ * the browser (to preview the dates before generating) and on the server (to
+ * schedule them), which is why this module stays pure — a second implementation
+ * in the form is exactly how a preview starts lying.
  *
  * TIME ZONE. The dates are plain calendar days and are handled as such (UTC
  * midnight is only ever a marker for "this day"), but the TIME OF DAY a slot
@@ -70,6 +74,9 @@ export const MAX_BULK_RANGE_DAYS = 366;
 /** Latest hour a same-day overflow post may be pushed to. */
 const LAST_HOUR_OF_DAY = 23;
 
+/** 23:59 as minutes past midnight — the last wall clock a day has. */
+const LAST_MINUTE_OF_DAY = LAST_HOUR_OF_DAY * 60 + 59;
+
 export interface BulkSlotPlan {
   /** Inclusive, `YYYY-MM-DD`, read as UTC. */
   startDate: string;
@@ -80,12 +87,28 @@ export interface BulkSlotPlan {
   postingWindows?: unknown;
 }
 
-/** One day of a user-authored distribution: "three posts on 2026-08-19". */
+/**
+ * One day of a user-authored distribution: "three posts on 2026-08-19, at
+ * 09:00, 13:30 and 18:00".
+ *
+ * `count` and `times.length` say the same thing twice, and are required to
+ * agree (`time_count_mismatch`) rather than one being derived from the other:
+ * the count is what the editor's per-day field holds and what the request's
+ * total is checked against, the times are what actually get scheduled, and a
+ * request where they disagree is one whose author and reader would have
+ * understood it differently.
+ */
 export interface BulkCustomDay {
   /** `YYYY-MM-DD`, read as UTC. */
   date: string;
-  /** Posts to write on that day; at least 1. */
+  /** Posts to write on that day; at least 1, and exactly `times.length`. */
   count: number;
+  /**
+   * The publish time of each post on that day, as `HH:mm` — business-zone wall
+   * clock, chosen by the user. Not optional, and never inferred: in this mode
+   * the times ARE the request.
+   */
+  times: string[];
 }
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -303,6 +326,38 @@ function pushPastPrevious(candidate: Date, previous: Date | null): Date {
 
 // ─── Custom distribution ───────────────────────────────────────────────────────
 
+const HH_MM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+/**
+ * A `HH:mm` wall clock → its parts, or null when it is not a real time of day.
+ *
+ * Stricter than the shape check `postingWindowsSchema` applies to stored
+ * windows: this reads times a user typed for a specific post, and there is no
+ * sensible default to fall back to for a `"25:70"` — the request is simply wrong
+ * and is refused (`invalid_time`).
+ */
+export function parseTimeOfDay(value: string): TimeOfDay | null {
+  const match = HH_MM.exec(value);
+  return match === null ? null : { hour: Number(match[1]), minute: Number(match[2]) };
+}
+
+/** A time of day → the `HH:mm` a time input shows and the request carries. */
+export function formatTimeOfDay(time: TimeOfDay): string {
+  return `${String(time.hour).padStart(2, "0")}:${String(time.minute).padStart(2, "0")}`;
+}
+
+/** Whether a time of day is one a clock can actually show. */
+function isRealTimeOfDay(time: TimeOfDay): boolean {
+  return (
+    Number.isInteger(time.hour) &&
+    Number.isInteger(time.minute) &&
+    time.hour >= 0 &&
+    time.hour <= LAST_HOUR_OF_DAY &&
+    time.minute >= 0 &&
+    time.minute <= 59
+  );
+}
+
 /**
  * Why a user-authored distribution cannot be used.
  *
@@ -316,7 +371,11 @@ export type CustomDistributionError =
   | "duplicate_date"
   | "out_of_period"
   | "invalid_count"
-  | "count_mismatch";
+  | "count_mismatch"
+  | "invalid_time"
+  | "time_count_mismatch"
+  | "duplicate_slot"
+  | "time_in_past";
 
 /**
  * Checks a custom distribution against the request it belongs to, returning the
@@ -325,12 +384,22 @@ export type CustomDistributionError =
  * `total` is the requested number of posts: the per-day counts must add up to
  * exactly that, because the number the user asked for and the number the days
  * describe are the same number shown twice.
+ *
+ * `now` is what "in the past" is measured against, and is why this takes a clock
+ * at all. In this mode the user names exact instants, so an instant already
+ * behind them is a post the publisher will refuse to fire — caught here, while
+ * it is still a form field, rather than after ten drafts have been written to
+ * times that cannot happen. The form measures it against the clock it opened on
+ * (so a field cannot start failing while being read) and the server against its
+ * own; the server is the authority, so a form left open long enough for a chosen
+ * time to go by is rejected on submit, which is the honest answer.
  */
 export function validateCustomDistribution(
   days: readonly BulkCustomDay[],
   total: number,
   startDate: string,
-  endDate: string
+  endDate: string,
+  now: Date
 ): CustomDistributionError | null {
   if (days.length === 0) return "empty";
 
@@ -341,6 +410,19 @@ export function validateCustomDistribution(
   }
 
   const seen = new Set<string>();
+  // Every INSTANT the request has claimed so far. Two posts at one instant are
+  // indistinguishable on the calendar and read as a mistake, so the second one is
+  // refused rather than silently nudged an hour later — in this mode the times
+  // are the user's, and moving one would be answering a question they did not
+  // ask.
+  //
+  // Keyed on the resolved instant rather than on the `date` + `HH:mm` the user
+  // typed, because those are not the same question one day a year: on the
+  // spring-forward day the skipped hour has no instant of its own and resolves
+  // forward, so 03:00 and 04:00 in Sofia on 2026-03-29 are one and the same
+  // moment. Comparing the typed strings would call those distinct and write two
+  // posts to the same instant — the exact thing this refuses.
+  const slots = new Set<number>();
   let sum = 0;
 
   for (const day of days) {
@@ -352,6 +434,23 @@ export function validateCustomDistribution(
     // offered by the form, so it can only be a stale or hand-made request.
     if (date.getTime() < start.getTime() || date.getTime() > end.getTime()) return "out_of_period";
     if (!Number.isInteger(day.count) || day.count < 1) return "invalid_count";
+    if (!Array.isArray(day.times) || day.times.length !== day.count) return "time_count_mismatch";
+
+    for (const raw of day.times) {
+      const time = typeof raw === "string" ? parseTimeOfDay(raw) : null;
+      if (time === null) return "invalid_time";
+
+      // A real time on a real day can still name no instant — the hour a DST
+      // jump skips. `appZoneInstant` resolves it forward rather than throwing,
+      // but a null here means the pair was not usable at all.
+      const at = appZoneInstant(day.date, time.hour, time.minute);
+      if (at === null) return "invalid_time";
+      if (at.getTime() <= now.getTime()) return "time_in_past";
+
+      if (slots.has(at.getTime())) return "duplicate_slot";
+      slots.add(at.getTime());
+    }
+
     sum += day.count;
   }
 
@@ -361,47 +460,99 @@ export function validateCustomDistribution(
 /**
  * The scheduled instants for a user-authored distribution, earliest first.
  *
- * The user chose the DAYS and how many posts each carries; the channel still
- * chooses the TIMES. A day's posts fill that weekday's configured windows in
- * order, so a channel with a 09:00 and an 18:30 window asked for two posts that
- * day publishes at 09:00 and 18:30. Anything past the last configured window
- * stacks an hour apart from it, the same overflow rule even distribution uses.
- * A day with no window of its own (or a channel with none at all) falls back to
- * `resolveWindowStart`, i.e. the channel's usual hour, or 10:00.
+ * The user chose everything: the days, how many posts each carries, and the
+ * exact wall clock of every one of them. So this does no scheduling — it reads
+ * `HH:mm` in the business zone and returns the instants those name, sorted.
+ * Deliberately NOT taking the channel's posting windows: "Custom" means the
+ * times on screen are the times that get written, and a planner that could
+ * still move them is a planner whose preview is a guess.
  *
- * Invalid days are skipped rather than guessed at; callers run
+ * No overflow rule either, for the same reason: two posts wanting one instant is
+ * refused up front (`duplicate_slot`) instead of one being pushed to an hour the
+ * user never picked.
+ *
+ * Unusable days and times are skipped rather than guessed at; callers run
  * `validateCustomDistribution` first and report a proper error code.
  */
-export function planCustomSlots(days: readonly BulkCustomDay[], postingWindows?: unknown): Date[] {
-  const byDay = windowsByWeekday(postingWindows);
-
-  const ordered = days
-    .flatMap((day) => {
-      const date = parseIsoDate(day.date);
-      return date !== null && Number.isInteger(day.count) && day.count > 0
-        ? [{ date, count: day.count }]
-        : [];
-    })
-    .sort((a, b) => a.date.getTime() - b.date.getTime());
-
+export function planCustomSlots(days: readonly BulkCustomDay[]): Date[] {
   const slots: Date[] = [];
 
-  for (const { date, count } of ordered) {
-    const configured = byDay?.[utcDayIndex(date)] ?? [];
-    const times: TimeOfDay[] =
-      configured.length > 0 ? configured : [resolveWindowStart(postingWindows, utcDayIndex(date))];
+  for (const day of days) {
+    if (parseIsoDate(day.date) === null || !Array.isArray(day.times)) continue;
 
-    // Restarts each day: a day's own windows are what its posts fill, and the
-    // previous day's last slot must never push today's first one later.
-    let previous: Date | null = null;
+    for (const raw of day.times) {
+      const time = typeof raw === "string" ? parseTimeOfDay(raw) : null;
+      if (time === null) continue;
 
-    for (let i = 0; i < count; i++) {
-      const candidate = slotInstant(date, times[Math.min(i, times.length - 1)]);
-      const when = pushPastPrevious(candidate, previous);
-      slots.push(when);
-      previous = when;
+      const at = appZoneInstant(day.date, time.hour, time.minute);
+      if (at !== null) slots.push(at);
     }
   }
 
-  return slots;
+  // Chronological regardless of the order the days and times arrived in: the
+  // batch is generated slot by slot in this order, and both the preview and the
+  // audit entry read it as "first post to last".
+  return slots.sort((a, b) => a.getTime() - b.getTime());
+}
+
+/**
+ * The `HH:mm` times a day's time inputs should OPEN on — `count` of them, in
+ * ascending order, and distinct for as long as the day has room for them.
+ *
+ * A seed, not a schedule. The editor could open on empty fields and demand a
+ * time for all ten posts before it previews anything, but the channel already
+ * has usual hours and they are almost always what the user wants: this is the
+ * old automatic behaviour, kept exactly where it belongs, as the starting value
+ * of an input the user is free to overwrite.
+ *
+ * So a day's posts take that weekday's configured windows in order, and anything
+ * past the last one steps an hour on from it — the same rule even distribution
+ * overflows by, and clamped at 23:00 for the same reason (a seeded time must not
+ * land on the next day). A day with no window of its own falls back to the
+ * channel's usual hour via `resolveWindowStart`, or 10:00 with nothing
+ * configured.
+ *
+ * Pure wall-clock arithmetic: no zone is involved in "an hour after 09:00", and
+ * the times only become instants once `planCustomSlots` reads them.
+ */
+export function defaultTimesForDay(
+  date: string,
+  count: number,
+  postingWindows?: unknown
+): string[] {
+  const day = parseIsoDate(date);
+  if (day === null || !Number.isInteger(count) || count < 1) return [];
+
+  const configured = windowsByWeekday(postingWindows)?.[utcDayIndex(day)] ?? [];
+  const seeds = (
+    configured.length > 0 ? configured : [resolveWindowStart(postingWindows, utcDayIndex(day))]
+  )
+    // The stored windows are shape-checked, not range-checked, so a `"25:00"` is
+    // possible and would seed an input the API then refuses as `invalid_time`.
+    // Treated as unconfigured instead — the same answer `slotInstant` gives it.
+    .map((time) => (isRealTimeOfDay(time) ? time : { hour: DEFAULT_POSTING_HOUR, minute: 0 }));
+
+  const times: string[] = [];
+  let previous = -1;
+
+  for (let i = 0; i < count; i++) {
+    const seed = seeds[Math.min(i, seeds.length - 1)];
+    let minutes = seed.hour * 60 + seed.minute;
+
+    // Same shape as `pushPastPrevious`: an hour on from the previous one,
+    // keeping its minute, and never past 23:00.
+    if (minutes <= previous) {
+      minutes = Math.min(LAST_HOUR_OF_DAY, Math.floor(previous / 60) + 1) * 60 + (previous % 60);
+    }
+    // Once that hour is clamped, stepping by the hour stops moving — so step by
+    // the minute instead, and a seeded day stays free of the `duplicate_slot`
+    // the user would otherwise have to fix by hand. Only a day seeded at 23:59
+    // runs out of minutes; validation still refuses the collision.
+    if (minutes <= previous) minutes = Math.min(previous + 1, LAST_MINUTE_OF_DAY);
+
+    times.push(formatTimeOfDay({ hour: Math.floor(minutes / 60), minute: minutes % 60 }));
+    previous = minutes;
+  }
+
+  return times;
 }

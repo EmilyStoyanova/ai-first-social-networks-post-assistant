@@ -154,6 +154,7 @@ export function GeneratePostForm({
     ...defaultBulkRange(new Date()),
     distribution: "even",
     counts: {},
+    times: {},
   }));
   // The clock, read once — for the same reason the default range is: "today"
   // must not move to a new day underneath a form someone is in the middle of
@@ -170,7 +171,16 @@ export function GeneratePostForm({
   // preview below can be computed without a round trip.
   const postingWindows = selectedChannel?.config.postingWindows ?? [];
 
-  const customDistribution = useMemo(() => toCustomDistribution(plan.counts), [plan.counts]);
+  /**
+   * The custom distribution exactly as it will be sent: the days, their counts,
+   * and the times the user chose for each post. This one object is what gets
+   * validated, what gets previewed, and what goes in the request body — the
+   * three cannot disagree because there is only one of it.
+   */
+  const customDistribution = useMemo(
+    () => toCustomDistribution(plan.counts, plan.times),
+    [plan.counts, plan.times]
+  );
 
   const distributionError = useMemo(
     () =>
@@ -179,10 +189,18 @@ export function GeneratePostForm({
             customDistribution,
             plan.numberOfPosts,
             plan.startDate,
-            plan.endDate
+            plan.endDate,
+            openedAt
           )
         : null,
-    [plan.distribution, plan.numberOfPosts, plan.startDate, plan.endDate, customDistribution]
+    [
+      plan.distribution,
+      plan.numberOfPosts,
+      plan.startDate,
+      plan.endDate,
+      customDistribution,
+      openedAt,
+    ]
   );
 
   /**
@@ -192,10 +210,14 @@ export function GeneratePostForm({
    * a second implementation that can drift — it is the answer, shown early. A
    * custom plan that does not yet add up previews nothing rather than previewing
    * a schedule the request would be refused for.
+   *
+   * Note that only the even branch is given the channel's posting windows.
+   * Custom slots come from the user's own times and nothing else, on both sides
+   * of the wire.
    */
   const slots = useMemo(() => {
     if (plan.distribution === "custom") {
-      return distributionError === null ? planCustomSlots(customDistribution, postingWindows) : [];
+      return distributionError === null ? planCustomSlots(customDistribution) : [];
     }
     return planBulkSlots({
       startDate: plan.startDate,
@@ -349,7 +371,10 @@ export function GeneratePostForm({
           numberOfPosts: plan.numberOfPosts,
           startDate: plan.startDate,
           endDate: plan.endDate,
-          // Omitted for an even spread, so the server plans the slots itself.
+          // Omitted for an even spread, so the server plans the slots itself
+          // from the channel's windows. In custom mode it carries the user's own
+          // days AND times, and the server schedules exactly those — which is
+          // why the preview above is not an estimate.
           ...(plan.distribution === "custom" ? { distribution: customDistribution } : {}),
         }),
       });
@@ -623,6 +648,8 @@ export function GeneratePostForm({
           slots={slots}
           distributionError={distributionError}
           minDate={minDate}
+          now={openedAt}
+          postingWindows={postingWindows}
           disabled={generating || noChannels}
           locale={locale}
         />

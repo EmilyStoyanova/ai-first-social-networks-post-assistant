@@ -10,7 +10,11 @@
  * Pure, so it can be tested without rendering anything.
  */
 
-import { MAX_BULK_POSTS, type BulkCustomDay } from "@/lib/scheduling/bulk-schedule";
+import {
+  MAX_BULK_POSTS,
+  defaultTimesForDay,
+  type BulkCustomDay,
+} from "@/lib/scheduling/bulk-schedule";
 import { appZoneToday } from "@/lib/scheduling/app-datetime-local";
 
 /** `YYYY-MM-DD` in UTC — the form's date format, and the API's. */
@@ -70,15 +74,56 @@ export function enumerateDays(startDate: string, endDate: string, limit = 62): s
 }
 
 /**
- * The editor's per-day counts as the API wants them: only the days carrying at
- * least one post, in date order, zeroes dropped.
+ * The editor's per-day counts and times as the API wants them: only the days
+ * carrying at least one post, in date order, zeroes dropped.
+ *
+ * A day's times are cut to its count and never padded. Keeping the two in step
+ * is `syncDayTimes`' job as the count field is edited; if they have come apart
+ * anyway, this hands over what the state actually says and lets
+ * `validateCustomDistribution` refuse it — a distribution quietly completed with
+ * invented times is precisely what this mode must not do.
  */
-export function toCustomDistribution(counts: Readonly<Record<string, number>>): BulkCustomDay[] {
+export function toCustomDistribution(
+  counts: Readonly<Record<string, number>>,
+  times: Readonly<Record<string, string[]>>
+): BulkCustomDay[] {
   return Object.entries(counts)
     .filter(([, count]) => Number.isInteger(count) && count > 0)
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([date, count]) => ({ date, count }));
+    .map(([date, count]) => ({ date, count, times: (times[date] ?? []).slice(0, count) }));
 }
+
+/**
+ * A day's list of times, resized to `count` — what the editor holds after its
+ * per-day number has been typed into.
+ *
+ * Times the user has already chosen are KEPT, positionally: raising a day from
+ * two posts to three must not renumber or re-seed the two times already on
+ * screen, and lowering it back drops only the tail. New positions are seeded
+ * from the channel's posting windows (`defaultTimesForDay`), so a day opens on
+ * plausible hours rather than on empty inputs the user has to fill before
+ * anything previews.
+ */
+export function syncDayTimes(
+  date: string,
+  count: number,
+  existing: readonly string[] | undefined,
+  postingWindows?: unknown
+): string[] {
+  if (!Number.isInteger(count) || count < 1) return [];
+
+  const seeds = defaultTimesForDay(date, count, postingWindows);
+  return Array.from(
+    { length: count },
+    // The last seed is the fallback for a position past the seeded list, which
+    // only an unusable date can produce — `FALLBACK_TIME` then keeps the input
+    // showing a real time instead of an empty one.
+    (_, i) => existing?.[i] ?? seeds[i] ?? seeds[seeds.length - 1] ?? FALLBACK_TIME
+  );
+}
+
+/** Shown when a day is too malformed to seed from; the API refuses it anyway. */
+const FALLBACK_TIME = "10:00";
 
 /** Total posts a custom distribution currently assigns. */
 export function customTotal(counts: Readonly<Record<string, number>>): number {

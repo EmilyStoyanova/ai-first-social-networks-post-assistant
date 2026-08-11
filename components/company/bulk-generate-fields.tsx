@@ -4,8 +4,13 @@ import { useTranslations } from "next-intl";
 import { CalendarClock } from "lucide-react";
 import { Alert } from "@/components/ui/Alert";
 import { APP_TIME_ZONE, formatDate, formatDateTime } from "@/lib/i18n/format-date";
-import { clampDayCount, customTotal, enumerateDays } from "@/lib/posts/bulk-form";
-import { MAX_BULK_POSTS, type CustomDistributionError } from "@/lib/scheduling/bulk-schedule";
+import { clampDayCount, customTotal, enumerateDays, syncDayTimes } from "@/lib/posts/bulk-form";
+import {
+  MAX_BULK_POSTS,
+  parseTimeOfDay,
+  type CustomDistributionError,
+} from "@/lib/scheduling/bulk-schedule";
+import { appZoneInstant } from "@/lib/scheduling/app-datetime-local";
 
 /** How the requested posts are laid out over the period. */
 export type BulkDistribution = "even" | "custom";
@@ -21,6 +26,13 @@ export interface BulkPlanState {
   distribution: BulkDistribution;
   /** Custom mode only: posts per `YYYY-MM-DD`. Days at 0 are simply not used. */
   counts: Record<string, number>;
+  /**
+   * Custom mode only: the `HH:mm` publish time of each post on a day, in the
+   * business zone — `times[date][i]` belongs to post `i` of that day. Kept the
+   * same length as `counts[date]` by `syncDayTimes`, so the list can never carry
+   * a time for a post the day no longer has.
+   */
+  times: Record<string, string[]>;
 }
 
 interface Props {
@@ -40,6 +52,20 @@ interface Props {
    * value gates the submit button as bounds these inputs.
    */
   minDate: string;
+  /**
+   * The clock this form opened on, held by the parent for the same reason
+   * `minDate` is: a chosen time must not start failing while it is being read,
+   * and the value that marks an input as past must be the one that gates the
+   * submit button. The server re-checks against its own clock and is the
+   * authority.
+   */
+  now: Date;
+  /**
+   * The selected channel's posting windows, used only to SEED a day's time
+   * inputs. Nothing here reads them to schedule with — in custom mode the times
+   * on screen are the times that get sent.
+   */
+  postingWindows: unknown;
   disabled: boolean;
   locale: string;
 }
@@ -67,6 +93,8 @@ export function BulkGenerateFields({
   slots,
   distributionError,
   minDate,
+  now,
+  postingWindows,
   disabled,
   locale,
 }: Props) {
@@ -87,6 +115,10 @@ export function BulkGenerateFields({
    * Changing the period drops any per-day counts that fall outside it, so a
    * distribution can never quietly keep pointing at days the user can no longer
    * see — which the server would then reject as out_of_period.
+   *
+   * The times go with them. A day dropped from the period must not leave its
+   * times behind: they would be invisible in the editor, ride along in the
+   * request, and be rejected for a day the user can no longer even see.
    */
   function updateRange(patch: { startDate?: string; endDate?: string }) {
     const next = { ...plan, ...patch };
@@ -94,7 +126,47 @@ export function BulkGenerateFields({
     next.counts = Object.fromEntries(
       Object.entries(plan.counts).filter(([date]) => inRange.has(date))
     );
+    next.times = Object.fromEntries(
+      Object.entries(plan.times).filter(([date]) => inRange.has(date))
+    );
     onChange(next);
+  }
+
+  /**
+   * A day's post count changed: resize its list of times to match.
+   *
+   * Both maps are written together, always — the count is what the request's
+   * total is checked against and the times are what gets scheduled, so a state
+   * where one has moved and the other has not is a request the API refuses
+   * (`time_count_mismatch`). A day taken to 0 loses its times entirely rather
+   * than keeping a hidden list that would come back if it were raised again.
+   */
+  function updateDayCount(date: string, raw: string) {
+    const count = clampDayCount(raw);
+    const times = { ...plan.times };
+    if (count < 1) delete times[date];
+    else times[date] = syncDayTimes(date, count, plan.times[date], postingWindows);
+
+    onChange({ ...plan, counts: { ...plan.counts, [date]: count }, times });
+  }
+
+  /** One time input edited. Empty is kept as-is so the field can be cleared. */
+  function updateDayTime(date: string, index: number, value: string) {
+    const current = plan.times[date] ?? [];
+    const next = current.map((time, i) => (i === index ? value : time));
+    onChange({ ...plan, times: { ...plan.times, [date]: next } });
+  }
+
+  /**
+   * Whether a chosen time has already gone by — the per-input half of the
+   * `time_in_past` rule, so the offending field is visibly marked and not just
+   * named in one line of text under the list.
+   */
+  function isPastTime(date: string, value: string): boolean {
+    const time = parseTimeOfDay(value);
+    if (time === null) return false; // invalid, not past — a different message
+    const at = appZoneInstant(date, time.hour, time.minute);
+    return at !== null && at.getTime() <= now.getTime();
   }
 
   return (
@@ -200,33 +272,65 @@ export function BulkGenerateFields({
             <p className="text-fg-faint text-xs">{t("noDaysInRange")}</p>
           ) : (
             <div className="border-border bg-surface rounded-control max-h-56 overflow-y-auto border">
-              {days.map((date) => (
-                <div
-                  key={date}
-                  className="border-border/60 flex items-center justify-between gap-3 border-b px-3 py-2 last:border-b-0"
-                >
-                  {/* Midday, not midnight: timestamps render in the business
-                      zone, and a UTC midnight would label this row with the
-                      previous day west of it while the request still carries
-                      `date`. */}
-                  <label htmlFor={`bulk-day-${date}`} className="text-fg-muted text-sm">
-                    {formatDate(`${date}T12:00:00.000Z`, locale)}
-                  </label>
-                  <input
-                    id={`bulk-day-${date}`}
-                    type="number"
-                    min={0}
-                    max={MAX_BULK_POSTS}
-                    value={plan.counts[date] ?? 0}
-                    onChange={(e) =>
-                      update({ counts: { ...plan.counts, [date]: clampDayCount(e.target.value) } })
-                    }
-                    disabled={disabled}
-                    aria-label={t("postsOnDay", { date })}
-                    className="rounded-control border-border-strong bg-surface focus:border-accent focus:ring-accent/20 w-20 border px-2 py-1 text-sm outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60"
-                  />
-                </div>
-              ))}
+              {days.map((date) => {
+                const count = plan.counts[date] ?? 0;
+                const times = plan.times[date] ?? [];
+
+                return (
+                  <div key={date} className="border-border/60 border-b px-3 py-2 last:border-b-0">
+                    <div className="flex items-center justify-between gap-3">
+                      {/* Midday, not midnight: timestamps render in the business
+                          zone, and a UTC midnight would label this row with the
+                          previous day west of it while the request still carries
+                          `date`. */}
+                      <label htmlFor={`bulk-day-${date}`} className="text-fg-muted text-sm">
+                        {formatDate(`${date}T12:00:00.000Z`, locale)}
+                      </label>
+                      <input
+                        id={`bulk-day-${date}`}
+                        type="number"
+                        min={0}
+                        max={MAX_BULK_POSTS}
+                        value={count}
+                        onChange={(e) => updateDayCount(date, e.target.value)}
+                        disabled={disabled}
+                        aria-label={t("postsOnDay", { date })}
+                        className="rounded-control border-border-strong bg-surface focus:border-accent focus:ring-accent/20 w-20 border px-2 py-1 text-sm outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60"
+                      />
+                    </div>
+
+                    {/* One time input per post assigned to this day — the whole
+                        point of the mode. Seeded from the channel's windows and
+                        then entirely the user's: these values are what the
+                        request carries and what gets scheduled. */}
+                    {count > 0 && (
+                      <div className="mt-2 flex flex-wrap items-center gap-2 pl-1">
+                        {times.map((time, i) => {
+                          const past = isPastTime(date, time);
+                          return (
+                            <div key={i} className="flex items-center gap-1.5">
+                              <span className="text-fg-faint text-xs tabular-nums">{i + 1}.</span>
+                              <input
+                                type="time"
+                                value={time}
+                                onChange={(e) => updateDayTime(date, i, e.target.value)}
+                                disabled={disabled}
+                                aria-invalid={past || undefined}
+                                aria-label={t("timeForPost", { index: i + 1, date })}
+                                className={`rounded-control bg-surface focus:ring-accent/20 w-28 border px-2 py-1 text-sm outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+                                  past
+                                    ? "border-status-danger-fg text-status-danger-fg"
+                                    : "border-border-strong focus:border-accent"
+                                }`}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 

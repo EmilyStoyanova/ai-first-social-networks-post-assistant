@@ -7,11 +7,12 @@ import {
   defaultBulkRange,
   enumerateDays,
   partialReasonKey,
+  syncDayTimes,
   toCustomDistribution,
   toIsoDate,
   type BulkBatchResponse,
 } from "./bulk-form";
-import { MAX_BULK_POSTS } from "@/lib/scheduling/bulk-schedule";
+import { MAX_BULK_POSTS, type CustomDistributionError } from "@/lib/scheduling/bulk-schedule";
 import en from "@/i18n/messages/en.json";
 import bg from "@/i18n/messages/bg.json";
 
@@ -112,16 +113,90 @@ describe("enumerateDays", () => {
 });
 
 describe("toCustomDistribution", () => {
-  it("drops the untouched days and sorts what is left", () => {
-    assert.deepEqual(toCustomDistribution({ "2026-08-20": 1, "2026-08-17": 2, "2026-08-19": 0 }), [
-      { date: "2026-08-17", count: 2 },
-      { date: "2026-08-20", count: 1 },
-    ]);
+  it("drops the untouched days, sorts what is left, and carries their times", () => {
+    assert.deepEqual(
+      toCustomDistribution(
+        { "2026-08-20": 1, "2026-08-17": 2, "2026-08-19": 0 },
+        {
+          "2026-08-20": ["12:00"],
+          "2026-08-17": ["09:00", "18:30"],
+          "2026-08-19": ["10:00"],
+        }
+      ),
+      [
+        { date: "2026-08-17", count: 2, times: ["09:00", "18:30"] },
+        { date: "2026-08-20", count: 1, times: ["12:00"] },
+      ]
+    );
   });
 
   it("is empty when nothing has been assigned", () => {
-    assert.deepEqual(toCustomDistribution({}), []);
-    assert.deepEqual(toCustomDistribution({ "2026-08-17": 0 }), []);
+    assert.deepEqual(toCustomDistribution({}, {}), []);
+    assert.deepEqual(toCustomDistribution({ "2026-08-17": 0 }, { "2026-08-17": ["09:00"] }), []);
+  });
+
+  it("cuts a day's times to its count and never pads them", () => {
+    // Trailing times from a day that was lowered must not ride along as hidden
+    // slots; a day whose times are short must reach validation short, so it is
+    // refused rather than quietly completed with a time nobody chose.
+    assert.deepEqual(
+      toCustomDistribution({ "2026-08-17": 1 }, { "2026-08-17": ["09:00", "18:30"] }),
+      [{ date: "2026-08-17", count: 1, times: ["09:00"] }]
+    );
+    assert.deepEqual(toCustomDistribution({ "2026-08-17": 2 }, { "2026-08-17": ["09:00"] }), [
+      { date: "2026-08-17", count: 2, times: ["09:00"] },
+    ]);
+    assert.deepEqual(toCustomDistribution({ "2026-08-17": 1 }, {}), [
+      { date: "2026-08-17", count: 1, times: [] },
+    ]);
+  });
+});
+
+describe("syncDayTimes", () => {
+  /** Mon/Wed at 09:00, so a seeded Monday is predictable. */
+  const MON_WED = [
+    { day: "MONDAY", start: "09:00", end: "11:00" },
+    { day: "WEDNESDAY", start: "09:00", end: "11:00" },
+  ];
+
+  it("seeds a new day from the channel's windows", () => {
+    assert.deepEqual(syncDayTimes("2026-08-17", 3, undefined, MON_WED), [
+      "09:00",
+      "10:00",
+      "11:00",
+    ]);
+  });
+
+  it("keeps the times already chosen when the count goes up", () => {
+    // The two times on screen must not be renumbered or re-seeded because a third
+    // post was added; only the new position is filled in.
+    assert.deepEqual(syncDayTimes("2026-08-17", 3, ["07:30", "16:45"], MON_WED), [
+      "07:30",
+      "16:45",
+      "11:00",
+    ]);
+  });
+
+  it("drops only the tail when the count goes down", () => {
+    assert.deepEqual(syncDayTimes("2026-08-17", 1, ["07:30", "16:45"], MON_WED), ["07:30"]);
+  });
+
+  it("holds exactly `count` times, so the two can never disagree", () => {
+    for (let count = 1; count <= MAX_BULK_POSTS; count++) {
+      assert.equal(syncDayTimes("2026-08-17", count, ["07:30"], MON_WED).length, count);
+    }
+  });
+
+  it("has no times for a day carrying no posts", () => {
+    for (const count of [0, -1, 1.5, Number.NaN]) {
+      assert.deepEqual(syncDayTimes("2026-08-17", count, ["07:30"], MON_WED), [], String(count));
+    }
+  });
+
+  it("still shows a real time for a day it cannot seed", () => {
+    // An unusable date seeds nothing, and an empty time input would read as a
+    // bug; the API refuses the date either way.
+    assert.deepEqual(syncDayTimes("not-a-date", 2, undefined, MON_WED), ["10:00", "10:00"]);
   });
 });
 
@@ -241,6 +316,43 @@ describe("partialReasonKey", () => {
       for (const key of keys) {
         assert.equal(typeof bulk[key], "string", `${locale} is missing posts.generate.bulk.${key}`);
       }
+    }
+  });
+});
+
+describe("the distribution errors are all translated", () => {
+  it("resolves a message for every CustomDistributionError in both locales", () => {
+    // The form renders these by building the key from the code
+    // (`distributionError_${code}`), so a code without a message is not a gap in
+    // the copy — next-intl throws, and the error line becomes a crash exactly
+    // when the user has something wrong to fix.
+    //
+    // Listed by hand because a type cannot be enumerated at runtime: adding a
+    // code to CustomDistributionError means adding it here, which is the reminder.
+    const codes: CustomDistributionError[] = [
+      "empty",
+      "invalid_date",
+      "duplicate_date",
+      "out_of_period",
+      "invalid_count",
+      "count_mismatch",
+      "invalid_time",
+      "time_count_mismatch",
+      "duplicate_slot",
+      "time_in_past",
+    ];
+
+    for (const [locale, messages] of [
+      ["en", en],
+      ["bg", bg],
+    ] as const) {
+      const bulk = messages.posts.generate.bulk as Record<string, string>;
+      for (const code of codes) {
+        const key = `distributionError_${code}`;
+        assert.equal(typeof bulk[key], "string", `${locale} is missing posts.generate.bulk.${key}`);
+      }
+      // The per-post time input's accessible name, built the same way.
+      assert.equal(typeof bulk.timeForPost, "string", `${locale} is missing timeForPost`);
     }
   });
 });

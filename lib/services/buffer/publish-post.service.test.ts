@@ -21,6 +21,8 @@ interface PostRow {
   hashtags: string[];
   mediaAssetId: string | null;
   mediaAsset: { url: string } | null;
+  scheduledFor: Date | null;
+  generationBatchId: string | null;
 }
 
 function makePost(overrides: Partial<PostRow> = {}): PostRow {
@@ -34,6 +36,10 @@ function makePost(overrides: Partial<PostRow> = {}): PostRow {
     hashtags: ["ai"],
     mediaAssetId: null,
     mediaAsset: null,
+    // Unscheduled and not from a bulk run — the plain "publish this now" case
+    // every test below is about unless it says otherwise.
+    scheduledFor: null,
+    generationBatchId: null,
     ...overrides,
   };
 }
@@ -53,6 +59,8 @@ function makeDeps(
     bufferError?: Error;
     /** Thrown from resolving the client, e.g. no connection on file. */
     clientError?: Error;
+    /** Pins the clock the due-check reads. */
+    now?: Date;
   } = {}
 ): Harness {
   const updates: Prisma.PostUncheckedUpdateInput[] = [];
@@ -91,6 +99,7 @@ function makeDeps(
         if (options.clientError) throw options.clientError;
         return sender;
       },
+      now: () => options.now ?? new Date(),
     },
     updates: () => updates,
     audits: () => audits,
@@ -307,6 +316,205 @@ describe("approveAndPublishPost — policy", () => {
     assert.equal(result.success === false && result.code, "POLICY_VIOLATION");
     // Approval must not slip through on a post that cannot be published.
     assert.deepEqual(h.updates(), []);
+    assert.deepEqual(h.sent(), []);
+  });
+});
+
+// ─── The schedule a person set ───────────────────────────────────────────────
+// Reported from manual testing: a bulk post scheduled for 12:00 Europe/Sofia was
+// approved at 11:48 and went to Buffer immediately. Approving is not publishing;
+// only the sweep may send a manually scheduled post, and only once it is due.
+
+const SOFIA_NOON = new Date("2026-08-12T09:00:00.000Z"); // 12:00 Europe/Sofia (UTC+3)
+const BATCH_ID = "batch-1";
+
+describe("approveAndPublishPost — manually scheduled", () => {
+  it("does not send a future-scheduled bulk post approved 12 minutes early", async () => {
+    const h = makeDeps(
+      makePost({
+        status: "pending_approval",
+        scheduledFor: SOFIA_NOON,
+        generationBatchId: BATCH_ID,
+      }),
+      { role: "owner", now: new Date("2026-08-12T08:48:00.000Z") } // 11:48 Sofia
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success, false);
+    assert.equal(result.success === false && result.code, "NOT_DUE");
+    // The whole point: Buffer was never called.
+    assert.deepEqual(h.sent(), []);
+    // And nothing was written — no approval, no publish, no partial state.
+    assert.deepEqual(h.updates(), []);
+    assert.deepEqual(h.audits(), []);
+  });
+
+  it("refuses one second early, because early is early", async () => {
+    const h = makeDeps(
+      makePost({
+        status: "pending_approval",
+        scheduledFor: SOFIA_NOON,
+        generationBatchId: BATCH_ID,
+      }),
+      { role: "owner", now: new Date(SOFIA_NOON.getTime() - 1000) }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success === false && result.code, "NOT_DUE");
+    assert.deepEqual(h.sent(), []);
+  });
+
+  it("refuses a global admin too — the schedule is not a permission", async () => {
+    const h = makeDeps(
+      makePost({
+        status: "pending_approval",
+        scheduledFor: SOFIA_NOON,
+        generationBatchId: BATCH_ID,
+      }),
+      { now: new Date("2026-08-12T08:48:00.000Z") }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, true, h.deps);
+
+    assert.equal(result.success === false && result.code, "NOT_DUE");
+    assert.deepEqual(h.sent(), []);
+  });
+
+  it("refuses an already-approved post whose time is still ahead", async () => {
+    // The state the fixed flow leaves a post in: approved, waiting for the sweep.
+    const h = makeDeps(
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: BATCH_ID }),
+      { role: "owner", now: new Date("2026-08-12T08:48:00.000Z") }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success === false && result.code, "NOT_DUE");
+    assert.deepEqual(h.sent(), []);
+    assert.deepEqual(h.updates(), []);
+  });
+
+  it("names the scheduled time in the refusal, so the card can explain itself", async () => {
+    const h = makeDeps(
+      makePost({
+        status: "pending_approval",
+        scheduledFor: SOFIA_NOON,
+        generationBatchId: BATCH_ID,
+      }),
+      { role: "owner", now: new Date("2026-08-12T08:48:00.000Z") }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success, false);
+    assert.match(
+      result.success === false ? (result.message ?? "") : "",
+      /2026-08-12T09:00:00\.000Z/
+    );
+  });
+
+  it("sends it once due", async () => {
+    const h = makeDeps(
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: BATCH_ID }),
+      { role: "owner", now: SOFIA_NOON }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success, true);
+    assert.equal(h.sent().length, 1);
+  });
+
+  it("still lets an owner publish a manual post whose slot is long gone", async () => {
+    // The sweep parks these rather than firing them late; publishing by hand is
+    // the recovery path, so it must stay open.
+    const h = makeDeps(
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: BATCH_ID }),
+      { role: "owner", now: new Date("2026-08-14T09:00:00.000Z") }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success, true);
+    assert.equal(h.sent().length, 1);
+  });
+
+  it("keeps generationBatchId out of the update, so the post stays in its batch", async () => {
+    const h = makeDeps(
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: BATCH_ID }),
+      { role: "owner", now: SOFIA_NOON }
+    );
+
+    await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(h.updates().length, 1);
+    assert.equal("generationBatchId" in h.updates()[0], false);
+    assert.equal("scheduledFor" in h.updates()[0], false);
+  });
+});
+
+describe("approveAndPublishPost — schedules the gate must not touch", () => {
+  it("publishes an unscheduled draft on demand, as it always has", async () => {
+    const h = makeDeps(makePost({ status: "draft" }), { role: "owner" });
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success, true);
+    assert.equal(h.sent().length, 1);
+  });
+
+  it("publishes an automatic cron post early, keeping its look-ahead", async () => {
+    // generationBatchId === null means the weekly filler picked the time as an
+    // estimate. That behaviour is deliberately unchanged.
+    const h = makeDeps(
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: null }),
+      { role: "owner", now: new Date("2026-08-12T08:48:00.000Z") }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success, true);
+    assert.equal(h.sent().length, 1);
+  });
+
+  it("publishes an automatic post scheduled days out", async () => {
+    const h = makeDeps(
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: null }),
+      { role: "owner", now: new Date("2026-08-01T09:00:00.000Z") }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success, true);
+    assert.equal(h.sent().length, 1);
+  });
+
+  it("checks access before the schedule — an editor is refused as an editor", async () => {
+    const h = makeDeps(
+      makePost({
+        status: "pending_approval",
+        scheduledFor: SOFIA_NOON,
+        generationBatchId: BATCH_ID,
+      }),
+      { role: "editor", now: new Date("2026-08-12T08:48:00.000Z") }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success === false && result.code, "FORBIDDEN");
+    assert.deepEqual(h.sent(), []);
+  });
+
+  it("checks status before the schedule — a rejected post is INVALID_STATUS", async () => {
+    const h = makeDeps(
+      makePost({ status: "rejected", scheduledFor: SOFIA_NOON, generationBatchId: BATCH_ID }),
+      { role: "owner", now: new Date("2026-08-12T08:48:00.000Z") }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success === false && result.code, "INVALID_STATUS");
     assert.deepEqual(h.sent(), []);
   });
 });

@@ -16,6 +16,8 @@ export const API_ERROR_CODES = [
   "INVALID_JSON",
   "INVALID_TRANSITION",
   "INVALID_STATUS",
+  // Publishing (v2-9) — a manually scheduled post cannot be sent before its time.
+  "NOT_DUE",
   "TOKEN_EXPIRED",
   "POST_LOCKED",
   "NO_CONNECTION",

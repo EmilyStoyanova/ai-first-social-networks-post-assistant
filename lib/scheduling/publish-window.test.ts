@@ -4,6 +4,7 @@ import {
   PAST_DUE_GRACE_MS,
   PUBLISH_LOOKAHEAD_MS,
   PUBLISH_SWEEP_INTERVAL_MS,
+  blocksOnDemandPublish,
   decidePublish,
   partitionByPublishDecision,
   pastDueMessage,
@@ -184,5 +185,81 @@ describe("pastDueMessage", () => {
       pastDueMessage(new Date("2026-08-01T09:00:00.000Z")),
       pastDueMessage(new Date("2026-08-02T09:00:00.000Z"))
     );
+  });
+});
+
+// ─── On-demand publishing (the card's button, not the sweep) ──────────────────
+
+describe("blocksOnDemandPublish", () => {
+  const NOON = new Date("2026-08-12T09:00:00.000Z");
+
+  it("blocks a manual post whose time is still ahead", () => {
+    assert.equal(
+      blocksOnDemandPublish(
+        { scheduledFor: NOON, generationBatchId: "batch-1" },
+        new Date("2026-08-12T08:48:00.000Z")
+      ),
+      true
+    );
+  });
+
+  it("blocks it one millisecond early", () => {
+    assert.equal(
+      blocksOnDemandPublish(
+        { scheduledFor: NOON, generationBatchId: "batch-1" },
+        new Date(NOON.getTime() - 1)
+      ),
+      true
+    );
+  });
+
+  it("allows it exactly on time", () => {
+    assert.equal(
+      blocksOnDemandPublish({ scheduledFor: NOON, generationBatchId: "batch-1" }, NOON),
+      false
+    );
+  });
+
+  it("allows a manual post that is past due — publishing by hand is its way out", () => {
+    // decidePublish says "past_due" here and the sweep parks it; a person must
+    // still be able to send it, so this predicate must NOT follow that decision.
+    const late = new Date("2026-08-14T09:00:00.000Z");
+    assert.equal(
+      decidePublish({ scheduledFor: NOON, generationBatchId: "batch-1" }, late),
+      "past_due"
+    );
+    assert.equal(
+      blocksOnDemandPublish({ scheduledFor: NOON, generationBatchId: "batch-1" }, late),
+      false
+    );
+  });
+
+  it("allows an unscheduled post, which is the ordinary publish-now case", () => {
+    // decidePublish calls this "not_due" forever; on demand it is the norm.
+    assert.equal(decidePublish({ scheduledFor: null, generationBatchId: null }, NOON), "not_due");
+    assert.equal(
+      blocksOnDemandPublish({ scheduledFor: null, generationBatchId: null }, NOON),
+      false
+    );
+  });
+
+  it("allows an unscheduled post that came from a bulk run", () => {
+    assert.equal(
+      blocksOnDemandPublish({ scheduledFor: null, generationBatchId: "batch-1" }, NOON),
+      false
+    );
+  });
+
+  it("never blocks an automatic post, however far out its estimate is", () => {
+    for (const now of [
+      new Date("2026-08-12T08:48:00.000Z"),
+      new Date("2026-08-01T09:00:00.000Z"),
+      new Date("2026-01-01T09:00:00.000Z"),
+    ]) {
+      assert.equal(
+        blocksOnDemandPublish({ scheduledFor: NOON, generationBatchId: null }, now),
+        false
+      );
+    }
   });
 });

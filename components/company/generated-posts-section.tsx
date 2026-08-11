@@ -69,6 +69,26 @@ export function GeneratedPostsSection({
   const [posts, setPosts] = useState<PostItem[]>(initialPosts);
   const [statusFilter, setStatusFilter] = useState<PostStatusFilter>(initialStatusFilter);
   const [lastUrlFilter, setLastUrlFilter] = useState<PostStatusFilter>(initialStatusFilter);
+  const [lastServerPosts, setLastServerPosts] = useState<PostItem[]>(initialPosts);
+
+  // A fresh list from the server replaces the local one.
+  //
+  // `posts` is seeded from a prop, and a `useState` initialiser runs once — so
+  // without this, `router.refresh()` re-rendered the server component, delivered
+  // a new `initialPosts`, and the grid went on showing the array it was born
+  // with. That is what made a completed bulk run look like it had generated
+  // nothing until the page was reloaded by hand: the ten drafts existed, the
+  // refresh fetched them, and the list ignored them.
+  //
+  // The server is authoritative whenever it speaks, and it only speaks here
+  // after something has already been committed (a bulk run, a status change), so
+  // adopting its answer cannot discard a pending local edit. Same adjust-during-
+  // render pattern as the filter below, and for the same reason: an effect would
+  // repaint the grid a second time.
+  if (initialPosts !== lastServerPosts) {
+    setLastServerPosts(initialPosts);
+    setPosts(initialPosts);
+  }
 
   // Back/forward should move the grid, not just the address bar. Local state
   // exists only so a click renders instantly rather than waiting on the router,
@@ -89,6 +109,9 @@ export function GeneratedPostsSection({
    * A bulk run finished. It reports post ids rather than whole posts, so the
    * grid is reloaded from the server instead of patched — one refresh against
    * up to ten follow-up fetches, and it repaints the tab counts too.
+   *
+   * The refresh reaches the grid via the `initialPosts` sync above; on its own it
+   * only re-renders the server component.
    */
   function handleBulkGenerated() {
     router.refresh();

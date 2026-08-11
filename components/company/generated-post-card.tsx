@@ -66,6 +66,7 @@ export function GeneratedPostCard({
   // ── Approval state ────────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
   const [rejecting, setRejecting] = useState(false);
+  const [approving, setApproving] = useState(false);
   const [approvalError, setApprovalError] = useState("");
 
   // ── Delete state ──────────────────────────────────────────────────────────
@@ -118,7 +119,17 @@ export function GeneratedPostCard({
   const origin = post.origin;
   const originLabel = originLabelFor(origin);
 
-  const actions = resolvePostActions({ role, status: localStatus, bufferConnected });
+  // Read once per mount: a card that sits open past its post's slot keeps
+  // offering plain Approve, which stays correct — the sweep publishes it.
+  const [openedAt] = useState(() => new Date());
+  const actions = resolvePostActions({
+    role,
+    status: localStatus,
+    bufferConnected,
+    manuallyScheduled: post.manuallyScheduled,
+    scheduledFor: post.scheduledFor,
+    now: openedAt,
+  });
 
   const isDraft = localStatus === "DRAFT";
   const isPendingApproval = localStatus === "PENDING_APPROVAL";
@@ -163,6 +174,29 @@ export function GeneratedPostCard({
       setApprovalError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  /**
+   * Approve without publishing — the action for a post whose time is still
+   * ahead. Goes through the plain approval route, so the post becomes `approved`
+   * with its `scheduledFor` untouched and the publishing sweep sends it when due.
+   */
+  async function handleApproveOnly() {
+    setApproving(true);
+    setApprovalError("");
+    try {
+      const res = await fetch(`/api/v1/posts/${post.id}/approve`, { method: "POST" });
+      if (!res.ok) {
+        const json = (await res.json()) as { error?: { message?: string } };
+        throw new Error(apiError(json.error));
+      }
+      setLocalStatus("APPROVED");
+      onStatusChange?.(post.id, "APPROVED");
+    } catch (err) {
+      setApprovalError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
+    } finally {
+      setApproving(false);
     }
   }
 
@@ -569,6 +603,16 @@ export function GeneratedPostCard({
           <Button variant="primary" size="sm" onClick={handleOpenPublish}>
             {actions.approvalPending ? t("approveAndPublish") : t("publishToBuffer")}
           </Button>
+        )}
+
+        {/* Approve alone — its publish time is still ahead, so the sweep sends it */}
+        {actions.approveOnly && (
+          <Button variant="primary" size="sm" loading={approving} onClick={handleApproveOnly}>
+            {approving ? t("approving") : t("approve")}
+          </Button>
+        )}
+        {actions.awaitingSchedule && (
+          <span className="text-fg-faint text-xs">{t("awaitingScheduledTime")}</span>
         )}
         {actions.connectBufferHint && (
           <span className="text-fg-faint text-xs">{t("connectBufferToPublish")}</span>

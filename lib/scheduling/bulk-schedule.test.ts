@@ -3,10 +3,13 @@ import assert from "node:assert/strict";
 import {
   MAX_BULK_POSTS,
   MAX_BULK_RANGE_DAYS,
+  defaultTimesForDay,
   deriveEligibleSlots,
+  formatTimeOfDay,
   inclusiveDayCount,
   isStartDateInPast,
   parseIsoDate,
+  parseTimeOfDay,
   planBulkSlots,
   planCustomSlots,
   validateCustomDistribution,
@@ -81,25 +84,19 @@ describe("inclusiveDayCount", () => {
 });
 
 describe("the times are business-zone wall clock, not UTC", () => {
-  it("schedules a configured 18:30 at 18:30 in Sofia, whatever that is in UTC", () => {
+  it("schedules a chosen 18:30 at 18:30 in Sofia, whatever that is in UTC", () => {
     // The bug this exists to prevent: 18:30 stored as 18:30Z, then rendered back
     // to the user who typed it as 21:30.
-    const summer = planCustomSlots(
-      [{ date: "2026-08-17", count: 1 }],
-      [{ day: "MONDAY", start: "18:30", end: "20:00" }]
-    );
+    const summer = planCustomSlots([{ date: "2026-08-17", count: 1, times: ["18:30"] }]);
     assert.deepEqual(summer.map(stamp), ["2026-08-17T18:30"]);
     // EEST, UTC+3.
     assert.deepEqual(summer.map(whenUtc), ["2026-08-17T15:30:00.000Z"]);
   });
 
   it("follows the zone across the DST boundary rather than fixing an offset", () => {
-    // Same configured time, opposite side of the year: the stored instant moves
-    // by an hour so the wall clock does not.
-    const winter = planCustomSlots(
-      [{ date: "2026-01-19", count: 1 }],
-      [{ day: "MONDAY", start: "18:30", end: "20:00" }]
-    );
+    // Same chosen time, opposite side of the year: the stored instant moves by an
+    // hour so the wall clock does not.
+    const winter = planCustomSlots([{ date: "2026-01-19", count: 1, times: ["18:30"] }]);
     assert.deepEqual(winter.map(stamp), ["2026-01-19T18:30"]);
     // EET, UTC+2.
     assert.deepEqual(winter.map(whenUtc), ["2026-01-19T16:30:00.000Z"]);
@@ -114,22 +111,35 @@ describe("the times are business-zone wall clock, not UTC", () => {
   it("keeps a slot on the day it was planned for, not the UTC day before it", () => {
     // 00:30 Sofia is 21:30 UTC the previous day. The post belongs to the 17th,
     // which is the day the user chose and the day the card will show.
-    const slots = planCustomSlots(
-      [{ date: "2026-08-17", count: 1 }],
-      [{ day: "MONDAY", start: "00:30", end: "02:00" }]
-    );
+    const slots = planCustomSlots([{ date: "2026-08-17", count: 1, times: ["00:30"] }]);
     assert.deepEqual(slots.map(stamp), ["2026-08-17T00:30"]);
     assert.deepEqual(slots.map(whenUtc), ["2026-08-16T21:30:00.000Z"]);
   });
 
-  it("treats a window time that is not a real clock time as unconfigured", () => {
-    // postingWindows is shape-checked, never range-checked. Rolling "25:00" over
-    // into the next day would move the post off the day it was planned for.
-    const slots = planCustomSlots(
-      [{ date: "2026-08-17", count: 1 }],
-      [{ day: "MONDAY", start: "25:00", end: "26:00" }]
+  it("seeds from a window time that is not a real clock time as if unconfigured", () => {
+    // postingWindows is shape-checked, never range-checked. A "25:00" must not
+    // become a seeded input the API then refuses as invalid_time.
+    assert.deepEqual(
+      defaultTimesForDay("2026-08-17", 1, [{ day: "MONDAY", start: "25:00", end: "26:00" }]),
+      ["10:00"]
     );
-    assert.deepEqual(slots.map(stamp), ["2026-08-17T10:00"]);
+  });
+
+  it("reads a chosen time back as itself, on every screen that shows it", () => {
+    // The contract the whole mode depends on. `toAppDateTimeLocal` is what the
+    // reschedule input is filled from, and `formatDateTime` renders the preview
+    // and the post card through the same zone — so if the wall clock survives
+    // this round trip, all three agree with what the user picked.
+    //
+    // Both sides of the DST boundary, and both edges of the day, because those
+    // are where an offset bug hides: 00:15 and 23:45 are the times that would
+    // land on a neighbouring DATE if the instant were assembled in UTC.
+    for (const date of ["2026-01-19", "2026-08-17", "2026-03-29", "2026-10-25"]) {
+      for (const time of ["00:15", "09:00", "13:15", "23:45"]) {
+        const [slot] = planCustomSlots([{ date, count: 1, times: [time] }]);
+        assert.equal(toAppDateTimeLocal(slot), `${date}T${time}`, `${date} ${time}`);
+      }
+    }
   });
 });
 
@@ -396,55 +406,83 @@ describe("planBulkSlots — even spread, boundaries not pinned", () => {
   });
 });
 
+describe("parseTimeOfDay / formatTimeOfDay", () => {
+  it("reads a real HH:mm", () => {
+    assert.deepEqual(parseTimeOfDay("00:00"), { hour: 0, minute: 0 });
+    assert.deepEqual(parseTimeOfDay("09:05"), { hour: 9, minute: 5 });
+    assert.deepEqual(parseTimeOfDay("23:59"), { hour: 23, minute: 59 });
+  });
+
+  it("rejects anything a clock cannot show", () => {
+    // Range-checked, unlike the shape check applied to stored posting windows:
+    // these are times a user typed for a specific post.
+    for (const bad of ["24:00", "25:00", "12:60", "9:00", "09:0", "0900", "", "09:00:00", "abc"]) {
+      assert.equal(parseTimeOfDay(bad), null, bad);
+    }
+  });
+
+  it("round-trips through formatTimeOfDay", () => {
+    for (const value of ["00:00", "07:45", "18:30", "23:59"]) {
+      assert.equal(formatTimeOfDay(parseTimeOfDay(value)!), value);
+    }
+  });
+});
+
 describe("validateCustomDistribution", () => {
-  it("accepts days inside the period whose counts add up", () => {
+  /** Well before every date used below, so nothing is accidentally "past". */
+  const NOW = new Date("2026-08-10T09:00:00.000Z");
+
+  /** A day with `count` posts at plausible distinct times. */
+  function day(date: string, count: number) {
+    return { date, count, times: defaultTimesForDay(date, count) };
+  }
+
+  it("accepts days inside the period whose counts add up and whose times are real", () => {
     assert.equal(
       validateCustomDistribution(
         [
-          { date: "2026-08-18", count: 2 },
-          { date: "2026-08-25", count: 1 },
+          { date: "2026-08-18", count: 2, times: ["09:00", "17:30"] },
+          { date: "2026-08-25", count: 1, times: ["12:00"] },
         ],
         3,
         START,
-        END
+        END,
+        NOW
       ),
       null
     );
   });
 
   it("accepts the boundary days themselves — they are allowed, just not required", () => {
-    assert.equal(validateCustomDistribution([{ date: START, count: 1 }], 1, START, END), null);
-    assert.equal(validateCustomDistribution([{ date: END, count: 1 }], 1, START, END), null);
+    assert.equal(validateCustomDistribution([day(START, 1)], 1, START, END, NOW), null);
+    assert.equal(validateCustomDistribution([day(END, 1)], 1, START, END, NOW), null);
   });
 
   it("rejects a total that disagrees with the requested number of posts", () => {
-    const days = [{ date: "2026-08-18", count: 2 }];
-    assert.equal(validateCustomDistribution(days, 3, START, END), "count_mismatch");
-    assert.equal(validateCustomDistribution(days, 1, START, END), "count_mismatch");
+    const days = [day("2026-08-18", 2)];
+    assert.equal(validateCustomDistribution(days, 3, START, END, NOW), "count_mismatch");
+    assert.equal(validateCustomDistribution(days, 1, START, END, NOW), "count_mismatch");
   });
 
   it("rejects an empty distribution", () => {
-    assert.equal(validateCustomDistribution([], 3, START, END), "empty");
+    assert.equal(validateCustomDistribution([], 3, START, END, NOW), "empty");
   });
 
   it("rejects a day outside the period", () => {
     assert.equal(
-      validateCustomDistribution([{ date: "2026-09-01", count: 1 }], 1, START, END),
+      validateCustomDistribution([day("2026-09-01", 1)], 1, START, END, NOW),
       "out_of_period"
     );
     assert.equal(
-      validateCustomDistribution([{ date: "2026-08-16", count: 1 }], 1, START, END),
+      validateCustomDistribution([day("2026-08-16", 1)], 1, START, END, NOW),
       "out_of_period"
     );
   });
 
   it("rejects an unusable period outright", () => {
+    assert.equal(validateCustomDistribution([day(START, 1)], 1, END, START, NOW), "out_of_period");
     assert.equal(
-      validateCustomDistribution([{ date: START, count: 1 }], 1, END, START),
-      "out_of_period"
-    );
-    assert.equal(
-      validateCustomDistribution([{ date: "2026-06-01", count: 1 }], 1, "2026-01-01", "2027-06-01"),
+      validateCustomDistribution([day("2026-06-01", 1)], 1, "2026-01-01", "2027-06-01", NOW),
       "out_of_period"
     );
   });
@@ -453,12 +491,13 @@ describe("validateCustomDistribution", () => {
     assert.equal(
       validateCustomDistribution(
         [
-          { date: "2026-08-18", count: 1 },
-          { date: "2026-08-18", count: 2 },
+          { date: "2026-08-18", count: 1, times: ["09:00"] },
+          { date: "2026-08-18", count: 2, times: ["12:00", "15:00"] },
         ],
         3,
         START,
-        END
+        END,
+        NOW
       ),
       "duplicate_date"
     );
@@ -466,91 +505,220 @@ describe("validateCustomDistribution", () => {
 
   it("rejects a malformed date and a non-positive or fractional count", () => {
     assert.equal(
-      validateCustomDistribution([{ date: "18/08/2026", count: 1 }], 1, START, END),
+      validateCustomDistribution(
+        [{ date: "18/08/2026", count: 1, times: ["09:00"] }],
+        1,
+        START,
+        END,
+        NOW
+      ),
       "invalid_date"
     );
     assert.equal(
-      validateCustomDistribution([{ date: "2026-08-18", count: 0 }], 0, START, END),
+      validateCustomDistribution([{ date: "2026-08-18", count: 0, times: [] }], 0, START, END, NOW),
       "invalid_count"
     );
     assert.equal(
-      validateCustomDistribution([{ date: "2026-08-18", count: 1.5 }], 1.5, START, END),
+      validateCustomDistribution(
+        [{ date: "2026-08-18", count: 1.5, times: ["09:00"] }],
+        1.5,
+        START,
+        END,
+        NOW
+      ),
       "invalid_count"
+    );
+  });
+
+  // ── The rules the manual times add ────────────────────────────────────────
+
+  it("requires exactly one time per post on the day", () => {
+    // Fewer, and a post has no time; more, and a time belongs to no post. Either
+    // way the request means two different things to its author and its reader.
+    for (const times of [["09:00"], ["09:00", "12:00", "15:00"], []]) {
+      assert.equal(
+        validateCustomDistribution([{ date: "2026-08-18", count: 2, times }], 2, START, END, NOW),
+        "time_count_mismatch",
+        JSON.stringify(times)
+      );
+    }
+  });
+
+  it("rejects a time no clock can show", () => {
+    for (const bad of ["24:00", "12:60", "9:00", "", "noon"]) {
+      assert.equal(
+        validateCustomDistribution(
+          [{ date: "2026-08-18", count: 1, times: [bad] }],
+          1,
+          START,
+          END,
+          NOW
+        ),
+        "invalid_time",
+        bad
+      );
+    }
+  });
+
+  it("rejects the same date and time twice", () => {
+    // Two posts at one instant are indistinguishable on the calendar, and in this
+    // mode there is no nudging one along — the user is asked to change it.
+    assert.equal(
+      validateCustomDistribution(
+        [{ date: "2026-08-18", count: 2, times: ["09:00", "09:00"] }],
+        2,
+        START,
+        END,
+        NOW
+      ),
+      "duplicate_slot"
+    );
+  });
+
+  it("catches two times that are one instant across the spring-forward hour", () => {
+    // Sofia skips 03:00–03:59 on 2026-03-29, so a wall clock in that hour has no
+    // instant of its own and resolves forward: 03:00 and 04:00 are the SAME
+    // moment. Comparing the typed strings would let both through and write two
+    // posts to one instant.
+    assert.equal(
+      validateCustomDistribution(
+        [{ date: "2026-03-29", count: 2, times: ["03:00", "04:00"] }],
+        2,
+        "2026-03-01",
+        "2026-03-31",
+        new Date("2026-03-01T00:00:00.000Z")
+      ),
+      "duplicate_slot"
+    );
+
+    // An hour either side of the gap is two real, distinct instants.
+    assert.equal(
+      validateCustomDistribution(
+        [{ date: "2026-03-29", count: 2, times: ["02:30", "04:30"] }],
+        2,
+        "2026-03-01",
+        "2026-03-31",
+        new Date("2026-03-01T00:00:00.000Z")
+      ),
+      null
+    );
+  });
+
+  it("allows the same time on two different days", () => {
+    // It is the date AND time together that must be unique; a channel posting at
+    // 09:00 every day is the normal case, not a collision.
+    assert.equal(
+      validateCustomDistribution(
+        [
+          { date: "2026-08-18", count: 1, times: ["09:00"] },
+          { date: "2026-08-19", count: 1, times: ["09:00"] },
+        ],
+        2,
+        START,
+        END,
+        NOW
+      ),
+      null
+    );
+  });
+
+  it("rejects a time that has already passed", () => {
+    // 2026-08-17 12:00 Sofia is 09:00 UTC; an hour later, the slot is behind us.
+    const afterwards = new Date("2026-08-17T10:00:00.000Z");
+    assert.equal(
+      validateCustomDistribution(
+        [{ date: "2026-08-17", count: 1, times: ["12:00"] }],
+        1,
+        START,
+        END,
+        afterwards
+      ),
+      "time_in_past"
+    );
+
+    // Later the same day is still fine — it is the time that is checked, not the
+    // day, so a same-day batch remains possible.
+    assert.equal(
+      validateCustomDistribution(
+        [{ date: "2026-08-17", count: 1, times: ["18:00"] }],
+        1,
+        START,
+        END,
+        afterwards
+      ),
+      null
+    );
+  });
+
+  it("measures the past in Sofia, not UTC", () => {
+    // 09:30 UTC is 12:30 in Sofia. A 12:00 slot that day is therefore PAST, even
+    // though 12:00 is still ahead on the UTC clock — reading it in UTC would let
+    // through three hours of unpublishable posts every afternoon.
+    const now = new Date("2026-08-17T09:30:00.000Z");
+    assert.equal(
+      validateCustomDistribution(
+        [{ date: "2026-08-17", count: 1, times: ["12:00"] }],
+        1,
+        START,
+        END,
+        now
+      ),
+      "time_in_past"
     );
   });
 });
 
-describe("planCustomSlots — the user picks the days, the channel picks the times", () => {
-  it("places each day's posts at that day's configured windows, in order", () => {
-    const slots = planCustomSlots(
-      [
-        { date: "2026-08-17", count: 2 },
-        { date: "2026-08-19", count: 1 },
-      ],
-      [
-        { day: "MONDAY", start: "09:00", end: "10:00" },
-        { day: "MONDAY", start: "18:30", end: "19:30" },
-        { day: "WEDNESDAY", start: "12:15", end: "13:00" },
-      ]
-    );
+describe("planCustomSlots — the user picks the days AND the times", () => {
+  it("schedules exactly the times given, in the order they were given", () => {
+    const slots = planCustomSlots([
+      { date: "2026-08-17", count: 3, times: ["07:15", "13:40", "21:05"] },
+      { date: "2026-08-19", count: 1, times: ["12:15"] },
+    ]);
 
     assert.deepEqual(slots.map(stamp), [
-      "2026-08-17T09:00",
-      "2026-08-17T18:30",
+      "2026-08-17T07:15",
+      "2026-08-17T13:40",
+      "2026-08-17T21:05",
       "2026-08-19T12:15",
     ]);
   });
 
-  it("fills the windows from the earliest one when a day has fewer posts than windows", () => {
-    // The user asked for one post that day, so it goes at the first window —
-    // not at whichever one an even spread would have centred on.
-    const slots = planCustomSlots(
-      [{ date: "2026-08-17", count: 1 }],
-      [
-        { day: "MONDAY", start: "09:00", end: "10:00" },
-        { day: "MONDAY", start: "18:30", end: "19:30" },
-      ]
+  it("ignores the channel's posting windows entirely", () => {
+    // The guarantee the whole mode rests on: whatever the channel is configured
+    // for, a custom slot is the time the user typed. The planner does not even
+    // accept windows any more, so this is checked by the times surviving on a day
+    // the channel has no window for at all (Sunday on a Mon/Wed channel).
+    assert.deepEqual(
+      planCustomSlots([{ date: "2026-08-23", count: 2, times: ["06:00", "22:45"] }]).map(stamp),
+      ["2026-08-23T06:00", "2026-08-23T22:45"]
     );
-    assert.deepEqual(slots.map(stamp), ["2026-08-17T09:00"]);
+    // MON_WED exists for the even-spread tests; naming it here is what makes the
+    // absence of a windows argument deliberate rather than forgotten.
+    assert.equal(MON_WED.length, 2);
   });
 
-  it("stacks posts an hour apart past the last configured window", () => {
-    const slots = planCustomSlots([{ date: "2026-08-17", count: 3 }], MON_WED);
-    assert.deepEqual(slots.map(stamp), [
-      "2026-08-17T09:00",
-      "2026-08-17T10:00",
-      "2026-08-17T11:00",
+  it("does not stack or nudge times, however close together they are", () => {
+    // Even distribution pushes a colliding slot an hour on. Custom must not: the
+    // user asked for 09:00 and 09:01, and moving either would answer a question
+    // they did not ask. (Two IDENTICAL times are refused by validation instead.)
+    assert.deepEqual(
+      planCustomSlots([{ date: "2026-08-17", count: 3, times: ["09:00", "09:01", "23:59"] }]).map(
+        stamp
+      ),
+      ["2026-08-17T09:00", "2026-08-17T09:01", "2026-08-17T23:59"]
+    );
+  });
+
+  it("returns the slots in ascending order whatever order they arrive in", () => {
+    const slots = planCustomSlots([
+      { date: "2026-08-26", count: 1, times: ["09:00"] },
+      { date: "2026-08-17", count: 2, times: ["18:30", "08:00"] },
+      { date: "2026-08-19", count: 1, times: ["09:00"] },
     ]);
-  });
 
-  it("keeps a day the channel has no window for at the channel's usual hour", () => {
-    // Sunday on a Mon/Wed channel: the user explicitly chose the day, so it is
-    // honoured — at 09:00, the channel's own time, not an arbitrary default.
-    const slots = planCustomSlots([{ date: "2026-08-23", count: 1 }], MON_WED);
-    assert.deepEqual(slots.map(stamp), ["2026-08-23T09:00"]);
-  });
-
-  it("falls back to 10:00 when the channel has no windows at all", () => {
-    for (const windows of [undefined, [], { nonsense: true }]) {
-      assert.deepEqual(planCustomSlots([{ date: "2026-08-18", count: 2 }], windows).map(stamp), [
-        "2026-08-18T10:00",
-        "2026-08-18T11:00",
-      ]);
-    }
-  });
-
-  it("returns the slots in ascending order whatever order the days arrive in", () => {
-    const slots = planCustomSlots(
-      [
-        { date: "2026-08-26", count: 1 },
-        { date: "2026-08-17", count: 2 },
-        { date: "2026-08-19", count: 1 },
-      ],
-      MON_WED
-    );
     assert.deepEqual(slots.map(stamp), [
-      "2026-08-17T09:00",
-      "2026-08-17T10:00",
+      "2026-08-17T08:00",
+      "2026-08-17T18:30",
       "2026-08-19T09:00",
       "2026-08-26T09:00",
     ]);
@@ -559,36 +727,79 @@ describe("planCustomSlots — the user picks the days, the channel picks the tim
     }
   });
 
-  it("never lets one day's overflow push into the next day", () => {
-    // Two posts on a 22:00 channel, on consecutive configured days: the second
-    // post of day one is clamped at 23:00 and day two still starts at 22:00.
-    const slots = planCustomSlots(
-      [
-        { date: "2026-08-17", count: 3 },
-        { date: "2026-08-18", count: 1 },
-      ],
-      [
-        { day: "MONDAY", start: "22:00", end: "23:30" },
-        { day: "TUESDAY", start: "22:00", end: "23:30" },
-      ]
+  it("keeps a late slot on its own day rather than spilling over", () => {
+    assert.deepEqual(
+      planCustomSlots([
+        { date: "2026-08-17", count: 2, times: ["23:00", "23:59"] },
+        { date: "2026-08-18", count: 1, times: ["00:01"] },
+      ]).map(stamp),
+      ["2026-08-17T23:00", "2026-08-17T23:59", "2026-08-18T00:01"]
     );
-    assert.deepEqual(slots.map(stamp), [
-      "2026-08-17T22:00",
-      "2026-08-17T23:00",
-      "2026-08-17T23:00",
-      "2026-08-18T22:00",
-    ]);
   });
 
-  it("skips days it cannot use rather than guessing a date", () => {
+  it("skips what it cannot use rather than guessing a date or a time", () => {
     assert.deepEqual(planCustomSlots([]), []);
     assert.deepEqual(
       planCustomSlots([
-        { date: "not-a-date", count: 2 },
-        { date: "2026-08-18", count: 1 },
-        { date: "2026-08-19", count: 0 },
+        { date: "not-a-date", count: 1, times: ["09:00"] },
+        { date: "2026-08-18", count: 2, times: ["10:00", "25:00"] },
+        { date: "2026-08-19", count: 0, times: [] },
       ]).map(stamp),
       ["2026-08-18T10:00"]
     );
+  });
+});
+
+describe("defaultTimesForDay — seeding the editor's inputs", () => {
+  it("takes that weekday's configured windows in order", () => {
+    assert.deepEqual(
+      defaultTimesForDay("2026-08-17", 2, [
+        { day: "MONDAY", start: "09:00", end: "10:00" },
+        { day: "MONDAY", start: "18:30", end: "19:30" },
+      ]),
+      ["09:00", "18:30"]
+    );
+  });
+
+  it("steps an hour past the last window when more posts are asked for", () => {
+    assert.deepEqual(defaultTimesForDay("2026-08-17", 3, MON_WED), ["09:00", "10:00", "11:00"]);
+  });
+
+  it("uses the channel's usual hour for a day it has no window for", () => {
+    // Sunday on a Mon/Wed channel — the user chose the day, so it is seeded at
+    // 09:00, the channel's own time, not an arbitrary default.
+    assert.deepEqual(defaultTimesForDay("2026-08-23", 1, MON_WED), ["09:00"]);
+  });
+
+  it("falls back to 10:00 with nothing usable configured", () => {
+    for (const windows of [undefined, [], { nonsense: true }]) {
+      assert.deepEqual(defaultTimesForDay("2026-08-18", 2, windows), ["10:00", "11:00"]);
+    }
+  });
+
+  it("stays distinct once the 23:00 clamp is reached", () => {
+    // Stepping by the hour stops moving at 23:00, so it steps by the minute
+    // instead — otherwise the editor would open on a duplicate_slot the user has
+    // to fix before anything previews.
+    const times = defaultTimesForDay("2026-08-17", 4, [
+      { day: "MONDAY", start: "22:00", end: "23:30" },
+    ]);
+    assert.deepEqual(times, ["22:00", "23:00", "23:01", "23:02"]);
+    assert.equal(new Set(times).size, times.length);
+  });
+
+  it("gives every position a real time of day, up to a full batch", () => {
+    for (const windows of [undefined, MON_WED, [{ day: "MONDAY", start: "23:30", end: "23:59" }]]) {
+      const times = defaultTimesForDay("2026-08-17", MAX_BULK_POSTS, windows);
+      assert.equal(times.length, MAX_BULK_POSTS);
+      for (const time of times) assert.notEqual(parseTimeOfDay(time), null, time);
+    }
+  });
+
+  it("returns nothing for a day or a count it cannot seed", () => {
+    assert.deepEqual(defaultTimesForDay("not-a-date", 2), []);
+    assert.deepEqual(defaultTimesForDay("2026-02-30", 2), []);
+    assert.deepEqual(defaultTimesForDay("2026-08-17", 0), []);
+    assert.deepEqual(defaultTimesForDay("2026-08-17", 1.5), []);
   });
 });

@@ -35,23 +35,32 @@ const bodySchema = z.object({
   // Bounded because each post is a full generation (LLM + image) inside ONE
   // request; the service enforces the same bound independently.
   numberOfPosts: z.number().int().min(1).max(MAX_BULK_POSTS),
-  // Plain calendar days — the posts are scheduled, not timestamped, and a
-  // date-time here would only invite a timezone to be lost in transit. The time
-  // of day comes from the channel's posting windows, read in the business zone;
-  // the service is also what refuses a start date that has already gone by,
-  // since only it knows what "today" is for this company.
+  // Plain calendar days bounding the PERIOD — the posts are scheduled, not
+  // timestamped, and a date-time here would only invite a timezone to be lost in
+  // transit. The service is also what refuses a start date that has already gone
+  // by, since only it knows what "today" is for this company.
   startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  // Optional: which days carry how many posts. Omitted means "spread evenly
-  // across the channel's posting windows in the period". Bounded by
-  // MAX_BULK_POSTS days because a distribution needs at least one post per day,
-  // so more entries than that could never add up; the service re-checks the sum
-  // against `numberOfPosts` and the period, and is the authority.
+  // Optional: the user's own schedule — which days carry how many posts, and the
+  // exact business-zone wall clock of every one of them. Omitted means "spread
+  // evenly across the channel's posting windows in the period", which is the
+  // only mode where the windows decide anything; when this is present the times
+  // in it are scheduled verbatim.
+  //
+  // Bounded by MAX_BULK_POSTS days because a distribution needs at least one
+  // post per day, so more entries than that could never add up. `times` is
+  // shape-checked here only — that it has exactly `count` entries, that each one
+  // is a real time of day, that none collide and none are in the past is the
+  // service's answer, and the service is the authority.
   distribution: z
     .array(
       z.object({
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
         count: z.number().int().min(1).max(MAX_BULK_POSTS),
+        times: z
+          .array(z.string().regex(/^\d{2}:\d{2}$/))
+          .min(1)
+          .max(MAX_BULK_POSTS),
       })
     )
     .min(1)

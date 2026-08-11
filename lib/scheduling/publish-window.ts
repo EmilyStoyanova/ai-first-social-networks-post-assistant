@@ -133,6 +133,35 @@ export function partitionByPublishDecision<T extends PublishCandidate>(
 }
 
 /**
+ * Whether an ON-DEMAND publish — an owner pressing the button on the card, not a
+ * sweep — has to be refused because a person named a later time for this post.
+ *
+ * This is the guarantee that a manually scheduled post cannot go out early. The
+ * sweep already honours `scheduledFor` (see `decidePublish`), but the card's
+ * approve-and-publish action bypasses the sweep entirely, so without this a
+ * 12:00 post approved at 11:48 was sent at 11:48.
+ *
+ * Deliberately NOT `decidePublish(...) !== "publish"`, which would be wrong in
+ * both directions for a person's own button press:
+ *
+ *   • A post with no `scheduledFor` is "not_due" forever, yet publishing one on
+ *     demand is the normal case — that is what the button has always been for.
+ *   • A manual post that is "past_due" must stay hand-publishable. The sweep
+ *     refuses to fire it silently and parks it precisely so a person can decide;
+ *     blocking them here too would strand it with no way out but a reschedule.
+ *
+ * So only one case is refused: a manual post whose time is still ahead of us.
+ * Automatic posts are untouched and keep publishing on demand as before.
+ */
+export function blocksOnDemandPublish(post: PublishCandidate, now: Date): boolean {
+  return (
+    post.generationBatchId !== null &&
+    post.scheduledFor !== null &&
+    post.scheduledFor.getTime() > now.getTime()
+  );
+}
+
+/**
  * The explanation stored on a parked post, and shown on its card.
  *
  * Deterministic for a given `scheduledFor` so the publisher can tell an already

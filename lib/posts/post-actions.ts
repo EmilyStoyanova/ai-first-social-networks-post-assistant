@@ -18,6 +18,11 @@
  * Intermediate transitions an owner would only be performing to satisfy the
  * state machine are therefore not offered to them. Rejecting is not one of
  * those: it is a real editorial decision about someone else's work, so it stays.
+ *
+ * The one exception to "approve and publish are one decision" is a post whose
+ * time a person chose (a manual bulk post, still ahead of its slot). There they
+ * are two decisions — approve it now, publish it at 12:00 — so the owner is
+ * offered approval alone and the sweep does the rest.
  */
 
 /** The acting user's effective role. A global admin is treated as an owner. */
@@ -38,6 +43,12 @@ export interface PostActionsInput {
   status: string;
   /** Whether the company has a Buffer connection to publish through. */
   bufferConnected: boolean;
+  /** True iff a person named this post's time — PostItem.manuallyScheduled. */
+  manuallyScheduled?: boolean;
+  /** The named time, ISO, as the client holds it. */
+  scheduledFor?: string | null;
+  /** Evaluated against `scheduledFor`. Passed in so this stays pure. */
+  now?: Date;
 }
 
 export interface PostActions {
@@ -45,6 +56,18 @@ export interface PostActions {
   submitForApproval: boolean;
   /** The owner's single primary action: approve if needed, then send to Buffer. */
   approveAndPublish: boolean;
+  /**
+   * Approve WITHOUT publishing — the owner's action on a post whose time a
+   * person set for later. Approving is genuinely all there is to do: the
+   * publishing sweep sends it when it is due, so offering "publish" here would
+   * offer to break the schedule (and the server refuses it — NOT_DUE).
+   */
+  approveOnly: boolean;
+  /**
+   * Whether the post is approved and simply waiting for its own time. No action
+   * belongs to the owner in that state, so the card explains instead of asking.
+   */
+  awaitingSchedule: boolean;
   /**
    * Whether that action still has to approve, which is what its label says.
    * False for an already-approved post — including one auto-approved by a
@@ -70,12 +93,17 @@ export function resolvePostActions({
   role,
   status,
   bufferConnected,
+  manuallyScheduled = false,
+  scheduledFor = null,
+  now,
 }: PostActionsInput): PostActions {
   if (role === "editor") {
     return {
       // An editor's draft is the only thing they can move, and only to an owner.
       submitForApproval: status === "DRAFT",
       approveAndPublish: false,
+      approveOnly: false,
+      awaitingSchedule: false,
       approvalPending: false,
       reject: false,
       // Buffer is not an editor's concern — they cannot publish either way.
@@ -84,13 +112,29 @@ export function resolvePostActions({
   }
 
   const publishable = PUBLISHABLE.has(status);
+
+  // Held back by its own schedule: a person set a time still in the future, so
+  // publishing now is not on offer. Mirrors blocksOnDemandPublish in
+  // lib/scheduling/publish-window.ts, which is what actually enforces it — this
+  // only keeps the card from proposing an action the server would refuse.
+  // A past-due post is NOT held: publishing it by hand is its recovery path.
+  const scheduledAhead =
+    manuallyScheduled &&
+    scheduledFor !== null &&
+    now !== undefined &&
+    new Date(scheduledFor).getTime() > now.getTime();
+
   return {
     // An owner approving their own submission is a formality; skip straight to
     // the decision that matters.
     submitForApproval: false,
-    approveAndPublish: publishable && bufferConnected,
+    approveAndPublish: publishable && bufferConnected && !scheduledAhead,
+    approveOnly: scheduledAhead && publishable && status !== "APPROVED",
+    awaitingSchedule: scheduledAhead && status === "APPROVED",
     approvalPending: publishable && status !== "APPROVED",
     reject: status === "PENDING_APPROVAL",
-    connectBufferHint: publishable && !bufferConnected,
+    // Pointless while the post is waiting for its time — the sweep needs Buffer,
+    // but that is a company-settings problem, not this post's next step.
+    connectBufferHint: publishable && !bufferConnected && !scheduledAhead,
   };
 }

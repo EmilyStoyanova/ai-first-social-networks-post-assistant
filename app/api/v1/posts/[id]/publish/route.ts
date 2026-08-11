@@ -71,6 +71,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           },
           { status: 422 }
         );
+      case "NOT_DUE":
+        // 422: the post is fine, the timing is not. Its own schedule forbids
+        // sending it now, and the sweep will send it when due.
+        return NextResponse.json(
+          {
+            error: {
+              code: "NOT_DUE",
+              message: result.message ?? "This post is scheduled for later.",
+            },
+          },
+          { status: 422 }
+        );
       case "NO_CONNECTION":
         return NextResponse.json(
           {

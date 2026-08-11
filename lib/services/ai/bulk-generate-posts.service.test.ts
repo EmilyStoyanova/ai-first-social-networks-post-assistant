@@ -562,12 +562,13 @@ describe("bulkGeneratePosts — request validation", () => {
 
 // ─── Custom distribution ──────────────────────────────────────────────────────
 
-describe("bulkGeneratePosts — a user-authored distribution", () => {
-  it("schedules the posts on the days the user chose, at the channel's times", async () => {
+describe("bulkGeneratePosts — a user-authored schedule", () => {
+  it("schedules each post at exactly the date and time the user chose", async () => {
+    // Windows that disagree with every chosen time, precisely so that a slot
+    // landing on one of them would be visible here.
     const { deps, calls } = makeDeps({
       postingWindows: [
         { day: "MONDAY", start: "07:45", end: "09:00" },
-        { day: "MONDAY", start: "17:30", end: "18:30" },
         { day: "WEDNESDAY", start: "12:00", end: "13:00" },
       ],
     });
@@ -579,8 +580,8 @@ describe("bulkGeneratePosts — a user-authored distribution", () => {
       makeInput({
         numberOfPosts: 3,
         customDistribution: [
-          { date: "2026-08-19", count: 1 },
-          { date: "2026-08-17", count: 2 },
+          { date: "2026-08-19", count: 1, times: ["06:05"] },
+          { date: "2026-08-17", count: 2, times: ["21:40", "13:15"] },
         ],
       }),
       deps
@@ -589,13 +590,81 @@ describe("bulkGeneratePosts — a user-authored distribution", () => {
     assert.equal(result.success, true);
     if (!result.success) return;
 
-    // Days from the user, times from the channel, and ascending whatever order
-    // the days were sent in.
+    // The user's own times, ascending whatever order the days and times were
+    // sent in — and not one of the channel's windows among them.
     assert.deepEqual(
       calls().map((c) => slotStamp(c.options.scheduledFor as Date)),
-      ["2026-08-17T07:45", "2026-08-17T17:30", "2026-08-19T12:00"]
+      ["2026-08-17T13:15", "2026-08-17T21:40", "2026-08-19T06:05"]
     );
     assert.equal(result.data.generated, 3);
+  });
+
+  it("stores each chosen Sofia wall clock as the right UTC instant", async () => {
+    // What actually reaches the database. 13:15 Sofia in August (EEST, UTC+3) is
+    // 10:15Z — and it is this instant the post card and the reschedule panel
+    // read back through the same zone, so the user sees 13:15 again.
+    const { deps, calls } = makeDeps();
+
+    await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({
+        numberOfPosts: 2,
+        customDistribution: [{ date: "2026-08-17", count: 2, times: ["13:15", "23:30"] }],
+      }),
+      deps
+    );
+
+    assert.deepEqual(
+      calls().map((c) => (c.options.scheduledFor as Date).toISOString()),
+      ["2026-08-17T10:15:00.000Z", "2026-08-17T20:30:00.000Z"]
+    );
+  });
+
+  it("never reads the channel's posting windows in this mode", async () => {
+    // The strongest form of "do not recalculate from postingWindows": the
+    // service does not even load them, so there is nothing available to
+    // recalculate from.
+    let loads = 0;
+    const { deps } = makeDeps();
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({
+        numberOfPosts: 1,
+        customDistribution: [{ date: "2026-08-17", count: 1, times: ["13:15"] }],
+      }),
+      {
+        ...deps,
+        loadPostingWindows: async () => {
+          loads++;
+          return [{ day: "MONDAY", start: "07:45", end: "09:00" }];
+        },
+      }
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(loads, 0);
+  });
+
+  it("still loads the windows for an even spread", async () => {
+    // The other half of the previous test: even distribution is unchanged and
+    // depends on them, so a skipped load there would be a silent regression.
+    let loads = 0;
+    const { deps } = makeDeps();
+
+    await bulkGeneratePosts(SLUG, USER_ID, false, makeInput({ numberOfPosts: 1 }), {
+      ...deps,
+      loadPostingWindows: async () => {
+        loads++;
+        return [{ day: "MONDAY", start: "07:45", end: "09:00" }];
+      },
+    });
+
+    assert.equal(loads, 1);
   });
 
   it("rejects a distribution whose counts do not add up to the request", async () => {
@@ -607,7 +676,7 @@ describe("bulkGeneratePosts — a user-authored distribution", () => {
       false,
       makeInput({
         numberOfPosts: 5,
-        customDistribution: [{ date: "2026-08-18", count: 2 }],
+        customDistribution: [{ date: "2026-08-18", count: 2, times: ["09:00", "12:00"] }],
       }),
       deps
     );
@@ -628,7 +697,87 @@ describe("bulkGeneratePosts — a user-authored distribution", () => {
       false,
       makeInput({
         numberOfPosts: 1,
-        customDistribution: [{ date: "2026-09-15", count: 1 }],
+        customDistribution: [{ date: "2026-09-15", count: 1, times: ["09:00"] }],
+      }),
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (result.success) return;
+    assert.equal(result.code, "INVALID_DISTRIBUTION");
+    assert.equal(calls().length, 0);
+  });
+
+  it("rejects two posts at the same date and time", async () => {
+    const { deps, calls } = makeDeps();
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({
+        numberOfPosts: 2,
+        customDistribution: [{ date: "2026-08-18", count: 2, times: ["09:00", "09:00"] }],
+      }),
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (result.success) return;
+    assert.equal(result.code, "INVALID_DISTRIBUTION");
+    assert.equal(calls().length, 0);
+  });
+
+  it("rejects a chosen time that has already gone by", async () => {
+    // The injected clock is 2026-08-10 09:00Z — 12:00 in Sofia. A 10:00 slot
+    // that same day is behind it, even though the DAY is not in the past, so the
+    // start-date rule would let it through.
+    const { deps, calls } = makeDeps();
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({
+        numberOfPosts: 1,
+        startDate: "2026-08-10",
+        endDate: "2026-08-20",
+        customDistribution: [{ date: "2026-08-10", count: 1, times: ["10:00"] }],
+      }),
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (result.success) return;
+    assert.equal(result.code, "INVALID_DISTRIBUTION");
+    assert.equal(calls().length, 0);
+
+    // Later the same day is accepted, so a same-day batch is still possible.
+    const later = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({
+        numberOfPosts: 1,
+        startDate: "2026-08-10",
+        endDate: "2026-08-20",
+        customDistribution: [{ date: "2026-08-10", count: 1, times: ["18:00"] }],
+      }),
+      makeDeps().deps
+    );
+    assert.equal(later.success, true);
+  });
+
+  it("rejects a day whose times do not match its count", async () => {
+    const { deps, calls } = makeDeps();
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({
+        numberOfPosts: 2,
+        customDistribution: [{ date: "2026-08-18", count: 2, times: ["09:00"] }],
       }),
       deps
     );
@@ -650,7 +799,7 @@ describe("bulkGeneratePosts — a user-authored distribution", () => {
       false,
       makeInput({
         numberOfPosts: MAX_BULK_POSTS + 1,
-        customDistribution: [{ date: "2026-08-18", count: MAX_BULK_POSTS + 1 }],
+        customDistribution: [{ date: "2026-08-18", count: MAX_BULK_POSTS + 1, times: ["09:00"] }],
       }),
       deps
     );
@@ -669,7 +818,7 @@ describe("bulkGeneratePosts — a user-authored distribution", () => {
       false,
       makeInput({
         numberOfPosts: 2,
-        customDistribution: [{ date: "2026-08-20", count: 2 }],
+        customDistribution: [{ date: "2026-08-20", count: 2, times: ["09:00", "18:30"] }],
       }),
       deps
     );
@@ -852,7 +1001,10 @@ describe("bulkGeneratePosts — the batch's audit entry", () => {
       SLUG,
       USER_ID,
       false,
-      makeInput({ numberOfPosts: 2, customDistribution: [{ date: START, count: 2 }] }),
+      makeInput({
+        numberOfPosts: 2,
+        customDistribution: [{ date: START, count: 2, times: ["09:00", "18:30"] }],
+      }),
       deps
     );
 

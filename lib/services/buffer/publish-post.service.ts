@@ -9,6 +9,7 @@ import {
 } from "@/lib/buffer/buffer-errors";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 import { checkBlockingConstraints, type PolicyViolation } from "@/lib/ai/channel-policy";
+import { blocksOnDemandPublish } from "@/lib/scheduling/publish-window";
 import type { BufferPublishResult } from "@/lib/buffer/buffer-client";
 
 const MOCK_BUFFER_POST_ID = "mock-buffer-post";
@@ -42,6 +43,8 @@ export type PublishPostResult =
         | "NOT_FOUND"
         | "FORBIDDEN"
         | "INVALID_STATUS"
+        /** A person scheduled this post for later; the sweep will send it then. */
+        | "NOT_DUE"
         | "NO_CONNECTION"
         | "TOKEN_EXPIRED"
         | "INVALID_PROFILE"
@@ -89,6 +92,8 @@ export interface PublishPostDb {
         hashtags: true;
         mediaAssetId: true;
         mediaAsset: { select: { url: true } };
+        scheduledFor: true;
+        generationBatchId: true;
       };
     }) => Promise<{
       companyId: string;
@@ -98,6 +103,9 @@ export interface PublishPostDb {
       hashtags: string[];
       mediaAssetId: string | null;
       mediaAsset: { url: string } | null;
+      scheduledFor: Date | null;
+      /** Non-null iff the post came from a manual bulk generation. */
+      generationBatchId: string | null;
     } | null>;
     update: (args: {
       where: { id: string };
@@ -126,6 +134,8 @@ export interface PublishPostDeps {
   auditLog?: typeof createAuditLog;
   /** Resolves a Buffer client for the company. Injected in tests. */
   bufferClient?: (companyId: string) => Promise<BufferSender>;
+  /** Read once, so the due-check and the stamped timestamps agree. */
+  now?: () => Date;
 }
 
 /**
@@ -143,6 +153,10 @@ export interface PublishPostDeps {
  * Buffer is called, and only then is anything written. A post that Buffer
  * rejects therefore keeps the status it arrived with — it is never left approved
  * but unpublished, and the owner can simply try again.
+ *
+ * It will NOT publish a manually scheduled post before its time — that is
+ * `blocksOnDemandPublish`, and it returns NOT_DUE. Approving such a post is a
+ * separate action (approvePost); the publishing sweep sends it once due.
  */
 export async function approveAndPublishPost(
   postId: string,
@@ -154,6 +168,7 @@ export async function approveAndPublishPost(
   const db: PublishPostDb = deps.db ?? prisma;
   const auditLog = deps.auditLog ?? createAuditLog;
   const bufferClient = deps.bufferClient ?? getBufferClient;
+  const at = (deps.now ?? (() => new Date()))();
 
   // Load post with company and media
   const post = await db.post.findUnique({
@@ -166,6 +181,8 @@ export async function approveAndPublishPost(
       hashtags: true,
       mediaAssetId: true,
       mediaAsset: { select: { url: true } },
+      scheduledFor: true,
+      generationBatchId: true,
     },
   });
 
@@ -186,6 +203,21 @@ export async function approveAndPublishPost(
       success: false,
       code: "INVALID_STATUS",
       message: `Only draft, pending approval, or approved posts can be published. Current status: ${post.status.toUpperCase()}.`,
+    };
+  }
+
+  // A person named a later time for this post, so this action must not send it —
+  // approving is not the same as publishing early. It is refused outright rather
+  // than approved-and-held, so nothing is written on a request that cannot do
+  // what it was asked to do; the card offers a plain Approve for these posts
+  // (see lib/posts/post-actions.ts) and the sweep sends them once due.
+  if (blocksOnDemandPublish(post, at)) {
+    return {
+      success: false,
+      code: "NOT_DUE",
+      message:
+        `This post is scheduled for ${(post.scheduledFor as Date).toISOString()} and cannot be ` +
+        `published before then. Approve it and it will be published automatically at that time.`,
     };
   }
 
@@ -211,7 +243,6 @@ export async function approveAndPublishPost(
 
   const text = buildPostText(post.content, post.hashtags);
   const mediaUrl = post.mediaAsset?.url;
-  const now = new Date().toISOString();
 
   // ── Send to Buffer ─────────────────────────────────────────────────────────
   // Nothing below this point may fail the post: every write happens after Buffer
@@ -252,15 +283,16 @@ export async function approveAndPublishPost(
   // ── Persist the final state ────────────────────────────────────────────────
   // One update carries both the approval and the publish, so the post can never
   // be observed approved-but-unpublished or published-but-unapproved.
-  const approvedAt = new Date();
   await db.post.update({
     where: { id: postId },
     data: {
       status: "sent_to_buffer",
       bufferUpdateId: bufferResult.updateId,
       publishedPostUrl: bufferResult.publishedUrl,
-      publishedAt: approvedAt,
-      ...(needsApproval ? { approvedById: userId, approvedAt } : {}),
+      publishedAt: at,
+      // generationBatchId is deliberately absent: a manual bulk post keeps its
+      // batch for the lifetime of the post (see prisma/schema.prisma).
+      ...(needsApproval ? { approvedById: userId, approvedAt: at } : {}),
     },
   });
 
@@ -292,7 +324,7 @@ export async function approveAndPublishPost(
     data: {
       bufferPostId: bufferResult.updateId,
       status: "SENT_TO_BUFFER",
-      publishedAt: now,
+      publishedAt: at.toISOString(),
       profileId,
       publishedPostUrl: bufferResult.publishedUrl,
       approved: needsApproval,

@@ -73,13 +73,16 @@ export interface BulkGeneratePostsInput {
   /** Inclusive `YYYY-MM-DD`, a business-zone calendar day. */
   endDate: string;
   /**
-   * A user-authored distribution: which days carry how many posts.
+   * A user-authored schedule: which days carry how many posts, and the exact
+   * time of each one.
    *
    * Absent means "spread them evenly", the default — the channel's posting
-   * windows inside the period decide the days. When present, the user has
-   * chosen the days themselves and the counts must add up to `numberOfPosts`;
-   * the channel's windows still decide the time of day. Either way the range
-   * bounds what is allowed, and the times come from the same planner.
+   * windows inside the period decide both the days and the times. When present,
+   * the user has chosen everything: the counts must add up to `numberOfPosts`,
+   * and each day's times are scheduled exactly as given, in the business zone.
+   * The channel's windows are not consulted at all in that case — a time on the
+   * user's screen that this service then moved would make the form's preview a
+   * lie. Either way the range bounds which days are allowed.
    */
   customDistribution?: BulkCustomDay[];
 
@@ -301,6 +304,10 @@ const DISTRIBUTION_MESSAGES: Record<CustomDistributionError, string> = {
   out_of_period: "Every chosen date must fall inside the start and end dates.",
   invalid_count: "Each chosen date must carry at least one whole post.",
   count_mismatch: "The posts assigned to the chosen dates must add up to the number requested.",
+  invalid_time: "One of the chosen publishing times is not a valid time of day.",
+  time_count_mismatch: "Each chosen date must have one publishing time per post assigned to it.",
+  duplicate_slot: "Two posts were given the same date and time.",
+  time_in_past: "Every chosen publishing time must be in the future.",
 };
 
 /** Fallback wording when the generator reported a code but no message. */
@@ -403,7 +410,8 @@ export async function bulkGeneratePosts(
       custom,
       input.numberOfPosts,
       input.startDate,
-      input.endDate
+      input.endDate,
+      new Date(now())
     );
     if (problem !== null) {
       return {
@@ -414,23 +422,25 @@ export async function bulkGeneratePosts(
     }
   }
 
-  // The channel's posting windows decide the time of day in BOTH modes, and are
-  // read here rather than taken from the request — the client previews with a
-  // copy of them, it does not get to set them.
-  const postingWindows = await loadPostingWindows(slug, input.channel);
-
   // Slots are planned up front because each post is persisted with its own
-  // `scheduledFor` as it is written. Evenly: the dates bound the PERIOD and the
-  // channel's windows inside it decide the days. Custom: the user chose the
-  // days, already checked against that same period.
+  // `scheduledFor` as it is written.
+  //
+  //   • Evenly — the dates bound the PERIOD and the channel's posting windows
+  //     inside it decide the days and the times. Those are read from the database
+  //     rather than taken from the request: the client previews with a copy of
+  //     them, it does not get to set them.
+  //   • Custom — the user chose every date and every time, already checked
+  //     against that same period and against the clock. They are scheduled
+  //     verbatim, and the windows are not loaded at all, because consulting them
+  //     here could only move a post off the time the form promised.
   const slots =
     custom !== undefined
-      ? planCustomSlots(custom, postingWindows)
+      ? planCustomSlots(custom)
       : planBulkSlots({
           startDate: input.startDate,
           endDate: input.endDate,
           count: input.numberOfPosts,
-          postingWindows,
+          postingWindows: await loadPostingWindows(slug, input.channel),
         });
 
   const batchId = newBatchId();
