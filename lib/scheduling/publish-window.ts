@@ -133,6 +133,25 @@ export function partitionByPublishDecision<T extends PublishCandidate>(
 }
 
 /**
+ * Whether a PERSON chose this post's publish time, as opposed to the weekly
+ * filler estimating one for it.
+ *
+ * Both halves are required. `generationBatchId` is what distinguishes a manual
+ * bulk post from a cron post, and a time is what there is to honour — a bulk post
+ * without one has nothing to wait for and is an ordinary draft.
+ *
+ * This is the condition under which the two decisions "this is fit to publish"
+ * and "publish it now" come apart, so it is what both of the rules that keep them
+ * apart are written against: `blocksOnDemandPublish` here, and which drafts
+ * `approvePost` will approve without publishing.
+ */
+export function isManuallyScheduled(
+  post: PublishCandidate
+): post is PublishCandidate & { scheduledFor: Date; generationBatchId: string } {
+  return post.generationBatchId !== null && post.scheduledFor !== null;
+}
+
+/**
  * Whether an ON-DEMAND publish — an owner pressing the button on the card, not a
  * sweep — has to be refused because a person named a later time for this post.
  *
@@ -154,11 +173,7 @@ export function partitionByPublishDecision<T extends PublishCandidate>(
  * Automatic posts are untouched and keep publishing on demand as before.
  */
 export function blocksOnDemandPublish(post: PublishCandidate, now: Date): boolean {
-  return (
-    post.generationBatchId !== null &&
-    post.scheduledFor !== null &&
-    post.scheduledFor.getTime() > now.getTime()
-  );
+  return isManuallyScheduled(post) && post.scheduledFor.getTime() > now.getTime();
 }
 
 /**

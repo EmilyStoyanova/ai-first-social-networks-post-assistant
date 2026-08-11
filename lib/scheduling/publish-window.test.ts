@@ -6,6 +6,7 @@ import {
   PUBLISH_SWEEP_INTERVAL_MS,
   blocksOnDemandPublish,
   decidePublish,
+  isManuallyScheduled,
   partitionByPublishDecision,
   pastDueMessage,
   type PublishCandidate,
@@ -189,6 +190,35 @@ describe("pastDueMessage", () => {
 });
 
 // ─── On-demand publishing (the card's button, not the sweep) ──────────────────
+
+describe("isManuallyScheduled", () => {
+  const NOON = new Date("2026-08-12T09:00:00.000Z");
+
+  it("is true for a bulk post with a time", () => {
+    assert.equal(isManuallyScheduled({ scheduledFor: NOON, generationBatchId: "batch-1" }), true);
+  });
+
+  it("is false for a cron post, however precise its time looks", () => {
+    assert.equal(isManuallyScheduled({ scheduledFor: NOON, generationBatchId: null }), false);
+  });
+
+  it("is false for a bulk post with no time — there is nothing to honour", () => {
+    assert.equal(isManuallyScheduled({ scheduledFor: null, generationBatchId: "batch-1" }), false);
+  });
+
+  it("is false for an ordinary draft", () => {
+    assert.equal(isManuallyScheduled({ scheduledFor: null, generationBatchId: null }), false);
+  });
+
+  it("does not depend on the clock — it is about who chose the time", () => {
+    // Which is why approval can use it: whether a post is manually scheduled
+    // cannot change just because its slot went by.
+    const post = { scheduledFor: NOON, generationBatchId: "batch-1" };
+    assert.equal(isManuallyScheduled(post), true);
+    assert.equal(decidePublish(post, new Date("2026-08-20T09:00:00.000Z")), "past_due");
+    assert.equal(isManuallyScheduled(post), true);
+  });
+});
 
 describe("blocksOnDemandPublish", () => {
   const NOON = new Date("2026-08-12T09:00:00.000Z");
