@@ -1,9 +1,9 @@
 import { prisma } from "@/lib/db/client";
-import { z } from "zod";
 import {
   buildGenerationContextForCompany,
   type SourceScope,
 } from "@/lib/services/ai/build-generation-context.service";
+import { resolveWindowStart } from "@/lib/scheduling/posting-windows";
 import { generatePostFromContext } from "@/lib/services/ai/generate-draft-post.service";
 import {
   COMPANY_CONTENT_SOURCE_ID,
@@ -20,24 +20,6 @@ import {
  * run — the schedule stays in "generating" until every channel hits target.
  */
 const MAX_GENERATIONS_PER_RUN = 3;
-
-const DAY_ORDER = [
-  "MONDAY",
-  "TUESDAY",
-  "WEDNESDAY",
-  "THURSDAY",
-  "FRIDAY",
-  "SATURDAY",
-  "SUNDAY",
-] as const;
-
-const postingWindowsSchema = z.array(
-  z.object({
-    day: z.enum(DAY_ORDER),
-    start: z.string().regex(/^\d{2}:\d{2}$/),
-    end: z.string().regex(/^\d{2}:\d{2}$/),
-  })
-);
 
 export interface WeeklyScheduleSummary {
   weekStart: string;
@@ -90,16 +72,8 @@ function slotFor(
 ): Date {
   const dayIndex = Math.min(6, Math.floor((slotIndex * 7) / Math.max(target, 1)));
 
-  let hour = 10;
-  let minute = 0;
-  const parsed = postingWindowsSchema.safeParse(postingWindows);
-  if (parsed.success && parsed.data.length > 0) {
-    const dayName = DAY_ORDER[dayIndex];
-    const window = parsed.data.find((w) => w.day === dayName) ?? parsed.data[0];
-    const [h, m] = window.start.split(":").map(Number);
-    hour = h;
-    minute = m;
-  }
+  // weekStart is always a Monday, so the slot's DAY_ORDER index is its offset.
+  const { hour, minute } = resolveWindowStart(postingWindows, dayIndex);
 
   const slot = new Date(weekStart);
   slot.setUTCDate(slot.getUTCDate() + dayIndex);

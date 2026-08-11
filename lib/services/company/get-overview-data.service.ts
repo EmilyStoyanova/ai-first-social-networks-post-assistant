@@ -203,6 +203,7 @@ export async function getOverviewData(
         approvedById: true,
         publishedPostUrl: true,
         scheduledFor: true,
+        generationBatchId: true,
         createdAt: true,
         mediaAsset: { select: { url: true } },
         // Frozen provenance first; the join is the legacy fallback.
@@ -303,6 +304,7 @@ export async function getOverviewData(
       previousMediaUrl: null,
       origin: resolvePostOrigin(r, r.primaryFeedItem),
       scheduledFor: r.scheduledFor?.toISOString() ?? null,
+      manuallyScheduled: r.generationBatchId !== null,
       createdAt: r.createdAt.toISOString(),
     })),
     // An eligible channel with no metric rows yet sums to zero posts and all

@@ -39,7 +39,6 @@ function summary(overrides: Partial<GenerationCronSummary> = {}): GenerationCron
       llmMs: 0,
       imageMs: 0,
       approvalMs: 0,
-      publishingMs: 0,
       retryMs: 0,
       backfillMs: 0,
     },

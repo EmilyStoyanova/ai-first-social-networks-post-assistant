@@ -1,12 +1,15 @@
-import type { ChannelConfigItem } from "@/lib/services/company/list-channel-configs.service";
+import type {
+  ChannelConfigItem,
+  PostingWindow,
+} from "@/lib/services/company/list-channel-configs.service";
 
 /**
  * A channel the manual generation form may offer.
  *
  * The form's own CHANNELS constant still owns the label and the display order —
- * this only decides WHICH channels are offered and carries the two per-channel
- * settings the form has to show: the resolved posting language and whether the
- * channel needs an image.
+ * this only decides WHICH channels are offered and carries the per-channel
+ * settings the form has to show: the resolved posting language, whether the
+ * channel needs an image, and the posting windows.
  */
 export interface GenerationChannelOption {
   /** Uppercase SocialChannel value, matching the form's CHANNELS constant. */
@@ -15,6 +18,17 @@ export interface GenerationChannelOption {
   postingLanguage: string | null;
   /** Publishing on this channel requires an image — drives the image warning. */
   imageRequired: boolean;
+  /**
+   * The channel's configured posting windows, as stored.
+   *
+   * Carried into the browser so bulk generation can PREVIEW the days and times
+   * it is about to schedule, by running the same pure planner the server runs
+   * (`lib/scheduling/bulk-schedule.ts`). It is display configuration the owner
+   * authored on the settings page, not data the form is trusted with: the
+   * server re-reads the windows from the database when the request arrives and
+   * never takes the client's word for a schedule.
+   */
+  postingWindows: PostingWindow[];
 }
 
 /**
@@ -54,6 +68,7 @@ export function resolveGenerationChannels(
       channel,
       postingLanguage: config.postingLanguage,
       imageRequired: config.imageRequired,
+      postingWindows: config.postingWindows ?? [],
     });
   }
 

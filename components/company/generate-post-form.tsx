@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
@@ -11,6 +11,21 @@ import type { GenerationWarnings } from "@/lib/services/ai/generate-draft-post.s
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
 import type { GenerationChannelOption } from "@/lib/posts/generation-channels";
 import { COMPANY_MISSION_VALUE, COMPANY_RULES_VALUE } from "@/lib/ai/manual-content-source";
+import { BulkGenerateFields, type BulkPlanState } from "./bulk-generate-fields";
+import { BulkResultSummary } from "./bulk-result-summary";
+import {
+  defaultBulkRange,
+  toCustomDistribution,
+  type BulkBatchResponse,
+} from "@/lib/posts/bulk-form";
+import {
+  MAX_BULK_POSTS,
+  isStartDateInPast,
+  planBulkSlots,
+  planCustomSlots,
+  validateCustomDistribution,
+} from "@/lib/scheduling/bulk-schedule";
+import { appZoneToday } from "@/lib/scheduling/app-datetime-local";
 
 // Labels and display order only — which of these are actually offered is decided
 // by the company's enabled Buffer profiles (see `availableChannels`).
@@ -55,9 +70,18 @@ const UNIQUE_ERROR_KEY: Record<NonNullable<GenerateApiError["reason"]>, string> 
   jaccard_duplicate: "uniqueErrorJaccardDuplicate",
 };
 
+/** Which of the two generation modes the form is in. */
+type GenerateMode = "single" | "multiple";
+
 interface Props {
   slug: string;
   onGenerated: (post: PostItem) => void;
+  /**
+   * A bulk run finished with at least one post. Bulk returns ids rather than
+   * whole posts, so the list reloads from the server instead of being patched
+   * in place — the cheap alternative would be N follow-up fetches.
+   */
+  onBulkGenerated: () => void;
   /** Whether generation is based on an RSS feed item — gates the source-link override. */
   hasRssFeedItems: boolean;
   /**
@@ -79,14 +103,17 @@ interface Props {
 export function GeneratePostForm({
   slug,
   onGenerated,
+  onBulkGenerated,
   hasRssFeedItems,
   contentSources,
   availableChannels,
   companyDefaultLang,
 }: Props) {
   const t = useTranslations("posts.generate");
+  const tBulk = useTranslations("posts.generate.bulk");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
+  const locale = useLocale();
 
   // CHANNELS drives label and order; availableChannels decides membership. The
   // intersection is taken in CHANNELS order so the list never reshuffles when a
@@ -117,8 +144,79 @@ export function GeneratePostForm({
   const [error, setError] = useState("");
   const [warnings, setWarnings] = useState<GenerationWarnings | null>(null);
 
+  // ── Bulk mode ─────────────────────────────────────────────────────────────
+  const [mode, setMode] = useState<GenerateMode>("single");
+  // Seeded once, from the browser's clock at first render: the default range
+  // starts tomorrow, and re-deriving it on every render would move it at
+  // midnight underneath a form someone is filling in.
+  const [plan, setPlan] = useState<BulkPlanState>(() => ({
+    numberOfPosts: 3,
+    ...defaultBulkRange(new Date()),
+    distribution: "even",
+    counts: {},
+  }));
+  // The clock, read once — for the same reason the default range is: "today"
+  // must not move to a new day underneath a form someone is in the middle of
+  // filling in. It is the floor under the period, in the business zone.
+  const [openedAt] = useState(() => new Date());
+  const minDate = useMemo(() => appZoneToday(openedAt), [openedAt]);
+  const [batch, setBatch] = useState<BulkBatchResponse | null>(null);
+
   const noChannels = channelOptions.length === 0;
   const selectedChannel = channelOptions.find((c) => c.value === channel) ?? null;
+
+  // The channel's own posting windows decide the times in both distribution
+  // modes. Server-authored, carried down with the channel option purely so the
+  // preview below can be computed without a round trip.
+  const postingWindows = selectedChannel?.config.postingWindows ?? [];
+
+  const customDistribution = useMemo(() => toCustomDistribution(plan.counts), [plan.counts]);
+
+  const distributionError = useMemo(
+    () =>
+      plan.distribution === "custom"
+        ? validateCustomDistribution(
+            customDistribution,
+            plan.numberOfPosts,
+            plan.startDate,
+            plan.endDate
+          )
+        : null,
+    [plan.distribution, plan.numberOfPosts, plan.startDate, plan.endDate, customDistribution]
+  );
+
+  /**
+   * The exact instants this plan would schedule.
+   *
+   * Computed with the SAME pure planner the service runs, so the preview is not
+   * a second implementation that can drift — it is the answer, shown early. A
+   * custom plan that does not yet add up previews nothing rather than previewing
+   * a schedule the request would be refused for.
+   */
+  const slots = useMemo(() => {
+    if (plan.distribution === "custom") {
+      return distributionError === null ? planCustomSlots(customDistribution, postingWindows) : [];
+    }
+    return planBulkSlots({
+      startDate: plan.startDate,
+      endDate: plan.endDate,
+      count: plan.numberOfPosts,
+      postingWindows,
+    });
+    // `postingWindows` is a fresh array each render; the channel it came from is
+    // what actually changes, so that is what the memo watches.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan, distributionError, customDistribution, channel]);
+
+  /** A bulk request the API would accept — what the Generate button waits for. */
+  const bulkReady =
+    plan.numberOfPosts >= 1 &&
+    plan.numberOfPosts <= MAX_BULK_POSTS &&
+    distributionError === null &&
+    // Literally the same function the service runs: a period that has already
+    // begun is refused there, so the button must not offer it here.
+    !isStartDateInPast(plan.startDate, openedAt) &&
+    slots.length > 0;
 
   // The language "Default" resolves to, mirroring the server's order:
   // ChannelConfig.postingLanguage → Company.defaultLang. Naming it in the option
@@ -172,32 +270,44 @@ export function GeneratePostForm({
     return apiError(err);
   }
 
+  /**
+   * The options both modes send. A bulk post is generated by the same pipeline
+   * with the same settings — the only thing a batch adds is how many and when —
+   * so these are built once rather than kept in step in two places.
+   */
+  function sharedGenerationBody(): Record<string, unknown> {
+    return {
+      channel,
+      // Omit when "Default" so the server inherits the channel's language.
+      ...(contentLanguage !== "default" ? { contentLanguage } : {}),
+      ...(hasRssFeedItems && sourceLinkOverride !== "inherit"
+        ? { includeSourceLink: sourceLinkOverride === "include" }
+        : {}),
+      // Omit when inheriting so the server keeps reading the channel's
+      // autoGenerateImage setting, exactly as cron does.
+      ...(imageOverride !== "inherit" ? { generateImage: imageOverride === "generate" } : {}),
+      contentSource,
+      // Omit entirely when "System default" is selected so the server keeps
+      // its env-var default provider path unchanged (v2-5).
+      ...(llmConfigId ? { llmConfigId } : {}),
+    };
+  }
+
   async function handleGenerate() {
-    // Belt-and-braces: the button is already disabled without a channel.
-    if (!channel) return;
+    // Belt-and-braces: the button is already disabled without a channel, and
+    // `generating` already blocks a second click — a bulk run is minutes of
+    // billed work, so a duplicate submission is not a cosmetic problem.
+    if (!channel || generating) return;
 
     setGenerating(true);
     setError("");
     setWarnings(null);
+    setBatch(null);
     try {
       const res = await fetch(`/api/v1/companies/${slug}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          channel,
-          // Omit when "Default" so the server inherits the channel's language.
-          ...(contentLanguage !== "default" ? { contentLanguage } : {}),
-          ...(hasRssFeedItems && sourceLinkOverride !== "inherit"
-            ? { includeSourceLink: sourceLinkOverride === "include" }
-            : {}),
-          // Omit when inheriting so the server keeps reading the channel's
-          // autoGenerateImage setting, exactly as cron does.
-          ...(imageOverride !== "inherit" ? { generateImage: imageOverride === "generate" } : {}),
-          contentSource,
-          // Omit entirely when "System default" is selected so the server keeps
-          // its env-var default provider path unchanged (v2-5).
-          ...(llmConfigId ? { llmConfigId } : {}),
-        }),
+        body: JSON.stringify(sharedGenerationBody()),
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: GenerateApiError };
@@ -215,9 +325,87 @@ export function GeneratePostForm({
     }
   }
 
+  /**
+   * Runs a whole batch in one request and reports what came back.
+   *
+   * A short batch is a SUCCESS with an account attached, not an error: the posts
+   * that exist are real, committed drafts. Only a run that produced nothing at
+   * all arrives as an error, and it carries the generation's own code, so it is
+   * shown exactly like a failed single generation.
+   */
+  async function handleBulkGenerate() {
+    if (!channel || generating || !bulkReady) return;
+
+    setGenerating(true);
+    setError("");
+    setWarnings(null);
+    setBatch(null);
+    try {
+      const res = await fetch(`/api/v1/companies/${slug}/generate/bulk`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...sharedGenerationBody(),
+          numberOfPosts: plan.numberOfPosts,
+          startDate: plan.startDate,
+          endDate: plan.endDate,
+          // Omitted for an even spread, so the server plans the slots itself.
+          ...(plan.distribution === "custom" ? { distribution: customDistribution } : {}),
+        }),
+      });
+      if (!res.ok) {
+        const json = (await res.json()) as { error?: GenerateApiError };
+        throw new Error(resolveGenerateError(json.error));
+      }
+      const json = (await res.json()) as { batch: BulkBatchResponse };
+      setBatch(json.batch);
+      onBulkGenerated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
+    } finally {
+      setGenerating(false);
+    }
+  }
+
   return (
     <div className="rounded-card border-border bg-surface border px-5 py-5 shadow-sm">
-      <h3 className="text-fg mb-4 text-sm font-semibold">{t("title")}</h3>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-fg text-sm font-semibold">
+          {mode === "single" ? t("title") : tBulk("title")}
+        </h3>
+
+        {/* Two modes of one form, not two forms: every option below is shared,
+            and switching keeps whatever has been picked. */}
+        <div
+          role="tablist"
+          aria-label={tBulk("modeLabel")}
+          className="border-border bg-surface-subtle rounded-control inline-flex gap-0.5 border p-0.5"
+        >
+          {(["single", "multiple"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              role="tab"
+              aria-selected={mode === value}
+              disabled={generating}
+              onClick={() => {
+                setMode(value);
+                setError("");
+                setBatch(null);
+              }}
+              className={`rounded-control px-3 py-1.5 text-xs font-semibold transition-colors ${
+                mode === value
+                  ? "bg-surface text-fg shadow-sm"
+                  : "text-fg-muted hover:text-fg disabled:cursor-not-allowed"
+              }`}
+            >
+              {tBulk(value === "single" ? "modeSingle" : "modeMultiple")}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {batch && <BulkResultSummary batch={batch} locale={locale} />}
 
       {error && (
         <Alert variant="error" className="mb-4">
@@ -405,15 +593,46 @@ export function GeneratePostForm({
           </div>
         )}
 
-        <Button
-          variant="primary"
-          loading={generating}
-          disabled={noChannels}
-          onClick={handleGenerate}
-        >
-          {generating ? t("generating") : t("generateDraft")}
-        </Button>
+        {mode === "single" ? (
+          <Button
+            variant="primary"
+            loading={generating}
+            disabled={noChannels || generating}
+            onClick={handleGenerate}
+          >
+            {generating ? t("generating") : t("generateDraft")}
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            loading={generating}
+            disabled={noChannels || generating || !bulkReady}
+            onClick={handleBulkGenerate}
+          >
+            {generating
+              ? tBulk("generating", { count: plan.numberOfPosts })
+              : tBulk("generateDrafts", { count: plan.numberOfPosts })}
+          </Button>
+        )}
       </div>
+
+      {mode === "multiple" && (
+        <BulkGenerateFields
+          plan={plan}
+          onChange={setPlan}
+          slots={slots}
+          distributionError={distributionError}
+          minDate={minDate}
+          disabled={generating || noChannels}
+          locale={locale}
+        />
+      )}
+
+      {/* One run can take minutes; without this the user is looking at a
+          spinner with no idea whether to wait or reload. */}
+      {mode === "multiple" && generating && (
+        <p className="text-fg-faint mt-3 text-xs">{tBulk("generatingHint")}</p>
+      )}
 
       {/* Advisory, never blocking: the draft is still worth having, and an image
           can be generated or attached from the post card before publishing. */}

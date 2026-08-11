@@ -3,7 +3,6 @@ import { prisma } from "@/lib/db/client";
 import { Prisma, type AutomationMode } from "@prisma/client";
 import { generateWeeklySchedule } from "./generate-weekly-schedule.service";
 import { autoApprovePosts } from "./auto-approve-posts.service";
-import { publishScheduledPosts } from "./publish-scheduled-posts.service";
 import { retryFailedPosts } from "./retry-failed-posts.service";
 import { backfillEmbeddings } from "./backfill-embeddings.service";
 import {
@@ -78,8 +77,6 @@ export interface GenerationTimings {
   imageMs: number;
   /** autoApprovePosts. */
   approvalMs: number;
-  /** publishScheduledPosts (Buffer). */
-  publishingMs: number;
   /** retryFailedPosts. */
   retryMs: number;
   /** backfillEmbeddings (embedding worker). */
@@ -202,13 +199,13 @@ async function defaultCountRemaining(processedBefore: Date): Promise<number> {
 }
 
 /**
- * Steps 3–7: schedule → auto-approve → publish → retry → backfill embeddings. Kept as one
- * seam so the orchestrator's batching / fairness / locking can be unit-tested without a
- * real DB or LLM.
+ * Steps 3–7: schedule → auto-approve → retry → backfill embeddings. Kept as one seam so
+ * the orchestrator's batching / fairness / locking can be unit-tested without a real DB
+ * or LLM.
  *
- * The legacy runCron ended with a metrics sync; that step now lives in its own queue job
- * (runAnalyticsCron), enqueued by the same cron tick — see the note at the end of this
- * function.
+ * Two steps the legacy runCron ended with have moved out into their own queue jobs,
+ * enqueued by the same cron tick: the metrics sync (runAnalyticsCron) and publishing
+ * (runPublishCron) — see the notes in the body.
  *
  * `shouldStop` is threaded into generateWeeklySchedule so its LLM/image loop stops between
  * posts at the deadline, and checked between the subsequent steps so a company crossing the
@@ -231,8 +228,18 @@ async function defaultProcessCompany(
     autoApprovePosts(company.id, company.automationMode)
   );
   if (shouldStop()) return actions;
-  actions.publish = await recordPhase("publishing", () => publishScheduledPosts(company.id));
-  if (shouldStop()) return actions;
+  // Publishing deliberately does NOT run here any more. It is its own queue job
+  // (PUBLISH_SWEEP_JOB_TYPE → runPublishCron), enqueued by the same cron tick that
+  // enqueues this one and, in production, by an external scheduler every 30 minutes.
+  //
+  // It had to move: a manually scheduled post is only publishable for 90 minutes
+  // after its slot (PAST_DUE_GRACE_MS), and this run happens once a day — as an
+  // inline step it would have parked nearly every one of them. It must not ALSO
+  // stay here, because `publishScheduledPosts` has no per-post claim: a sweep and a
+  // generation run publishing at the same time can both read the same approved post
+  // before either marks it sent, and Buffer receives it twice. One publisher is the
+  // guarantee. The publishing RULE itself (`decidePublish`) is untouched, so
+  // automatic posts keep the 48-hour look-ahead they have always had.
   actions.retry = await recordPhase("retry", () => retryFailedPosts(company.id));
   if (shouldStop()) return actions;
   actions.backfillEmbeddings = await recordPhase("backfill", () =>
@@ -255,7 +262,6 @@ function mergePhaseTimings(timings: GenerationTimings, phases: Record<string, nu
   timings.llmMs = phases.llm ?? 0;
   timings.imageMs = phases.image ?? 0;
   timings.approvalMs = phases.approval ?? 0;
-  timings.publishingMs = phases.publishing ?? 0;
   timings.retryMs = phases.retry ?? 0;
   timings.backfillMs = phases.backfill ?? 0;
 }
@@ -278,10 +284,11 @@ function toActions(summary: GenerationCronSummary): Record<string, unknown> {
 
 /**
  * Post generation cron (v2-9, Hobby-safe). Generates and fills weekly schedules from
- * already-ingested, already-translated content, then auto-approves, publishes, retries and
- * backfills embeddings. Companies are processed oldest-first in a bounded batch, each
+ * already-ingested, already-translated content, then auto-approves, retries and backfills
+ * embeddings. Companies are processed oldest-first in a bounded batch, each
  * failure-isolated, each claimed with a compare-and-swap so concurrent runs never
- * double-generate. The Buffer metrics refresh is a sibling job, not a step here.
+ * double-generate. The Buffer metrics refresh and the publishing sweep are sibling jobs,
+ * not steps here.
  *
  * Hobby-safety comes from a wall-clock deadline enforced at FOUR granularities (a soft,
  * cooperative deadline alone cannot interrupt an in-flight network call):
@@ -339,7 +346,6 @@ export async function runGenerationCron(
     llmMs: 0,
     imageMs: 0,
     approvalMs: 0,
-    publishingMs: 0,
     retryMs: 0,
     backfillMs: 0,
   };

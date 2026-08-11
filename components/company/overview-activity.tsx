@@ -2,12 +2,15 @@ import { getTranslations } from "next-intl/server";
 import {
   Activity as ActivityIcon,
   CalendarCheck,
+  CalendarClock,
   CheckCircle2,
   FileText,
   Image as ImageIcon,
+  Layers,
   Pencil,
   Send,
   ShieldAlert,
+  SkipForward,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -31,6 +34,9 @@ const ACTION_ICONS: Record<string, LucideIcon> = {
   POST_VERSION_RESTORED: Pencil,
   POST_PUBLISHED: CalendarCheck,
   POST_PUBLISH_FAILED: ShieldAlert,
+  POST_PUBLISH_SKIPPED: SkipForward,
+  POST_RESCHEDULED: CalendarClock,
+  POST_BULK_GENERATED: Layers,
   MEDIA_ATTACHED: ImageIcon,
 };
 

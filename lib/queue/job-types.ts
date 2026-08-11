@@ -44,6 +44,27 @@ export const POST_GENERATION_JOB_TYPE = "post-generation";
  */
 export const POST_GENERATION_DEDUPE_KEY = "cron:post-generation";
 
+/** Publishing sweep: send every approved post that is due, across all companies. */
+export const PUBLISH_SWEEP_JOB_TYPE = "publish-sweep";
+
+/**
+ * Stable dedupe key for the publishing sweep — the one that carries the most weight
+ * of the four, because this job is the only thing that hands posts to Buffer.
+ *
+ * The sweep is triggered every 30 minutes by an external scheduler AND once a day by
+ * the generation cron tick (the daily floor, see enqueue-generation-cycle.service.ts).
+ * Two triggers plus a run that overruns its interval means overlapping enqueues are
+ * expected, not exceptional. The partial unique index `jobs_dedupe_active_key`
+ * (WHERE status IN ('queued','active')) rejects the second one, so a sweep already
+ * queued or in flight absorbs every further request instead of a second sweep
+ * starting, reading the same due posts, and delivering them to Buffer twice.
+ *
+ * Nothing is lost by the rejection: the sweep holds no per-tick state — it re-derives
+ * what is due from `scheduledFor` every run — so the run already under way covers
+ * exactly what the deduplicated one would have.
+ */
+export const PUBLISH_SWEEP_DEDUPE_KEY = "cron:publish-sweep";
+
 /** Buffer analytics fan-out: refresh engagement metrics across all companies. */
 export const ANALYTICS_SYNC_JOB_TYPE = "analytics-sync";
 

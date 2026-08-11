@@ -191,6 +191,9 @@ class Harness {
         mediaUrl: null,
         sourceImageUrl: null,
         origin: brandSetupOrigin(),
+        scheduledFor: options.scheduledFor ?? null,
+        // Cron generation is never part of a manual bulk batch.
+        generationBatchId: null,
         createdAt: new Date(),
       },
       warnings: {

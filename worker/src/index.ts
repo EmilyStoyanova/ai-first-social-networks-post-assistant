@@ -13,8 +13,16 @@
  * diagnostics and persistence. All real work lives in the registered handlers,
  * which are thin adapters over the existing services. Registered so far: the
  * dummy handler (Phase 2), RSS ingestion (Phase 3), RSS translation (Phase 4),
- * post generation (Phase 5) and the Buffer analytics refresh. Manual (interactive)
- * generation is NOT migrated: it stays a synchronous request path.
+ * post generation (Phase 5), the Buffer analytics refresh, and the publishing
+ * sweep. Manual (interactive) generation is NOT migrated: it stays a synchronous
+ * request path.
+ *
+ * The publishing sweep is the one job whose CADENCE matters rather than just its
+ * completion: it is the only path that hands scheduled posts to Buffer, and a
+ * manually scheduled post is only publishable for 90 minutes after its slot. It is
+ * driven by an external 30-minute scheduler calling /api/v1/internal/cron/publish,
+ * with the daily generation tick enqueuing the same job as a floor. A worker that
+ * is down therefore does not merely delay posts — it strands them.
  *
  * Run from the repo root so the shared client and env resolve:
  *   npx tsx worker/src/index.ts
@@ -34,6 +42,7 @@ import { rssIngestionHandler, RSS_INGESTION_JOB_TYPE } from "./rss-ingestion-han
 import { rssTranslationHandler, RSS_TRANSLATION_JOB_TYPE } from "./rss-translation-handler";
 import { postGenerationHandler, POST_GENERATION_JOB_TYPE } from "./post-generation-handler";
 import { analyticsSyncHandler, ANALYTICS_SYNC_JOB_TYPE } from "./analytics-sync-handler";
+import { publishSweepHandler, PUBLISH_SWEEP_JOB_TYPE } from "./publish-sweep-handler";
 import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
 import type { JobRecord } from "./job-store";
 
@@ -68,7 +77,8 @@ async function main(): Promise<void> {
     .register(RSS_INGESTION_JOB_TYPE, rssIngestionHandler)
     .register(RSS_TRANSLATION_JOB_TYPE, rssTranslationHandler)
     .register(POST_GENERATION_JOB_TYPE, postGenerationHandler)
-    .register(ANALYTICS_SYNC_JOB_TYPE, analyticsSyncHandler);
+    .register(ANALYTICS_SYNC_JOB_TYPE, analyticsSyncHandler)
+    .register(PUBLISH_SWEEP_JOB_TYPE, publishSweepHandler);
   const orchestrator = new JobOrchestrator({
     store: createPrismaJobStore(prisma),
     registry: handlers,

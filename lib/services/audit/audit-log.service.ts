@@ -13,6 +13,17 @@ export const AUDIT_ACTIONS = {
   POST_VERSION_RESTORED: "POST_VERSION_RESTORED",
   POST_PUBLISHED: "POST_PUBLISHED",
   POST_PUBLISH_FAILED: "POST_PUBLISH_FAILED",
+  /**
+   * The publisher declined to send a post it had otherwise selected — today only
+   * for a manual schedule whose time is long past. Distinct from
+   * POST_PUBLISH_FAILED: nothing was attempted and nothing broke, so it must not
+   * read as a delivery error or enter the retry budget.
+   */
+  POST_PUBLISH_SKIPPED: "POST_PUBLISH_SKIPPED",
+  /** A person moved a post's scheduledFor — the way out of a missed slot. */
+  POST_RESCHEDULED: "POST_RESCHEDULED",
+  /** One manual "generate N posts" request, recorded once for the whole batch. */
+  POST_BULK_GENERATED: "POST_BULK_GENERATED",
   MEDIA_ATTACHED: "MEDIA_ATTACHED",
   CONTENT_MIX_UPDATED: "CONTENT_MIX_UPDATED",
   // v2-7 analytics. The key itself is never logged — only its last 4 characters.

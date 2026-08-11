@@ -85,6 +85,15 @@ export function GeneratedPostsSection({
     setPosts((prev) => [post, ...prev]);
   }
 
+  /**
+   * A bulk run finished. It reports post ids rather than whole posts, so the
+   * grid is reloaded from the server instead of patched — one refresh against
+   * up to ten follow-up fetches, and it repaints the tab counts too.
+   */
+  function handleBulkGenerated() {
+    router.refresh();
+  }
+
   function handleDelete(id: string) {
     setPosts((prev) => prev.filter((p) => p.id !== id));
   }
@@ -141,6 +150,7 @@ export function GeneratedPostsSection({
       <GeneratePostForm
         slug={slug}
         onGenerated={handleGenerated}
+        onBulkGenerated={handleBulkGenerated}
         hasRssFeedItems={hasRssFeedItems}
         contentSources={contentSources}
         availableChannels={availableChannels}

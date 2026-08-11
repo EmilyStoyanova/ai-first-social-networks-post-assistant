@@ -67,6 +67,12 @@ export const API_ERROR_CODES = [
   "NO_SOURCE_IMAGE",
   "NO_PREVIOUS_IMAGE",
   "SOURCE_IMAGE_UNAVAILABLE",
+  // Manual bulk generation — the request itself is out of bounds.
+  "INVALID_POST_COUNT",
+  "INVALID_DATE_RANGE",
+  "INVALID_DISTRIBUTION",
+  // Rescheduling — the requested publish time is not one a post can be given.
+  "INVALID_SCHEDULE",
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];

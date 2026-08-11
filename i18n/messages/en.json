@@ -70,7 +70,12 @@
     "UNKNOWN_SOURCE": "That content source doesn't belong to this company.",
     "NO_SOURCE_IMAGE": "The source article has no image we can use.",
     "NO_PREVIOUS_IMAGE": "There is no earlier image to switch back to.",
-    "SOURCE_IMAGE_UNAVAILABLE": "The source article's image could not be used"
+    "SOURCE_IMAGE_UNAVAILABLE": "The source article's image could not be used",
+    "INVALID_POST_COUNT": "Pick a number of posts between 1 and 10.",
+    "INVALID_DATE_RANGE": "The end date must be on or after the start date, and no more than a year later.",
+    "START_DATE_IN_PAST": "The start date has already passed. Pick today or a later date.",
+    "INVALID_DISTRIBUTION": "Check the dates you assigned posts to — they must fall inside the period and add up to the number of posts requested.",
+    "INVALID_SCHEDULE": "Pick a publish time in the future."
   },
   "brand": {
     "title": "New Post",
@@ -602,6 +607,15 @@
       "publishing": "Publishing…",
       "publish": "Publish"
     },
+    "schedule": {
+      "scheduledFor": "Scheduled for {date}",
+      "pastDue": "This publish time has passed, so the post was not sent. Pick a new time to put it back in the queue.",
+      "reschedule": "Reschedule",
+      "newTime": "New publish time",
+      "save": "Save time",
+      "saving": "Saving…",
+      "timeZoneHint": "Times are shown in {zone}."
+    },
     "generate": {
       "title": "Generate a draft post",
       "channel": "Channel",
@@ -640,7 +654,52 @@
       "uniqueErrorTopicRepeated": "We couldn't find a fresh angle after {attempts} attempts — recent posts already cover this topic. Add new source material or try again later.",
       "uniqueErrorSemanticDuplicate": "After {attempts} attempts the draft kept making the same point as a recent post. Add new source material or try again later.",
       "uniqueErrorJaccardDuplicate": "After {attempts} attempts the wording stayed too close to a recent post. Add new source material or try again later.",
-      "uniqueErrorGeneric": "We couldn't create a post different enough from recent ones after {attempts} attempts. Add new source material or try again later."
+      "uniqueErrorGeneric": "We couldn't create a post different enough from recent ones after {attempts} attempts. Add new source material or try again later.",
+      "bulk": {
+        "title": "Generate multiple drafts",
+        "modeLabel": "Generation mode",
+        "modeSingle": "Single post",
+        "modeMultiple": "Multiple posts",
+        "numberOfPosts": "Number of posts",
+        "startDate": "Start date",
+        "endDate": "End date",
+        "distribution": "Distribution",
+        "distributionEven": "Evenly distributed",
+        "distributionCustom": "Custom",
+        "startInPast": "The start date has already passed. Pick today or a later date.",
+        "evenHint": "The dates set the period, not the publishing days. Posts are spread evenly across this channel's posting days and times inside it.",
+        "customHint": "Choose how many posts each day carries. The times still come from this channel's posting windows.",
+        "perDayTitle": "Posts per day",
+        "assignedOf": "{assigned} of {requested} assigned",
+        "noDaysInRange": "Pick a start date and an end date first.",
+        "postsOnDay": "Posts on {date}",
+        "distributionError_empty": "Assign at least one post to a date.",
+        "distributionError_invalid_date": "One of the dates is not a valid date.",
+        "distributionError_duplicate_date": "The same date is listed twice.",
+        "distributionError_out_of_period": "Every date must fall inside the start and end dates.",
+        "distributionError_invalid_count": "Each date must carry at least one whole post.",
+        "distributionError_count_mismatch": "The posts you assigned must add up to the number of posts requested.",
+        "previewTitle": "Planned publish times",
+        "previewEmpty": "Nothing to preview yet.",
+        "timeZoneHint": "Times are shown in {zone}, the same as everywhere else in the app.",
+        "workflowNote": "Drafts are generated now and scheduled for these times. Review and approve them, and each one publishes at its scheduled time.",
+        "generateDrafts": "{count, plural, one {Generate # draft} other {Generate # drafts}}",
+        "generating": "{count, plural, one {Generating # draft…} other {Generating # drafts…}}",
+        "generatingHint": "This can take a few minutes. Keep this tab open until it finishes.",
+        "resultComplete": "{generated, plural, one {Generated # draft.} other {Generated # drafts.}}",
+        "resultPartial": "Generated {generated} of {requested} drafts.",
+        "resultCounts": "{missing} of {requested} could not be generated.",
+        "resultScheduledRange": "Scheduled from {first} to {last}.",
+        "resultReviewNote": "They are drafts. Review and approve them to publish at their scheduled times.",
+        "stoppedTimeBudget": "The request ran out of time before the last posts were started. Nothing is wrong — run it again for the rest.",
+        "stoppedUnknown": "The run stopped before every post was generated.",
+        "stopped_no_eligible_content": "There was no unused source material left to write another post from. Add sources or wait for new articles.",
+        "stopped_not_unique": "No further post could be made that was different enough from recent ones.",
+        "stopped_provider_error": "The AI provider could not complete the next generation.",
+        "stopped_configuration": "No usable AI model is configured for this generation.",
+        "stopped_channel_limit": "The next post exceeded this channel's character limit.",
+        "stopped_access": "This company or channel is not available."
+      }
     }
   },
   "auditLog": {
@@ -654,6 +713,9 @@
       "POST_EDITED": "Post Edited",
       "POST_VERSION_RESTORED": "Version Restored",
       "POST_PUBLISHED": "Published to Buffer",
+      "POST_PUBLISH_SKIPPED": "Publish Skipped",
+      "POST_RESCHEDULED": "Post Rescheduled",
+      "POST_BULK_GENERATED": "Bulk Generation",
       "MEDIA_ATTACHED": "Media Attached"
     },
     "noActivity": "No activity recorded yet.",

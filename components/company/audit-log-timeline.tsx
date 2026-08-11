@@ -3,12 +3,15 @@
 import { useState } from "react";
 import { useTranslations } from "next-intl";
 import {
+  CalendarClock,
   CheckCircle2,
   Image,
+  Layers,
   Pencil,
   RotateCcw,
   Send,
   Sparkles,
+  SkipForward,
   XCircle,
   Zap,
   type LucideIcon,
@@ -27,6 +30,9 @@ const ACTION_ICONS: Record<string, LucideIcon> = {
   POST_EDITED: Pencil,
   POST_VERSION_RESTORED: RotateCcw,
   POST_PUBLISHED: Zap,
+  POST_PUBLISH_SKIPPED: SkipForward,
+  POST_RESCHEDULED: CalendarClock,
+  POST_BULK_GENERATED: Layers,
   MEDIA_ATTACHED: Image,
 };
 
@@ -38,6 +44,9 @@ const ACTION_DOT_COLORS: Record<string, string> = {
   POST_EDITED: "border-status-info-dot/40 bg-status-info-bg",
   POST_VERSION_RESTORED: "border-status-warning-dot/40 bg-status-warning-bg",
   POST_PUBLISHED: "border-status-success-dot/40 bg-status-success-bg",
+  POST_PUBLISH_SKIPPED: "border-status-warning-dot/40 bg-status-warning-bg",
+  POST_RESCHEDULED: "border-status-info-dot/40 bg-status-info-bg",
+  POST_BULK_GENERATED: "border-status-neutral-dot/40 bg-status-neutral-bg",
   MEDIA_ATTACHED: "border-status-neutral-dot/40 bg-status-neutral-bg",
 };
 
@@ -49,6 +58,9 @@ const ALL_ACTION_KEYS = [
   "POST_EDITED",
   "POST_VERSION_RESTORED",
   "POST_PUBLISHED",
+  "POST_PUBLISH_SKIPPED",
+  "POST_RESCHEDULED",
+  "POST_BULK_GENERATED",
   "MEDIA_ATTACHED",
 ] as const;
 

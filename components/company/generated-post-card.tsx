@@ -15,6 +15,7 @@ import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { BufferProfileItem } from "@/lib/services/buffer/list-buffer-profiles.service";
 import { EditPostModal } from "./edit-post-modal";
 import { PostActivityModal } from "./post-activity-modal";
+import { PostSchedulePanel } from "./post-schedule-panel";
 import { ImagePickerModal, type GalleryMediaItem } from "@/components/media/ImagePickerModal";
 import { formatDateTime } from "@/lib/i18n/format-date";
 import { resolvePostActions, type PostRole } from "@/lib/posts/post-actions";
@@ -397,6 +398,18 @@ export function GeneratedPostCard({
           </p>
           <p className="text-fg-muted text-xs leading-relaxed">{post.notes}</p>
         </div>
+      )}
+
+      {/* Publish time — only for a post whose time a person chose. An automatic
+          post's scheduledFor is an estimate the publisher may bring forward, so
+          showing it as a commitment would misrepresent it. */}
+      {post.manuallyScheduled && post.scheduledFor && (
+        <PostSchedulePanel
+          postId={post.id}
+          scheduledFor={post.scheduledFor}
+          status={localStatus}
+          role={role}
+        />
       )}
 
       {/* Published info */}

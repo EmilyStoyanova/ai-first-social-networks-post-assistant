@@ -2296,6 +2296,85 @@ describe("generatePostFromContext — the post links to the article it was writt
   });
 });
 
+describe("generatePostFromContext — bulk generation batch", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const SLOT = new Date("2026-08-17T10:00:00.000Z");
+
+  it("persists the batch id and the slot the bulk run scheduled", async () => {
+    const { deps, created } = makeDeps();
+
+    const result = await generatePostFromContext(
+      context(),
+      "company-1",
+      { generationBatchId: "batch-1", scheduledFor: SLOT },
+      deps
+    );
+
+    assert.ok(result.success);
+    const data = created()!;
+    assert.equal(data.generationBatchId, "batch-1");
+    assert.deepEqual(data.scheduledFor, SLOT);
+  });
+
+  it("leaves both null for a generation that is not part of a batch", async () => {
+    const { deps, created } = makeDeps();
+
+    await generatePostFromContext(context(), "company-1", {}, deps);
+
+    const data = created()!;
+    assert.equal(data.generationBatchId, null);
+    assert.equal(data.scheduledFor, null);
+  });
+
+  it("echoes them back so the caller needs no read-back", async () => {
+    const { deps } = makeDeps();
+
+    const result = await generatePostFromContext(
+      context(),
+      "company-1",
+      { generationBatchId: "batch-1", scheduledFor: SLOT },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(result.post.generationBatchId, "batch-1");
+    assert.deepEqual(result.post.scheduledFor, SLOT);
+  });
+
+  it("keeps a batched post a draft — a batch never approves anything", async () => {
+    const { deps, created } = makeDeps();
+
+    // fully_automated is the mode that used to short-circuit manual generation
+    // straight to `approved`. A bulk post must still wait for a person.
+    const automated = makeContext({
+      company: { ...makeContext().company, automationMode: "fully_automated" },
+      channel: { ...makeContext().channel, automationModeOverride: "fully_automated" },
+    });
+
+    await generatePostFromContext(
+      automated,
+      "company-1",
+      { generationBatchId: "batch-1", scheduledFor: SLOT },
+      deps
+    );
+
+    const data = created()!;
+    assert.equal(data.status, "draft");
+    assert.equal(data.approvedAt, null);
+  });
+});
+
 // Type-level guard: the column is nullable, so legacy rows may omit/null it.
 const _nullableCoreMessage: Prisma.PostUncheckedCreateInput["coreMessage"] = null;
 void _nullableCoreMessage;

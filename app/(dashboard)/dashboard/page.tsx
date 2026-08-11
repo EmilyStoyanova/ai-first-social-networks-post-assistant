@@ -29,6 +29,9 @@ const ACTION_LABELS: Record<string, string> = {
   POST_VERSION_RESTORED: "Version restored",
   POST_PUBLISHED: "Published to Buffer",
   POST_PUBLISH_FAILED: "Publish failed",
+  POST_PUBLISH_SKIPPED: "Publish skipped",
+  POST_RESCHEDULED: "Post rescheduled",
+  POST_BULK_GENERATED: "Bulk generation",
   MEDIA_ATTACHED: "Media attached",
 };
 

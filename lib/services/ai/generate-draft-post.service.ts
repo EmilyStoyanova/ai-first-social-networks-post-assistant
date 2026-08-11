@@ -102,6 +102,14 @@ export interface GeneratedPostDTO {
   /** Where the post was written from — mirrors PostItem.origin so the client
    *  can render the new card from this response with no refetch. */
   origin: PostOriginView;
+  /**
+   * The slot this post was written into, or null when generation was not asked
+   * for one (the single manual flow). Echoed from the caller's option rather
+   * than read back — nothing between here and the insert can change it.
+   */
+  scheduledFor: Date | null;
+  /** The bulk run this post belongs to; null for a single manual generation. */
+  generationBatchId: string | null;
   createdAt: Date;
 }
 
@@ -140,51 +148,60 @@ export interface GenerationWarnings {
  */
 export type UniquenessFailureReason = "jaccard_duplicate" | "semantic_duplicate" | "topic_repeated";
 
+/**
+ * Every way one generation can fail. Named so callers that orchestrate REPEATED
+ * generations (bulk) can exhaustively classify an outcome instead of matching
+ * strings.
+ */
+export type GenerateDraftPostErrorCode =
+  | "NOT_FOUND"
+  | "FORBIDDEN"
+  | "INVALID_CHANNEL"
+  | "NO_ACTIVE_PROVIDER"
+  // A per-generation llmConfigId was supplied but no active provider-state
+  // row matches it (deleted or deactivated). Distinct from NO_ACTIVE_PROVIDER.
+  | "LLM_CONFIG_NOT_FOUND"
+  // The resolved provider is active but its required environment config is
+  // now absent/incomplete (e.g. TEXT_WORKER_URL/API key removed).
+  | "PROVIDER_CONFIG_MISSING"
+  // The provider is rate limiting us (HTTP 429) and its bounded retries were
+  // exhausted. We never switch provider/model to dodge a limit.
+  | "LLM_RATE_LIMITED"
+  | "LLM_PROVIDER_ERROR"
+  | "LLM_RESPONSE_PARSE_ERROR"
+  | "POST_TOO_LONG_WITH_URL"
+  // Every retry was exhausted and the final candidate was still a
+  // duplicate (near-verbatim, semantic, or a repeated topic). We refuse to
+  // persist a post we could not make unique.
+  | "CANNOT_GENERATE_UNIQUE_POST"
+  // Source articles existed but every one was already claimed (concurrent
+  // run / exhausted pool). Not an error — callers skip cleanly.
+  | "NO_FEED_ITEMS_AVAILABLE"
+  // Manual generation only: the source picked in the form can no longer
+  // back a post — an RSS feed whose articles ran out, a non-RSS source with
+  // nothing extracted yet, or any source disabled/deleted between the form
+  // rendering and the click. Never a silent fallback — an explicit pick
+  // that cannot be honoured is reported, not substituted.
+  | "SELECTED_SOURCE_UNAVAILABLE";
+
+export interface GenerateDraftPostFailure {
+  success: false;
+  code: GenerateDraftPostErrorCode;
+  message?: string;
+  /** Set only for CANNOT_GENERATE_UNIQUE_POST — which guard forced the abort. */
+  reason?: UniquenessFailureReason;
+  /** Set only for CANNOT_GENERATE_UNIQUE_POST — attempts made before aborting. */
+  attempts?: number;
+  /**
+   * Set only for LLM_RATE_LIMITED, and only when the provider advertised a
+   * Retry-After — how long to wait before trying again.
+   */
+  retryAfterMs?: number;
+}
+
 export type GenerateDraftPostResult =
   | { success: true; post: GeneratedPostDTO; warnings: GenerationWarnings }
-  | {
-      success: false;
-      code:
-        | "NOT_FOUND"
-        | "FORBIDDEN"
-        | "INVALID_CHANNEL"
-        | "NO_ACTIVE_PROVIDER"
-        // A per-generation llmConfigId was supplied but no active provider-state
-        // row matches it (deleted or deactivated). Distinct from NO_ACTIVE_PROVIDER.
-        | "LLM_CONFIG_NOT_FOUND"
-        // The resolved provider is active but its required environment config is
-        // now absent/incomplete (e.g. TEXT_WORKER_URL/API key removed).
-        | "PROVIDER_CONFIG_MISSING"
-        // The provider is rate limiting us (HTTP 429) and its bounded retries were
-        // exhausted. We never switch provider/model to dodge a limit.
-        | "LLM_RATE_LIMITED"
-        | "LLM_PROVIDER_ERROR"
-        | "LLM_RESPONSE_PARSE_ERROR"
-        | "POST_TOO_LONG_WITH_URL"
-        // Every retry was exhausted and the final candidate was still a
-        // duplicate (near-verbatim, semantic, or a repeated topic). We refuse to
-        // persist a post we could not make unique.
-        | "CANNOT_GENERATE_UNIQUE_POST"
-        // Source articles existed but every one was already claimed (concurrent
-        // run / exhausted pool). Not an error — callers skip cleanly.
-        | "NO_FEED_ITEMS_AVAILABLE"
-        // Manual generation only: the source picked in the form can no longer
-        // back a post — an RSS feed whose articles ran out, a non-RSS source with
-        // nothing extracted yet, or any source disabled/deleted between the form
-        // rendering and the click. Never a silent fallback — an explicit pick
-        // that cannot be honoured is reported, not substituted.
-        | "SELECTED_SOURCE_UNAVAILABLE";
-      message?: string;
-      /** Set only for CANNOT_GENERATE_UNIQUE_POST — which guard forced the abort. */
-      reason?: UniquenessFailureReason;
-      /** Set only for CANNOT_GENERATE_UNIQUE_POST — attempts made before aborting. */
-      attempts?: number;
-      /**
-       * Set only for LLM_RATE_LIMITED, and only when the provider advertised a
-       * Retry-After — how long to wait before trying again.
-       */
-      retryAfterMs?: number;
-    };
+  | GenerateDraftPostFailure;
 
 // ─── Minimal DB interface for testability ─────────────────────────────────────
 // Mirrors the pattern in generate-post-image.service.ts: the real Prisma client
@@ -283,6 +300,18 @@ export interface GeneratePostOptions {
   scheduleId?: string;
   scheduledFor?: Date;
   /**
+   * The manual bulk run this post belongs to — one id shared by every post of
+   * one bulk request (see bulk-generate-posts.service.ts). Undefined for single
+   * manual generation and for cron, which have no batch.
+   *
+   * It changes nothing about how the post is generated or reviewed — a bulk post
+   * is an ordinary manual draft. It IS load-bearing at publish time: it is how
+   * the publisher tells a time a person chose from one the weekly filler
+   * estimated, so it must never be cleared or reused
+   * (lib/scheduling/publish-window.ts).
+   */
+  generationBatchId?: string;
+  /**
    * The content-mix quota this post is drawn against (v2-8): a source id, or
    * null for the company-content (mission) quota. Passed explicitly rather than
    * inferred from the claimed feed item, because an evergreen (prompt/calendar)
@@ -329,7 +358,15 @@ export async function generateDraftPost(
   isGlobalAdmin: boolean,
   options: Pick<
     GeneratePostOptions,
-    "contentLanguage" | "includeSourceLinkOverride" | "llmConfigId" | "autoGenerateImageOverride"
+    | "contentLanguage"
+    | "includeSourceLinkOverride"
+    | "llmConfigId"
+    | "autoGenerateImageOverride"
+    // Both are set only by bulk generation, which schedules each post it writes
+    // and tags it with the run it came from. The single manual flow omits them
+    // and behaves exactly as before.
+    | "scheduledFor"
+    | "generationBatchId"
   > & {
     /**
      * The form's "Content source" choice, as it came off the wire. Omitted =
@@ -415,6 +452,10 @@ export async function generateDraftPost(
     autoGenerateImageOverride: options.autoGenerateImageOverride,
     preferredLlmConfigId,
     generatedById: userId,
+    // Set by bulk generation only; undefined here leaves the single manual flow
+    // writing an unscheduled, unbatched draft exactly as it always has.
+    scheduledFor: options.scheduledFor,
+    generationBatchId: options.generationBatchId,
     // The picked source, recorded on the post as a durable FK. For a direct
     // content-source post this is the ONLY relation back to what it was written
     // from — primaryFeedItemId stays null because nothing was reserved. It can
@@ -872,6 +913,10 @@ export async function generatePostFromContext(
       generatedById: generatedById ?? null,
       scheduleId: scheduleId ?? null,
       scheduledFor: scheduledFor ?? null,
+      // Which bulk run wrote this post, if any. An association and nothing more:
+      // the status above is untouched by it, so a bulk post is reviewed exactly
+      // like any other manual draft.
+      generationBatchId: options.generationBatchId ?? null,
       safetyFlagged: safetyResult.flagged,
       safetyFlagReason: safetyResult.flagged
         ? `Flagged terms: ${safetyResult.matchedTerms.join(", ")}`
@@ -1107,6 +1152,8 @@ export async function generatePostFromContext(
       // Straight from what was just written — no read-back needed, and the
       // client renders the new card from this response with no refetch.
       origin: resolvePostOrigin(originSnapshot, null),
+      scheduledFor: scheduledFor ?? null,
+      generationBatchId: options.generationBatchId ?? null,
       createdAt: post.createdAt,
     },
     warnings,

@@ -6,6 +6,14 @@ import { runCron } from "@/lib/services/cron/run-cron.service";
 // crons /api/v1/internal/cron/ingest and /api/v1/internal/cron/generate, which vercel.json
 // now schedules instead. Retained for manual/backwards-compatible invocation only — do NOT
 // schedule it alongside the generation cron, as both advance Company.lastCronProcessedAt.
+//
+// It no longer publishes inline. Its step 5 enqueues the publishing sweep instead of
+// calling publishScheduledPosts, so invoking this route while a sweep is running is safe:
+// the enqueue is deduplicated rather than starting a second publisher. Delivery is
+// therefore asynchronous here — it needs the worker running — and global rather than
+// scoped to this run's one company. The response shape is unchanged; `actions.publish`
+// now reports the enqueue result. Prefer /api/v1/internal/cron/publish to trigger
+// publishing directly.
 
 // Cron work must never be cached or statically optimized.
 export const dynamic = "force-dynamic";

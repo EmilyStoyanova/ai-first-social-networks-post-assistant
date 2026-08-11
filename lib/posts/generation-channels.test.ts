@@ -28,7 +28,7 @@ describe("resolveGenerationChannels", () => {
     const result = resolveGenerationChannels([makeConfig()]);
 
     assert.deepEqual(result, [
-      { channel: "FACEBOOK", postingLanguage: null, imageRequired: false },
+      { channel: "FACEBOOK", postingLanguage: null, imageRequired: false, postingWindows: [] },
     ]);
   });
 
@@ -80,6 +80,30 @@ describe("resolveGenerationChannels", () => {
     const result = resolveGenerationChannels([makeConfig({ imageRequired: true })]);
 
     assert.equal(result[0]?.imageRequired, true);
+  });
+
+  it("carries the posting windows through so bulk generation can preview its slots", () => {
+    const windows = [{ day: "MONDAY", start: "09:00", end: "11:00" }];
+    const result = resolveGenerationChannels([makeConfig({ postingWindows: windows })]);
+
+    assert.deepEqual(result[0]?.postingWindows, windows);
+  });
+
+  it("keeps the first row's windows when profiles collide on one channel", () => {
+    // Same last-writer rule the language and image settings already follow, so
+    // the previewed times match the settings the generation will actually use.
+    const result = resolveGenerationChannels([
+      makeConfig({
+        bufferProfileId: "p-1",
+        postingWindows: [{ day: "MONDAY", start: "09:00", end: "11:00" }],
+      }),
+      makeConfig({
+        bufferProfileId: "p-2",
+        postingWindows: [{ day: "FRIDAY", start: "17:00", end: "18:00" }],
+      }),
+    ]);
+
+    assert.deepEqual(result[0]?.postingWindows, [{ day: "MONDAY", start: "09:00", end: "11:00" }]);
   });
 
   it("preserves input order across distinct channels", () => {

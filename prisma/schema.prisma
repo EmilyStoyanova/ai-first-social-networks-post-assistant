@@ -489,6 +489,19 @@ model Post {
   originSourceName  String?       @map("origin_source_name")
   originSourceTitle String?       @map("origin_source_title")
   originSourceUrl   String?       @map("origin_source_url")
+  // The manual BULK generation that produced this post — one id shared by every
+  // post of one "generate N posts between these dates" request. NULL for a
+  // single manual generation and for every cron/scheduled post.
+  //
+  // A plain column rather than a `BulkGeneration` table: a batch has no state or
+  // lifecycle of its own (each post is committed independently and reviewed on
+  // its own), so the only fact worth persisting is which posts came from the
+  // same click. The batch summary is returned to the caller, never stored.
+  //
+  // Also the publisher's discriminator: NULL means "this time is the weekly
+  // filler's estimate" (publishable early), non-NULL means "a person named this
+  // time" (published only once due). Never clear or reuse it.
+  generationBatchId String?       @map("generation_batch_id")
   channel          SocialChannel
   content          String
   language         String        @default("en")
@@ -555,6 +568,9 @@ model Post {
   // Backs the scheduler's per-run "what has this week generated so far, and from
   // which source" count. Every cron run does this before generating.
   @@index([scheduleId, channel, contentSourceId])
+  // Backs "show me everything that bulk run produced", always asked within one
+  // company. Partial in effect: the column is NULL for every non-bulk post.
+  @@index([companyId, generationBatchId])
   @@map("posts")
 }
 

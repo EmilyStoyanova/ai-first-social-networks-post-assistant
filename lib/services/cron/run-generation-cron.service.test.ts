@@ -89,7 +89,6 @@ describe("runGenerationCron — bounded deterministic batching", () => {
       "llmMs",
       "imageMs",
       "approvalMs",
-      "publishingMs",
       "retryMs",
       "backfillMs",
     ] as const) {
@@ -347,7 +346,10 @@ describe("runGenerationCron — diagnostics & CronRun persistence", () => {
     let finished: { id: string; actions: Record<string, unknown> } | undefined;
     const h = harness({
       selectCompanies: async () => [company("a")],
-      processCompany: async () => ({ weeklySchedule: { postsGenerated: 2 }, publish: { sent: 1 } }),
+      processCompany: async () => ({
+        weeklySchedule: { postsGenerated: 2 },
+        retry: { retried: 1 },
+      }),
       finishRun: async (id, actions) => {
         finished = { id, actions };
       },
