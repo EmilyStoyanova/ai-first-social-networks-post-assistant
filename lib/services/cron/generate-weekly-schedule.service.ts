@@ -9,6 +9,7 @@ import {
   COMPANY_CONTENT_SOURCE_ID,
   contentMixTotal,
   MAX_POSTS_PER_CHANNEL_PER_WEEK,
+  mixForChannel,
   nextDueQuota,
   resolveContentMix,
   type MixQuota,
@@ -191,10 +192,13 @@ interface FillContext {
  * it with generated posts (pending_approval; the auto-approve step promotes
  * them for fully automated companies). Generation is budgeted per run.
  *
- * Source selection takes one of two paths:
+ * How many posts a channel gets is `ChannelConfig.postsPerWeek` on both paths
+ * below, capped at MAX_POSTS_PER_CHANNEL_PER_WEEK. Only the choice of source
+ * differs:
  *
- *   • Content mix configured (v2-8) — quotas decide which source each post comes
- *     from; see fillChannelFromMix.
+ *   • Content mix configured (v2-8) — the company's recipe, resized to this
+ *     channel's target, decides which source each post comes from; see
+ *     fillChannelFromMix.
  *   • No mix — the pre-v2-8 pooled behaviour, unchanged: fill the channel's
  *     target from whatever unused article surfaces first.
  */
@@ -391,7 +395,18 @@ async function fillChannelPooled(
 }
 
 /**
- * v2-8 — fills the channel by following the configured distribution exactly.
+ * v2-8 — fills the channel's own weekly target, following the company's recipe
+ * for where each post comes from.
+ *
+ * The target is the channel's `postsPerWeek` (capped), exactly as on the pooled
+ * path; `mixForChannel` resizes the stored recipe to it, so a company posting to
+ * Facebook 5× and Instagram 7× a week gets 5 and 7 posts, each split along the
+ * same proportions. The mix is never the target — a recipe totalling 5 does not
+ * hold Instagram to 5.
+ *
+ * Scaling is deterministic in (recipe, channel target), so a run resuming
+ * mid-week re-derives the identical quotas; nothing about the split is
+ * persisted.
  *
  * Each iteration asks nextDueQuota which source is due, scopes the generation
  * context to that source alone, and tags the resulting post with the quota it
@@ -413,11 +428,16 @@ async function fillChannelPooled(
  */
 async function fillChannelFromMix(
   fill: FillContext,
-  quotas: readonly MixQuota[],
+  mix: readonly MixQuota[],
   existing: ReadonlyMap<string | null, number>
 ): Promise<void> {
   const { companyId, scheduleId, weekStart, config, budget, summary, buildContext, generate } =
     fill;
+  // The channel's week, split along the company's recipe. contentMixTotal of the
+  // result is the channel's target — scaleMixToTotal hits the number exactly —
+  // except for an all-zero recipe, which has no proportions to apply and
+  // correctly yields an empty week rather than an invented split.
+  const quotas = mixForChannel(mix, config.postsPerWeek);
   const target = contentMixTotal(quotas);
   const generatedBySource = new Map(existing);
   const exhausted = new Set<string | null>();
@@ -433,8 +453,8 @@ async function fillChannelFromMix(
     // past the cron time budget. What's unwritten stays "generating" and resumes next run.
     if (fill.shouldStop()) break;
 
-    // Defence in depth: validation rejects a mix above the ceiling, so this can
-    // only fire on a mix stored before that rule existed.
+    // Defence in depth: mixForChannel already caps the target, so this can only
+    // fire on posts a previous run wrote under a higher ceiling.
     if (totalGenerated() >= MAX_POSTS_PER_CHANNEL_PER_WEEK) break;
 
     const due = nextDueQuota({ quotas, generatedBySource, exhausted });
@@ -499,13 +519,13 @@ async function fillChannelFromMix(
     summary.postsGenerated++;
   }
 
-  // What the week still owes, measured against the mix total rather than summed
-  // per quota — the same rule the pooled path above uses.
+  // What the week still owes, measured against the channel's target rather than
+  // summed per quota — the same rule the pooled path above uses.
   //
   // Per-quota deficits cannot answer this once a transfer is in play: they clamp
-  // at zero, so a recipient that wrote 4 against a stored quota of 2 reports 0
-  // rather than -2, and the donor's untouched deficit of 2 is then counted as
-  // outstanding even though those posts exist. The mix total is invariant under
+  // at zero, so a recipient that wrote 4 against a quota of 2 reports 0 rather
+  // than -2, and the donor's untouched deficit of 2 is then counted as
+  // outstanding even though those posts exist. The target is invariant under
   // transfer, so target-minus-written is the honest number.
   //
   // Posts still owed keep the schedule "generating" so a later run retries them,

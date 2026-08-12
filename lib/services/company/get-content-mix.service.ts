@@ -21,19 +21,17 @@ export interface ContentMixDTO {
   sources: ContentMixSourceDTO[];
   companyContentPostsPerWeek: number | null;
   /**
-   * The weekly target every enabled channel must add up to, or null when no
-   * channel is enabled yet (nothing to validate against).
+   * Sum of the configured quotas; 0 when the mix is unconfigured.
+   *
+   * The recipe's parts, NOT a weekly post count: how many posts a channel
+   * generates is its own `postsPerWeek`, and the mix is resized to it (see
+   * mixForChannel). So there is no target here to reconcile the sum against —
+   * it is shown because a distribution is easier to read with its total.
    */
-  weeklyTarget: number | null;
-  /** Sum of the configured quotas; 0 when the mix is unconfigured. */
   total: number;
-  /** weeklyTarget − total, or null when there is no target. Negative = over-allocated. */
-  remaining: number | null;
   /** False = this company uses the pre-v2-8 pooled behaviour. */
   configured: boolean;
   maxPostsPerWeek: number;
-  /** Enabled channels and their weekly budgets, for explaining a mismatch in the UI. */
-  channelTargets: Array<{ channel: string; postsPerWeek: number }>;
   /** Why the CURRENT stored mix is invalid, if it is. Null when valid. */
   validationError: { code: MixValidationCode; message: string } | null;
 }
@@ -111,12 +109,6 @@ export interface LoadContentMixDb {
       }>
     >;
   };
-  channelConfig: {
-    findMany: (args: {
-      where: { companyId: string; enabled: true; postsPerWeek: { gt: number } };
-      select: { channel: true; postsPerWeek: true };
-    }) => Promise<Array<{ channel: string; postsPerWeek: number }>>;
-  };
 }
 
 /** Read model shared by the GET route and the save path's post-write response. */
@@ -128,7 +120,7 @@ export async function loadContentMixCore(
   db: LoadContentMixDb,
   companyId: string
 ): Promise<ContentMixDTO> {
-  const [company, sources, channels] = await Promise.all([
+  const [company, sources] = await Promise.all([
     db.company.findUnique({
       where: { id: companyId },
       select: { companyContentPostsPerWeek: true },
@@ -144,27 +136,13 @@ export async function loadContentMixCore(
         postsPerWeek: true,
       },
     }),
-    db.channelConfig.findMany({
-      where: { companyId, enabled: true, postsPerWeek: { gt: 0 } },
-      select: { channel: true, postsPerWeek: true },
-    }),
   ]);
 
   const companyContentPostsPerWeek = company?.companyContentPostsPerWeek ?? null;
   const quotas = resolveContentMix({ sources, companyContentPostsPerWeek });
   const total = quotas === null ? 0 : contentMixTotal(quotas);
 
-  // The target is only well-defined when every enabled channel agrees — a mix is
-  // one recipe shared by all of them. When they disagree there is no single
-  // number to show, and validation surfaces MIX_CHANNEL_TARGETS_DIFFER instead.
-  const distinctTargets = [...new Set(channels.map((c) => c.postsPerWeek))];
-  const weeklyTarget = distinctTargets.length === 1 ? distinctTargets[0] : null;
-
-  const validation = validateContentMix({
-    sources,
-    companyContentPostsPerWeek,
-    channelTargets: channels,
-  });
+  const validation = validateContentMix({ sources, companyContentPostsPerWeek });
 
   return {
     sources: sources.map((s) => ({
@@ -175,12 +153,9 @@ export async function loadContentMixCore(
       postsPerWeek: s.postsPerWeek,
     })),
     companyContentPostsPerWeek,
-    weeklyTarget,
     total,
-    remaining: weeklyTarget === null ? null : weeklyTarget - total,
     configured: quotas !== null,
     maxPostsPerWeek: MAX_POSTS_PER_CHANNEL_PER_WEEK,
-    channelTargets: channels,
     validationError: validation.valid ? null : validation.error,
   };
 }

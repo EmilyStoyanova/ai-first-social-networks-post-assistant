@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import {
   transferExhaustedQuotas,
   COMPANY_CONTENT_SOURCE_ID,
-  contentMixTarget,
   contentMixTotal,
   findUnknownSourceId,
+  MAX_POSTS_PER_CHANNEL_PER_WEEK,
+  mixForChannel,
   nextDueQuota,
   projectMixSources,
   remainingByQuota,
@@ -104,77 +105,42 @@ describe("resolveContentMix", () => {
   });
 });
 
-describe("contentMixTarget", () => {
-  it("is null when unconfigured and the total when configured", () => {
-    assert.equal(contentMixTarget({ sources: BRIEF_SOURCES, companyContentPostsPerWeek: 1 }), 5);
-    assert.equal(
-      contentMixTarget({ sources: [source({ id: "a" })], companyContentPostsPerWeek: null }),
-      null
-    );
-  });
-});
-
 // ─── validateContentMix — valid distributions ─────────────────────────────────
 
 describe("validateContentMix — valid", () => {
-  it("accepts the brief's distribution against a matching weekly target", () => {
+  it("accepts the brief's distribution", () => {
     const result = validateContentMix({
       sources: BRIEF_SOURCES,
       companyContentPostsPerWeek: BRIEF_COMPANY_QUOTA,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
     });
     assert.deepEqual(result, { valid: true });
   });
 
-  it("accepts one recipe shared by several channels on the same target", () => {
-    const result = validateContentMix({
-      sources: BRIEF_SOURCES,
-      companyContentPostsPerWeek: 1,
-      channelTargets: [
-        { channel: "facebook", postsPerWeek: 5 },
-        { channel: "linkedin", postsPerWeek: 5 },
-      ],
-    });
-    assert.deepEqual(result, { valid: true });
-  });
-
-  it("accepts an unconfigured mix regardless of the channel target", () => {
+  it("accepts an unconfigured mix", () => {
     // Backward compatibility: legacy companies must never be blocked by a
     // validation rule for a feature they have not opted into.
     const result = validateContentMix({
       sources: [source({ id: "rss-a" }), source({ id: "rss-b" })],
       companyContentPostsPerWeek: null,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
     });
     assert.deepEqual(result, { valid: true });
   });
 
-  it("accepts a configured mix when no channel is enabled yet", () => {
-    const result = validateContentMix({
-      sources: BRIEF_SOURCES,
-      companyContentPostsPerWeek: 1,
-      channelTargets: [],
-    });
-    assert.deepEqual(result, { valid: true });
-  });
-
-  it("ignores a disabled channel's divergent target", () => {
-    // channelTargets only ever carries enabled channels; a disabled facebook at
-    // 3/week must not block a linkedin-only mix of 5.
-    const result = validateContentMix({
-      sources: BRIEF_SOURCES,
-      companyContentPostsPerWeek: 1,
-      channelTargets: [{ channel: "linkedin", postsPerWeek: 5 }],
-    });
-    assert.deepEqual(result, { valid: true });
+  it("accepts any total a channel's weekly budget disagrees with", () => {
+    // The mix is a ratio, so there is nothing for it to agree with: each channel
+    // resizes it to its own posts-per-week (see mixForChannel). A company running
+    // Facebook at 3 and Instagram at 5 can still write its recipe as a 4.
+    for (const companyQuota of [0, 2, 3]) {
+      const result = validateContentMix({
+        sources: BRIEF_SOURCES,
+        companyContentPostsPerWeek: companyQuota,
+      });
+      assert.deepEqual(result, { valid: true }, `company quota ${companyQuota}`);
+    }
   });
 
   it("accepts a mix that is entirely company content", () => {
-    const result = validateContentMix({
-      sources: [],
-      companyContentPostsPerWeek: 5,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
-    });
+    const result = validateContentMix({ sources: [], companyContentPostsPerWeek: 5 });
     assert.deepEqual(result, { valid: true });
   });
 
@@ -182,46 +148,21 @@ describe("validateContentMix — valid", () => {
     const result = validateContentMix({
       sources: [source({ id: "rss-a", postsPerWeek: 5 }), source({ id: "rss-b", postsPerWeek: 0 })],
       companyContentPostsPerWeek: 0,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
     });
     assert.deepEqual(result, { valid: true });
   });
 });
 
-// ─── validateContentMix — invalid totals ──────────────────────────────────────
+// ─── validateContentMix — rejections ──────────────────────────────────────────
 
-describe("validateContentMix — invalid totals", () => {
-  it("rejects a mix that under-fills the weekly target", () => {
-    const result = validateContentMix({
-      sources: BRIEF_SOURCES,
-      companyContentPostsPerWeek: 0,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
-    });
-    assert.equal(result.valid, false);
-    assert.equal(result.valid === false && result.error.code, "MIX_TOTAL_MISMATCH");
-    assert.match(result.valid === false ? result.error.message : "", /totals 4 .* target is 5/);
-  });
-
-  it("rejects a mix that over-fills the weekly target", () => {
-    // 3 + 1 + 2 = 6 against a target of 5 — over, but still under the ceiling,
-    // so this isolates the total rule from the MIX_EXCEEDS_MAX rule below.
-    const result = validateContentMix({
-      sources: BRIEF_SOURCES,
-      companyContentPostsPerWeek: 2,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
-    });
-    assert.equal(result.valid, false);
-    assert.equal(result.valid === false && result.error.code, "MIX_TOTAL_MISMATCH");
-  });
-
+describe("validateContentMix — rejections", () => {
   it("rejects a mix above the per-channel weekly ceiling", () => {
     // The ceiling cannot be applied by truncation — dropping posts would mean
-    // choosing whose quota to cut — so it is a rejection, even though the mix
-    // matches the requested target exactly.
+    // choosing whose quota to cut — so it is a rejection. The scheduler enforces
+    // the same number with a hard stop, so a mix above it would under-generate.
     const result = validateContentMix({
       sources: [source({ id: "rss-a", postsPerWeek: 8 })],
       companyContentPostsPerWeek: 0,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 8 }],
     });
     assert.equal(result.valid, false);
     assert.equal(result.valid === false && result.error.code, "MIX_EXCEEDS_MAX");
@@ -231,33 +172,29 @@ describe("validateContentMix — invalid totals", () => {
     const result = validateContentMix({
       sources: [source({ id: "rss-a", postsPerWeek: 7 })],
       companyContentPostsPerWeek: 0,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 7 }],
     });
     assert.deepEqual(result, { valid: true });
+  });
+
+  it("rejects a mix of nothing but zeros", () => {
+    // Saveable it would generate no posts at all, while looking in settings like
+    // a decision someone made. Clearing the mix is how you ask for pooling.
+    const result = validateContentMix({
+      sources: [source({ id: "rss-a", postsPerWeek: 0 })],
+      companyContentPostsPerWeek: 0,
+    });
+    assert.equal(result.valid, false);
+    assert.equal(result.valid === false && result.error.code, "MIX_EMPTY");
   });
 
   it("rejects an enabled source left without a quota", () => {
     const result = validateContentMix({
       sources: [...BRIEF_SOURCES, source({ id: "rss-c", name: "RSS C", postsPerWeek: null })],
       companyContentPostsPerWeek: 1,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
     });
     assert.equal(result.valid, false);
     assert.equal(result.valid === false && result.error.code, "MIX_SOURCE_UNASSIGNED");
     assert.match(result.valid === false ? result.error.message : "", /RSS C/);
-  });
-
-  it("rejects enabled channels with differing weekly targets", () => {
-    const result = validateContentMix({
-      sources: BRIEF_SOURCES,
-      companyContentPostsPerWeek: 1,
-      channelTargets: [
-        { channel: "facebook", postsPerWeek: 5 },
-        { channel: "linkedin", postsPerWeek: 3 },
-      ],
-    });
-    assert.equal(result.valid, false);
-    assert.equal(result.valid === false && result.error.code, "MIX_CHANNEL_TARGETS_DIFFER");
   });
 
   it("rejects a negative quota", () => {
@@ -267,7 +204,6 @@ describe("validateContentMix — invalid totals", () => {
         source({ id: "rss-b", postsPerWeek: 6 }),
       ],
       companyContentPostsPerWeek: 0,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
     });
     assert.equal(result.valid, false);
     assert.equal(result.valid === false && result.error.code, "MIX_INVALID_VALUE");
@@ -277,7 +213,6 @@ describe("validateContentMix — invalid totals", () => {
     const result = validateContentMix({
       sources: [source({ id: "rss-a", postsPerWeek: 2.5 })],
       companyContentPostsPerWeek: 2.5,
-      channelTargets: [{ channel: "facebook", postsPerWeek: 5 }],
     });
     assert.equal(result.valid, false);
     assert.equal(result.valid === false && result.error.code, "MIX_INVALID_VALUE");
@@ -904,6 +839,86 @@ describe("scaleMixToTotal", () => {
 
   it("does not mutate the quotas it was given", () => {
     scaleMixToTotal(BRIEF_QUOTAS, 9);
+    assert.deepEqual(
+      BRIEF_QUOTAS.map((q) => q.postsPerWeek),
+      [3, 1, 1]
+    );
+  });
+});
+
+// ─── mixForChannel — the recipe as one channel's week ─────────────────────────
+
+describe("mixForChannel", () => {
+  it("gives a channel exactly its own postsPerWeek", () => {
+    // The rule the whole feature hangs on: the recipe decides the split, the
+    // channel decides the size. A mix totalling 5 does not hold a 7-post channel
+    // to 5, and never replaces the channel's target.
+    for (const target of [1, 3, 5, 7]) {
+      assert.equal(
+        contentMixTotal(mixForChannel(BRIEF_QUOTAS, target)),
+        target,
+        `channel target ${target}`
+      );
+    }
+  });
+
+  it("splits Facebook=5 and Instagram=7 along the same proportions", () => {
+    // The two-channel example end to end. One recipe, two cadences, nothing to
+    // reconcile: 3/1/1 at 5 posts is itself; at 7 posts it is 4/2/1.
+    assert.deepEqual(
+      mixForChannel(BRIEF_QUOTAS, 5).map((q) => q.postsPerWeek),
+      [3, 1, 1]
+    );
+    assert.deepEqual(
+      mixForChannel(BRIEF_QUOTAS, 7).map((q) => q.postsPerWeek),
+      [4, 2, 1]
+    );
+  });
+
+  it("keeps every quota on its own source", () => {
+    assert.deepEqual(
+      mixForChannel(BRIEF_QUOTAS, 7).map((q) => q.sourceId),
+      ["rss-a", "rss-b", COMPANY_CONTENT_SOURCE_ID]
+    );
+  });
+
+  it("caps a channel asking for more than a week may hold", () => {
+    assert.equal(contentMixTotal(mixForChannel(BRIEF_QUOTAS, 100)), MAX_POSTS_PER_CHANNEL_PER_WEEK);
+  });
+
+  it("is deterministic, so a run resuming mid-week re-derives the same split", () => {
+    // Nothing about the scaling is stored — every cron run recomputes it from
+    // the recipe and the channel's target alone.
+    assert.deepEqual(mixForChannel(BRIEF_QUOTAS, 7), mixForChannel(BRIEF_QUOTAS, 7));
+  });
+
+  it("gives a channel of zero an empty week", () => {
+    assert.equal(contentMixTotal(mixForChannel(BRIEF_QUOTAS, 0)), 0);
+  });
+
+  it("gives an all-zero recipe an empty week rather than an invented split", () => {
+    const empty: MixQuota[] = [
+      { sourceId: "rss-a", postsPerWeek: 0 },
+      { sourceId: "rss-b", postsPerWeek: 0 },
+    ];
+    assert.deepEqual(
+      mixForChannel(empty, 5).map((q) => q.postsPerWeek),
+      [0, 0]
+    );
+  });
+
+  it("never resurrects a source the owner set to zero", () => {
+    const quotas: MixQuota[] = [
+      { sourceId: "rss-a", postsPerWeek: 3 },
+      { sourceId: "rss-b", postsPerWeek: 0 },
+    ];
+    for (let target = 1; target <= MAX_POSTS_PER_CHANNEL_PER_WEEK; target++) {
+      assert.equal(mixForChannel(quotas, target)[1].postsPerWeek, 0, `target ${target}`);
+    }
+  });
+
+  it("does not mutate the stored recipe", () => {
+    mixForChannel(BRIEF_QUOTAS, 7);
     assert.deepEqual(
       BRIEF_QUOTAS.map((q) => q.postsPerWeek),
       [3, 1, 1]

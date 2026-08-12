@@ -51,10 +51,10 @@ export function planSourceWrites(
 /**
  * Saves the whole distribution atomically (v2-8).
  *
- * The mix is validated on the SERVER against the sources and channel budgets as
- * they exist right now — never against what the client believed. The UI performs
- * the same check for immediate feedback, but this is the authority: a client can
- * be stale (a channel budget changed in another tab) or simply bypassed.
+ * The mix is validated on the SERVER against the sources as they exist right now
+ * — never against what the client believed. The UI performs the same check for
+ * immediate feedback, but this is the authority: a client can be stale (a source
+ * was added in another tab) or simply bypassed.
  *
  * All writes go in one transaction so a rejected or crashed save can never leave
  * a half-applied distribution whose total is nonsense.
@@ -69,16 +69,10 @@ export async function updateContentMix(
   if (!resolved.ok) return { success: false, code: resolved.code };
   const { companyId } = resolved;
 
-  const [existingSources, channels] = await Promise.all([
-    prisma.contentSource.findMany({
-      where: { companyId },
-      select: { id: true, name: true, enabled: true, postsPerWeek: true },
-    }),
-    prisma.channelConfig.findMany({
-      where: { companyId, enabled: true, postsPerWeek: { gt: 0 } },
-      select: { channel: true, postsPerWeek: true },
-    }),
-  ]);
+  const existingSources = await prisma.contentSource.findMany({
+    where: { companyId },
+    select: { id: true, name: true, enabled: true, postsPerWeek: true },
+  });
 
   const unknown = findUnknownSourceId(
     existingSources,
@@ -97,7 +91,6 @@ export async function updateContentMix(
   const validation = validateContentMix({
     sources: projected,
     companyContentPostsPerWeek: data.companyContentPostsPerWeek,
-    channelTargets: channels,
   });
   if (!validation.valid) {
     return { success: false, code: validation.error.code, message: validation.error.message };

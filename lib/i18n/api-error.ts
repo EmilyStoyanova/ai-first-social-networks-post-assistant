@@ -58,10 +58,9 @@ export const API_ERROR_CODES = [
   // Channel policy (v2-3) — a verified platform constraint blocked the publish.
   "POLICY_VIOLATION",
   // Content mix (v2-8) — a rejected generation distribution.
-  "MIX_TOTAL_MISMATCH",
   "MIX_SOURCE_UNASSIGNED",
-  "MIX_CHANNEL_TARGETS_DIFFER",
   "MIX_INVALID_VALUE",
+  "MIX_EMPTY",
   "MIX_EXCEEDS_MAX",
   "UNKNOWN_SOURCE",
   // Source article image — the post has no article image to switch to, no

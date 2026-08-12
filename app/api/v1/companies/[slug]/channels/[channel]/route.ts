@@ -42,31 +42,21 @@ export async function PUT(request: Request, context: Context) {
   );
 
   if (!result.success) {
-    switch (result.code) {
-      case "NOT_FOUND":
-        return Response.json(
-          { error: { code: "NOT_FOUND", message: "Channel config not found." } },
-          { status: 404 }
-        );
-      case "FORBIDDEN":
-        return Response.json(
-          {
-            error: {
-              code: "FORBIDDEN",
-              message: "Only company owners can update channel configurations.",
-            },
-          },
-          { status: 403 }
-        );
-      default:
-        // v2-8 — the edit is valid in itself but would contradict the saved
-        // content mix (e.g. a weekly budget the quotas no longer add up to).
-        // The specific code lets the UI say which rule broke.
-        return Response.json(
-          { error: { code: result.code, message: result.message ?? "Invalid content mix." } },
-          { status: 422 }
-        );
+    if (result.code === "NOT_FOUND") {
+      return Response.json(
+        { error: { code: "NOT_FOUND", message: "Channel config not found." } },
+        { status: 404 }
+      );
     }
+    return Response.json(
+      {
+        error: {
+          code: "FORBIDDEN",
+          message: "Only company owners can update channel configurations.",
+        },
+      },
+      { status: 403 }
+    );
   }
 
   return Response.json({ channel: result.config });

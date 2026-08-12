@@ -42,6 +42,23 @@ function parseQuota(raw: string | undefined): number | null {
   return Number.isInteger(value) && value >= 0 ? value : null;
 }
 
+/**
+ * "Which sources do a channel's posts come from?" — the whole feature, and
+ * nothing else.
+ *
+ * This panel used to open on a weekly target the quotas had to hit exactly, a
+ * running "remaining" counter, and a warning when two channels posted at
+ * different cadences. None of it belongs here: how many posts a channel gets is
+ * that channel's own posts-per-week, and this screen only splits that number
+ * between sources (see mixForChannel — a 3/1/1 recipe fills a 5-post channel as
+ * 3/1/1 and a 7-post one as 4/2/1). So the numbers here answer to nothing but
+ * each other, and the screen now says only that.
+ *
+ * What is left is a list of sources, a number each, and their sum. The feature
+ * is optional and the copy leads with it: a company with no mix keeps the
+ * pooled behaviour it has always had, which is a perfectly good answer and not
+ * a setup step left undone.
+ */
 export function ContentMixSection({ slug, initialMix, canManage }: Props) {
   const t = useTranslations("contentMix");
   const tCommon = useTranslations("common");
@@ -54,10 +71,7 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
   const [saved, setSaved] = useState(false);
 
   const enabledSources = useMemo(() => mix.sources.filter((s) => s.enabled), [mix.sources]);
-  const disabledSources = useMemo(() => mix.sources.filter((s) => !s.enabled), [mix.sources]);
 
-  // Live totals mirror the server's rule (sum of quotas vs the weekly target) so
-  // the number on screen is the same one the API will check on save.
   const total = useMemo(() => {
     let sum = parseQuota(draft[COMPANY_KEY]) ?? 0;
     for (const source of enabledSources) sum += parseQuota(draft[source.id]) ?? 0;
@@ -76,12 +90,22 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
     [configured, draft, enabledSources]
   );
 
-  const remaining = mix.weeklyTarget === null ? null : mix.weeklyTarget - total;
-  const balanced = remaining === 0;
+  // The two rules the server still enforces, in the order it checks them: every
+  // enabled source needs a number, and the week has a ceiling. A mix of all
+  // zeros is the third — it would generate nothing, and "Clear mix" is the way
+  // to say that.
+  const problem: string | null = unassigned
+    ? apiError({ code: "MIX_SOURCE_UNASSIGNED" })
+    : configured && total === 0
+      ? apiError({ code: "MIX_EMPTY" })
+      : total > mix.maxPostsPerWeek
+        ? apiError({ code: "MIX_EXCEEDS_MAX" })
+        : null;
+
   const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(toDraft(mix)), [draft, mix]);
 
   // An unconfigured mix is always saveable — it is the "clear the mix" action.
-  const canSave = canManage && dirty && !saving && (!configured || (balanced && !unassigned));
+  const canSave = canManage && dirty && !saving && (!configured || problem === null);
 
   function setValue(key: string, value: string) {
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -128,47 +152,31 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
     setError("");
   }
 
-  const rows: Array<{ key: string; label: string; hint?: string }> = [
+  // Company content sits last: it is a source like the others here, just one
+  // that never runs out of material.
+  const rows: Array<{ key: string; label: string }> = [
     ...enabledSources.map((s) => ({ key: s.id, label: s.name })),
-    { key: COMPANY_KEY, label: t("companyContent"), hint: t("companyContentHint") },
+    { key: COMPANY_KEY, label: t("companyContent") },
   ];
 
   return (
     <div className="rounded-card border-border bg-surface border px-5 py-5 shadow-sm">
-      <h3 className="text-fg text-sm font-semibold">{t("title")}</h3>
-      <p className="text-fg-muted mt-1 text-xs">{t("description")}</p>
-
-      {/* Weekly target — the number every quota must add up to. */}
-      <div className="border-border mt-4 flex items-baseline justify-between border-b pb-3">
-        <span className="text-fg-muted text-sm font-medium">{t("weeklyTarget")}</span>
-        <span className="text-fg text-sm font-semibold">
-          {mix.weeklyTarget === null ? "—" : t("postsCount", { count: mix.weeklyTarget })}
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="text-fg text-sm font-semibold">{t("title")}</h3>
+        <span className="rounded-control border-border text-fg-muted border px-1.5 py-0.5 text-[11px] font-medium">
+          {t("optional")}
         </span>
       </div>
+      <p className="text-fg-muted mt-1 text-xs">{t("description")}</p>
 
-      {mix.weeklyTarget === null && mix.channelTargets.length === 0 && (
-        <Alert variant="info" className="mt-4">
-          {t("noTarget")}
-        </Alert>
-      )}
+      <div className="mt-4 flex justify-end">
+        <span className="text-fg-faint text-xs">{t("postsPerWeek")}</span>
+      </div>
 
-      {/* Enabled channels disagree — one recipe cannot serve two budgets. */}
-      {mix.weeklyTarget === null && mix.channelTargets.length > 0 && (
-        <Alert variant="warning" className="mt-4">
-          {t("targetsDiffer", {
-            detail: mix.channelTargets.map((c) => `${c.channel} ${c.postsPerWeek}`).join(", "),
-          })}
-        </Alert>
-      )}
-
-      {/* Distribution rows */}
-      <div className="mt-4 space-y-2">
+      <div className="mt-1 space-y-2">
         {rows.map((row) => (
           <div key={row.key} className="flex items-center gap-3">
-            <div className="min-w-0 flex-1">
-              <span className="text-fg block truncate text-sm">{row.label}</span>
-              {row.hint && <span className="text-fg-faint block text-xs">{row.hint}</span>}
-            </div>
+            <span className="text-fg min-w-0 flex-1 truncate text-sm">{row.label}</span>
             {/* Dotted leader, as in the spec's sketch. */}
             <span
               aria-hidden="true"
@@ -192,57 +200,20 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
         ))}
       </div>
 
-      {/* Live total and remaining — the running answer to "does this add up?" */}
       <div className="border-border mt-4 flex items-baseline justify-between border-t pt-3">
-        <span className="text-fg-muted text-sm font-medium">
-          {remaining === null || !configured
-            ? t("remaining")
-            : balanced
-              ? t("balanced")
-              : remaining > 0
-                ? t("remaining")
-                : t("over", { count: Math.abs(remaining) })}
-        </span>
-        <span
-          className={`text-sm font-semibold ${
-            !configured || remaining === null
-              ? "text-fg-muted"
-              : balanced
-                ? "text-status-success-dot"
-                : "text-status-danger-dot"
-          }`}
-        >
-          {remaining === null || !configured ? "—" : balanced ? "0" : Math.abs(remaining)}
-        </span>
+        <span className="text-fg-muted text-sm font-medium">{t("total")}</span>
+        <span className="text-fg text-sm font-semibold">{t("postsCount", { count: total })}</span>
       </div>
 
-      {unassigned && (
-        <p className="text-status-danger-dot mt-2 text-xs">
-          {apiError({ code: "MIX_SOURCE_UNASSIGNED" })}
-        </p>
-      )}
+      {problem && <p className="text-status-danger-dot mt-2 text-xs">{problem}</p>}
 
-      {disabledSources.length > 0 && (
-        <p className="text-fg-faint mt-3 text-xs">
-          {t("disabledHint")} {disabledSources.map((s) => s.name).join(", ")}
-        </p>
-      )}
+      {/* The one thing this screen must not be mistaken for: a second weekly
+          target. Each channel keeps its own, and these numbers only split it. */}
+      <p className="text-fg-faint mt-3 text-xs">{t("channelNote")}</p>
+      <p className="text-fg-faint mt-1 text-xs">{t("autoNote")}</p>
 
-      <p className="text-fg-faint mt-3 text-xs">{t("exhaustedNote")}</p>
-
-      {configured ? (
-        mix.channelTargets.length > 1 && (
-          <p className="text-fg-faint mt-1 text-xs">
-            {t("appliesToChannels", {
-              channels: mix.channelTargets.map((c) => c.channel).join(", "),
-            })}
-          </p>
-        )
-      ) : (
-        <p className="text-fg-muted mt-3 text-xs">{t("unconfigured")}</p>
-      )}
-
-      {/* A mix stored before a channel budget changed can be invalid on load. */}
+      {/* A mix stored before this company's sources changed can be invalid on
+          load — an added source with no quota is the realistic case. */}
       {mix.validationError && !dirty && (
         <Alert variant="warning" className="mt-4">
           {apiError({ code: mix.validationError.code })}
@@ -285,8 +256,6 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
       ) : (
         <p className="text-fg-faint mt-4 text-xs">{t("ownersOnly")}</p>
       )}
-
-      {canManage && configured && <p className="text-fg-faint mt-2 text-xs">{t("clearHint")}</p>}
     </div>
   );
 }

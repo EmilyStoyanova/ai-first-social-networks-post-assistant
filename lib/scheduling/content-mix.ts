@@ -1,25 +1,31 @@
 /**
  * Content mix — generation distribution (v2-8).
  *
- * Lets an owner say exactly where next week's posts come from:
+ * Two settings answer two different questions, and neither answers the other's:
  *
- *   Weekly target: 5
- *     RSS A ............ 3
- *     RSS B ............ 1
- *     Company content .. 1
+ *   ChannelConfig.postsPerWeek → HOW MANY posts a channel gets in a week.
+ *   The content mix            → WHERE those posts come from.
  *
- * The mix is a single company-wide *recipe* that is applied to every enabled
- * channel (the "one shared recipe" model): each enabled channel fills its weekly
- * budget following the same distribution. That is why every enabled channel must
- * share the same `postsPerWeek` — the recipe has one total, so it cannot satisfy
- * two different channel budgets at once.
+ * The mix is a single company-wide *recipe* applied to every enabled channel
+ * (the "one shared recipe" model), and it is a ratio rather than a headcount:
  *
- * Two invariants drive every function here:
+ *   RSS A ............ 3
+ *   RSS B ............ 1
+ *   Company content .. 1
  *
- *   • The week hits its total. A source that runs out of articles hands its
- *     unwritten posts to the sources that can still write them — always, with no
- *     setting to opt out of. See transferExhaustedQuotas. Only when no source can
- *     take them do the posts go unwritten.
+ * reads as three parts RSS A, one part RSS B, one part brand copy. A channel set
+ * to 5 posts a week generates exactly that; a channel set to 7 generates the same
+ * proportions resized to 7 (4/2/1). Channels running at different cadences
+ * therefore need no reconciling and never compete for one budget — see
+ * mixForChannel, the single place where a channel's target and the recipe meet.
+ *
+ * Three invariants drive every function here:
+ *
+ *   • The channel hits its own postsPerWeek. A mix never raises or lowers it.
+ *   • Whatever the channel owes, it gets written. A source that runs out of
+ *     articles hands its unwritten posts to the sources that can still write
+ *     them — always, with no setting to opt out of. See transferExhaustedQuotas.
+ *     Only when no source can take them do the posts go unwritten.
  *   • An unconfigured mix is not a mix. When nothing is configured the scheduler
  *     falls back to the pre-v2-8 pooling behaviour, unchanged.
  *
@@ -35,12 +41,14 @@
 export const COMPANY_CONTENT_SOURCE_ID = null;
 
 /**
- * Hard per-channel weekly ceiling, as a cost guard. Pre-v2-8 the scheduler
- * applied this silently (`Math.min(postsPerWeek, 7)`), which a mix cannot do:
- * capping a 10-post distribution at 7 would have to drop 3 posts from *someone's*
- * quota, and choosing whose is exactly the silent reassignment this feature
- * exists to prevent. So a mix must fit under the ceiling, and validation says so
- * out loud (MIX_EXCEEDS_MAX) instead of truncating.
+ * Hard per-channel weekly ceiling, as a cost guard: whatever a channel's
+ * `postsPerWeek` says, no channel generates more than this in a week — on the
+ * mix path (mixForChannel) and the pooled path (fillChannelPooled) alike.
+ *
+ * It bounds the recipe as well. A ratio would work at any size, but a recipe is
+ * written in the same units a channel is ("posts a week"), and one that cannot
+ * describe a real week is a number with nothing to check it against. Validation
+ * says so out loud (MIX_EXCEEDS_MAX) rather than quietly rescaling it.
  *
  * Lives here rather than in the scheduler because it is a rule about the
  * distribution; the scheduler imports it for the legacy path too.
@@ -63,7 +71,14 @@ export interface MixSourceInput {
   postsPerWeek: number | null;
 }
 
-/** One resolved quota: "this source owes N posts per week per channel". */
+/**
+ * One part of the recipe: "this much of a channel's week comes from this
+ * source".
+ *
+ * `postsPerWeek` is read two ways, and mixForChannel is the line between them:
+ * on a stored mix it is a share, measured against the recipe's own total; on the
+ * quotas mixForChannel returns it is literally posts, for one channel's week.
+ */
 export interface MixQuota {
   /** null = company-generated content (no RSS). */
   sourceId: string | null;
@@ -113,20 +128,25 @@ export function resolveContentMix(input: ResolveContentMixInput): MixQuota[] | n
   return quotas;
 }
 
-/** Total posts per channel per week the mix accounts for. */
+/**
+ * The recipe's parts, added up.
+ *
+ * On a stored mix this is the denominator every share is measured against, NOT a
+ * weekly post count — that number belongs to the channel. On the output of
+ * mixForChannel it *is* the channel's week, because that is what the mix was
+ * just scaled to.
+ */
 export function contentMixTotal(quotas: readonly MixQuota[]): number {
   return quotas.reduce((sum, q) => sum + q.postsPerWeek, 0);
 }
 
 export type MixValidationCode =
-  /** Quotas do not add up to the weekly target. */
-  | "MIX_TOTAL_MISMATCH"
   /** An enabled source has no quota while the rest of the mix is configured. */
   | "MIX_SOURCE_UNASSIGNED"
-  /** Enabled channels disagree on postsPerWeek, so one recipe cannot serve them all. */
-  | "MIX_CHANNEL_TARGETS_DIFFER"
   /** A quota is negative or not a whole number. */
   | "MIX_INVALID_VALUE"
+  /** Every quota is zero, so the mix asks for a week with no posts in it. */
+  | "MIX_EMPTY"
   /** The mix totals more than a channel may generate in a week. */
   | "MIX_EXCEEDS_MAX";
 
@@ -138,10 +158,14 @@ export interface MixValidationError {
 
 export type MixValidationResult = { valid: true } | { valid: false; error: MixValidationError };
 
-export interface ValidateContentMixInput extends ResolveContentMixInput {
-  /** Enabled channels only, with their weekly budget. */
-  channelTargets: ReadonlyArray<{ channel: string; postsPerWeek: number }>;
-}
+/**
+ * A mix is validated against itself alone. It once also had to match the weekly
+ * budget of every enabled channel, which meant a company whose Facebook and
+ * Instagram ran at different cadences could not save a mix at all. A ratio has
+ * nothing to match: every channel resizes it to its own `postsPerWeek`, so the
+ * two numbers cannot contradict each other and there is no drift to reconcile.
+ */
+export type ValidateContentMixInput = ResolveContentMixInput;
 
 /**
  * Validates a whole mix at once.
@@ -152,9 +176,8 @@ export interface ValidateContentMixInput extends ResolveContentMixInput {
  * there is no per-field save path — the UI and the API both submit the complete
  * distribution.
  *
- * An unconfigured mix is always valid (it means "use legacy pooling"). A mix
- * with no enabled channels is also valid: there is no target to compare against
- * yet, and configuring the mix before turning a channel on is legitimate.
+ * An unconfigured mix is always valid: it means "use legacy pooling", which is
+ * what a company that never opted into the feature gets.
  */
 export function validateContentMix(input: ValidateContentMixInput): MixValidationResult {
   const quotas = resolveContentMix(input);
@@ -186,6 +209,23 @@ export function validateContentMix(input: ValidateContentMixInput): MixValidatio
   }
 
   const total = contentMixTotal(quotas);
+
+  // A recipe of nothing but zeros has no proportions to resize, so every channel
+  // scales it to a week with nothing in it. Refused rather than saved, because
+  // it is indistinguishable at generation time from having no mix at all while
+  // looking, in settings, like a decision that was made. Clearing every quota is
+  // the supported way to say that — it returns the company to pooling, which
+  // does generate posts.
+  if (total === 0) {
+    return {
+      valid: false,
+      error: {
+        code: "MIX_EMPTY",
+        message: "A content mix must add up to at least one post per week.",
+      },
+    };
+  }
+
   if (total > MAX_POSTS_PER_CHANNEL_PER_WEEK) {
     return {
       valid: false,
@@ -196,41 +236,7 @@ export function validateContentMix(input: ValidateContentMixInput): MixValidatio
     };
   }
 
-  if (input.channelTargets.length === 0) return { valid: true };
-
-  const targets = [...new Set(input.channelTargets.map((c) => c.postsPerWeek))];
-  if (targets.length > 1) {
-    const detail = input.channelTargets.map((c) => `${c.channel}=${c.postsPerWeek}`).join(", ");
-    return {
-      valid: false,
-      error: {
-        code: "MIX_CHANNEL_TARGETS_DIFFER",
-        message: `A content mix is one recipe shared by every enabled channel, so all enabled channels must have the same posts-per-week. Got: ${detail}.`,
-      },
-    };
-  }
-
-  const target = targets[0];
-  if (total !== target) {
-    return {
-      valid: false,
-      error: {
-        code: "MIX_TOTAL_MISMATCH",
-        message: `Content mix totals ${total} posts but the weekly target is ${target}.`,
-      },
-    };
-  }
-
   return { valid: true };
-}
-
-/**
- * The weekly target a validated mix implies, or null when it is unconfigured.
- * Once a mix exists it IS the budget — see nextDueQuota.
- */
-export function contentMixTarget(input: ResolveContentMixInput): number | null {
-  const quotas = resolveContentMix(input);
-  return quotas === null ? null : contentMixTotal(quotas);
 }
 
 export interface NextDueQuotaInput {
@@ -267,13 +273,14 @@ function acceptsQuota(quota: MixQuota, exhausted: ReadonlySet<string | null>): b
 
 /**
  * The quotas as they stand once exhausted sources have handed off their unfilled
- * posts.
+ * posts. Runs on a channel's quotas — the output of mixForChannel — so the total
+ * it preserves is that channel's own week.
  *
- * The week's total is the promise this keeps: an RSS source that runs dry gives
- * up exactly the posts it could not write, and those same posts are added to the
+ * That total is the promise this keeps: an RSS source that runs dry gives up
+ * exactly the posts it could not write, and those same posts are added to the
  * sources that still have articles. Nothing is created and nothing is lost, so
- * the mix total — and therefore the channel's weekly post count — is identical
- * before and after. What changes is only *who* writes them.
+ * the channel's weekly post count is identical before and after. What changes is
+ * only *who* writes them.
  *
  * This is unconditional. It was briefly a per-source setting; the product
  * decision is that a company configuring "5 posts a week" wants 5 posts a week,
@@ -379,12 +386,15 @@ export function nextDueQuota(input: NextDueQuotaInput): MixQuota | null {
 }
 
 /**
- * The same distribution, resized to a different total.
+ * The same distribution, resized to a different total — the operation that makes
+ * the mix a ratio rather than a headcount.
  *
- * The stored mix is a WEEKLY recipe; a manual batch asks for an arbitrary number
- * of posts over an arbitrary period. Scaling is what lets one answer the other:
- * a 3/1/1 week prefills a batch of 10 as 6/2/2 and a batch of 3 as 2/1/0 — the
- * owner's proportions, at the size actually being generated.
+ * Both callers need it for the same reason: the stored recipe is one set of
+ * proportions, and the thing being generated has a size of its own. A channel
+ * asks for its `postsPerWeek` (mixForChannel); a manual batch asks for an
+ * arbitrary number of posts over an arbitrary period. A 3/1/1 recipe fills a
+ * 7-post channel week as 4/2/1, a batch of 10 as 6/2/2, a batch of 3 as 2/1/0 —
+ * the owner's proportions, at the size actually being generated.
  *
  * Largest remainder, because the alternatives both lie. Rounding each quota
  * independently does not add up to `total` (3/1/1 scaled to 4 rounds to 2/1/1),
@@ -437,6 +447,28 @@ export function scaleMixToTotal(quotas: readonly MixQuota[], total: number): Mix
   }
 
   return scaled;
+}
+
+/**
+ * The recipe as one channel's week: the stored proportions resized to that
+ * channel's own `postsPerWeek`, under the per-channel ceiling.
+ *
+ * This is the entire relationship between the two settings, in one function. The
+ * channel says how many posts there are; the mix says only which sources they
+ * come from. Facebook at 5 and Instagram at 7 both follow a 3/1/1 recipe and get
+ * 3/1/1 and 4/2/1 — the same shape, each at its own cadence — and neither
+ * channel's cadence is any concern of the other's.
+ *
+ * Two inputs mean "generate nothing", and both yield all zeros rather than an
+ * invented split: a channel target of zero, and a recipe that is entirely zeros
+ * (there are no proportions in it to apply). The scheduler reads that as an
+ * empty week for the channel, which is what each of them says.
+ */
+export function mixForChannel(
+  quotas: readonly MixQuota[],
+  channelPostsPerWeek: number
+): MixQuota[] {
+  return scaleMixToTotal(quotas, Math.min(channelPostsPerWeek, MAX_POSTS_PER_CHANNEL_PER_WEEK));
 }
 
 /**

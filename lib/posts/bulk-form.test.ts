@@ -258,12 +258,9 @@ function mixDto(overrides: Partial<ContentMixDTO> = {}): ContentMixDTO {
       { id: "src-b", name: "B", type: "rss", enabled: true, postsPerWeek: 1 },
     ],
     companyContentPostsPerWeek: 1,
-    weeklyTarget: 5,
     total: 5,
-    remaining: 0,
     configured: true,
     maxPostsPerWeek: 7,
-    channelTargets: [],
     validationError: null,
     ...overrides,
   };

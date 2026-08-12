@@ -225,7 +225,7 @@ class Harness {
   }
 }
 
-/** The brief's example: 5 posts/week = RSS A 3 + RSS B 1 + company content 1. */
+/** The brief's example: a 3/1/1 recipe, on a channel set to 5 posts a week. */
 function briefHarness(overrides: Partial<Record<"aArticles" | "bArticles", number>> = {}) {
   return new Harness(
     [
@@ -263,7 +263,9 @@ async function runUntilSettled(harness: Harness, maxRuns = 6) {
 // ─── Scheduler respects quotas ────────────────────────────────────────────────
 
 describe("generateWeeklySchedule — respects the configured distribution", () => {
-  it("generates exactly the configured mix over the week", async () => {
+  it("generates the channel's postsPerWeek, split by the mix", async () => {
+    // Channel target 5, recipe 3/1/1 — the recipe already fits, so it applies as
+    // written. The count comes from the channel either way.
     const harness = briefHarness();
     await runUntilSettled(harness);
 
@@ -329,7 +331,7 @@ describe("generateWeeklySchedule — respects the configured distribution", () =
     assert.equal(harness.posts.length, settled, "a settled week generates nothing further");
   });
 
-  it("applies the same recipe to every enabled channel", async () => {
+  it("applies the same recipe to every enabled channel on the same cadence", async () => {
     const harness = new Harness(
       [
         {
@@ -354,6 +356,91 @@ describe("generateWeeklySchedule — respects the configured distribution", () =
       assert.equal(forChannel.filter((p) => p.contentSourceId === "rss-a").length, 2);
       assert.equal(forChannel.filter((p) => p.contentSourceId === null).length, 1);
     }
+  });
+});
+
+// ─── The channel decides how many, the mix decides where from ─────────────────
+
+describe("generateWeeklySchedule — channel target drives the count", () => {
+  /** The 3/1/1 recipe, on whatever channels the caller wants. */
+  function mixHarness(channels: FakeChannel[]) {
+    return new Harness(
+      [
+        { id: "rss-a", name: "RSS A", enabled: true, postsPerWeek: 3, articles: 30 },
+        { id: "rss-b", name: "RSS B", enabled: true, postsPerWeek: 1, articles: 30 },
+      ],
+      1,
+      channels
+    );
+  }
+
+  it("gives channels with different cadences their own counts from one recipe", async () => {
+    // The example that defines the model: Facebook 5 and Instagram 7, one 3/1/1
+    // mix. Facebook gets 5 posts as 3/1/1, Instagram gets 7 as 4/2/1 — the same
+    // proportions, each at its own weekly count. Neither channel is held to the
+    // other's, and neither is held to the mix's total of 5.
+    const harness = mixHarness([
+      { channel: "facebook", postsPerWeek: 5 },
+      { channel: "instagram", postsPerWeek: 7 },
+    ]);
+    await runUntilSettled(harness, 12);
+
+    const forChannel = (channel: string) => harness.posts.filter((p) => p.channel === channel);
+    const countIn = (channel: string, sourceId: string | null) =>
+      forChannel(channel).filter((p) => p.contentSourceId === sourceId).length;
+
+    assert.equal(forChannel("facebook").length, 5, "Facebook posts its own 5");
+    assert.equal(countIn("facebook", "rss-a"), 3);
+    assert.equal(countIn("facebook", "rss-b"), 1);
+    assert.equal(countIn("facebook", null), 1);
+
+    assert.equal(forChannel("instagram").length, 7, "Instagram posts its own 7");
+    assert.equal(countIn("instagram", "rss-a"), 4);
+    assert.equal(countIn("instagram", "rss-b"), 2);
+    assert.equal(countIn("instagram", null), 1);
+  });
+
+  it("does not cap a channel at the mix total", async () => {
+    // A recipe totalling 5 must not turn a 7-post channel into a 5-post one.
+    const harness = mixHarness([{ channel: "instagram", postsPerWeek: 7 }]);
+    const summary = await runUntilSettled(harness, 12);
+
+    assert.equal(harness.posts.length, 7);
+    assert.equal(summary.postsRemaining, 0);
+    assert.equal(summary.scheduleStatus, "ready");
+  });
+
+  it("does not raise a channel to the mix total either", async () => {
+    // The same recipe on a channel that posts twice a week writes two posts, not
+    // five. 3/1/1 over 2 is 1/1/0 — company content sits out a week this small.
+    const harness = mixHarness([{ channel: "facebook", postsPerWeek: 2 }]);
+    const summary = await runUntilSettled(harness);
+
+    assert.equal(harness.posts.length, 2);
+    assert.equal(harness.countFor("rss-a"), 1);
+    assert.equal(harness.countFor("rss-b"), 1);
+    assert.equal(summary.scheduleStatus, "ready");
+  });
+
+  it("caps a channel at the per-channel ceiling, mix or no mix", async () => {
+    const harness = mixHarness([{ channel: "facebook", postsPerWeek: 100 }]);
+    await runUntilSettled(harness, 12);
+    assert.equal(harness.posts.length, 7, "MAX_POSTS_PER_CHANNEL_PER_WEEK");
+  });
+
+  it("resumes a scaled week across runs without redistributing it", async () => {
+    // The split is re-derived every run, never stored, so the second run must
+    // pick up exactly where the first left off.
+    const harness = mixHarness([{ channel: "instagram", postsPerWeek: 7 }]);
+
+    const first = await generateWeeklySchedule(COMPANY_ID, harness.deps());
+    assert.equal(first.postsGenerated, 3, "budget is 3 generations per run");
+    assert.equal(first.postsRemaining, 4, "against the channel's 7, not the mix's 5");
+
+    await runUntilSettled(harness, 12);
+    assert.equal(harness.countFor("rss-a"), 4);
+    assert.equal(harness.countFor("rss-b"), 2);
+    assert.equal(harness.countFor(null), 1);
   });
 });
 
@@ -444,11 +531,13 @@ describe("generateWeeklySchedule — company-content quota", () => {
   });
 
   it("fills a mix that is entirely company content", async () => {
+    // One quota, so every post is a mission post whatever the channel asks for:
+    // a recipe of 3 on a channel set to 5 writes 5, all of them company content.
     const harness = new Harness([], 3);
     const summary = await runUntilSettled(harness);
 
-    assert.equal(harness.posts.length, 3);
-    assert.equal(harness.countFor(null), 3);
+    assert.equal(harness.posts.length, 5, "the channel's target, not the recipe's total");
+    assert.equal(harness.countFor(null), 5);
     assert.equal(summary.scheduleStatus, "ready");
   });
 
@@ -529,7 +618,7 @@ describe("generateWeeklySchedule — quota transfer", () => {
     );
   });
 
-  it("still generates nothing beyond the mix total", async () => {
+  it("still generates nothing beyond the channel's target", async () => {
     const harness = transferHarness(1);
     await runUntilSettled(harness);
     await generateWeeklySchedule(COMPANY_ID, harness.deps());
