@@ -67,6 +67,26 @@ const bodySchema = z.object({
     .max(MAX_BULK_POSTS)
     .optional(),
 
+  // Optional: this batch's content mix — how many of the posts each source
+  // writes. `null` names the company-content quota (mission posts, no article),
+  // mirroring the stored mix's own convention.
+  //
+  // Rows carrying no posts are simply left out, which is why every `posts` here
+  // is at least 1 — and why at most MAX_BULK_POSTS rows can ever be meaningful,
+  // whatever the number of sources the company has. That the counts add up to
+  // `numberOfPosts`, that the ids are this company's, and that they are enabled
+  // is the service's answer, and the service is the authority.
+  sourceMix: z
+    .array(
+      z.object({
+        sourceId: z.string().min(1).nullable(),
+        posts: z.number().int().min(1).max(MAX_BULK_POSTS),
+      })
+    )
+    .min(1)
+    .max(MAX_BULK_POSTS)
+    .optional(),
+
   // ── Identical to POST /generate ──────────────────────────────────────────
   contentLanguage: z.enum(["en", "bg"]).optional(),
   includeSourceLink: z.boolean().optional(),
@@ -121,6 +141,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     autoGenerateImageOverride: parsed.data.generateImage,
     llmConfigId: parsed.data.llmConfigId,
     contentSource: parseManualContentSource(parsed.data.contentSource),
+    sourceMix: parsed.data.sourceMix,
   });
 
   if (!result.success) {
@@ -131,7 +152,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
       result.code === "INVALID_POST_COUNT" ||
       result.code === "INVALID_DATE_RANGE" ||
       result.code === "START_DATE_IN_PAST" ||
-      result.code === "INVALID_DISTRIBUTION"
+      result.code === "INVALID_DISTRIBUTION" ||
+      result.code === "INVALID_SOURCE_MIX"
     ) {
       return NextResponse.json(
         { error: { code: result.code, message: result.message } },

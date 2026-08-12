@@ -16,6 +16,8 @@ import {
   type BulkCustomDay,
 } from "@/lib/scheduling/bulk-schedule";
 import { appZoneToday } from "@/lib/scheduling/app-datetime-local";
+import { resolveContentMix, scaleMixToTotal } from "@/lib/scheduling/content-mix";
+import type { ContentMixDTO } from "@/lib/services/company/get-content-mix.service";
 
 /** `YYYY-MM-DD` in UTC — the form's date format, and the API's. */
 export function toIsoDate(date: Date): string {
@@ -142,6 +144,79 @@ export function clampDayCount(raw: string): number {
   return Math.min(parsed, MAX_BULK_POSTS);
 }
 
+// ─── The batch's content mix ──────────────────────────────────────────────────
+
+/**
+ * The company-content row's key in the editor's state.
+ *
+ * The mix is keyed by content-source id, and company content has none — it is a
+ * quota with a null source. A `__`-prefixed sentinel cannot collide with a uuid,
+ * the same trick the manual content-source dropdown uses for its own sentinels.
+ */
+export const BATCH_MIX_COMPANY_KEY = "__company_content__";
+
+/** State key for a quota; the inverse of the mapping `toSourceMixPayload` undoes. */
+export function batchMixKey(sourceId: string | null): string {
+  return sourceId ?? BATCH_MIX_COMPANY_KEY;
+}
+
+/**
+ * The company's saved mix, sized to the number of posts this batch will write.
+ *
+ * This is the whole "pre-fill from the default" behaviour: the same quotas the
+ * scheduler follows every week, scaled by `scaleMixToTotal` to the batch's own
+ * total. Reading the stored configuration through `resolveContentMix` — rather
+ * than re-deriving quotas from the DTO's fields — is what keeps one answer to
+ * "what is this company's distribution": disabled sources are dropped and an
+ * unassigned quota counts as zero, exactly as they do at generation time.
+ *
+ * An unconfigured mix yields `{}`, which the form reads as "there is no default
+ * to offer" and leaves generation on the pooled behaviour it has always had.
+ */
+export function defaultBatchMix(mix: ContentMixDTO, total: number): Record<string, number> {
+  const quotas = resolveContentMix({
+    sources: mix.sources,
+    companyContentPostsPerWeek: mix.companyContentPostsPerWeek,
+  });
+  if (quotas === null) return {};
+
+  return Object.fromEntries(
+    scaleMixToTotal(quotas, total).map((q) => [batchMixKey(q.sourceId), q.postsPerWeek])
+  );
+}
+
+/** Posts the editor currently assigns across all sources. */
+export function batchMixTotal(counts: Readonly<Record<string, number>>): number {
+  return Object.values(counts).reduce((sum, n) => sum + (Number.isFinite(n) ? n : 0), 0);
+}
+
+/**
+ * The mix as the API wants it: only the sources actually writing something.
+ *
+ * Zero rows are dropped rather than sent. A quota of zero means "not this
+ * source", which is what its absence already says — and the scheduler treats the
+ * two identically (a zero quota is never due, and never receives posts from a
+ * source that ran dry). Insertion order is preserved, so the order the user sees
+ * is the order ties break in.
+ */
+export function toSourceMixPayload(
+  counts: Readonly<Record<string, number>>
+): Array<{ sourceId: string | null; posts: number }> {
+  return Object.entries(counts)
+    .filter(([, posts]) => Number.isInteger(posts) && posts > 0)
+    .map(([key, posts]) => ({
+      sourceId: key === BATCH_MIX_COMPANY_KEY ? null : key,
+      posts,
+    }));
+}
+
+/** Clamps a typed quota to something the request could carry; unreadable → 0. */
+export function clampMixCount(raw: string): number {
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+  return Math.min(parsed, MAX_BULK_POSTS);
+}
+
 // ─── Reading a finished batch ─────────────────────────────────────────────────
 
 /** The batch summary as it crosses the wire — dates arrive as ISO strings. */
@@ -161,7 +236,9 @@ export interface BulkBatchResponse {
   }[];
   notAttempted: number;
   stoppedEarly: boolean;
-  stopReason: "generation_failed" | "time_budget" | null;
+  stopReason: "generation_failed" | "time_budget" | "mix_exhausted" | null;
+  /** Content-mix runs: sources that ran dry mid-run; null = company content. */
+  exhaustedSources: Array<string | null>;
 }
 
 /**
@@ -189,9 +266,14 @@ export function bulkOutcome(batch: BulkBatchResponse): BulkOutcome {
  * what the user can act on. Running out of request time is not a content
  * problem at all and gets its own wording — "ask for the rest again", not
  * "add more sources".
+ *
+ * A mix that ran out is its own case for the same reason: no single slot failed,
+ * so `failures` is empty and there is nothing for the generic wording to name.
+ * Every source in the batch's mix was tried and had nothing left.
  */
 export function partialReasonKey(batch: BulkBatchResponse): string {
   if (batch.stopReason === "time_budget") return "stoppedTimeBudget";
+  if (batch.stopReason === "mix_exhausted") return "stoppedMixExhausted";
   const reason = batch.failures[0]?.reason;
   return reason ? `stopped_${reason}` : "stoppedUnknown";
 }

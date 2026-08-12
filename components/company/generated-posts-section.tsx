@@ -21,6 +21,7 @@ import {
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
 import type { GenerationChannelOption } from "@/lib/posts/generation-channels";
+import type { ContentMixDTO } from "@/lib/services/company/get-content-mix.service";
 import type { PostRole } from "@/lib/posts/post-actions";
 import {
   disabledMetrics,
@@ -39,6 +40,8 @@ interface Props {
   availableChannels: GenerationChannelOption[];
   /** Company.defaultLang, used to name the resolved "Default" language option. */
   companyDefaultLang: "en" | "bg";
+  /** The saved content mix, pre-filling a multi-post batch's distribution. */
+  contentMix: ContentMixDTO | null;
   /** Engagement metrics by post id (v2-7). Loaded server-side for the whole tab. */
   postMetrics: Record<string, PostMetricsView>;
   /** Owners see the "add a key" nudge on the disabled state. */
@@ -57,6 +60,7 @@ export function GeneratedPostsSection({
   contentSources,
   availableChannels,
   companyDefaultLang,
+  contentMix,
   postMetrics,
   canManageAnalyticsKey,
   initialStatusFilter,
@@ -178,6 +182,7 @@ export function GeneratedPostsSection({
         contentSources={contentSources}
         availableChannels={availableChannels}
         companyDefaultLang={companyDefaultLang}
+        contentMix={contentMix}
       />
 
       {/* Hidden when there is nothing to filter — a toolbar over an empty grid

@@ -31,6 +31,14 @@
  * generation defaults to `draft`, and only cron's separate auto-approve step
  * ever promotes anything.
  *
+ * A batch may also carry a CONTENT MIX — how many of its posts each source
+ * writes. That too is orchestration and not a second distribution engine: the
+ * quotas are handed to `lib/scheduling/content-mix.ts`, the same module the
+ * weekly scheduler asks "which source is due next", and each answer becomes an
+ * ordinary manual content-source pick on the very next generate call. The mix
+ * arrives with the request and is never written back — the company's saved mix
+ * is configuration, a batch's mix is one instruction.
+ *
  * Running N generations inside one HTTP request is the real operational cost of
  * that shape, so the loop runs under the same ambient request deadline the cron
  * pipelines use and stops cleanly when the budget runs out — see
@@ -46,6 +54,11 @@ import {
 } from "./generate-draft-post.service";
 import type { ManualContentSourceRef } from "@/lib/ai/manual-content-source";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
+import {
+  COMPANY_CONTENT_SOURCE_ID,
+  nextDueQuota,
+  type MixQuota,
+} from "@/lib/scheduling/content-mix";
 import {
   createRequestDeadline,
   remainingBudgetMs,
@@ -93,6 +106,28 @@ export interface BulkGeneratePostsInput {
   llmConfigId?: string;
   /** The form's "Content source" choice, applied identically to every post. */
   contentSource?: ManualContentSourceRef;
+  /**
+   * A per-batch content mix: how many of these posts each source writes.
+   *
+   * Absent means the batch behaves exactly as it always has — one content-source
+   * choice applied to every post. Present, it REPLACES that choice: each slot is
+   * generated from whichever quota is due next, so `contentSource` must be the
+   * pooled default (or absent) or the request is refused rather than one of the
+   * two silently winning.
+   *
+   * This is a copy of the company's saved mix, sized to this batch, and nothing
+   * here writes back to it. The saved default is configuration; this is one
+   * run's instruction.
+   */
+  sourceMix?: BulkSourceQuota[];
+}
+
+/** One line of a per-batch content mix. */
+export interface BulkSourceQuota {
+  /** null = company content: written from the brand profile, with no article. */
+  sourceId: string | null;
+  /** How many posts of this batch this source writes. At least 1. */
+  posts: number;
 }
 
 export interface BulkGeneratedPost {
@@ -144,8 +179,13 @@ export interface BulkGenerationFailure {
  *                         to start another full generation. Not an error: the
  *                         posts already written are real and committed, and the
  *                         caller is told plainly that the rest were not tried.
+ *   • mix_exhausted     — content-mix runs only: every source in the mix ran out
+ *                         of material, so no quota was left that anything could
+ *                         still be written from. Distinct from a plain failure
+ *                         because no single slot failed — the batch simply ran
+ *                         past what the company currently has to say.
  */
-export type BulkStopReason = "generation_failed" | "time_budget";
+export type BulkStopReason = "generation_failed" | "time_budget" | "mix_exhausted";
 
 export interface BulkGenerationSummary {
   /** Shared by every post this run wrote — also persisted on each of them. */
@@ -164,6 +204,16 @@ export interface BulkGenerationSummary {
   stoppedEarly: boolean;
   /** Null when every slot was attempted. */
   stopReason: BulkStopReason | null;
+  /**
+   * Content-mix runs only: the sources that ran out of material during this run,
+   * in the order they did. Their unwritten posts were handed to the sources that
+   * still had something (see transferExhaustedQuotas), so this is an account of
+   * what happened rather than a list of failures — a batch can be complete and
+   * still have entries here.
+   *
+   * Empty for a run without a mix, where a dry source ends the batch instead.
+   */
+  exhaustedSources: Array<string | null>;
 }
 
 /**
@@ -181,6 +231,7 @@ export type BulkGeneratePostsResult =
   | { success: false; code: "INVALID_DATE_RANGE"; message: string }
   | { success: false; code: "START_DATE_IN_PAST"; message: string }
   | { success: false; code: "INVALID_DISTRIBUTION"; message: string }
+  | { success: false; code: "INVALID_SOURCE_MIX"; message: string }
   | GenerateDraftPostFailure;
 
 export interface BulkGeneratePostsDeps {
@@ -188,6 +239,8 @@ export interface BulkGeneratePostsDeps {
   generate?: typeof generateDraftPost;
   /** Reads the channel's posting windows so slots land at its usual hour. */
   loadPostingWindows?: (slug: string, channel: string) => Promise<unknown>;
+  /** The company's enabled content-source ids — what a submitted mix is checked against. */
+  loadEnabledSourceIds?: (slug: string) => Promise<Set<string>>;
   /** Batch id factory — injected so tests get a stable id. */
   newBatchId?: () => string;
   /** Writes the batch-level audit entry. Injected so tests can read it back. */
@@ -346,6 +399,91 @@ function isSocialChannel(value: string): value is SocialChannel {
 }
 
 /**
+ * The ids a per-batch mix may name: this company's ENABLED content sources.
+ *
+ * Scoped by slug only, on the same reasoning as the posting-windows read above —
+ * these ids are only ever compared against what the request submitted, and the
+ * generation call that follows is what enforces membership. Disabled sources are
+ * excluded because the stored mix excludes them too (resolveContentMix drops
+ * them), so a mix naming one is a stale client, not a valid instruction.
+ */
+async function loadEnabledSourceIdsFromDb(slug: string): Promise<Set<string>> {
+  const rows = await prisma.contentSource.findMany({
+    where: { company: { slug }, enabled: true },
+    select: { id: true },
+  });
+  return new Set(rows.map((r) => r.id));
+}
+
+/**
+ * Why a submitted per-batch mix cannot be run, in English, or null when it can.
+ *
+ * The form applies every one of these before it enables the button; they are
+ * repeated here because the server does not take the client's word for where
+ * posts come from. The sum rule is the load-bearing one: the mix IS the batch,
+ * so a mix that does not add up to the number requested would silently generate
+ * a different number of posts than the button promised.
+ */
+function validateSourceMix(
+  mix: readonly BulkSourceQuota[],
+  numberOfPosts: number,
+  contentSource: ManualContentSourceRef | undefined,
+  enabledSourceIds: ReadonlySet<string>
+): string | null {
+  // The two ways of choosing a source are alternatives, not layers: a specific
+  // pick means "every post from here", a mix means "these posts from each of
+  // these". Letting both through would leave the answer to whichever the loop
+  // happened to read.
+  if (contentSource !== undefined && contentSource.kind !== "company_rules") {
+    return "A content mix and a single content source cannot both be chosen for one batch.";
+  }
+
+  if (mix.length === 0) {
+    return "A content mix must name at least one source.";
+  }
+
+  const seen = new Set<string | null>();
+  for (const quota of mix) {
+    if (seen.has(quota.sourceId)) {
+      return "The same content source is listed more than once in the mix.";
+    }
+    seen.add(quota.sourceId);
+
+    if (!Number.isInteger(quota.posts) || quota.posts < 1) {
+      return "Every source in the mix must be given a whole number of one post or more.";
+    }
+
+    if (quota.sourceId !== COMPANY_CONTENT_SOURCE_ID && !enabledSourceIds.has(quota.sourceId)) {
+      return "The mix names a content source that does not exist or is not enabled.";
+    }
+  }
+
+  const total = mix.reduce((sum, q) => sum + q.posts, 0);
+  if (total !== numberOfPosts) {
+    return `The content mix assigns ${total} posts but ${numberOfPosts} were requested.`;
+  }
+
+  return null;
+}
+
+/**
+ * The content-source choice a mix quota stands for.
+ *
+ * Deliberately expressed as the ordinary manual selection rather than as a new
+ * kind of instruction: a mix post is a manual generation from a picked source,
+ * so it reaches the same resolution (`resolveManualContentSource`), the same
+ * scope, and the same `Post.contentSourceId` attribution as if the user had
+ * chosen that source in the dropdown themselves. The company-content quota maps
+ * to the mission sentinel, which is what the weekly scheduler's own mix path
+ * scopes to for a null source id.
+ */
+function contentSourceForQuota(sourceId: string | null): ManualContentSourceRef {
+  return sourceId === COMPANY_CONTENT_SOURCE_ID
+    ? { kind: "company_mission" }
+    : { kind: "source", sourceId };
+}
+
+/**
  * Generates up to `numberOfPosts` drafts, one per planned slot, stopping at the
  * first failure.
  *
@@ -365,6 +503,7 @@ export async function bulkGeneratePosts(
 ): Promise<BulkGeneratePostsResult> {
   const generate = deps.generate ?? generateDraftPost;
   const loadPostingWindows = deps.loadPostingWindows ?? loadPostingWindowsFromDb;
+  const loadEnabledSourceIds = deps.loadEnabledSourceIds ?? loadEnabledSourceIdsFromDb;
   const newBatchId = deps.newBatchId ?? (() => crypto.randomUUID());
   const auditLog = deps.auditLog ?? createAuditLog;
   const now = deps.now ?? Date.now;
@@ -422,6 +561,27 @@ export async function bulkGeneratePosts(
     }
   }
 
+  // The per-batch content mix, checked against the company's real sources before
+  // anything is generated. An unknown id is refused rather than skipped: it would
+  // otherwise fail per-slot, be read as "that source is spent", and quietly move
+  // its posts onto sources the user never allocated them to.
+  const mixQuotas: MixQuota[] | null =
+    input.sourceMix === undefined
+      ? null
+      : input.sourceMix.map((q) => ({ sourceId: q.sourceId, postsPerWeek: q.posts }));
+
+  if (input.sourceMix !== undefined) {
+    const problem = validateSourceMix(
+      input.sourceMix,
+      input.numberOfPosts,
+      input.contentSource,
+      await loadEnabledSourceIds(slug)
+    );
+    if (problem !== null) {
+      return { success: false, code: "INVALID_SOURCE_MIX", message: problem };
+    }
+  }
+
   // Slots are planned up front because each post is persisted with its own
   // `scheduledFor` as it is written.
   //
@@ -452,6 +612,15 @@ export async function bulkGeneratePosts(
   // already resolved the company by then.
   let companyId: string | null = null;
 
+  // Mix bookkeeping, all of it scoped to THIS run. `generatedBySource` is what
+  // nextDueQuota measures a quota's progress against; `exhausted` is what makes
+  // transferExhaustedQuotas hand a dry source's remaining posts to the sources
+  // that can still write them. Neither is persisted — the saved mix is untouched
+  // by anything that happens in this loop.
+  const generatedBySource = new Map<string | null, number>();
+  const exhausted = new Set<string | null>();
+  const exhaustedSources: Array<string | null> = [];
+
   const minSlotBudgetMs = deps.minSlotBudgetMs ?? MIN_SLOT_BUDGET_MS;
   const deadline = createRequestDeadline(now() + (deps.softBudgetMs ?? BULK_SOFT_BUDGET_MS), now);
 
@@ -460,6 +629,22 @@ export async function bulkGeneratePosts(
   // BULK_SOFT_BUDGET_MS for why a bulk run cannot be allowed to find out about
   // the function cap the hard way.
   const zeroGenerated = await runInRequestDeadline(deadline, async () => {
+    /** The single-post answer for a run that wrote nothing at all. */
+    const asSingleFailure = (result: GenerateDraftPostFailure) => ({
+      success: false as const,
+      code: result.code,
+      message: result.message ?? DEFAULT_MESSAGES[classifyBulkFailure(result.code)],
+      reason: result.reason,
+      attempts: result.attempts,
+      retryAfterMs: result.retryAfterMs,
+    });
+
+    // The last "nothing left to write from" a mix run hit. Kept because it is
+    // the honest answer when every source runs dry before a single post exists:
+    // the caller gets the generation's own code, exactly as it would from a
+    // one-post request that found the same empty pool.
+    let lastExhaustion: GenerateDraftPostFailure | null = null;
+
     for (let i = 0; i < slots.length; i++) {
       const scheduledFor = slots[i];
 
@@ -471,49 +656,87 @@ export async function bulkGeneratePosts(
         break;
       }
 
-      // The one and only generation path — the same call the single-post route
-      // makes, with the same options, plus this post's slot and batch id.
-      const result = await generate(slug, input.channel, userId, isGlobalAdmin, {
-        contentLanguage: input.contentLanguage,
-        includeSourceLinkOverride: input.includeSourceLinkOverride,
-        autoGenerateImageOverride: input.autoGenerateImageOverride,
-        llmConfigId: input.llmConfigId,
-        contentSource: input.contentSource,
-        scheduledFor,
-        generationBatchId: batchId,
-      });
+      // Fill this one slot.
+      //
+      // Without a mix that is a single attempt, exactly as before. With one, a
+      // slot may be attempted more than once: a source that turns out to have
+      // nothing left is marked spent for the rest of the run and its remaining
+      // posts pass to the sources that can still write them (nextDueQuota reads
+      // the post-transfer quotas), so the slot is retried against whichever
+      // source is due next rather than costing the batch a post. Every other
+      // kind of failure still ends the run at the first one — see
+      // classifyBulkFailure for why retrying those cannot help.
+      let stop = false;
 
-      if (result.success) {
-        companyId ??= result.post.companyId;
-        posts.push({ index: i + 1, postId: result.post.id, scheduledFor });
-        continue;
-      }
+      while (!stop) {
+        const due =
+          mixQuotas === null
+            ? null
+            : nextDueQuota({ quotas: mixQuotas, generatedBySource, exhausted });
 
-      const reason = classifyBulkFailure(result.code);
+        // Mix runs only: every quota is filled or spent, so there is nothing
+        // left to write this slot — or any slot after it — from.
+        if (mixQuotas !== null && due === null) {
+          if (posts.length === 0 && lastExhaustion !== null) {
+            return asSingleFailure(lastExhaustion);
+          }
+          stopReason = "mix_exhausted";
+          stop = true;
+          break;
+        }
 
-      // Nothing was written at all: answer exactly as the single-post flow
-      // would, so the caller gets the real code (and its retry hints) rather
-      // than a "successful batch of zero".
-      if (posts.length === 0) {
-        return {
-          success: false as const,
+        // The one and only generation path — the same call the single-post route
+        // makes, with the same options, plus this post's slot and batch id. A
+        // mix post differs only in WHICH source it names, and it names it the
+        // same way the dropdown would.
+        const result = await generate(slug, input.channel, userId, isGlobalAdmin, {
+          contentLanguage: input.contentLanguage,
+          includeSourceLinkOverride: input.includeSourceLinkOverride,
+          autoGenerateImageOverride: input.autoGenerateImageOverride,
+          llmConfigId: input.llmConfigId,
+          contentSource: due === null ? input.contentSource : contentSourceForQuota(due.sourceId),
+          scheduledFor,
+          generationBatchId: batchId,
+        });
+
+        if (result.success) {
+          companyId ??= result.post.companyId;
+          posts.push({ index: i + 1, postId: result.post.id, scheduledFor });
+          if (due !== null) {
+            generatedBySource.set(due.sourceId, (generatedBySource.get(due.sourceId) ?? 0) + 1);
+          }
+          break;
+        }
+
+        const reason = classifyBulkFailure(result.code);
+
+        // This source is spent. Not a failure of the slot — the posts it owed
+        // move to the sources that still have material, and this slot is tried
+        // again against the next one due.
+        if (due !== null && reason === "no_eligible_content") {
+          exhausted.add(due.sourceId);
+          exhaustedSources.push(due.sourceId);
+          lastExhaustion = result;
+          continue;
+        }
+
+        // Nothing was written at all: answer exactly as the single-post flow
+        // would, so the caller gets the real code (and its retry hints) rather
+        // than a "successful batch of zero".
+        if (posts.length === 0) return asSingleFailure(result);
+
+        failures.push({
+          index: i + 1,
+          scheduledFor,
           code: result.code,
+          reason,
           message: result.message ?? DEFAULT_MESSAGES[reason],
-          reason: result.reason,
-          attempts: result.attempts,
-          retryAfterMs: result.retryAfterMs,
-        };
+        });
+        stopReason = "generation_failed";
+        stop = true;
       }
 
-      failures.push({
-        index: i + 1,
-        scheduledFor,
-        code: result.code,
-        reason,
-        message: result.message ?? DEFAULT_MESSAGES[reason],
-      });
-      stopReason = "generation_failed";
-      break;
+      if (stop) break;
     }
 
     return null;
@@ -531,7 +754,9 @@ export async function bulkGeneratePosts(
           ? ` — stopped at slot ${failures[0].index}: ${failures[0].code}`
           : stopReason === "time_budget"
             ? " — stopped: request time budget exhausted"
-            : "")
+            : stopReason === "mix_exhausted"
+              ? " — stopped: every source in the content mix ran out of material"
+              : "")
     );
   }
 
@@ -563,6 +788,11 @@ export async function bulkGeneratePosts(
         stopReason,
         failureCode: failures[0]?.code ?? null,
         postIds: posts.map((p) => p.postId),
+        // The mix this ONE run used, recorded because it may differ from the
+        // company's saved default — which this run did not change. Without it
+        // the log could not explain why these posts came from these sources.
+        sourceMix: input.sourceMix ?? null,
+        exhaustedSources,
       },
     });
   }
@@ -580,6 +810,7 @@ export async function bulkGeneratePosts(
       notAttempted,
       stoppedEarly: attempted < input.numberOfPosts,
       stopReason,
+      exhaustedSources,
     },
   };
 }

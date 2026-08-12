@@ -12,12 +12,17 @@ import type { GenerationSourceOption } from "@/lib/services/company/list-generat
 import type { GenerationChannelOption } from "@/lib/posts/generation-channels";
 import { COMPANY_MISSION_VALUE, COMPANY_RULES_VALUE } from "@/lib/ai/manual-content-source";
 import { BulkGenerateFields, type BulkPlanState } from "./bulk-generate-fields";
+import { BatchContentMixFields } from "./batch-content-mix-fields";
 import { BulkResultSummary } from "./bulk-result-summary";
 import {
+  batchMixTotal,
+  defaultBatchMix,
   defaultBulkRange,
   toCustomDistribution,
+  toSourceMixPayload,
   type BulkBatchResponse,
 } from "@/lib/posts/bulk-form";
+import type { ContentMixDTO } from "@/lib/services/company/get-content-mix.service";
 import {
   MAX_BULK_POSTS,
   isStartDateInPast,
@@ -98,6 +103,12 @@ interface Props {
   availableChannels: GenerationChannelOption[];
   /** Company.defaultLang — names the resolved "Default" language option. */
   companyDefaultLang: "en" | "bg";
+  /**
+   * The company's saved content mix — the DEFAULT a multi-post batch starts
+   * from. Null when it could not be read, which simply leaves the batch on the
+   * pooled behaviour it had before this panel existed.
+   */
+  contentMix: ContentMixDTO | null;
 }
 
 export function GeneratePostForm({
@@ -108,6 +119,7 @@ export function GeneratePostForm({
   contentSources,
   availableChannels,
   companyDefaultLang,
+  contentMix,
 }: Props) {
   const t = useTranslations("posts.generate");
   const tBulk = useTranslations("posts.generate.bulk");
@@ -162,6 +174,28 @@ export function GeneratePostForm({
   const [openedAt] = useState(() => new Date());
   const minDate = useMemo(() => appZoneToday(openedAt), [openedAt]);
   const [batch, setBatch] = useState<BulkBatchResponse | null>(null);
+
+  // ── This batch's content mix ──────────────────────────────────────────────
+  // Null means "untouched, so use the saved default". Holding the override as
+  // null-or-edits rather than as a copy of the default is what keeps the panel
+  // honest for free: the badge, the reset, and the re-scaling when the number of
+  // posts changes are all just this one distinction, and no effect has to keep a
+  // duplicate in step with the source of truth.
+  const [mixOverride, setMixOverride] = useState<Record<string, number> | null>(null);
+
+  // A saved mix exists AND the batch is drawing on all sources — a specific
+  // content-source pick is an instruction of its own and is not overridden here.
+  const mixConfigured = contentMix?.configured === true;
+  const mixApplies = mode === "multiple" && contentSource === COMPANY_RULES_VALUE;
+
+  const mixCounts = useMemo(() => {
+    if (!contentMix) return {};
+    return mixOverride ?? defaultBatchMix(contentMix, plan.numberOfPosts);
+  }, [contentMix, mixOverride, plan.numberOfPosts]);
+
+  /** The mix is what this run will follow — as opposed to merely being shown. */
+  const mixActive = mixApplies && mixConfigured;
+  const mixBalanced = batchMixTotal(mixCounts) === plan.numberOfPosts;
 
   const noChannels = channelOptions.length === 0;
   const selectedChannel = channelOptions.find((c) => c.value === channel) ?? null;
@@ -238,7 +272,11 @@ export function GeneratePostForm({
     // Literally the same function the service runs: a period that has already
     // begun is refused there, so the button must not offer it here.
     !isStartDateInPast(plan.startDate, openedAt) &&
-    slots.length > 0;
+    slots.length > 0 &&
+    // The mix IS the batch when it applies, so one that does not add up would
+    // ask for a different number of posts than the button promises. The service
+    // refuses it too; this is what stops the request being made at all.
+    (!mixActive || mixBalanced);
 
   // The language "Default" resolves to, mirroring the server's order:
   // ChannelConfig.postingLanguage → Company.defaultLang. Naming it in the option
@@ -376,6 +414,10 @@ export function GeneratePostForm({
           // days AND times, and the server schedules exactly those — which is
           // why the preview above is not an estimate.
           ...(plan.distribution === "custom" ? { distribution: customDistribution } : {}),
+          // Sent only when a mix is actually driving this run. Its absence is
+          // what keeps a company without one — or a batch pinned to a single
+          // source — on exactly the behaviour it had before.
+          ...(mixActive ? { sourceMix: toSourceMixPayload(mixCounts) } : {}),
         }),
       });
       if (!res.ok) {
@@ -653,6 +695,32 @@ export function GeneratePostForm({
           disabled={generating || noChannels}
           locale={locale}
         />
+      )}
+
+      {/* Where the posts come from, beside when they go out. Shown only for a
+          batch — a single post already answers this with the dropdown above —
+          and only while that dropdown is on "company rules", since a specific
+          pick is itself the answer. */}
+      {mixApplies && contentMix && (
+        <BatchContentMixFields
+          slug={slug}
+          mix={contentMix}
+          counts={mixCounts}
+          onChange={setMixOverride}
+          isDefault={mixOverride === null}
+          onReset={() => setMixOverride(null)}
+          numberOfPosts={plan.numberOfPosts}
+          sources={contentSources}
+          disabled={generating || noChannels}
+        />
+      )}
+
+      {/* A specific source was picked, so there is nothing to distribute. Said
+          out loud, with the way back, rather than by a panel silently vanishing. */}
+      {mode === "multiple" && !mixApplies && mixConfigured && (
+        <p className="text-fg-faint mt-3 text-xs">
+          {tBulk("contentMixPinnedSource", { option: t("contentSourceCompanyRules") })}
+        </p>
       )}
 
       {/* One run can take minutes; without this the user is looking at a

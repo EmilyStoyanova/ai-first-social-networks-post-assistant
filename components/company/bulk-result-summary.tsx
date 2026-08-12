@@ -46,6 +46,16 @@ export function BulkResultSummary({ batch, locale }: Props) {
           </>
         )}
 
+        {/* A source ran dry and the others covered for it. Worth saying even on
+            a complete run: the batch matched the mix that was asked for, but not
+            the one that was written, and the next run may be short if nothing
+            new arrives. */}
+        {batch.exhaustedSources.length > 0 && (
+          <p className="text-xs">
+            {t("resultMixTransferred", { count: batch.exhaustedSources.length })}
+          </p>
+        )}
+
         {batch.posts.length > 0 && (
           <p className="text-xs">
             {t("resultScheduledRange", {

@@ -10,6 +10,7 @@ import {
   projectMixSources,
   remainingByQuota,
   resolveContentMix,
+  scaleMixToTotal,
   validateContentMix,
   type MixQuota,
   type MixSourceInput,
@@ -822,5 +823,90 @@ describe("remainingByQuota", () => {
       exhausted: new Set(),
     });
     assert.equal(remaining.find((r) => r.sourceId === "rss-b")?.remaining, 0);
+  });
+});
+
+// ─── scaleMixToTotal ──────────────────────────────────────────────────────────
+
+describe("scaleMixToTotal", () => {
+  it("leaves a mix that already matches the total alone", () => {
+    assert.deepEqual(scaleMixToTotal(BRIEF_QUOTAS, 5), BRIEF_QUOTAS);
+  });
+
+  it("keeps the proportions when scaling up", () => {
+    // 3/1/1 doubled is 6/2/2 exactly — no remainder to hand out.
+    assert.deepEqual(
+      scaleMixToTotal(BRIEF_QUOTAS, 10).map((q) => q.postsPerWeek),
+      [6, 2, 2]
+    );
+  });
+
+  it("hands the indivisible remainder to the largest fractions, in list order", () => {
+    // 3/1/1 over 4 is 2.4/0.8/0.8: floors give 2/0/0 and two posts are left, so
+    // the two 0.8s take one each. The earlier quota wins the tie, which is what
+    // makes the same mix scale the same way every time.
+    assert.deepEqual(
+      scaleMixToTotal(BRIEF_QUOTAS, 4).map((q) => q.postsPerWeek),
+      [2, 1, 1]
+    );
+  });
+
+  it("can scale a quota down to nothing rather than rounding it up", () => {
+    // 3/1/1 over 3 is 1.8/0.6/0.6 — the two posts left go to the largest
+    // fractions, and company content writes nothing in a batch this small.
+    // Rounding it up to 1 would take that post off the source weighted highest.
+    assert.deepEqual(
+      scaleMixToTotal(BRIEF_QUOTAS, 3).map((q) => q.postsPerWeek),
+      [2, 1, 0]
+    );
+  });
+
+  it("always adds up to the requested total", () => {
+    for (let total = 1; total <= 10; total++) {
+      const scaled = scaleMixToTotal(BRIEF_QUOTAS, total);
+      assert.equal(contentMixTotal(scaled), total, `scaling to ${total}`);
+    }
+  });
+
+  it("never gives posts to a quota of zero", () => {
+    const quotas: MixQuota[] = [
+      { sourceId: "rss-a", postsPerWeek: 3 },
+      { sourceId: "rss-b", postsPerWeek: 0 },
+    ];
+    // Zero is a deliberate "not this source" — scaling must not smuggle it back
+    // into the run.
+    for (let total = 1; total <= 10; total++) {
+      assert.equal(scaleMixToTotal(quotas, total)[1].postsPerWeek, 0, `scaling to ${total}`);
+    }
+  });
+
+  it("scales an empty recipe to zeros rather than inventing an even split", () => {
+    const quotas: MixQuota[] = [
+      { sourceId: "rss-a", postsPerWeek: 0 },
+      { sourceId: COMPANY_CONTENT_SOURCE_ID, postsPerWeek: 0 },
+    ];
+    assert.deepEqual(
+      scaleMixToTotal(quotas, 4).map((q) => q.postsPerWeek),
+      [0, 0]
+    );
+  });
+
+  it("treats an unusable total as nothing to distribute", () => {
+    // A half-typed number in a form is a mix that does not add up yet, not a throw.
+    for (const total of [0, -3, 2.5, Number.NaN]) {
+      assert.deepEqual(
+        scaleMixToTotal(BRIEF_QUOTAS, total).map((q) => q.postsPerWeek),
+        [0, 0, 0],
+        `total ${total}`
+      );
+    }
+  });
+
+  it("does not mutate the quotas it was given", () => {
+    scaleMixToTotal(BRIEF_QUOTAS, 9);
+    assert.deepEqual(
+      BRIEF_QUOTAS.map((q) => q.postsPerWeek),
+      [3, 1, 1]
+    );
   });
 });

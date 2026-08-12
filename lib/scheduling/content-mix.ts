@@ -379,6 +379,67 @@ export function nextDueQuota(input: NextDueQuotaInput): MixQuota | null {
 }
 
 /**
+ * The same distribution, resized to a different total.
+ *
+ * The stored mix is a WEEKLY recipe; a manual batch asks for an arbitrary number
+ * of posts over an arbitrary period. Scaling is what lets one answer the other:
+ * a 3/1/1 week prefills a batch of 10 as 6/2/2 and a batch of 3 as 2/1/0 — the
+ * owner's proportions, at the size actually being generated.
+ *
+ * Largest remainder, because the alternatives both lie. Rounding each quota
+ * independently does not add up to `total` (3/1/1 scaled to 4 rounds to 2/1/1),
+ * and a batch whose parts do not sum to the number of posts requested is exactly
+ * the state the form must never submit. So: floor every share, then hand the
+ * leftover posts to the quotas with the largest fractional parts, ties going to
+ * the earlier quota in list order — the same stable, reproducible ordering
+ * transferExhaustedQuotas uses.
+ *
+ * Two boundaries worth naming:
+ *
+ *   • A quota can scale to 0. Shrinking a batch below the number of sources
+ *     means some source writes nothing this time, and silently rounding it up to
+ *     1 would take that post from a source the owner weighted more heavily.
+ *   • A mix totalling 0 scales to all zeros rather than to an even split. There
+ *     are no proportions in an empty recipe to preserve, and inventing some
+ *     would put words in the owner's mouth; the caller shows the sum as unmet
+ *     and lets a person decide.
+ *
+ * Pure and total: a non-integer or negative `total` yields all zeros rather than
+ * throwing, so a half-typed number in a form is simply a mix that does not add
+ * up yet.
+ */
+export function scaleMixToTotal(quotas: readonly MixQuota[], total: number): MixQuota[] {
+  const zeroed = () => quotas.map((q) => ({ ...q, postsPerWeek: 0 }));
+  if (!Number.isInteger(total) || total <= 0) return zeroed();
+
+  const source = contentMixTotal(quotas);
+  if (source <= 0) return zeroed();
+
+  const exact = quotas.map((quota) => (quota.postsPerWeek * total) / source);
+  const scaled = quotas.map((quota, index) => ({
+    ...quota,
+    postsPerWeek: Math.floor(exact[index]),
+  }));
+
+  let leftover = total - scaled.reduce((sum, q) => sum + q.postsPerWeek, 0);
+  if (leftover <= 0) return scaled;
+
+  // Rank by fractional part, keeping list order on a tie so the same mix always
+  // scales the same way.
+  const byRemainder = quotas
+    .map((_, index) => ({ index, fraction: exact[index] - Math.floor(exact[index]) }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+
+  for (const { index } of byRemainder) {
+    if (leftover === 0) break;
+    scaled[index].postsPerWeek++;
+    leftover--;
+  }
+
+  return scaled;
+}
+
+/**
  * The mix as it WOULD be after applying a submitted set of quotas.
  *
  * A request only carries the sources the client knew about, so anything it omits

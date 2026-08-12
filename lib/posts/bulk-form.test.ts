@@ -1,19 +1,25 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  BATCH_MIX_COMPANY_KEY,
+  batchMixTotal,
   bulkOutcome,
   clampDayCount,
+  clampMixCount,
   customTotal,
+  defaultBatchMix,
   defaultBulkRange,
   enumerateDays,
   partialReasonKey,
   syncDayTimes,
   toCustomDistribution,
   toIsoDate,
+  toSourceMixPayload,
   type BulkBatchResponse,
 } from "./bulk-form";
 import { MAX_BULK_POSTS, type CustomDistributionError } from "@/lib/scheduling/bulk-schedule";
 import { isSlotAligned } from "@/lib/scheduling/time-slots";
+import type { ContentMixDTO } from "@/lib/services/company/get-content-mix.service";
 import en from "@/i18n/messages/en.json";
 import bg from "@/i18n/messages/bg.json";
 
@@ -29,6 +35,7 @@ function batch(overrides: Partial<BulkBatchResponse> = {}): BulkBatchResponse {
     notAttempted: 0,
     stoppedEarly: false,
     stopReason: null,
+    exhaustedSources: [],
     ...overrides,
   };
 }
@@ -238,6 +245,167 @@ describe("clampDayCount", () => {
   });
 });
 
+// ─── The batch's content mix ──────────────────────────────────────────────────
+
+/**
+ * The stored mix as the page hands it to the form. Only the fields the batch
+ * panel reads are meaningful here; the rest belong to the settings editor.
+ */
+function mixDto(overrides: Partial<ContentMixDTO> = {}): ContentMixDTO {
+  return {
+    sources: [
+      { id: "src-a", name: "A", type: "rss", enabled: true, postsPerWeek: 3 },
+      { id: "src-b", name: "B", type: "rss", enabled: true, postsPerWeek: 1 },
+    ],
+    companyContentPostsPerWeek: 1,
+    weeklyTarget: 5,
+    total: 5,
+    remaining: 0,
+    configured: true,
+    maxPostsPerWeek: 7,
+    channelTargets: [],
+    validationError: null,
+    ...overrides,
+  };
+}
+
+describe("defaultBatchMix", () => {
+  it("offers the saved distribution at the batch's own size", () => {
+    // The proportions the owner set, scaled to what is actually being generated
+    // — that is the whole "pre-fill from the default" promise.
+    assert.deepEqual(defaultBatchMix(mixDto(), 5), {
+      "src-a": 3,
+      "src-b": 1,
+      [BATCH_MIX_COMPANY_KEY]: 1,
+    });
+    assert.deepEqual(defaultBatchMix(mixDto(), 10), {
+      "src-a": 6,
+      "src-b": 2,
+      [BATCH_MIX_COMPANY_KEY]: 2,
+    });
+  });
+
+  it("always adds up to the number of posts asked for", () => {
+    // A prefill that does not add up would put the form into its own error state
+    // before the user has touched anything.
+    for (let total = 1; total <= MAX_BULK_POSTS; total++) {
+      assert.equal(batchMixTotal(defaultBatchMix(mixDto(), total)), total, `total ${total}`);
+    }
+  });
+
+  it("drops a disabled source rather than reserving posts for it", () => {
+    // The run drops it too (resolveContentMix does), so a row here would promise
+    // posts from a feed that cannot write any.
+    const mix = mixDto({
+      sources: [
+        { id: "src-a", name: "A", type: "rss", enabled: true, postsPerWeek: 3 },
+        { id: "src-b", name: "B", type: "rss", enabled: false, postsPerWeek: 1 },
+      ],
+    });
+    assert.deepEqual(defaultBatchMix(mix, 4), { "src-a": 3, [BATCH_MIX_COMPANY_KEY]: 1 });
+  });
+
+  it("offers nothing at all when no default has been configured", () => {
+    // Which is what the form reads as "there is no default here", leaving
+    // generation on the pooled behaviour it has always had.
+    const unconfigured = mixDto({
+      sources: [{ id: "src-a", name: "A", type: "rss", enabled: true, postsPerWeek: null }],
+      companyContentPostsPerWeek: null,
+      configured: false,
+    });
+    assert.deepEqual(defaultBatchMix(unconfigured, 5), {});
+  });
+});
+
+describe("batchMixTotal", () => {
+  it("adds the assigned posts up", () => {
+    assert.equal(batchMixTotal({ "src-a": 3, [BATCH_MIX_COMPANY_KEY]: 2 }), 5);
+    assert.equal(batchMixTotal({}), 0);
+  });
+
+  it("treats an unusable entry as nothing rather than NaN", () => {
+    assert.equal(batchMixTotal({ "src-a": Number.NaN, "src-b": 2 }), 2);
+  });
+});
+
+describe("toSourceMixPayload", () => {
+  it("names the company-content quota with a null source, as the API does", () => {
+    assert.deepEqual(toSourceMixPayload({ "src-a": 3, [BATCH_MIX_COMPANY_KEY]: 2 }), [
+      { sourceId: "src-a", posts: 3 },
+      { sourceId: null, posts: 2 },
+    ]);
+  });
+
+  it("leaves out the sources writing nothing", () => {
+    // A quota of zero says the same thing its absence does, and the scheduler
+    // treats the two identically.
+    assert.deepEqual(toSourceMixPayload({ "src-a": 5, "src-b": 0 }), [
+      { sourceId: "src-a", posts: 5 },
+    ]);
+    assert.deepEqual(toSourceMixPayload({ "src-a": 0 }), []);
+  });
+
+  it("keeps the order the user is looking at", () => {
+    // Ties in the run break on list order, so the order on screen is the order
+    // the posts come out in.
+    assert.deepEqual(
+      toSourceMixPayload({ "src-b": 1, "src-a": 1 }).map((q) => q.sourceId),
+      ["src-b", "src-a"]
+    );
+  });
+});
+
+describe("clampMixCount", () => {
+  it("reads a typed number", () => {
+    assert.equal(clampMixCount("3"), 3);
+  });
+
+  it("treats empty, negative and non-numeric input as none", () => {
+    for (const raw of ["", "0", "-2", "abc", " "]) {
+      assert.equal(clampMixCount(raw), 0, raw);
+    }
+  });
+
+  it("never returns more than one request could hold", () => {
+    assert.equal(clampMixCount("999"), MAX_BULK_POSTS);
+  });
+});
+
+describe("the batch mix copy is translated", () => {
+  it("has every string the mix panel renders, in both locales", () => {
+    // The panel is the only place these appear, and a missing one is a next-intl
+    // crash in the middle of the generation form rather than a blank line.
+    const keys = [
+      "contentMixTitle",
+      "contentMixDefaultBadge",
+      "contentMixAdjustedBadge",
+      "contentMixHint",
+      "contentMixCompanyContent",
+      "contentMixCompanyContentHint",
+      "contentMixAssigned",
+      "contentMixMismatch",
+      "contentMixReset",
+      "contentMixEditDefault",
+      "contentMixUnconfigured",
+      "contentMixSetUp",
+      "contentMixPinnedSource",
+      "contentMixExhaustedNote",
+      "resultMixTransferred",
+      "stoppedMixExhausted",
+    ];
+
+    for (const [locale, messages] of [
+      ["en", en],
+      ["bg", bg],
+    ] as const) {
+      const bulk = messages.posts.generate.bulk as Record<string, string>;
+      for (const key of keys) {
+        assert.equal(typeof bulk[key], "string", `${locale} is missing posts.generate.bulk.${key}`);
+      }
+    }
+  });
+});
+
 describe("bulkOutcome", () => {
   it("is complete only when every requested post exists", () => {
     assert.equal(bulkOutcome(batch({ requested: 5, generated: 5 })), "complete");
@@ -253,6 +421,16 @@ describe("partialReasonKey", () => {
     assert.equal(
       partialReasonKey(batch({ generated: 2, stopReason: "time_budget", notAttempted: 3 })),
       "stoppedTimeBudget"
+    );
+  });
+
+  it("explains an exhausted mix on its own terms too", () => {
+    // No slot failed, so `failures` is empty and the generic wording has nothing
+    // to name — every source in the batch's mix was simply tried and had
+    // nothing left.
+    assert.equal(
+      partialReasonKey(batch({ generated: 2, stopReason: "mix_exhausted", notAttempted: 3 })),
+      "stoppedMixExhausted"
     );
   });
 
@@ -299,6 +477,7 @@ describe("partialReasonKey", () => {
 
     const keys = [
       partialReasonKey(batch({ generated: 1, stopReason: "time_budget" })),
+      partialReasonKey(batch({ generated: 1, stopReason: "mix_exhausted" })),
       partialReasonKey(batch({ generated: 1, stopReason: "generation_failed" })),
       ...reasons.map((reason) =>
         partialReasonKey(

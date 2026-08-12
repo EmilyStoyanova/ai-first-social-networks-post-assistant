@@ -73,6 +73,9 @@ export const API_ERROR_CODES = [
   "INVALID_POST_COUNT",
   "INVALID_DATE_RANGE",
   "INVALID_DISTRIBUTION",
+  // …and its content mix names a source this company does not have, or does not
+  // add up to the number of posts asked for.
+  "INVALID_SOURCE_MIX",
   // Rescheduling — the requested publish time is not one a post can be given.
   "INVALID_SCHEDULE",
 ] as const;

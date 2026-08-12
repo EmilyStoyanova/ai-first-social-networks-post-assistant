@@ -5,12 +5,14 @@ import {
   classifyBulkFailure,
   type BulkGeneratePostsDeps,
   type BulkGeneratePostsInput,
+  type BulkSourceQuota,
 } from "./bulk-generate-posts.service";
 import type {
   GenerateDraftPostErrorCode,
   GenerateDraftPostResult,
   GeneratedPostDTO,
 } from "./generate-draft-post.service";
+import type { ManualContentSourceRef } from "@/lib/ai/manual-content-source";
 import { brandSetupOrigin } from "@/lib/posts/post-origin";
 import { MAX_BULK_POSTS } from "@/lib/scheduling/bulk-schedule";
 import { toAppDateTimeLocal } from "@/lib/scheduling/app-datetime-local";
@@ -1019,5 +1021,394 @@ describe("bulkGeneratePosts — the batch's audit entry", () => {
     await bulkGeneratePosts(SLUG, USER_ID, false, makeInput(), deps);
 
     assert.equal(audits().length, 0);
+  });
+});
+
+// ─── The batch's content mix ──────────────────────────────────────────────────
+
+const SRC_A = "src-a";
+const SRC_B = "src-b";
+
+/**
+ * A 3/1/1 mix over the default 5-post batch — the same shape the module doc of
+ * content-mix.ts reasons about, so the expected source order here is the one
+ * `nextDueQuota` documents: A, B, company, A, A.
+ */
+const BRIEF_MIX: BulkSourceQuota[] = [
+  { sourceId: SRC_A, posts: 3 },
+  { sourceId: SRC_B, posts: 1 },
+  { sourceId: null, posts: 1 },
+];
+
+/**
+ * The mix key a slot was asked to be written from — company content as null,
+ * exactly as the quota that produced it names itself; undefined when the slot
+ * carried no pick at all, which is what a run without a mix looks like.
+ *
+ * Read off the wire rather than off a summary field, because the claim under
+ * test is that a mix post is an ORDINARY manual pick: the service must reach the
+ * generator with the same `contentSource` ref the dropdown would have sent.
+ */
+function askedSource(call: RecordedCall): string | null | undefined {
+  const ref = call.options.contentSource as ManualContentSourceRef | undefined;
+  if (ref === undefined) return undefined;
+  return ref.kind === "source" ? ref.sourceId : null;
+}
+
+/**
+ * A generation double whose answer depends on WHICH source was asked for.
+ *
+ * `dry` names the sources with nothing left to write from; they fail with the
+ * generator's real "pool is empty" code, which is the only failure a mix run
+ * treats as a handoff rather than as the end of the batch. `failAttempt` injects
+ * one different failure at a chosen call, for the other half of that rule.
+ */
+function makeMixDeps(
+  options: {
+    dry?: Array<string | null>;
+    enabledSourceIds?: string[];
+    failAttempt?: { at: number; result: GenerateDraftPostResult };
+  } = {}
+): {
+  deps: BulkGeneratePostsDeps;
+  calls: () => RecordedCall[];
+  audits: () => RecordedAudit[];
+} {
+  const dry = new Set<string | null | undefined>(options.dry ?? []);
+  const calls: RecordedCall[] = [];
+  const audits: RecordedAudit[] = [];
+
+  const deps: BulkGeneratePostsDeps = {
+    now: () => Date.parse("2026-08-10T09:00:00.000Z"),
+    loadEnabledSourceIds: async () => new Set(options.enabledSourceIds ?? [SRC_A, SRC_B]),
+    generate: async (slug, channel, userId, isGlobalAdmin, opts = {}) => {
+      const call: RecordedCall = {
+        slug,
+        channel,
+        userId,
+        isGlobalAdmin,
+        options: opts as Record<string, unknown>,
+      };
+      calls.push(call);
+
+      if (options.failAttempt && calls.length === options.failAttempt.at) {
+        return options.failAttempt.result;
+      }
+      if (dry.has(askedSource(call))) {
+        return { success: false, code: "NO_FEED_ITEMS_AVAILABLE" };
+      }
+
+      return {
+        success: true,
+        post: post(`post-${calls.length}`, opts as Record<string, unknown>),
+        warnings: {
+          duplicate: { flagged: false, similarityScore: null, matchedPostId: null },
+          safety: { flagged: false, matchedTerms: [] },
+          semanticDuplicate: {
+            decision: "accept",
+            topSimilarity: null,
+            matchedPostId: null,
+            exhausted: false,
+            skipped: false,
+          },
+        },
+      };
+    },
+    loadPostingWindows: async () => null,
+    newBatchId: () => BATCH_ID,
+    auditLog: async (entry) => {
+      audits.push(entry);
+    },
+  };
+
+  return { deps, calls: () => calls, audits: () => audits };
+}
+
+describe("bulkGeneratePosts — a per-batch content mix", () => {
+  it("writes each source the number of posts its quota asked for", async () => {
+    const { deps, calls } = makeMixDeps();
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ sourceMix: BRIEF_MIX }),
+      deps
+    );
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+    assert.equal(result.data.generated, 5);
+
+    // Spread rather than drained: the heaviest quota does not take the first
+    // three slots. This is `nextDueQuota`'s ordering reaching the batch intact,
+    // not a second ordering implemented here.
+    assert.deepEqual(calls().map(askedSource), [SRC_A, SRC_B, null, SRC_A, SRC_A]);
+  });
+
+  it("asks for each quota the way the dropdown would, not as a new instruction", async () => {
+    // What earns the mix everything generation already does — the reservation,
+    // the scope, the `contentSourceId` attribution on the post — is that it
+    // arrives as an ordinary manual pick.
+    const { deps, calls } = makeMixDeps();
+
+    await bulkGeneratePosts(SLUG, USER_ID, false, makeInput({ sourceMix: BRIEF_MIX }), deps);
+
+    assert.deepEqual(calls()[0].options.contentSource, { kind: "source", sourceId: SRC_A });
+    assert.deepEqual(calls()[2].options.contentSource, { kind: "company_mission" });
+  });
+
+  it("leaves a batch without a mix exactly as it was", async () => {
+    const { deps, calls } = makeMixDeps();
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ contentSource: { kind: "source", sourceId: SRC_B } }),
+      deps
+    );
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+
+    // One choice, applied to every post — the pre-mix behaviour, unchanged.
+    assert.deepEqual(
+      calls().map((c) => c.options.contentSource),
+      Array.from({ length: 5 }, () => ({ kind: "source", sourceId: SRC_B }))
+    );
+    assert.deepEqual(result.data.exhaustedSources, []);
+  });
+
+  it("hands a dry source's posts to the sources that still have material", async () => {
+    // The batch was promised 5 posts. A ran out; B and company content wrote
+    // what it owed, so the batch is still 5 — which is exactly what
+    // transferExhaustedQuotas promises the weekly scheduler.
+    const { deps, calls } = makeMixDeps({ dry: [SRC_A] });
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ sourceMix: BRIEF_MIX }),
+      deps
+    );
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+
+    assert.equal(result.data.generated, 5);
+    assert.deepEqual(result.data.failures, []);
+    assert.equal(result.data.stopReason, null);
+    assert.equal(result.data.stoppedEarly, false);
+    // Reported, not hidden: the batch matched the mix that was asked for, not
+    // the one that was written.
+    assert.deepEqual(result.data.exhaustedSources, [SRC_A]);
+
+    // Asked once and never again. A source that is spent is spent for the run —
+    // retrying it every slot would be the infinite loop this guards against.
+    assert.equal(calls().filter((c) => askedSource(c) === SRC_A).length, 1);
+    assert.deepEqual(calls().map(askedSource), [SRC_A, SRC_B, null, SRC_B, SRC_B, SRC_B]);
+  });
+
+  it("stops the batch on a failure that is not a source running dry", async () => {
+    // Only "nothing left to write from" is a handoff. A provider error says
+    // nothing about which source is due next, and retrying it just spends money.
+    const { deps } = makeMixDeps({
+      failAttempt: { at: 2, result: { success: false, code: "LLM_PROVIDER_ERROR" } },
+    });
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ sourceMix: BRIEF_MIX }),
+      deps
+    );
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+
+    assert.equal(result.data.generated, 1);
+    assert.equal(result.data.stopReason, "generation_failed");
+    assert.equal(result.data.failures.length, 1);
+    assert.equal(result.data.failures[0].code, "LLM_PROVIDER_ERROR");
+    assert.equal(result.data.notAttempted, 3);
+    assert.deepEqual(result.data.exhaustedSources, []);
+  });
+
+  it("stops with mix_exhausted once every source has run dry", async () => {
+    // Nothing failed — every slot that could be filled was. The run simply got
+    // past what the company currently has to say, and says so in its own words.
+    const { deps } = makeMixDeps({ dry: [SRC_B, null] });
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({
+        numberOfPosts: 3,
+        sourceMix: [
+          { sourceId: SRC_A, posts: 1 },
+          { sourceId: SRC_B, posts: 1 },
+          { sourceId: null, posts: 1 },
+        ],
+      }),
+      deps
+    );
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+
+    assert.equal(result.data.generated, 2);
+    assert.equal(result.data.stopReason, "mix_exhausted");
+    assert.equal(result.data.stoppedEarly, true);
+    assert.equal(result.data.notAttempted, 1);
+    // No slot failed, so there is nothing in `failures` for a summary to name —
+    // which is precisely why this reason exists.
+    assert.deepEqual(result.data.failures, []);
+    assert.deepEqual(result.data.exhaustedSources, [SRC_B, null]);
+  });
+
+  it("answers a mix that wrote nothing exactly as one generation would", async () => {
+    // A batch of zero is never a success. The caller gets the generation's own
+    // code, so the API reads identically whether one post or five were asked for.
+    const { deps, calls, audits } = makeMixDeps({ dry: [SRC_A, SRC_B, null] });
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ sourceMix: BRIEF_MIX }),
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (result.success) return;
+    assert.equal(result.code, "NO_FEED_ITEMS_AVAILABLE");
+
+    // Each source tried once, then the run gave up rather than cycling.
+    assert.equal(calls().length, 3);
+    assert.equal(audits().length, 0);
+  });
+
+  it("records the mix this run used and the sources that ran dry", async () => {
+    const { deps, audits } = makeMixDeps({ dry: [SRC_A] });
+
+    await bulkGeneratePosts(SLUG, USER_ID, false, makeInput({ sourceMix: BRIEF_MIX }), deps);
+
+    const meta = audits()[0].metadata as Record<string, unknown>;
+    // The saved default is not in the log because this run did not use it; what
+    // is recorded is the instruction these posts were actually written from.
+    assert.deepEqual(meta.sourceMix, BRIEF_MIX);
+    assert.deepEqual(meta.exhaustedSources, [SRC_A]);
+  });
+
+  it("records no mix for a run that had none", async () => {
+    const { deps, audits } = makeMixDeps();
+
+    await bulkGeneratePosts(SLUG, USER_ID, false, makeInput(), deps);
+
+    const meta = audits()[0].metadata as Record<string, unknown>;
+    assert.equal(meta.sourceMix, null);
+    assert.deepEqual(meta.exhaustedSources, []);
+  });
+
+  it("does not change the mix it was handed", async () => {
+    // The submitted mix is one run's instruction; the company's saved default is
+    // configuration. Nothing in the loop may write back to either — a run that
+    // rewrote its own quotas would make the next batch's prefill a fiction.
+    const submitted: BulkSourceQuota[] = BRIEF_MIX.map((q) => ({ ...q }));
+    const { deps } = makeMixDeps({ dry: [SRC_A] });
+
+    await bulkGeneratePosts(SLUG, USER_ID, false, makeInput({ sourceMix: submitted }), deps);
+
+    assert.deepEqual(submitted, BRIEF_MIX);
+  });
+});
+
+// ─── A mix the server will not run ────────────────────────────────────────────
+
+describe("bulkGeneratePosts — a content mix the server refuses", () => {
+  /** Every rejection must land before a single post is written. */
+  async function reject(
+    input: Partial<BulkGeneratePostsInput>,
+    options: Parameters<typeof makeMixDeps>[0] = {}
+  ) {
+    const { deps, calls } = makeMixDeps(options);
+    const result = await bulkGeneratePosts(SLUG, USER_ID, false, makeInput(input), deps);
+
+    assert.equal(result.success, false);
+    if (result.success) throw new Error("expected a rejection");
+    assert.equal(result.code, "INVALID_SOURCE_MIX");
+    assert.equal(calls().length, 0, "nothing may be generated from a mix that was refused");
+    return result;
+  }
+
+  it("refuses a mix that does not add up to the number of posts requested", async () => {
+    // The load-bearing rule: the mix IS the batch, so one that does not add up
+    // would quietly generate a different number of posts than was asked for.
+    await reject({ sourceMix: [{ sourceId: SRC_A, posts: 2 }] });
+  });
+
+  it("refuses a source this company does not have, or has switched off", async () => {
+    // Refused rather than skipped: per-slot it would look like "that source is
+    // spent" and hand its posts to sources the user never allocated them to.
+    await reject({ sourceMix: [{ sourceId: "src-gone", posts: 5 }] });
+    await reject({ sourceMix: [{ sourceId: SRC_B, posts: 5 }] }, { enabledSourceIds: [SRC_A] });
+  });
+
+  it("refuses a mix and a single picked source together", async () => {
+    // Alternatives, not layers — otherwise the answer belongs to whichever the
+    // loop happens to read.
+    await reject({
+      sourceMix: BRIEF_MIX,
+      contentSource: { kind: "source", sourceId: SRC_A },
+    });
+  });
+
+  it("refuses the same source listed twice", async () => {
+    await reject({
+      sourceMix: [
+        { sourceId: SRC_A, posts: 3 },
+        { sourceId: SRC_A, posts: 2 },
+      ],
+    });
+  });
+
+  it("refuses a quota that is not a whole post", async () => {
+    await reject({
+      sourceMix: [
+        { sourceId: SRC_A, posts: 2.5 },
+        { sourceId: SRC_B, posts: 2.5 },
+      ],
+    });
+    await reject({
+      sourceMix: [
+        { sourceId: SRC_A, posts: 0 },
+        { sourceId: SRC_B, posts: 5 },
+      ],
+    });
+  });
+
+  it("refuses a mix that names nobody", async () => {
+    await reject({ sourceMix: [] });
+  });
+
+  it("accepts a mix alongside the pooled default, which is what the form sends", async () => {
+    // "Use company rules" is the ABSENCE of a pick, so it is the one content
+    // source a mix may accompany — the rule above must not reach this far.
+    const { deps, calls } = makeMixDeps();
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ sourceMix: BRIEF_MIX, contentSource: { kind: "company_rules" } }),
+      deps
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(calls().length, 5);
   });
 });
