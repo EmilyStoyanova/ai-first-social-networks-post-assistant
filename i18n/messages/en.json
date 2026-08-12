@@ -911,6 +911,7 @@
     "total": "Total",
     "postsCount": "{count, plural, one {# post} other {# posts}}",
     "channelNote": "Each channel keeps its own weekly number of posts. This only decides where they come from — the same split is resized to fit every channel.",
+    "backToGeneration": "Back to generation",
     "autoNote": "Without a mix, sources are selected automatically from whatever has new material.",
     "unassigned": "Not set",
     "save": "Save content mix",

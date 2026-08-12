@@ -1,11 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useTranslations } from "next-intl";
+import { ArrowLeft } from "lucide-react";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import type { ContentMixDTO } from "@/lib/services/company/get-content-mix.service";
+import { CONTENT_MIX_ANCHOR } from "@/lib/posts/bulk-draft";
 
 const BASE =
   "rounded-control border px-3 py-1.5 text-sm outline-none transition-all duration-fast focus:ring-2 focus:ring-offset-0";
@@ -16,6 +19,12 @@ interface Props {
   slug: string;
   initialMix: ContentMixDTO;
   canManage: boolean;
+  /**
+   * Where the user came from and should be offered back to — set only when this
+   * page was opened from the bulk generation form. Null on an ordinary visit to
+   * settings, which then looks and behaves exactly as it always has.
+   */
+  returnHref?: string | null;
 }
 
 /** Quota inputs are held as strings so a field can be emptied while typing. */
@@ -59,7 +68,7 @@ function parseQuota(raw: string | undefined): number | null {
  * pooled behaviour it has always had, which is a perfectly good answer and not
  * a setup step left undone.
  */
-export function ContentMixSection({ slug, initialMix, canManage }: Props) {
+export function ContentMixSection({ slug, initialMix, canManage, returnHref = null }: Props) {
   const t = useTranslations("contentMix");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
@@ -71,6 +80,26 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
   const [saved, setSaved] = useState(false);
 
   const enabledSources = useMemo(() => mix.sources.filter((s) => s.enabled), [mix.sources]);
+
+  const sectionRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * Arriving from the bulk form lands ON the editor, not at the top of a
+   * settings page with it somewhere below.
+   *
+   * The `#content-mix` anchor already scrolls; this repeats it because the panel
+   * is the last thing on a long page whose height settles as it hydrates, which
+   * is exactly when a browser's own anchor scroll lands short. Moving focus here
+   * as well is the part the anchor cannot do: it puts the keyboard where the
+   * user was sent and gives a screen reader something to announce.
+   */
+  useEffect(() => {
+    if (!returnHref) return;
+    const section = sectionRef.current;
+    if (!section) return;
+    section.scrollIntoView({ block: "start", behavior: "smooth" });
+    section.focus({ preventScroll: true });
+  }, [returnHref]);
 
   const total = useMemo(() => {
     let sum = parseQuota(draft[COMPANY_KEY]) ?? 0;
@@ -160,12 +189,30 @@ export function ContentMixSection({ slug, initialMix, canManage }: Props) {
   ];
 
   return (
-    <div className="rounded-card border-border bg-surface border px-5 py-5 shadow-sm">
+    // Focusable only programmatically (tabIndex -1): it is a scroll-and-announce
+    // target for the trip in from generation, never a tab stop of its own.
+    <div
+      ref={sectionRef}
+      id={CONTENT_MIX_ANCHOR}
+      tabIndex={-1}
+      className="rounded-card border-border bg-surface scroll-mt-24 border px-5 py-5 shadow-sm outline-none"
+    >
       <div className="flex flex-wrap items-center gap-2">
         <h3 className="text-fg text-sm font-semibold">{t("title")}</h3>
         <span className="rounded-control border-border text-fg-muted border px-1.5 py-0.5 text-[11px] font-medium">
           {t("optional")}
         </span>
+        {/* The way back, at the top where someone who has just arrived will look
+            for it. A batch is waiting on the other end, exactly as it was left. */}
+        {returnHref && (
+          <Link
+            href={returnHref}
+            className="text-accent ml-auto inline-flex items-center gap-1 text-xs font-semibold underline underline-offset-2"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
+            {t("backToGeneration")}
+          </Link>
+        )}
       </div>
       <p className="text-fg-muted mt-1 text-xs">{t("description")}</p>
 

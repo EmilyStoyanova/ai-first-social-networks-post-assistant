@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import type { ContentMixDTO } from "@/lib/services/company/get-content-mix.service";
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
 import { BATCH_MIX_COMPANY_KEY, batchMixTotal, clampMixCount } from "@/lib/posts/bulk-form";
+import { contentMixSettingsHref } from "@/lib/posts/bulk-draft";
 import { MAX_BULK_POSTS } from "@/lib/scheduling/bulk-schedule";
 
 interface Props {
@@ -29,6 +30,12 @@ interface Props {
    */
   sources: GenerationSourceOption[];
   disabled: boolean;
+  /**
+   * Called just before either link navigates away, so the parent can snapshot
+   * the half-filled form. Synchronous on purpose: the write has to land before
+   * the router leaves.
+   */
+  onLeaveForSettings: () => void;
 }
 
 /**
@@ -58,11 +65,14 @@ export function BatchContentMixFields({
   numberOfPosts,
   sources,
   disabled,
+  onLeaveForSettings,
 }: Props) {
   const t = useTranslations("posts.generate.bulk");
   const tSource = useTranslations("posts.generate");
 
-  const settingsHref = `/companies/${slug}/settings/channels`;
+  // Straight to the editor, not to the top of a settings page the user then has
+  // to search — and marked as a round trip, so that page offers the way back.
+  const settingsHref = contentMixSettingsHref(slug, true);
 
   // An unconfigured company gets an invitation, not an empty editor: generation
   // keeps the pooled behaviour it has always had, and the panel says where the
@@ -77,6 +87,7 @@ export function BatchContentMixFields({
         <p className="text-fg-muted mt-2 text-xs">{t("contentMixUnconfigured")}</p>
         <Link
           href={settingsHref}
+          onClick={onLeaveForSettings}
           className="text-accent mt-2 inline-block text-xs font-semibold underline underline-offset-2"
         >
           {t("contentMixSetUp")}
@@ -146,6 +157,7 @@ export function BatchContentMixFields({
           )}
           <Link
             href={settingsHref}
+            onClick={onLeaveForSettings}
             className="text-fg-muted hover:text-fg text-xs underline underline-offset-2"
           >
             {t("contentMixEditDefault")}

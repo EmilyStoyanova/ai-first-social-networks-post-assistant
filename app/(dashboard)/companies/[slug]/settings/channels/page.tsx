@@ -11,9 +11,11 @@ import { SettingsShell } from "@/components/company/settings-shell";
 import { ChannelConfigSection } from "@/components/company/channel-config-section";
 import { ContentMixSection } from "@/components/company/content-mix-section";
 import { Section } from "@/components/ui/Section";
+import { BULK_RETURN_PARAM, bulkGenerationHref, isReturnToBulk } from "@/lib/posts/bulk-draft";
 
 interface Props {
   params: Promise<{ slug: string }>;
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
@@ -21,11 +23,11 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   return { title: `Channels – ${slug} – AI-First Post Assistant` };
 }
 
-export default async function ChannelsSettingsPage({ params }: Props) {
+export default async function ChannelsSettingsPage({ params, searchParams }: Props) {
   const session = await auth();
   if (!session) redirect("/login");
 
-  const { slug } = await params;
+  const [{ slug }, sp] = await Promise.all([params, searchParams]);
 
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
@@ -43,6 +45,11 @@ export default async function ChannelsSettingsPage({ params }: Props) {
   const configs = channelConfigs?.success ? channelConfigs.configs : [];
   const sources = contentSources?.success ? contentSources.sources : [];
   const mix = contentMix?.success ? contentMix.mix : null;
+
+  // Only the trip in from the bulk form is offered a way back. The href is
+  // rebuilt from the slug rather than read out of the query, so the marker
+  // cannot become a link to somewhere else entirely.
+  const returnHref = isReturnToBulk(sp[BULK_RETURN_PARAM]) ? bulkGenerationHref(slug) : null;
 
   return (
     <SettingsShell
@@ -76,7 +83,12 @@ export default async function ChannelsSettingsPage({ params }: Props) {
             (§2.3). Hidden until a source exists: there is nothing to distribute
             otherwise, which is the same rule the Sources page applied. */}
         {mix && sources.length > 0 && (
-          <ContentMixSection slug={slug} initialMix={mix} canManage={canManage} />
+          <ContentMixSection
+            slug={slug}
+            initialMix={mix}
+            canManage={canManage}
+            returnHref={returnHref}
+          />
         )}
       </div>
     </SettingsShell>

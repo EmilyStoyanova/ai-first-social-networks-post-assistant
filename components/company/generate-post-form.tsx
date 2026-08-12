@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useLocale, useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
@@ -23,6 +23,13 @@ import {
   type BulkBatchResponse,
 } from "@/lib/posts/bulk-form";
 import type { ContentMixDTO } from "@/lib/services/company/get-content-mix.service";
+import {
+  BULK_FORM_ANCHOR,
+  clearBulkDraft,
+  saveBulkDraft,
+  stillAvailable,
+  takeBulkDraft,
+} from "@/lib/posts/bulk-draft";
 import {
   MAX_BULK_POSTS,
   isStartDateInPast,
@@ -292,6 +299,78 @@ export function GeneratePostForm({
   // companies, so warning on it would fire on nearly every first load.
   const imageWarning = imageOverride === "skip" && selectedChannel?.config.imageRequired === true;
 
+  /**
+   * Whether this form opened on a restored draft — which makes every choice in
+   * it the user's own, including the ones that happen to equal a default. Read
+   * by the LLM loader below, whose job is to preselect a preference for a form
+   * nobody has filled in yet.
+   */
+  const restoredFromDraft = useRef(false);
+
+  /**
+   * Restores the draft left behind on the way to the content-mix settings, once.
+   *
+   * Applied in an effect rather than in the `useState` initialisers because the
+   * initialisers also run on the server, where there is no sessionStorage to
+   * read: a restored initialiser would render one form on the server and
+   * hydrate a different one on the client. So the form mounts on its defaults
+   * and this replaces them immediately — the effect is deliberately the first
+   * in the component, ahead of anything that fetches.
+   *
+   * `takeBulkDraft` deletes as it reads, so this is a no-op on every run but the
+   * first — including the reruns a changed channel or source list would cause.
+   *
+   * Two values are re-checked against what the page currently offers: a channel
+   * can be disconnected and a source deleted while the user is in settings, and
+   * a select holding a value that is no longer an option shows blank.
+   */
+  useEffect(() => {
+    const draft = takeBulkDraft(slug);
+    if (!draft) return;
+    restoredFromDraft.current = true;
+
+    const channels = channelOptions.map((c) => c.value);
+    const sources = [
+      COMPANY_RULES_VALUE,
+      COMPANY_MISSION_VALUE,
+      ...contentSources.map((s) => s.id),
+    ];
+
+    // The one cascading render this rule exists to prevent is the one this
+    // feature is: browser storage cannot be read while rendering, so restored
+    // state can only arrive after the first paint. It happens once per mount,
+    // only when a draft exists, and settles immediately.
+    /* eslint-disable react-hooks/set-state-in-effect */
+    setMode(draft.mode);
+    setChannel(stillAvailable(draft.channel, channels, channelOptions[0]?.value ?? ""));
+    setContentLanguage(draft.contentLanguage);
+    setImageOverride(draft.imageOverride);
+    setContentSource(stillAvailable(draft.contentSource, sources, COMPANY_RULES_VALUE));
+    setSourceLinkOverride(draft.sourceLinkOverride);
+    setLlmConfigId(draft.llmConfigId);
+    // The compile-time check that the draft's plan and the form's state are the
+    // same shape — `BulkPlanState` is mirrored, not imported, in bulk-draft.ts.
+    const restoredPlan: BulkPlanState = draft.plan;
+    setPlan(restoredPlan);
+    setMixOverride(draft.mixOverride);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [slug, channelOptions, contentSources]);
+
+  /** Snapshots the form so the trip to settings and back costs nothing typed. */
+  function rememberDraft() {
+    saveBulkDraft(slug, {
+      mode,
+      channel,
+      contentLanguage,
+      imageOverride,
+      contentSource,
+      sourceLinkOverride,
+      llmConfigId,
+      plan,
+      mixOverride,
+    });
+  }
+
   // Load the company's selectable LLMs once. Failure is silent — the dropdown
   // simply stays at "System default", preserving the pre-v2-5 behaviour. When the
   // user has a saved preference among the active models, preselect it (v2-6); a
@@ -306,7 +385,10 @@ export function GeneratePostForm({
         if (!cancelled && Array.isArray(json.data)) {
           setAvailableLlms(json.data);
           const preferred = json.data.find((llm) => llm.isPreferred);
-          if (preferred) setLlmConfigId(preferred.id);
+          // A restored form already holds a choice the user made — including an
+          // explicit "System default", which this would otherwise overwrite with
+          // the preference the moment the fetch lands.
+          if (preferred && !restoredFromDraft.current) setLlmConfigId(preferred.id);
         }
       } catch {
         // Non-fatal: leave the dropdown at the system default.
@@ -426,6 +508,11 @@ export function GeneratePostForm({
       }
       const json = (await res.json()) as { batch: BulkBatchResponse };
       setBatch(json.batch);
+      // The batch this draft described has been generated, so restoring it on a
+      // later visit would re-offer a run that already happened. Normally there
+      // is nothing here to clear — the restore consumed it on mount — but a trip
+      // to settings the user never came back from leaves one behind.
+      clearBulkDraft(slug);
       onBulkGenerated();
     } catch (err) {
       setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
@@ -435,7 +522,12 @@ export function GeneratePostForm({
   }
 
   return (
-    <div className="rounded-card border-border bg-surface border px-5 py-5 shadow-sm">
+    // The anchor the "Back to generation" link lands on. Offset so the card's
+    // heading clears the sticky dashboard header rather than sitting under it.
+    <div
+      id={BULK_FORM_ANCHOR}
+      className="rounded-card border-border bg-surface scroll-mt-24 border px-5 py-5 shadow-sm"
+    >
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <h3 className="text-fg text-sm font-semibold">
           {mode === "single" ? t("title") : tBulk("title")}
@@ -712,6 +804,7 @@ export function GeneratePostForm({
           numberOfPosts={plan.numberOfPosts}
           sources={contentSources}
           disabled={generating || noChannels}
+          onLeaveForSettings={rememberDraft}
         />
       )}
 
