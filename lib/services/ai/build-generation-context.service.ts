@@ -60,7 +60,18 @@ export type SourceScope =
   | { kind: "pooled" }
   | { kind: "source"; sourceId: string }
   | { kind: "content_source"; sourceId: string }
-  | { kind: "company_content" };
+  | { kind: "company_content" }
+  /**
+   * Exactly ONE named feed item, with the `usedInPost` filter dropped — the
+   * sibling-channel window for multi-channel generation.
+   *
+   * The item is used, by definition: the first channel of this content group
+   * claimed it when the topic was decided. Keeping the filter here would hide
+   * the article from every sibling and the group would silently fragment into
+   * three different topics, which is the exact failure multi-channel generation
+   * exists to avoid. Nothing is claimed from this window (see planPinnedFeedItem).
+   */
+  | { kind: "feed_item"; feedItemId: string };
 
 const POOLED: SourceScope = { kind: "pooled" };
 
@@ -166,6 +177,10 @@ async function loadContext(
   // the single fact travels with the data it describes.
   const directContentSource = scope.kind === "content_source";
 
+  // A sibling channel's window: one named item, already consumed by this topic's
+  // first channel, so the `usedInPost` filter must not apply to it either.
+  const pinnedFeedItemId = scope.kind === "feed_item" ? scope.feedItemId : null;
+
   // Both single-source scopes restrict the window to their one source; they
   // differ only in whether used items still count (see directContentSource).
   const scopedSourceId =
@@ -212,8 +227,14 @@ async function loadContext(
             // that does not stop existing once a post cites it, and ingestion
             // writes only one row per such source, so keeping the filter would
             // make the source selectable exactly once and dry forever after.
-            ...(directContentSource ? {} : { usedInPost: false }),
+            //
+            // Also dropped for a pinned item, for the opposite reason: it IS
+            // used — this topic's first channel claimed it — and the sibling
+            // channels of that same topic must still be able to see it.
+            ...(directContentSource || pinnedFeedItemId ? {} : { usedInPost: false }),
             source: { enabled: true },
+            // One named item, and nothing else, for a sibling channel version.
+            ...(pinnedFeedItemId ? { id: pinnedFeedItemId } : {}),
             // v2-8 — when a specific source's quota is due, the window is restricted
             // to that source so a post can only ever consume the quota it was drawn
             // against. Without this the pooled window could hand RSS B's article to

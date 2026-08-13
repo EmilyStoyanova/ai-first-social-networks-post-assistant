@@ -1,39 +1,63 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/lib/auth";
-import { bulkGeneratePosts } from "@/lib/services/ai/bulk-generate-posts.service";
-import { parseManualContentSource } from "@/lib/ai/manual-content-source";
-import { generationErrorResponse } from "@/lib/http/generation-error-response";
+import { enqueueBulkGeneration } from "@/lib/services/queue/enqueue-bulk-generation.service";
 import { MAX_BULK_POSTS } from "@/lib/scheduling/bulk-schedule";
+import { BULK_CHANNELS } from "@/lib/queue/bulk-generation-payload";
 
-// Bulk work must never be cached or statically optimized.
+// Queue work must never be cached or statically optimized.
 export const dynamic = "force-dynamic";
-/**
- * The one route in the app that runs several full generations in a single
- * request, so it is the one that must state its own cap rather than inherit the
- * platform default (60s without Fluid Compute — not enough for two posts).
- *
- * This is the ceiling; the service's own BULK_SOFT_BUDGET_MS (240s) is what
- * actually governs the run, stopping it with a partial result while ~60s of
- * headroom remains to persist nothing further and answer. Requires Fluid Compute
- * to be enabled on the Vercel project, exactly as the cron routes do.
- */
-export const maxDuration = 300;
 
 /**
- * Manual bulk generation: N posts, scheduled across a date range.
+ * Manual bulk generation: N content TOPICS across the selected channels,
+ * scheduled across a date range.
  *
- * The body is the single-generation body plus the three fields that make it a
- * batch (count + range), and every shared field means exactly what it means
- * there — this route directs the existing pipeline, it does not reinterpret it.
+ * ── Why this route enqueues instead of generating ───────────────────────────
+ *
+ * It used to run the whole batch inline under a 300s `maxDuration`, which fit
+ * while a batch meant N posts on ONE channel. Multi-channel changed the
+ * arithmetic: a topic written for three channels is three full generations —
+ * LLM, image, upload, embedding — so five topics is fifteen, and ten topics on
+ * four channels is forty. No function cap accommodates that, and a run killed by
+ * the cap is the worst outcome available: the posts it already wrote ARE
+ * committed while the caller gets a connection reset and never learns their ids.
+ *
+ * So the request is validated synchronously — everything that can be answered
+ * from the request itself still gets an immediate 422 — and the work is handed
+ * to the queue. The response carries the ids the client needs to follow it:
+ * `jobId` to poll, `batchId` because every post the run writes is stamped with
+ * it, and `contentGroupIds` because those are decided up front so a retry
+ * re-opens the same groups rather than splitting a topic in two.
+ *
+ * 202, not 201: nothing has been created yet.
  */
+
 const bodySchema = z.object({
+  /**
+   * Every channel each topic is written for.
+   *
+   * `channels` is the shape; `channel` (singular) is still accepted below so a
+   * client that has not been updated keeps working unchanged — a single-channel
+   * batch is just the ordinary case with one entry.
+   */
+  channels: z
+    .array(
+      z
+        .string()
+        .transform((v) => v.toLowerCase())
+        .pipe(z.enum(BULK_CHANNELS))
+    )
+    .min(1)
+    .max(BULK_CHANNELS.length)
+    .optional(),
   channel: z
     .string()
     .transform((v) => v.toLowerCase())
-    .pipe(z.enum(["facebook", "linkedin", "instagram", "tiktok"])),
-  // Bounded because each post is a full generation (LLM + image) inside ONE
-  // request; the service enforces the same bound independently.
+    .pipe(z.enum(BULK_CHANNELS))
+    .optional(),
+
+  // TOPICS, not post rows: this many content groups, each written for every
+  // channel above. The service enforces the same bound independently.
   numberOfPosts: z.number().int().min(1).max(MAX_BULK_POSTS),
   // Plain calendar days bounding the PERIOD — the posts are scheduled, not
   // timestamped, and a date-time here would only invite a timezone to be lost in
@@ -43,9 +67,10 @@ const bodySchema = z.object({
   endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   // Optional: the user's own schedule — which days carry how many posts, and the
   // exact business-zone wall clock of every one of them. Omitted means "spread
-  // evenly across the channel's posting windows in the period", which is the
+  // evenly across each channel's posting windows in the period", which is the
   // only mode where the windows decide anything; when this is present the times
-  // in it are scheduled verbatim.
+  // in it are scheduled verbatim, and every channel version of a topic inherits
+  // the same one.
   //
   // Bounded by MAX_BULK_POSTS days because a distribution needs at least one
   // post per day, so more entries than that could never add up. `times` is
@@ -67,9 +92,10 @@ const bodySchema = z.object({
     .max(MAX_BULK_POSTS)
     .optional(),
 
-  // Optional: this batch's content mix — how many of the posts each source
+  // Optional: this batch's content mix — how many of its TOPICS each source
   // writes. `null` names the company-content quota (mission posts, no article),
-  // mirroring the stored mix's own convention.
+  // mirroring the stored mix's own convention. One topic draws ONE quota however
+  // many channels it is written for.
   //
   // Rows carrying no posts are simply left out, which is why every `posts` here
   // is at least 1 — and why at most MAX_BULK_POSTS rows can ever be meaningful,
@@ -130,44 +156,82 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     );
   }
 
-  const result = await bulkGeneratePosts(slug, session.user.id, session.user.isGlobalAdmin, {
-    channel: parsed.data.channel,
+  // `channels` wins; `channel` is the single-channel spelling of the same thing.
+  // Deduped because two identical entries would ask one topic to be written for
+  // the same channel twice, which the (article, channel) unique index refuses
+  // anyway — better as a normalization here than as a crash in a worker.
+  const requested = parsed.data.channels ?? (parsed.data.channel ? [parsed.data.channel] : []);
+  const channels = [...new Set(requested)];
+  if (channels.length === 0) {
+    return NextResponse.json(
+      {
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "Choose at least one channel to generate for.",
+        },
+      },
+      { status: 422 }
+    );
+  }
+
+  const result = await enqueueBulkGeneration(slug, session.user.id, session.user.isGlobalAdmin, {
+    channels,
     numberOfPosts: parsed.data.numberOfPosts,
     startDate: parsed.data.startDate,
     endDate: parsed.data.endDate,
-    customDistribution: parsed.data.distribution,
-    contentLanguage: parsed.data.contentLanguage,
-    includeSourceLinkOverride: parsed.data.includeSourceLink,
-    autoGenerateImageOverride: parsed.data.generateImage,
-    llmConfigId: parsed.data.llmConfigId,
-    contentSource: parseManualContentSource(parsed.data.contentSource),
+    distribution: parsed.data.distribution,
     sourceMix: parsed.data.sourceMix,
+    contentLanguage: parsed.data.contentLanguage,
+    includeSourceLink: parsed.data.includeSourceLink,
+    generateImage: parsed.data.generateImage,
+    llmConfigId: parsed.data.llmConfigId,
+    contentSource: parsed.data.contentSource,
   });
 
   if (!result.success) {
-    // The request-shape rejections the service can raise on its own. The schema
-    // above already catches the coarse ones for well-behaved clients; the
-    // service is the authority, so its answer is honoured rather than assumed.
-    if (
-      result.code === "INVALID_POST_COUNT" ||
-      result.code === "INVALID_DATE_RANGE" ||
-      result.code === "START_DATE_IN_PAST" ||
-      result.code === "INVALID_DISTRIBUTION" ||
-      result.code === "INVALID_SOURCE_MIX"
-    ) {
-      return NextResponse.json(
-        { error: { code: result.code, message: result.message } },
-        { status: 422 }
-      );
+    switch (result.code) {
+      case "NOT_FOUND":
+        return NextResponse.json(
+          { error: { code: "NOT_FOUND", message: "Not found" } },
+          { status: 404 }
+        );
+      case "FORBIDDEN":
+        return NextResponse.json(
+          { error: { code: "FORBIDDEN", message: "Forbidden" } },
+          { status: 403 }
+        );
+      case "INVALID_PAYLOAD":
+        return NextResponse.json(
+          { error: { code: "VALIDATION_ERROR", message: result.message } },
+          { status: 422 }
+        );
+      // The request-shape rejections, answered synchronously exactly as they
+      // were when this route ran the batch inline. Same codes, same status, and
+      // no job is created — a request that is wrong now was always going to be.
+      case "INVALID_POST_COUNT":
+      case "INVALID_DATE_RANGE":
+      case "START_DATE_IN_PAST":
+      case "INVALID_DISTRIBUTION":
+      case "INVALID_SOURCE_MIX":
+        return NextResponse.json(
+          { error: { code: result.code, message: result.message } },
+          { status: 422 }
+        );
+      case "ALREADY_RUNNING":
+        // 409, and deliberately not a silent success: this request carries its
+        // own instructions, so the run already in flight is not the run that was
+        // asked for and the caller has to know that. The running job's id rides
+        // along so the client can resume watching it instead of being stuck.
+        return NextResponse.json(
+          {
+            error: { code: "ALREADY_RUNNING", message: result.message, jobId: result.jobId },
+          },
+          { status: 409 }
+        );
     }
-
-    // Nothing was generated. The failure IS a single generation's failure, so it
-    // gets that exact response — same code, same status, same retry hints.
-    return generationErrorResponse(result);
   }
 
-  // At least one post exists. A partially filled batch is a success with an
-  // honest account attached: `generated` vs `requested`, and why the rest are
-  // missing. 201 because posts were created.
-  return NextResponse.json({ batch: result.data }, { status: 201 });
+  // Accepted, not created. The client follows the run at
+  // GET /api/v1/companies/[slug]/generate/bulk/[jobId].
+  return NextResponse.json({ job: result.data }, { status: 202 });
 }

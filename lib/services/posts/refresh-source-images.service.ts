@@ -144,8 +144,12 @@ export const prismaRefreshSourceImagesDeps: RefreshSourceImagesDeps = {
     const items = await prisma.feedItem.findMany({
       where: {
         source: { type: "rss" },
-        // A to-one filter, so this is already one row per article.
-        post: { status: "draft" },
+        // An article may now back one post per channel, so this is a to-MANY
+        // filter: refresh the image when ANY of its posts is still a draft.
+        // Still one row per article — the filter selects feed items, not posts —
+        // and a group whose channels are part-published is exactly the case that
+        // should still be refreshed, since the drafts can still use the image.
+        posts: { some: { status: "draft" } },
       },
       select: { id: true, url: true, sourceImageUrl: true },
       orderBy: { publishedAt: "desc" },

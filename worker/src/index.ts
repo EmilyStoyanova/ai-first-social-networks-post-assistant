@@ -13,9 +13,14 @@
  * diagnostics and persistence. All real work lives in the registered handlers,
  * which are thin adapters over the existing services. Registered so far: the
  * dummy handler (Phase 2), RSS ingestion (Phase 3), RSS translation (Phase 4),
- * post generation (Phase 5), the Buffer analytics refresh, and the publishing
- * sweep. Manual (interactive) generation is NOT migrated: it stays a synchronous
- * request path.
+ * post generation (Phase 5), the Buffer analytics refresh, the publishing sweep,
+ * and manual MULTI-CHANNEL bulk generation.
+ *
+ * That last one is the only job a person is actively waiting on, and the only
+ * one queued for arithmetic rather than cadence: one topic across three channels
+ * is three full generations, so ten topics is thirty — well past any HTTP
+ * function cap. Single-post manual generation is NOT migrated and stays a
+ * synchronous request path, which it comfortably fits in.
  *
  * The publishing sweep is the one job whose CADENCE matters rather than just its
  * completion: it is the only path that hands scheduled posts to Buffer, and a
@@ -43,6 +48,7 @@ import { rssTranslationHandler, RSS_TRANSLATION_JOB_TYPE } from "./rss-translati
 import { postGenerationHandler, POST_GENERATION_JOB_TYPE } from "./post-generation-handler";
 import { analyticsSyncHandler, ANALYTICS_SYNC_JOB_TYPE } from "./analytics-sync-handler";
 import { publishSweepHandler, PUBLISH_SWEEP_JOB_TYPE } from "./publish-sweep-handler";
+import { bulkGenerationHandlerFor, BULK_GENERATION_JOB_TYPE } from "./bulk-generation-handler";
 import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
 import type { JobRecord } from "./job-store";
 
@@ -78,7 +84,10 @@ async function main(): Promise<void> {
     .register(RSS_TRANSLATION_JOB_TYPE, rssTranslationHandler)
     .register(POST_GENERATION_JOB_TYPE, postGenerationHandler)
     .register(ANALYTICS_SYNC_JOB_TYPE, analyticsSyncHandler)
-    .register(PUBLISH_SWEEP_JOB_TYPE, publishSweepHandler);
+    .register(PUBLISH_SWEEP_JOB_TYPE, publishSweepHandler)
+    // The one interactive job: a person is waiting on it, so it reports progress
+    // as it goes and resumes rather than repeats on a retry.
+    .register(BULK_GENERATION_JOB_TYPE, bulkGenerationHandlerFor(config));
   const orchestrator = new JobOrchestrator({
     store: createPrismaJobStore(prisma),
     registry: handlers,

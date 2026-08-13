@@ -192,8 +192,14 @@ class Harness {
         sourceImageUrl: null,
         origin: brandSetupOrigin(),
         scheduledFor: options.scheduledFor ?? null,
-        // Cron generation is never part of a manual bulk batch.
+        // Cron generation is never part of a manual bulk batch, and never
+        // multi-channel: the weekly scheduler fills one channel at a time, so
+        // its posts are ungrouped exactly as they have always been.
         generationBatchId: null,
+        contentGroupId: null,
+        primaryFeedItemId: null,
+        coreMessage: "A generated core message.",
+        topic: null,
         createdAt: new Date(),
       },
       warnings: {

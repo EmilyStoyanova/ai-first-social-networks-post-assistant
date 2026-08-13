@@ -709,7 +709,6 @@
         "workflowNote": "Drafts are generated now and scheduled for these times. Review and approve them, and each one publishes at its scheduled time.",
         "generateDrafts": "{count, plural, one {Generate # draft} other {Generate # drafts}}",
         "generating": "{count, plural, one {Generating # draft…} other {Generating # drafts…}}",
-        "generatingHint": "This can take a few minutes. Keep this tab open until it finishes.",
         "resultComplete": "{generated, plural, one {Generated # draft.} other {Generated # drafts.}}",
         "resultPartial": "Generated {generated} of {requested} drafts.",
         "resultCounts": "{missing} of {requested} could not be generated.",
@@ -725,9 +724,30 @@
         "stopped_configuration": "No usable AI model is configured for this generation.",
         "stopped_channel_limit": "The next post exceeded this channel's character limit.",
         "stopped_access": "This company or channel is not available.",
-        "slotHint": "Publishing runs every {minutes} minutes, so times are set on the hour or the half hour."
-      }
-    }
+        "slotHint": "Publishing runs every {minutes} minutes, so times are set on the hour or the half hour.",
+        "jobQueued": "Queued for generation.",
+        "jobRunning": "Generating…",
+        "jobWaitingForWorker": "Waiting for a background worker",
+        "jobWaitingForWorkerHint": "The batch is queued and will start as soon as a worker picks it up. Nothing is lost in the meantime — you can leave this page and come back.",
+        "jobProgress": "{done} of {total} topics · {posts, plural, one {# post} other {# posts}} generated",
+        "jobProgressFailures": "{count, plural, one {# channel version could not be written so far.} other {# channel versions could not be written so far.}}",
+        "jobAttempt": "Attempt {attempt} of {max}.",
+        "jobKeepWorking": "You can leave this page — the batch keeps running and the drafts appear as they are written.",
+        "jobFailed": "The batch stopped before it finished.",
+        "jobCancelled": "The batch was cancelled.",
+        "jobFailedPartial": "{posts, plural, one {# post} other {# posts}} across {topics, plural, one {# topic} other {# topics}} were written before it stopped, and are in the list below.",
+        "jobAlreadyRunning": "A batch was already running for this company, so we are showing you that one. Nothing new was queued.",
+        "previewPerChannel": "Times shown are {channel}'s. Every other selected channel is scheduled into its own posting windows, so its versions may go out at different times."
+      },
+      "channels": "Channels",
+      "channelsAll": "All channels",
+      "channelsHint": "One post will be written for the selected channel.",
+      "channelsMultiHint": "The same topic will be written {count} times — once per channel, each in that channel's own style. They stay separate posts you approve and publish independently.",
+      "channelsAtLeastOne": "Pick at least one channel.",
+      "channelsPartial": "Nothing could be written for {channels}. The other channels were generated and are in the list below.",
+      "imageRequiredWarningChannels": "Publishing to {channels} requires an image. The drafts will still be created — attach or generate an image before publishing."
+    },
+    "channelVersionLabel": "Channel version"
   },
   "auditLog": {
     "title": "Audit Log",

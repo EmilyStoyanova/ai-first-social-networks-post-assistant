@@ -51,8 +51,17 @@ export interface BulkDraftPlan {
 export interface BulkFormDraft {
   version: number;
   mode: "single" | "multiple";
-  /** "" when the company has no connected channel to preselect. */
-  channel: string;
+  /**
+   * Every channel the topic is written for. Empty only when the company has no
+   * connected channel to preselect.
+   *
+   * Was a single `channel` string before generation could address more than one.
+   * A draft written by that version is still restored — see `parseChannels` —
+   * rather than dropped, because the version was not bumped: nothing else about
+   * the shape changed, and discarding a half-filled form over a field that can
+   * be read perfectly well would be a regression dressed as caution.
+   */
+  channels: string[];
   contentLanguage: "default" | "en" | "bg";
   imageOverride: "inherit" | "generate" | "skip";
   /** A sentinel or a content-source id; checked against the live list on restore. */
@@ -129,6 +138,27 @@ function isTimesMap(value: unknown): value is Record<string, string[]> {
   );
 }
 
+/**
+ * The draft's channels, reading either spelling.
+ *
+ * `channels` is the current shape. `channel` is what a draft saved before
+ * multi-channel generation holds, and it maps cleanly onto a selection of one —
+ * so it is read rather than refused. An empty string there meant "no connected
+ * channel to preselect", which is an empty selection, not a channel named "".
+ *
+ * Returns null only for a value that is neither, which rejects the whole draft
+ * like every other malformed field.
+ */
+function parseChannels(value: Record<string, unknown>): string[] | null {
+  if (Array.isArray(value.channels)) {
+    return value.channels.every((c) => typeof c === "string") ? (value.channels as string[]) : null;
+  }
+  if (typeof value.channel === "string") {
+    return value.channel === "" ? [] : [value.channel];
+  }
+  return null;
+}
+
 function parsePlan(value: unknown): BulkDraftPlan | null {
   if (!isRecord(value)) return null;
   const distribution = oneOf(value.distribution, ["even", "custom"] as const);
@@ -183,6 +213,7 @@ export function parseBulkDraft(raw: string | null): BulkFormDraft | null {
     "exclude",
   ] as const);
   const plan = parsePlan(value.plan);
+  const channels = parseChannels(value);
 
   if (
     mode === null ||
@@ -190,7 +221,7 @@ export function parseBulkDraft(raw: string | null): BulkFormDraft | null {
     imageOverride === null ||
     sourceLinkOverride === null ||
     plan === null ||
-    typeof value.channel !== "string" ||
+    channels === null ||
     typeof value.contentSource !== "string" ||
     typeof value.llmConfigId !== "string"
   ) {
@@ -205,7 +236,7 @@ export function parseBulkDraft(raw: string | null): BulkFormDraft | null {
   return {
     version: DRAFT_VERSION,
     mode,
-    channel: value.channel,
+    channels,
     contentLanguage,
     imageOverride,
     contentSource: value.contentSource,
@@ -285,5 +316,116 @@ export function clearBulkDraft(slug: string): void {
     store.removeItem(bulkDraftKey(slug));
   } catch {
     // Nothing to do — an unreachable store holds no draft to begin with.
+  }
+}
+
+// ─── The bulk run in flight ───────────────────────────────────────────────────
+
+/**
+ * The queued run this tab is watching.
+ *
+ * Bulk generation is a job now: the request returns in milliseconds and the work
+ * happens elsewhere, over minutes. Which means the browser can leave and come
+ * back — and if the only record of the job id were React state, coming back
+ * would show a form that looks idle over a run that is still writing posts. The
+ * obvious thing to do next would be to press Generate again, and the queue would
+ * refuse it as ALREADY_RUNNING.
+ *
+ * So the id is written down. Stored beside the draft and for the same reasons:
+ * `sessionStorage`, keyed by company, one tab's business. It is deliberately NOT
+ * consumed on read — unlike the draft, this has to survive every visit until the
+ * run it names actually finishes.
+ */
+export interface ActiveBulkJob {
+  jobId: string;
+  /** Stamped on every post the run writes; known from the 202. */
+  batchId: string | null;
+  /** Topics asked for — the denominator to show before any progress exists. */
+  requestedTopics: number;
+  /** When this tab started watching. ISO; used only for display. */
+  startedAt: string;
+}
+
+/** Per company, like the draft: two tabs on two companies watch two runs. */
+export function activeBulkJobKey(slug: string): string {
+  return `bulk-generate-job:${slug}`;
+}
+
+/**
+ * A stored job reference, or null when there is nothing usable.
+ *
+ * Only `jobId` is load-bearing — everything else is display detail the status
+ * endpoint will supply again on the first poll — so a missing `batchId` or an
+ * unreadable count degrades to a default rather than throwing the reference
+ * away. Losing the id is what costs the user their run; losing a denominator for
+ * one render costs nothing.
+ */
+export function parseActiveBulkJob(raw: string | null): ActiveBulkJob | null {
+  if (!raw) return null;
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isRecord(value) || typeof value.jobId !== "string" || value.jobId === "") return null;
+
+  return {
+    jobId: value.jobId,
+    batchId: typeof value.batchId === "string" ? value.batchId : null,
+    requestedTopics:
+      typeof value.requestedTopics === "number" && Number.isFinite(value.requestedTopics)
+        ? value.requestedTopics
+        : 0,
+    startedAt: typeof value.startedAt === "string" ? value.startedAt : "",
+  };
+}
+
+export function saveActiveBulkJob(slug: string, job: ActiveBulkJob): void {
+  const store = draftStorage();
+  if (!store) return;
+  try {
+    store.setItem(activeBulkJobKey(slug), JSON.stringify(job));
+  } catch {
+    // The run still happens; this tab just cannot resume watching it after a
+    // navigation, which is exactly the pre-existing behaviour.
+  }
+}
+
+/**
+ * The run this tab is watching, WITHOUT consuming it.
+ *
+ * The deliberate difference from `takeBulkDraft`. A draft describes a form
+ * nobody has submitted, so restoring it once is the whole of its job; this
+ * describes work that is actually happening, and it has to still be here on the
+ * next visit, and the one after that, until the run reaches a terminal state.
+ */
+export function readActiveBulkJob(slug: string): ActiveBulkJob | null {
+  const store = draftStorage();
+  if (!store) return null;
+  try {
+    return parseActiveBulkJob(store.getItem(activeBulkJobKey(slug)));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Forgets the run.
+ *
+ * Called when the job reaches a terminal state — completed, failed or cancelled
+ * — and when the status endpoint answers 404, which means the row is gone (a
+ * pruned queue, or a job id from a database that has since been reset). A
+ * reference to a job that no longer exists would otherwise put the form into a
+ * permanent, unresumable "generating" state.
+ */
+export function clearActiveBulkJob(slug: string): void {
+  const store = draftStorage();
+  if (!store) return;
+  try {
+    store.removeItem(activeBulkJobKey(slug));
+  } catch {
+    // An unreachable store holds no reference to begin with.
   }
 }

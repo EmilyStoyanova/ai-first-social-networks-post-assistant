@@ -204,6 +204,7 @@ export async function getOverviewData(
         publishedPostUrl: true,
         scheduledFor: true,
         generationBatchId: true,
+        contentGroupId: true,
         createdAt: true,
         mediaAsset: { select: { url: true } },
         // Frozen provenance first; the join is the legacy fallback.
@@ -305,6 +306,10 @@ export async function getOverviewData(
       origin: resolvePostOrigin(r, r.primaryFeedItem),
       scheduledFor: r.scheduledFor?.toISOString() ?? null,
       manuallyScheduled: r.generationBatchId !== null,
+      // Carried through truthfully even though this list never groups: the
+      // upcoming panel shows what is scheduled, and a topic's three channel
+      // versions are three things going out, not one.
+      contentGroupId: r.contentGroupId,
       createdAt: r.createdAt.toISOString(),
     })),
     // An eligible channel with no metric rows yet sums to zero posts and all

@@ -3,10 +3,12 @@ import assert from "node:assert/strict";
 import {
   BULK_RETURN_PARAM,
   BULK_RETURN_VALUE,
+  activeBulkJobKey,
   bulkDraftKey,
   bulkGenerationHref,
   contentMixSettingsHref,
   isReturnToBulk,
+  parseActiveBulkJob,
   parseBulkDraft,
   stillAvailable,
   type BulkFormDraft,
@@ -19,7 +21,7 @@ function draft(overrides: Partial<BulkFormDraft> = {}): BulkFormDraft {
   return {
     version: 1,
     mode: "multiple",
-    channel: "FACEBOOK",
+    channels: ["FACEBOOK", "LINKEDIN"],
     contentLanguage: "bg",
     imageOverride: "generate",
     contentSource: "__company_rules__",
@@ -78,11 +80,31 @@ describe("parseBulkDraft", () => {
     assert.deepEqual(parsed?.plan.counts, {});
   });
 
-  it("restores a single-post form, and an empty channel", () => {
-    // "" is what the form holds when the company has connected nothing yet.
-    const parsed = parseBulkDraft(stored(draft({ mode: "single", channel: "" })));
+  it("restores a single-post form, and an empty selection", () => {
+    // [] is what the form holds when the company has connected nothing yet.
+    const parsed = parseBulkDraft(stored(draft({ mode: "single", channels: [] })));
     assert.equal(parsed?.mode, "single");
-    assert.equal(parsed?.channel, "");
+    assert.deepEqual(parsed?.channels, []);
+  });
+
+  it("reads a draft saved before generation could address more than one channel", () => {
+    // Backward compatibility, not caution: the old `channel` string maps cleanly
+    // onto a selection of one, so a half-filled form is restored rather than
+    // thrown away over a field that can be read perfectly well.
+    const { channels: _dropped, ...rest } = draft();
+    const parsed = parseBulkDraft(stored({ ...rest, channel: "INSTAGRAM" }));
+    assert.deepEqual(parsed?.channels, ["INSTAGRAM"]);
+  });
+
+  it('reads the old empty channel as an empty selection, not as a channel named ""', () => {
+    const { channels: _dropped, ...rest } = draft();
+    const parsed = parseBulkDraft(stored({ ...rest, channel: "" }));
+    assert.deepEqual(parsed?.channels, []);
+  });
+
+  it("prefers the new spelling when a draft somehow carries both", () => {
+    const parsed = parseBulkDraft(stored({ ...draft(), channel: "TIKTOK" }));
+    assert.deepEqual(parsed?.channels, ["FACEBOOK", "LINKEDIN"]);
   });
 
   it("returns null for nothing stored", () => {
@@ -114,7 +136,8 @@ describe("parseBulkDraft — rejects rather than half-restores", () => {
     // which of a dozen fields quietly reverted.
     const bad: Array<Partial<Record<keyof BulkFormDraft, unknown>>> = [
       { mode: "bulk" },
-      { channel: 7 },
+      { channels: 7 },
+      { channels: ["FACEBOOK", 7] },
       { contentLanguage: "de" },
       { imageOverride: "maybe" },
       { contentSource: null },
@@ -226,5 +249,55 @@ describe("stillAvailable", () => {
 
   it("falls back on an empty saved value", () => {
     assert.equal(stillAvailable("", ["FACEBOOK"], "FACEBOOK"), "FACEBOOK");
+  });
+});
+
+// ─── The bulk run in flight ───────────────────────────────────────────────────
+
+describe("parseActiveBulkJob", () => {
+  it("restores the run this tab was watching", () => {
+    const job = {
+      jobId: "job-1",
+      batchId: "batch-1",
+      requestedTopics: 5,
+      startedAt: "2026-08-13T10:00:00.000Z",
+    };
+    assert.deepEqual(parseActiveBulkJob(JSON.stringify(job)), job);
+  });
+
+  it("returns null when there is nothing stored", () => {
+    assert.equal(parseActiveBulkJob(null), null);
+    assert.equal(parseActiveBulkJob(""), null);
+  });
+
+  it("returns null rather than throwing on unparseable storage", () => {
+    assert.equal(parseActiveBulkJob("{not json"), null);
+    assert.equal(parseActiveBulkJob(JSON.stringify("a string")), null);
+    assert.equal(parseActiveBulkJob(JSON.stringify([1, 2])), null);
+  });
+
+  it("refuses a reference with no job id, which is the only load-bearing field", () => {
+    assert.equal(parseActiveBulkJob(JSON.stringify({ batchId: "b" })), null);
+    assert.equal(parseActiveBulkJob(JSON.stringify({ jobId: "" })), null);
+    assert.equal(parseActiveBulkJob(JSON.stringify({ jobId: 7 })), null);
+  });
+
+  it("keeps the id and defaults the display detail when the rest is unreadable", () => {
+    // Losing the id costs the user their run; losing a denominator for one
+    // render costs nothing, so the reference is not thrown away over it.
+    const parsed = parseActiveBulkJob(
+      JSON.stringify({ jobId: "job-1", batchId: 7, requestedTopics: "five" })
+    );
+    assert.equal(parsed?.jobId, "job-1");
+    assert.equal(parsed?.batchId, null);
+    assert.equal(parsed?.requestedTopics, 0);
+    assert.equal(parsed?.startedAt, "");
+  });
+});
+
+describe("activeBulkJobKey", () => {
+  it("is scoped per company, and distinct from the draft's key", () => {
+    assert.notEqual(activeBulkJobKey("acme"), activeBulkJobKey("other"));
+    assert.notEqual(activeBulkJobKey("acme"), bulkDraftKey("acme"));
   });
 });

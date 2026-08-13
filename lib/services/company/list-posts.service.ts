@@ -43,6 +43,21 @@ export interface PostItem {
   manuallyScheduled: boolean;
   /** Where the post was written from — a content source, or Brand Setup. */
   origin: PostOriginView;
+  /**
+   * The content TOPIC this post is one channel's version of, or null.
+   *
+   * Null for every post written before multi-channel generation, and for every
+   * post cron writes — those are single, ungrouped posts and the UI keeps
+   * rendering them one card each. A non-null id means siblings may exist: the
+   * grid collapses posts sharing one into a single card with a channel selector
+   * (see lib/posts/post-groups.ts).
+   *
+   * Deliberately NOT `generationBatchId`, which answers a different question —
+   * one bulk run of five topics across three channels stamps the same batch id
+   * on all fifteen posts, so grouping by it would fold the whole run into one
+   * card.
+   */
+  contentGroupId: string | null;
   createdAt: string;
 }
 
@@ -64,6 +79,7 @@ const SELECT = {
   publishedPostUrl: true,
   scheduledFor: true,
   generationBatchId: true,
+  contentGroupId: true,
   createdAt: true,
   mediaAsset: { select: { url: true, sourceUrl: true } },
   previousMediaAsset: { select: { url: true } },
@@ -134,6 +150,7 @@ function toItem(r: {
   } | null;
   scheduledFor: Date | null;
   generationBatchId: string | null;
+  contentGroupId: string | null;
   createdAt: Date;
 }): PostItem {
   const sourceImageUrl = resolveSourceImageUrl(r.primaryFeedItem);
@@ -160,6 +177,7 @@ function toItem(r: {
     origin: resolvePostOrigin(r, r.primaryFeedItem),
     scheduledFor: r.scheduledFor?.toISOString() ?? null,
     manuallyScheduled: r.generationBatchId !== null,
+    contentGroupId: r.contentGroupId,
     createdAt: r.createdAt.toISOString(),
   };
 }

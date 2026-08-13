@@ -62,6 +62,7 @@ function job(overrides: Partial<JobRecord> = {}): JobRecord {
     payload: {},
     attempts: 1,
     maxAttempts: 5,
+    result: null,
     ...overrides,
   };
 }
@@ -72,6 +73,8 @@ function fakeJobStore() {
   const store: JobStore = {
     enqueue: async (_i: EnqueueInput) => "id",
     claim: async (_i: ClaimInput) => null,
+    renewLease: async () => true,
+    saveProgress: async () => true,
     complete: async (id, result) => {
       completes.push({ id, result });
     },
@@ -192,7 +195,9 @@ describe("rssIngestionHandler + orchestrator (queue retry behaviour)", () => {
   const registry = () =>
     new HandlerRegistry().register(
       RSS_INGESTION_JOB_TYPE,
-      createRssIngestionHandler(async () => summary({ status: "failed", error: "feed source down" }))
+      createRssIngestionHandler(async () =>
+        summary({ status: "failed", error: "feed source down" })
+      )
     );
 
   it("a run-level failure requeues with a retry when attempts remain", async () => {

@@ -72,6 +72,27 @@ export function resolvePrimarySelection(
     };
   }
 
+  if (plan.action === "pinned") {
+    // A sibling channel version of an already-decided topic. Same resolution as
+    // "generate" — the article IS the subject and its id IS what the post
+    // records — but the claim was made by the topic's first channel, so this
+    // generation owns nothing to release. That distinction lives at the call
+    // site (generatePostFromContext), which is the only place that can act on it.
+    const item = feedItems.find((f) => f.id === plan.feedItemId);
+    if (!item) {
+      // Impossible by construction: planPinnedFeedItem only returns "pinned"
+      // when the item is present in the window it was given.
+      throw new Error(
+        `Pinned feed item ${plan.feedItemId} is not present in the generation context.`
+      );
+    }
+    return {
+      item,
+      claimedFeedItemId: item.id,
+      sourceUrl: isConsumableItem(item) ? publicUrlOf(item) : null,
+    };
+  }
+
   if (plan.action === "direct") {
     // A manually picked non-RSS source, read from its stored extraction. The
     // window is already restricted to that one source and ordered newest-first,

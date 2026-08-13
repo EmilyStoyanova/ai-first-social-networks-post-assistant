@@ -79,3 +79,50 @@ export const ANALYTICS_SYNC_JOB_TYPE = "analytics-sync";
  * posts twice, spending Buffer's daily allowance on duplicate requests.
  */
 export const ANALYTICS_SYNC_DEDUPE_KEY = "cron:analytics-sync";
+
+/**
+ * Manual multi-channel bulk generation: N topics × the selected channels, on
+ * behalf of a person who is watching.
+ *
+ * The one job type here that is NOT a recurring cron fan-out. It is queued
+ * because of arithmetic rather than cadence: a topic written for three channels
+ * is three full generations, so five topics is fifteen — comfortably past any
+ * HTTP function cap, and a run killed by the cap commits posts whose ids the
+ * caller never learns.
+ */
+export const BULK_GENERATION_JOB_TYPE = "bulk-generation";
+
+/**
+ * Dedupe key for a manual bulk run: ONE per company, not one per request.
+ *
+ * Every other dedupe key in this file is a single global constant because its
+ * job is a single global sweep. This one is scoped to the company, which is the
+ * unit that actually collides: two people at the same company clicking
+ * "Generate" would otherwise run two batches side by side against the same
+ * article pool, each measuring uniqueness against a history the other is
+ * concurrently writing — precisely the near-duplicate batch the sequential
+ * design exists to prevent. Two DIFFERENT companies have nothing to contend
+ * over and must not block each other.
+ *
+ * The rejection is reported to the second caller (see the enqueue service)
+ * rather than swallowed: unlike a cron sweep, this job has specific instructions
+ * in it, so the run already in flight is NOT the run the second person asked
+ * for and they have to be told so.
+ */
+export function bulkGenerationDedupeKey(companySlug: string): string {
+  return `bulk-generation:${companySlug}`;
+}
+
+/**
+ * Attempts for a bulk run.
+ *
+ * Three rather than the queue's default five, and the reasoning is the cost of a
+ * wasted attempt: every one of these spends real LLM credits. Ordinary
+ * per-topic/per-channel failures never reach the retry policy at all — the
+ * handler reports them as data and completes — so an attempt only ever burns
+ * when something job-level broke (a lost lease, a crashed process, an
+ * unreachable database). Three is enough for that, and a resumed attempt skips
+ * every channel already committed, so retrying is cheap in exactly the case
+ * where it is useful.
+ */
+export const BULK_GENERATION_MAX_ATTEMPTS = 3;

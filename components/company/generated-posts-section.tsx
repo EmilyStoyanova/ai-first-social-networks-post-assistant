@@ -18,6 +18,7 @@ import {
   resolvePostsEmptyState,
   type PostStatusFilter,
 } from "@/lib/posts/post-status-filter";
+import { groupPostsByTopic } from "@/lib/posts/post-groups";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
 import type { GenerationChannelOption } from "@/lib/posts/generation-channels";
@@ -105,8 +106,13 @@ export function GeneratedPostsSection({
     setStatusFilter(urlFilter);
   }
 
-  function handleGenerated(post: PostItem) {
-    setPosts((prev) => [post, ...prev]);
+  /**
+   * A topic finished. Prepended as a block, in the order the channels were
+   * written, so the grouping below folds them into one card immediately —
+   * before the router refresh that would eventually deliver them anyway.
+   */
+  function handleGenerated(generated: PostItem[]) {
+    setPosts((prev) => [...generated, ...prev]);
   }
 
   /**
@@ -159,6 +165,20 @@ export function GeneratedPostsSection({
     () => filterPostsByStatus(posts, statusFilter),
     [posts, statusFilter]
   );
+
+  /**
+   * The visible posts, as content topics.
+   *
+   * Grouped AFTER filtering rather than before, deliberately. The filter is a
+   * question about posts — "show me what is awaiting approval" — and a topic
+   * whose Facebook version is approved while its Instagram version is still
+   * pending genuinely belongs in only one of those two views. Grouping first
+   * would force the card to answer for versions the filter had excluded.
+   *
+   * Counts stay per POST for the same reason: "4 pending approval" means four
+   * posts a person has to look at, whatever they are grouped into.
+   */
+  const groups = useMemo(() => groupPostsByTopic(visiblePosts), [visiblePosts]);
 
   // Counts come from the same predicate the grid uses, so a label can never
   // promise a post the grid then hides.
@@ -217,19 +237,24 @@ export function GeneratedPostsSection({
         )
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
-          {visiblePosts.map((post) => (
+          {groups.map((group) => (
             <GeneratedPostCard
-              key={post.id}
+              // Stable across a sibling being deleted, so the card keeps its
+              // selected version rather than remounting on every mutation.
+              key={group.key}
               slug={slug}
-              post={post}
+              posts={group.posts}
               canDelete={canDelete}
               role={role}
               bufferConnected={bufferConnected}
               onDelete={handleDelete}
               onStatusChange={handleStatusChange}
-              // A post generated after page load has no metrics row yet, so it
+              // Per version, because each channel's post has its own reach. A
+              // post generated after page load has no metrics row yet, so it
               // falls back to the disabled/pending state rather than crashing.
-              metrics={postMetrics[post.id] ?? disabledMetrics()}
+              metrics={Object.fromEntries(
+                group.posts.map((p) => [p.id, postMetrics[p.id] ?? disabledMetrics()])
+              )}
               canManageAnalyticsKey={canManageAnalyticsKey}
             />
           ))}

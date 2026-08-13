@@ -390,9 +390,14 @@ model FeedItem {
   translationLeaseExpiresAt DateTime? @map("translation_lease_expires_at")
 
   source ContentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
-  // A feed item backs at most one generated post (one-post-per-article, V2).
-  // Enforced at the DB level by the unique index on Post.primaryFeedItemId.
-  post   Post?
+  // A feed item backs at most one post PER CHANNEL — one topic, written once for
+  // each social channel it was generated for. Enforced at the DB level by the
+  // composite unique index on Post(primaryFeedItemId, channel).
+  //
+  // `usedInPost` still means "this article has been consumed as a topic" and is
+  // claimed exactly once, by the first channel; the siblings are pinned to the
+  // article the topic already claimed and never claim it again.
+  posts  Post[]
 
   @@unique([sourceId, url])
   @@index([sourceId])
@@ -459,9 +464,33 @@ model Post {
   id               String        @id @default(uuid())
   companyId        String        @map("company_id")
   scheduleId       String?       @map("schedule_id")
-  // The single source article this post was generated from (V2 one-post-per-article).
-  // @unique gives a DB-level guarantee that a feed item is never reused across posts.
-  primaryFeedItemId String?      @unique @map("primary_feed_item_id")
+  // The single source article this post was generated from.
+  //
+  // Uniqueness is on (primaryFeedItemId, channel), not on the column alone: one
+  // article is ONE topic, and a topic may be written once for each channel it
+  // was generated for — a Facebook, an Instagram and a LinkedIn version of the
+  // same story are three posts, not a duplicate. Two posts on the SAME channel
+  // from the same article remain impossible, which is the half of
+  // one-post-per-article that was ever about avoiding repetition.
+  //
+  // See the @@unique at the bottom of this model. NULL is unconstrained either
+  // way (Postgres treats NULLs as distinct in a unique index), so mission and
+  // evergreen posts are unaffected.
+  primaryFeedItemId String?      @map("primary_feed_item_id")
+  // The content TOPIC this post is one channel's version of. One id shared by
+  // every channel version written from the same topic in the same request.
+  //
+  // Deliberately NOT `generationBatchId`, which is a different fact and is
+  // load-bearing elsewhere: a batch is one "generate N posts" click (many
+  // topics), and its non-NULL-ness is what tells the publisher a PERSON chose
+  // the time (lib/scheduling/publish-window.ts). Overloading it would either
+  // regroup a batch into its topics or make every single-post generation look
+  // manually scheduled.
+  //
+  // NULL = an ungrouped post: everything generated before this column existed,
+  // and every cron post. Those render exactly as they always have — the card
+  // falls back to a single-channel badge.
+  contentGroupId    String?      @map("content_group_id")
   // The content-mix quota this post was drawn against (v2-8). NULL = company
   // content (mission/brand post, no RSS). This cannot be derived from
   // primaryFeedItemId: evergreen (prompt/calendar) posts and mission posts BOTH
@@ -571,6 +600,11 @@ model Post {
   // Backs "show me everything that bulk run produced", always asked within one
   // company. Partial in effect: the column is NULL for every non-bulk post.
   @@index([companyId, generationBatchId])
+  // Backs the grouped posts list — "which channel versions belong together" —
+  // which is always asked within one company. NULL for every ungrouped post.
+  @@index([companyId, contentGroupId])
+  // One post per (article, channel). See the note on primaryFeedItemId.
+  @@unique([primaryFeedItemId, channel])
   @@map("posts")
 }
 

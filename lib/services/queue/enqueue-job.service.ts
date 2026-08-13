@@ -20,6 +20,17 @@ export interface EnqueueJobInput {
   priority?: number;
   maxAttempts?: number;
   cronRunId?: string;
+  /**
+   * The company this job acts for, when it acts for exactly one.
+   *
+   * Null for the recurring sweeps, which fan out across every company. Set for a
+   * job somebody requested for their own company — it is what lets a status
+   * endpoint scope a read by company without parsing the payload, so a job id
+   * from one company can never be used to read another's.
+   */
+  companyId?: string | null;
+  /** The user who asked, for the same job. Null for anything cron-driven. */
+  createdBy?: string | null;
 }
 
 export interface EnqueueJobResult {
@@ -39,6 +50,8 @@ export interface JobInsert {
   priority: number;
   maxAttempts: number;
   cronRunId: string | null;
+  companyId: string | null;
+  createdBy: string | null;
 }
 
 export interface EnqueueJobDeps {
@@ -55,6 +68,8 @@ async function defaultInsertJob(data: JobInsert): Promise<{ id: string }> {
       priority: data.priority,
       maxAttempts: data.maxAttempts,
       cronRunId: data.cronRunId,
+      companyId: data.companyId,
+      createdBy: data.createdBy,
     },
     select: { id: true },
   });
@@ -78,6 +93,8 @@ export async function enqueueJob(
       priority: input.priority ?? 0,
       maxAttempts: input.maxAttempts ?? 5,
       cronRunId: input.cronRunId ?? null,
+      companyId: input.companyId ?? null,
+      createdBy: input.createdBy ?? null,
     });
     return { enqueued: true, deduplicated: false, jobId: job.id };
   } catch (err) {

@@ -51,7 +51,13 @@ import {
   generateDraftPost,
   type GenerateDraftPostErrorCode,
   type GenerateDraftPostFailure,
+  type UniquenessFailureReason,
 } from "./generate-draft-post.service";
+import {
+  generateTopicAcrossChannels,
+  type TopicAnchor,
+  type TopicGenerationOutcome,
+} from "./generate-topic-across-channels.service";
 import type { ManualContentSourceRef } from "@/lib/ai/manual-content-source";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 import {
@@ -64,22 +70,27 @@ import {
   remainingBudgetMs,
   runInRequestDeadline,
 } from "@/lib/http/request-deadline";
+import { planBulkSlots, planCustomSlots, type BulkCustomDay } from "@/lib/scheduling/bulk-schedule";
 import {
-  MAX_BULK_POSTS,
-  MAX_BULK_RANGE_DAYS,
-  inclusiveDayCount,
-  isStartDateInPast,
-  planBulkSlots,
-  planCustomSlots,
-  validateCustomDistribution,
-  type BulkCustomDay,
-  type CustomDistributionError,
-} from "@/lib/scheduling/bulk-schedule";
+  validateBulkRequest,
+  type BulkRequestErrorCode,
+  type BulkSourceQuota,
+} from "./validate-bulk-request.service";
+
+export type { BulkSourceQuota };
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
 export interface BulkGeneratePostsInput {
-  channel: string;
+  /**
+   * Every channel each topic is written for, in attempt order.
+   *
+   * The count below is TOPICS, not posts: 5 topics × 3 channels is 5 content
+   * groups and 15 Post rows. One channel is the ordinary case and behaves
+   * exactly as a single-channel batch always has.
+   */
+  channels: readonly string[];
+  /** How many content TOPICS to write. Each one becomes a content group. */
   numberOfPosts: number;
   /** Inclusive `YYYY-MM-DD`, a business-zone calendar day. Must not be in the past. */
   startDate: string;
@@ -122,19 +133,33 @@ export interface BulkGeneratePostsInput {
   sourceMix?: BulkSourceQuota[];
 }
 
-/** One line of a per-batch content mix. */
-export interface BulkSourceQuota {
-  /** null = company content: written from the brand profile, with no article. */
-  sourceId: string | null;
-  /** How many posts of this batch this source writes. At least 1. */
-  posts: number;
-}
-
 export interface BulkGeneratedPost {
-  /** 1-based position of this post's slot in the batch. */
+  /** 1-based position of this post's TOPIC in the batch. */
   index: number;
   postId: string;
   scheduledFor: Date;
+  /** Which channel this version was written for. */
+  channel: string;
+  /** The content group it belongs to — its siblings share this id. */
+  contentGroupId: string;
+}
+
+/**
+ * One content topic's outcome: the channel versions that exist and the ones that
+ * do not.
+ *
+ * A group with some of each is a normal result, not a broken one — the posts
+ * that exist are real drafts. It is reported rather than smoothed over so the UI
+ * can say "Facebook and LinkedIn were written, Instagram was not, because …"
+ * instead of quietly presenting a group of two as the group of three that was
+ * asked for.
+ */
+export interface BulkGeneratedGroup {
+  /** 1-based position of this topic in the batch. */
+  index: number;
+  contentGroupId: string;
+  posts: BulkGeneratedPost[];
+  failures: BulkGenerationFailure[];
 }
 
 /**
@@ -161,14 +186,35 @@ export type BulkFailureReason =
   | "access";
 
 export interface BulkGenerationFailure {
-  /** 1-based position of the slot this attempt was for. */
+  /** 1-based position of the TOPIC this attempt was for. */
   index: number;
   /** The slot left empty by this failure. */
   scheduledFor: Date;
   code: GenerateDraftPostErrorCode;
+  /**
+   * The coarse grouping above — NOT the generator's own `reason`, which is a
+   * uniqueness-guard name and is carried separately as `uniquenessReason`. The
+   * two have always been different things; they are kept under different names
+   * so neither has to be renamed to make room for the other.
+   */
   reason: BulkFailureReason;
   /** English, for logs and API consumers; the UI translates `code`. */
   message: string;
+  /** The channel version that could not be written. */
+  channel: string;
+
+  // ── The generator's own diagnostics, verbatim ──────────────────────────────
+  // Present only when the underlying failure carried them. A partial batch used
+  // to be able to lose these — a rate-limited channel would report the code and
+  // nothing about how long to wait — so they are threaded through rather than
+  // left to the zero-generated path to be the only one that has them.
+
+  /** CANNOT_GENERATE_UNIQUE_POST only: which guard forced the abort. */
+  uniquenessReason?: UniquenessFailureReason;
+  /** CANNOT_GENERATE_UNIQUE_POST only: attempts made before aborting. */
+  attempts?: number;
+  /** LLM_RATE_LIMITED only, and only when the provider advertised a wait. */
+  retryAfterMs?: number;
 }
 
 /**
@@ -190,10 +236,20 @@ export type BulkStopReason = "generation_failed" | "time_budget" | "mix_exhauste
 export interface BulkGenerationSummary {
   /** Shared by every post this run wrote — also persisted on each of them. */
   batchId: string;
+  /** Topics asked for. NOT post rows: see `requestedPosts`. */
   requested: number;
+  /** Topics that produced at least one channel version. */
   generated: number;
-  /** Slots that produced no post: `failures.length + notAttempted`. */
+  /** Topics that produced no post at all: `failures.length + notAttempted`. */
   failed: number;
+  /** The channels every topic was asked for, echoed so a reader can do the maths. */
+  channels: string[];
+  /** `requested × channels.length` — the Post rows a complete run would write. */
+  requestedPosts: number;
+  /** Post rows actually written, across every topic and channel. */
+  generatedPosts: number;
+  /** One entry per topic that was attempted, complete or partial. */
+  groups: BulkGeneratedGroup[];
   postIds: string[];
   posts: BulkGeneratedPost[];
   /** One entry per slot that was attempted and failed. */
@@ -214,6 +270,20 @@ export interface BulkGenerationSummary {
    * Empty for a run without a mix, where a dry source ends the batch instead.
    */
   exhaustedSources: Array<string | null>;
+  /**
+   * The topic currently being written, present only on a MID-FLIGHT summary.
+   *
+   * Two jobs. It is what the UI shows as "writing topic 3 of 5", and it is what
+   * a retry resumes from: the anchor here is the story this group settled on, so
+   * the channels still missing continue it rather than each deciding a new one.
+   * Absent from a finished summary, where every topic is in `groups`.
+   */
+  liveTopic?: {
+    index: number;
+    contentGroupId: string;
+    anchor: TopicAnchor | null;
+    completedChannels: string[];
+  };
 }
 
 /**
@@ -224,9 +294,9 @@ export interface BulkGenerationSummary {
  */
 export type BulkGeneratePostsResult =
   | { success: true; data: BulkGenerationSummary }
-  // One member per code, not one member with a two-code union: a union-typed
+  // One member per code, not one member with a five-code union: a union-typed
   // discriminant cannot be narrowed AWAY, so the route's `else` would still be
-  // holding these two and could not hand the rest to the shared mapper.
+  // holding these and could not hand the rest to the shared mapper.
   | { success: false; code: "INVALID_POST_COUNT"; message: string }
   | { success: false; code: "INVALID_DATE_RANGE"; message: string }
   | { success: false; code: "START_DATE_IN_PAST"; message: string }
@@ -234,15 +304,77 @@ export type BulkGeneratePostsResult =
   | { success: false; code: "INVALID_SOURCE_MIX"; message: string }
   | GenerateDraftPostFailure;
 
+/**
+ * Widens a request-shape problem back into the service's result union.
+ *
+ * The union above spells each code out separately so a route can narrow them
+ * away one at a time; `BulkRequestProblem` carries the code as a single field.
+ * The cast bridges exactly that difference and nothing else — the codes are the
+ * same five, checked by the type below.
+ */
+function asRequestFailure(problem: {
+  code: BulkRequestErrorCode;
+  message: string;
+}): Extract<BulkGeneratePostsResult, { code: BulkRequestErrorCode }> {
+  return { success: false, ...problem } as Extract<
+    BulkGeneratePostsResult,
+    { code: BulkRequestErrorCode }
+  >;
+}
+
+/**
+ * What a previous attempt of this same batch already committed.
+ *
+ * A bulk run can be interrupted — the worker's lease can be lost, the process
+ * can be restarted, the queue can retry the job. Re-running the whole batch
+ * would write a second copy of everything it had already finished, which is both
+ * a duplicate-content bug and real money spent twice. So a resumed attempt is
+ * handed what exists and generates only the remainder.
+ *
+ * Keyed by topic index (1-based, matching `BulkGeneratedGroup.index`) so it
+ * lines up with the deterministic plan rather than with any id the retry would
+ * have to re-derive.
+ */
+export interface BulkResumeState {
+  /** Topic index → the group id that topic was given on the first attempt. */
+  contentGroupIds: Readonly<Record<number, string>>;
+  /** Topic index → channels already committed for it. */
+  completedChannels: Readonly<Record<number, readonly string[]>>;
+  /**
+   * Topic index → the topic it settled on. This is what makes a resumed sibling
+   * continue the SAME story: without it the channels still missing would each
+   * decide a topic of their own and the group would fragment.
+   */
+  anchors: Readonly<Record<number, TopicAnchor>>;
+  /** Post ids already written, so the summary counts them without a re-query. */
+  posts: readonly BulkGeneratedPost[];
+}
+
 export interface BulkGeneratePostsDeps {
   /** The single-post pipeline. Injected in tests; never re-implemented. */
   generate?: typeof generateDraftPost;
+  /** The per-topic fan-out. Injected in tests; never re-implemented. */
+  generateTopic?: typeof generateTopicAcrossChannels;
+  /**
+   * Called after every topic, with the summary as it stands. The queue job uses
+   * it to persist progress, which is both what the UI polls and what a retry
+   * resumes from. Best-effort by contract — it must never throw.
+   */
+  onProgress?: (summary: BulkGenerationSummary) => Promise<void>;
+  /** What an earlier attempt of this batch already wrote. */
+  resume?: BulkResumeState;
   /** Reads the channel's posting windows so slots land at its usual hour. */
   loadPostingWindows?: (slug: string, channel: string) => Promise<unknown>;
   /** The company's enabled content-source ids — what a submitted mix is checked against. */
   loadEnabledSourceIds?: (slug: string) => Promise<Set<string>>;
   /** Batch id factory — injected so tests get a stable id. */
   newBatchId?: () => string;
+  /**
+   * Content-group id factory, one call per topic. Injected so tests get stable
+   * ids; the queue job supplies ids from its persisted plan so a retry keeps the
+   * groups it already created.
+   */
+  newContentGroupId?: () => string;
   /** Writes the batch-level audit entry. Injected so tests can read it back. */
   auditLog?: typeof createAuditLog;
   /**
@@ -343,26 +475,6 @@ export function classifyBulkFailure(code: GenerateDraftPostErrorCode): BulkFailu
   }
 }
 
-/**
- * English wording for each way a custom distribution can be wrong.
- *
- * The form runs the very same `validateCustomDistribution` before it lets the
- * user submit, so in practice none of these are ever seen — they exist because
- * the server does not take the client's word for the schedule.
- */
-const DISTRIBUTION_MESSAGES: Record<CustomDistributionError, string> = {
-  empty: "Choose at least one date to publish on.",
-  invalid_date: "One of the chosen dates is not a valid date.",
-  duplicate_date: "The same date was listed more than once.",
-  out_of_period: "Every chosen date must fall inside the start and end dates.",
-  invalid_count: "Each chosen date must carry at least one whole post.",
-  count_mismatch: "The posts assigned to the chosen dates must add up to the number requested.",
-  invalid_time: "One of the chosen publishing times is not a valid time of day.",
-  time_count_mismatch: "Each chosen date must have one publishing time per post assigned to it.",
-  duplicate_slot: "Two posts were given the same date and time.",
-  time_in_past: "Every chosen publishing time must be in the future.",
-};
-
 /** Fallback wording when the generator reported a code but no message. */
 const DEFAULT_MESSAGES: Record<BulkFailureReason, string> = {
   no_eligible_content: "No unused source material is available to write another post from.",
@@ -396,74 +508,6 @@ const SOCIAL_CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const
 
 function isSocialChannel(value: string): value is SocialChannel {
   return (SOCIAL_CHANNELS as readonly string[]).includes(value);
-}
-
-/**
- * The ids a per-batch mix may name: this company's ENABLED content sources.
- *
- * Scoped by slug only, on the same reasoning as the posting-windows read above —
- * these ids are only ever compared against what the request submitted, and the
- * generation call that follows is what enforces membership. Disabled sources are
- * excluded because the stored mix excludes them too (resolveContentMix drops
- * them), so a mix naming one is a stale client, not a valid instruction.
- */
-async function loadEnabledSourceIdsFromDb(slug: string): Promise<Set<string>> {
-  const rows = await prisma.contentSource.findMany({
-    where: { company: { slug }, enabled: true },
-    select: { id: true },
-  });
-  return new Set(rows.map((r) => r.id));
-}
-
-/**
- * Why a submitted per-batch mix cannot be run, in English, or null when it can.
- *
- * The form applies every one of these before it enables the button; they are
- * repeated here because the server does not take the client's word for where
- * posts come from. The sum rule is the load-bearing one: the mix IS the batch,
- * so a mix that does not add up to the number requested would silently generate
- * a different number of posts than the button promised.
- */
-function validateSourceMix(
-  mix: readonly BulkSourceQuota[],
-  numberOfPosts: number,
-  contentSource: ManualContentSourceRef | undefined,
-  enabledSourceIds: ReadonlySet<string>
-): string | null {
-  // The two ways of choosing a source are alternatives, not layers: a specific
-  // pick means "every post from here", a mix means "these posts from each of
-  // these". Letting both through would leave the answer to whichever the loop
-  // happened to read.
-  if (contentSource !== undefined && contentSource.kind !== "company_rules") {
-    return "A content mix and a single content source cannot both be chosen for one batch.";
-  }
-
-  if (mix.length === 0) {
-    return "A content mix must name at least one source.";
-  }
-
-  const seen = new Set<string | null>();
-  for (const quota of mix) {
-    if (seen.has(quota.sourceId)) {
-      return "The same content source is listed more than once in the mix.";
-    }
-    seen.add(quota.sourceId);
-
-    if (!Number.isInteger(quota.posts) || quota.posts < 1) {
-      return "Every source in the mix must be given a whole number of one post or more.";
-    }
-
-    if (quota.sourceId !== COMPANY_CONTENT_SOURCE_ID && !enabledSourceIds.has(quota.sourceId)) {
-      return "The mix names a content source that does not exist or is not enabled.";
-    }
-  }
-
-  const total = mix.reduce((sum, q) => sum + q.posts, 0);
-  if (total !== numberOfPosts) {
-    return `The content mix assigns ${total} posts but ${numberOfPosts} were requested.`;
-  }
-
-  return null;
 }
 
 /**
@@ -502,8 +546,9 @@ export async function bulkGeneratePosts(
   deps: BulkGeneratePostsDeps = {}
 ): Promise<BulkGeneratePostsResult> {
   const generate = deps.generate ?? generateDraftPost;
+  const generateTopic = deps.generateTopic ?? generateTopicAcrossChannels;
+  const newContentGroupId = deps.newContentGroupId ?? (() => crypto.randomUUID());
   const loadPostingWindows = deps.loadPostingWindows ?? loadPostingWindowsFromDb;
-  const loadEnabledSourceIds = deps.loadEnabledSourceIds ?? loadEnabledSourceIdsFromDb;
   const newBatchId = deps.newBatchId ?? (() => crypto.randomUUID());
   const auditLog = deps.auditLog ?? createAuditLog;
   const now = deps.now ?? Date.now;
@@ -511,76 +556,24 @@ export async function bulkGeneratePosts(
   // ── Validate the request itself ───────────────────────────────────────────
   // Before any access check, because these are answers about the request, not
   // about the company — and they cost nothing to give.
-  if (
-    !Number.isInteger(input.numberOfPosts) ||
-    input.numberOfPosts < 1 ||
-    input.numberOfPosts > MAX_BULK_POSTS
-  ) {
-    return {
-      success: false,
-      code: "INVALID_POST_COUNT",
-      message: `Number of posts must be a whole number between 1 and ${MAX_BULK_POSTS}.`,
-    };
-  }
-
-  if (inclusiveDayCount(input.startDate, input.endDate) === null) {
-    return {
-      success: false,
-      code: "INVALID_DATE_RANGE",
-      message: `The end date must be a valid date on or after the start date, and at most ${MAX_BULK_RANGE_DAYS} days later.`,
-    };
-  }
-
-  // A period that has already begun would schedule posts into the past, and a
-  // post scheduled into the past is one the publisher will refuse to fire — so
-  // it is refused here, where it is still a request rather than a batch of
-  // stranded drafts. The form applies the same rule to its own date input.
-  if (isStartDateInPast(input.startDate, new Date(now()))) {
-    return {
-      success: false,
-      code: "START_DATE_IN_PAST",
-      message: "The start date must be today or later.",
-    };
-  }
-
+  //
+  // The rules live in `validate-bulk-request.service.ts` and are shared with the
+  // enqueue path, which runs them synchronously so a malformed request is
+  // refused with a 422 instead of becoming a job that fails in a worker log.
+  // Repeated here — not skipped on the grounds that the route already asked —
+  // because this service is reachable from the worker, and a payload that got
+  // there by any other route must not be able to spend anything unchecked.
   const custom = input.customDistribution;
-  if (custom !== undefined) {
-    const problem = validateCustomDistribution(
-      custom,
-      input.numberOfPosts,
-      input.startDate,
-      input.endDate,
-      new Date(now())
-    );
-    if (problem !== null) {
-      return {
-        success: false,
-        code: "INVALID_DISTRIBUTION",
-        message: DISTRIBUTION_MESSAGES[problem],
-      };
-    }
-  }
+  const problem = await validateBulkRequest(slug, input, new Date(now()), {
+    loadEnabledSourceIds: deps.loadEnabledSourceIds,
+  });
+  if (problem !== null) return asRequestFailure(problem);
 
-  // The per-batch content mix, checked against the company's real sources before
-  // anything is generated. An unknown id is refused rather than skipped: it would
-  // otherwise fail per-slot, be read as "that source is spent", and quietly move
-  // its posts onto sources the user never allocated them to.
+  // The per-batch content mix, in the shape the scheduler's own mix module reads.
   const mixQuotas: MixQuota[] | null =
     input.sourceMix === undefined
       ? null
       : input.sourceMix.map((q) => ({ sourceId: q.sourceId, postsPerWeek: q.posts }));
-
-  if (input.sourceMix !== undefined) {
-    const problem = validateSourceMix(
-      input.sourceMix,
-      input.numberOfPosts,
-      input.contentSource,
-      await loadEnabledSourceIds(slug)
-    );
-    if (problem !== null) {
-      return { success: false, code: "INVALID_SOURCE_MIX", message: problem };
-    }
-  }
 
   // Slots are planned up front because each post is persisted with its own
   // `scheduledFor` as it is written.
@@ -593,18 +586,42 @@ export async function bulkGeneratePosts(
   //     against that same period and against the clock. They are scheduled
   //     verbatim, and the windows are not loaded at all, because consulting them
   //     here could only move a post off the time the form promised.
-  const slots =
-    custom !== undefined
-      ? planCustomSlots(custom)
-      : planBulkSlots({
+  //
+  // Multi-channel: EVERY CHANNEL PLANS ITS OWN, from its own posting windows, so
+  // a topic's LinkedIn version can land at 09:00 and its Instagram version at
+  // 18:00 — which is each channel's scheduling rule being honoured, not a
+  // discrepancy. Custom mode is the deliberate exception: the user named the
+  // times for the topic, so every channel version of it inherits the same one
+  // and can be moved individually afterwards with the existing controls.
+  const slotsByChannel = new Map<string, Date[]>();
+  if (custom !== undefined) {
+    const shared = planCustomSlots(custom);
+    for (const channel of input.channels) slotsByChannel.set(channel, shared);
+  } else {
+    for (const channel of input.channels) {
+      slotsByChannel.set(
+        channel,
+        planBulkSlots({
           startDate: input.startDate,
           endDate: input.endDate,
           count: input.numberOfPosts,
-          postingWindows: await loadPostingWindows(slug, input.channel),
-        });
+          postingWindows: await loadPostingWindows(slug, channel),
+        })
+      );
+    }
+  }
+
+  // The topic-level timeline: what the batch's own progress is measured against,
+  // and what a failure with no post to attach itself to is dated by. The first
+  // channel's plan, because a topic is attempted in channel order.
+  const slots = slotsByChannel.get(input.channels[0]) ?? [];
 
   const batchId = newBatchId();
-  const posts: BulkGeneratedPost[] = [];
+  // Posts an earlier attempt committed. Counted in the summary from the start so
+  // a resumed run reports the batch, not just the part of it that this attempt
+  // happened to write.
+  const posts: BulkGeneratedPost[] = [...(deps.resume?.posts ?? [])];
+  const groups: BulkGeneratedGroup[] = [];
   const failures: BulkGenerationFailure[] = [];
   let stopReason: BulkStopReason | null = null;
   // Taken from the first post actually written rather than looked up: the batch
@@ -620,6 +637,104 @@ export async function bulkGeneratePosts(
   const generatedBySource = new Map<string | null, number>();
   const exhausted = new Set<string | null>();
   const exhaustedSources: Array<string | null> = [];
+
+  /**
+   * The group for a topic index, created on first use.
+   *
+   * Upsert rather than push because a RESUMED topic already has a group — the
+   * one an earlier attempt opened — and this attempt is adding the channels that
+   * were missing, not starting a second group beside it.
+   */
+  const upsertGroup = (index: number, contentGroupId: string): BulkGeneratedGroup => {
+    const existing = groups.find((g) => g.index === index);
+    if (existing) return existing;
+    const created: BulkGeneratedGroup = { index, contentGroupId, posts: [], failures: [] };
+    groups.push(created);
+    return created;
+  };
+
+  // Rebuild the groups an earlier attempt completed, so the summary describes the
+  // whole batch rather than only this attempt's share of it.
+  for (const p of deps.resume?.posts ?? []) {
+    upsertGroup(p.index, p.contentGroupId).posts.push(p);
+  }
+
+  /**
+   * The summary exactly as it stands, in the shape it will finally have.
+   *
+   * One shape for "running" and "finished" is deliberate: the UI polling a job
+   * mid-flight and the UI reading a completed one parse the same object, so
+   * there is no second progress format to keep in step with this one.
+   */
+  const buildSummary = (): BulkGenerationSummary => {
+    const attemptedTopics = groups.length;
+    return {
+      batchId,
+      requested: input.numberOfPosts,
+      generated: groups.filter((g) => g.posts.length > 0).length,
+      failed: input.numberOfPosts - groups.filter((g) => g.posts.length > 0).length,
+      channels: [...input.channels],
+      requestedPosts: input.numberOfPosts * input.channels.length,
+      generatedPosts: posts.length,
+      groups: groups.map((g) => ({ ...g, posts: [...g.posts], failures: [...g.failures] })),
+      postIds: posts.map((p) => p.postId),
+      posts: [...posts],
+      failures: [...failures],
+      notAttempted: Math.max(0, input.numberOfPosts - attemptedTopics),
+      stoppedEarly: attemptedTopics < input.numberOfPosts,
+      stopReason,
+      exhaustedSources: [...exhaustedSources],
+    };
+  };
+
+  /**
+   * Hands the caller the summary so far. Best-effort by contract — a progress
+   * write must never be the reason a batch of committed posts is lost — so
+   * anything it throws is swallowed here rather than at each call site.
+   */
+  const reportProgress = async (
+    topicIndex: number,
+    contentGroupId: string | null,
+    partial: TopicGenerationOutcome | null,
+    scheduledFor: Date
+  ): Promise<void> => {
+    if (!deps.onProgress) return;
+    // A topic mid-flight: fold what it has written so far into the summary the
+    // caller sees, WITHOUT committing it to the run's own bookkeeping — the
+    // topic's own bookkeeping happens once, when it finishes.
+    const snapshot = buildSummary();
+    if (partial && contentGroupId) {
+      const live = partial.posts.map((p) => ({
+        index: topicIndex,
+        postId: p.postId,
+        scheduledFor: p.scheduledFor ?? scheduledFor,
+        channel: p.channel,
+        contentGroupId,
+      }));
+      const seen = new Set(snapshot.postIds);
+      const fresh = live.filter((p) => !seen.has(p.postId));
+      snapshot.posts = [...snapshot.posts, ...fresh];
+      snapshot.postIds = snapshot.posts.map((p) => p.postId);
+      snapshot.generatedPosts = snapshot.posts.length;
+      // The anchor rides along so a retry can resume THIS topic rather than
+      // start a new one for the channels still missing.
+      snapshot.liveTopic = {
+        index: topicIndex,
+        contentGroupId,
+        anchor: partial.anchor,
+        completedChannels: partial.posts.map((p) => p.channel),
+      };
+    }
+    try {
+      await deps.onProgress(snapshot);
+    } catch (err) {
+      console.warn(
+        `[bulk-generate] Progress report failed (non-fatal): ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  };
 
   const minSlotBudgetMs = deps.minSlotBudgetMs ?? MIN_SLOT_BUDGET_MS;
   const deadline = createRequestDeadline(now() + (deps.softBudgetMs ?? BULK_SOFT_BUDGET_MS), now);
@@ -647,6 +762,13 @@ export async function bulkGeneratePosts(
 
     for (let i = 0; i < slots.length; i++) {
       const scheduledFor = slots[i];
+      const topicIndex = i + 1;
+
+      // Channels an earlier attempt already committed for this topic. A resumed
+      // run writes only the remainder, so nothing is generated twice.
+      const alreadyGenerated = deps.resume?.completedChannels[topicIndex] ?? [];
+      const remainingChannels = input.channels.filter((c) => !alreadyGenerated.includes(c));
+      if (remainingChannels.length === 0) continue;
 
       // Never start a generation there is not enough time left to finish; the
       // first slot is always attempted, so a run can never report "no time"
@@ -685,57 +807,130 @@ export async function bulkGeneratePosts(
           break;
         }
 
-        // The one and only generation path — the same call the single-post route
-        // makes, with the same options, plus this post's slot and batch id. A
-        // mix post differs only in WHICH source it names, and it names it the
-        // same way the dropdown would.
-        const result = await generate(slug, input.channel, userId, isGlobalAdmin, {
-          contentLanguage: input.contentLanguage,
-          includeSourceLinkOverride: input.includeSourceLinkOverride,
-          autoGenerateImageOverride: input.autoGenerateImageOverride,
-          llmConfigId: input.llmConfigId,
-          contentSource: due === null ? input.contentSource : contentSourceForQuota(due.sourceId),
-          scheduledFor,
-          generationBatchId: batchId,
-        });
+        // The one and only generation path. One call per TOPIC, which fans out
+        // to one `generateDraftPost` per channel — the same call the single-post
+        // route makes, with the same options, plus this topic's slots, batch id
+        // and group id. A mix topic differs only in WHICH source it names, and it
+        // names it the same way the dropdown would.
+        //
+        // The content group id comes from the resume state when this topic
+        // already has one, so a retry continues that group rather than opening a
+        // second one beside it.
+        const contentGroupId = deps.resume?.contentGroupIds[topicIndex] ?? newContentGroupId();
 
-        if (result.success) {
-          companyId ??= result.post.companyId;
-          posts.push({ index: i + 1, postId: result.post.id, scheduledFor });
+        const outcome = await generateTopic(
+          {
+            slug,
+            userId,
+            isGlobalAdmin,
+            contentGroupId,
+            channels: remainingChannels,
+            scheduledFor: Object.fromEntries(
+              input.channels.map((c) => [c, slotsByChannel.get(c)?.[i] ?? scheduledFor])
+            ),
+            generationBatchId: batchId,
+            contentSource: due === null ? input.contentSource : contentSourceForQuota(due.sourceId),
+            contentSourceId: due === null ? undefined : due.sourceId,
+            contentLanguage: input.contentLanguage,
+            includeSourceLinkOverride: input.includeSourceLinkOverride,
+            autoGenerateImageOverride: input.autoGenerateImageOverride,
+            llmConfigId: input.llmConfigId,
+            // The topic an earlier attempt settled on, so the channels still
+            // missing continue THAT story instead of each choosing a new one.
+            anchor: deps.resume?.anchors[topicIndex] ?? null,
+          },
+          {
+            generate,
+            // Surfaces the anchor to the caller the moment it exists, which is
+            // what a retry needs to resume this very topic.
+            onChannelComplete: async (partial) => {
+              await reportProgress(topicIndex, contentGroupId, partial, scheduledFor);
+            },
+          }
+        );
+
+        const topicFailures: BulkGenerationFailure[] = outcome.failures.map((f) => ({
+          index: topicIndex,
+          scheduledFor: slotsByChannel.get(f.channel)?.[i] ?? scheduledFor,
+          code: f.code,
+          reason: classifyBulkFailure(f.code),
+          message: f.message,
+          channel: f.channel,
+          // The generator's own diagnostics, carried through unchanged so a
+          // failed channel inside a partial batch explains itself as fully as a
+          // failed single generation does.
+          uniquenessReason: f.reason,
+          attempts: f.attempts,
+          retryAfterMs: f.retryAfterMs,
+        }));
+
+        // At least one channel version exists, so the TOPIC succeeded. A group
+        // that is short a channel is a partial group, reported as such — not a
+        // reason to abandon the batch or to discard the posts that do exist.
+        if (outcome.posts.length > 0) {
+          const written = outcome.posts.map((p) => ({
+            index: topicIndex,
+            postId: p.postId,
+            scheduledFor: p.scheduledFor ?? scheduledFor,
+            channel: p.channel,
+            contentGroupId,
+          }));
+          posts.push(...written);
+          // Carried out of the topic rather than looked up: the generations that
+          // just committed have already resolved the company, so the batch's
+          // audit entry is written against the same one its posts landed in.
+          companyId ??= outcome.companyId;
+          groups.push({
+            index: topicIndex,
+            contentGroupId,
+            posts: written,
+            failures: topicFailures,
+          });
+          failures.push(...topicFailures);
           if (due !== null) {
             generatedBySource.set(due.sourceId, (generatedBySource.get(due.sourceId) ?? 0) + 1);
           }
           break;
         }
 
-        const reason = classifyBulkFailure(result.code);
+        // Nothing at all was written for this topic. Every channel failed, so
+        // the topic's outcome is the outcome they agree on — read from the first,
+        // which is also the one that tried to claim a source.
+        const firstFailure = outcome.failures[0];
+        if (!firstFailure) break;
 
-        // This source is spent. Not a failure of the slot — the posts it owed
-        // move to the sources that still have material, and this slot is tried
-        // again against the next one due.
-        if (due !== null && reason === "no_eligible_content") {
+        // This source is spent — for EVERY channel, which is what makes it a
+        // property of the source rather than of one attempt. Not a failure of
+        // the topic: the posts it owed move to the sources that still have
+        // material, and this topic is tried again against the next one due.
+        if (
+          due !== null &&
+          outcome.failures.every((f) => classifyBulkFailure(f.code) === "no_eligible_content")
+        ) {
           exhausted.add(due.sourceId);
           exhaustedSources.push(due.sourceId);
-          lastExhaustion = result;
+          // The failure itself, not a copy of two of its fields — it is what the
+          // caller is answered with if the whole run ends up empty.
+          lastExhaustion = firstFailure;
           continue;
         }
 
-        // Nothing was written at all: answer exactly as the single-post flow
-        // would, so the caller gets the real code (and its retry hints) rather
-        // than a "successful batch of zero".
-        if (posts.length === 0) return asSingleFailure(result);
+        // Nothing was written at all, in the whole run: answer exactly as the
+        // single-post flow would, so the caller gets the real code — and the
+        // retry hints that came with it — rather than a "successful batch of
+        // zero". `firstFailure` IS a GenerateDraftPostFailure, so passing it on
+        // preserves every diagnostic the generator attached.
+        if (posts.length === 0) {
+          return asSingleFailure(firstFailure);
+        }
 
-        failures.push({
-          index: i + 1,
-          scheduledFor,
-          code: result.code,
-          reason,
-          message: result.message ?? DEFAULT_MESSAGES[reason],
-        });
+        failures.push(...topicFailures);
+        groups.push({ index: topicIndex, contentGroupId, posts: [], failures: topicFailures });
         stopReason = "generation_failed";
         stop = true;
       }
 
+      await reportProgress(topicIndex, null, null, scheduledFor);
       if (stop) break;
     }
 
@@ -744,14 +939,17 @@ export async function bulkGeneratePosts(
 
   if (zeroGenerated !== null) return zeroGenerated;
 
-  const attempted = posts.length + failures.length;
-  const notAttempted = input.numberOfPosts - attempted;
+  // One summary, built by the same function that built every progress snapshot,
+  // so a caller that watched the run and a caller that only read the end are
+  // never looking at two different accounts of it.
+  const summary = buildSummary();
 
-  if (posts.length < input.numberOfPosts) {
+  if (summary.generated < input.numberOfPosts) {
     console.warn(
-      `[bulk-generate] Batch ${batchId} produced ${posts.length}/${input.numberOfPosts} posts` +
+      `[bulk-generate] Batch ${batchId} produced ${summary.generated}/${input.numberOfPosts} topics ` +
+        `(${summary.generatedPosts}/${summary.requestedPosts} posts across ${input.channels.length} channel(s))` +
         (failures.length > 0
-          ? ` — stopped at slot ${failures[0].index}: ${failures[0].code}`
+          ? ` — stopped at topic ${failures[0].index}: ${failures[0].code}`
           : stopReason === "time_budget"
             ? " — stopped: request time budget exhausted"
             : stopReason === "mix_exhausted"
@@ -774,10 +972,19 @@ export async function bulkGeneratePosts(
       entityType: "post_batch",
       entityId: batchId,
       metadata: {
-        channel: input.channel,
+        // Every channel each topic was written for. `channel` (singular) is kept
+        // alongside it for a single-channel batch so existing log readers — and
+        // every entry already in the table — still mean the same thing.
+        channels: [...input.channels],
+        channel: input.channels.length === 1 ? input.channels[0] : null,
         requested: input.numberOfPosts,
-        generated: posts.length,
-        failed: input.numberOfPosts - posts.length,
+        generated: summary.generated,
+        failed: input.numberOfPosts - summary.generated,
+        // The Post rows behind those topics, which is the number that explains
+        // the LLM spend when several channels were selected.
+        requestedPosts: summary.requestedPosts,
+        generatedPosts: summary.generatedPosts,
+        contentGroupIds: summary.groups.map((g) => g.contentGroupId),
         distribution: custom !== undefined ? "custom" : "even",
         startDate: input.startDate,
         endDate: input.endDate,
@@ -797,20 +1004,5 @@ export async function bulkGeneratePosts(
     });
   }
 
-  return {
-    success: true,
-    data: {
-      batchId,
-      requested: input.numberOfPosts,
-      generated: posts.length,
-      failed: input.numberOfPosts - posts.length,
-      postIds: posts.map((p) => p.postId),
-      posts,
-      failures,
-      notAttempted,
-      stoppedEarly: attempted < input.numberOfPosts,
-      stopReason,
-      exhaustedSources,
-    },
-  };
+  return { success: true, data: summary };
 }

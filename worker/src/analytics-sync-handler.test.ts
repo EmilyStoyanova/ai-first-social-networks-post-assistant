@@ -39,6 +39,7 @@ function job(overrides: Partial<JobRecord> = {}): JobRecord {
     payload: {},
     attempts: 1,
     maxAttempts: 5,
+    result: null,
     ...overrides,
   };
 }

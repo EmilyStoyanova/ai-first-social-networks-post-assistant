@@ -3,7 +3,7 @@ import { Prisma, type SocialChannel, type LlmProvider } from "@prisma/client";
 import { buildGenerationContext } from "./build-generation-context.service";
 import { resolveGenerationAspect } from "./resolve-generation-aspect.service";
 import type { GenerationContext, ILlmProvider } from "@/lib/ai/types";
-import { buildPrompts } from "@/lib/ai/prompt-builder";
+import { buildPrompts, type SharedTopicConstraint } from "@/lib/ai/prompt-builder";
 import { resolveLlmSelection } from "./resolve-llm-selection.service";
 import {
   buildSupportedProvider,
@@ -25,6 +25,7 @@ import { resolvePrimarySelection } from "@/lib/ai/primary-feed-item";
 import {
   planDirectContentSource,
   planFeedItemUsage,
+  planPinnedFeedItem,
   releaseFeedItem,
   type FeedItemPlan,
   type FeedItemReservationDb,
@@ -110,6 +111,22 @@ export interface GeneratedPostDTO {
   scheduledFor: Date | null;
   /** The bulk run this post belongs to; null for a single manual generation. */
   generationBatchId: string | null;
+  /** The content topic this post is one channel's version of; null when ungrouped. */
+  contentGroupId: string | null;
+  /**
+   * The article this post was written from, or null for a mission/evergreen
+   * post. Returned — rather than left to a read-back — because it is what a
+   * multi-channel orchestrator PINS the topic's remaining channels to, and the
+   * two must be the same value by construction, not by a second query.
+   */
+  primaryFeedItemId: string | null;
+  /**
+   * This post's central claim, and the normalized topic it declared. Together
+   * they are the topic itself: what the sibling channels of the same content
+   * group are told to adapt rather than replace (see SharedTopicConstraint).
+   */
+  coreMessage: string;
+  topic: string | null;
   createdAt: Date;
 }
 
@@ -349,6 +366,34 @@ export interface GeneratePostOptions {
    * default, never a user's preference.
    */
   preferredLlmConfigId?: string | null;
+  /**
+   * The content TOPIC this post is one channel's version of — shared by every
+   * channel generated from the same topic in the same request.
+   *
+   * Purely an association, exactly like `generationBatchId` and deliberately
+   * separate from it: it changes nothing about how the post is generated,
+   * reviewed, scheduled or published. Undefined for single-channel generation
+   * and for cron, whose posts are ungrouped.
+   */
+  contentGroupId?: string;
+  /**
+   * Write from THIS article, which the topic's first channel already claimed.
+   *
+   * Set only for the second and later channels of a content group. It replaces
+   * the whole source-selection pipeline — no scope resolution, no availability
+   * check, no reservation — because the topic has already answered every one of
+   * those questions. Critically, a generation that fails here does NOT release
+   * the claim: it never owned it (see the release rule below).
+   */
+  pinnedFeedItemId?: string;
+  /**
+   * The central claim this channel version must adapt rather than replace. Set
+   * alongside `pinnedFeedItemId` for article-backed topics, and on its own for
+   * mission/evergreen topics, which have no article to pin but still have a
+   * topic — that is what makes a group of company-content posts one story
+   * instead of three.
+   */
+  sharedTopic?: SharedTopicConstraint;
 }
 
 export async function generateDraftPost(
@@ -367,6 +412,13 @@ export async function generateDraftPost(
     // and behaves exactly as before.
     | "scheduledFor"
     | "generationBatchId"
+    // Multi-channel generation only. A group id is an association; the pinned
+    // item and shared topic are what make the sibling channels versions of ONE
+    // topic rather than three independent posts about one feed.
+    | "contentGroupId"
+    | "pinnedFeedItemId"
+    | "sharedTopic"
+    | "contentSourceId"
   > & {
     /**
      * The form's "Content source" choice, as it came off the wire. Omitted =
@@ -375,6 +427,14 @@ export async function generateDraftPost(
     contentSource?: ManualContentSourceRef;
   } = {}
 ): Promise<GenerateDraftPostResult> {
+  // A sibling channel version writes from an article the topic already chose, so
+  // every question the block below answers — which kind of source, is it still
+  // usable, what may the window contain — has already been answered once, for
+  // the whole group. Re-asking them here is not merely wasteful: the item is
+  // `usedInPost` by now, so the ordinary window would refuse it and the sibling
+  // would quietly write about a different article.
+  const pinnedFeedItemId = options.pinnedFeedItemId ?? null;
+
   const ref: ManualContentSourceRef = options.contentSource ?? { kind: "company_rules" };
 
   // ── Resolve WHAT KIND of source was picked ────────────────────────────────
@@ -388,7 +448,14 @@ export async function generateDraftPost(
   // to another company resolves to null exactly like a deleted one: the caller
   // learns "not available", never that it exists.
   let selection: ManualContentSourceSelection;
-  if (ref.kind === "source") {
+  if (pinnedFeedItemId) {
+    // Not a pick at all — the topic already made it. Held as `company_rules` so
+    // the branches below that ask "did the user name a source" all answer no,
+    // which is true: the caller named an ARTICLE, and it does so through the
+    // scope instead. Quota attribution still arrives explicitly, via
+    // options.contentSourceId.
+    selection = { kind: "company_rules" };
+  } else if (ref.kind === "source") {
     const picked = await prisma.contentSource.findFirst({
       where: {
         id: ref.sourceId,
@@ -417,7 +484,11 @@ export async function generateDraftPost(
     rawChannel,
     userId,
     isGlobalAdmin,
-    toSourceScope(selection)
+    // A sibling channel's window is the ONE article its topic claimed, with the
+    // `usedInPost` filter dropped — see the `feed_item` scope.
+    pinnedFeedItemId
+      ? { kind: "feed_item", feedItemId: pinnedFeedItemId }
+      : toSourceScope(selection)
   );
   if (!contextResult.success) {
     return { success: false, code: contextResult.code };
@@ -456,12 +527,20 @@ export async function generateDraftPost(
     // writing an unscheduled, unbatched draft exactly as it always has.
     scheduledFor: options.scheduledFor,
     generationBatchId: options.generationBatchId,
+    // Multi-channel generation only.
+    contentGroupId: options.contentGroupId,
+    pinnedFeedItemId: pinnedFeedItemId ?? undefined,
+    sharedTopic: options.sharedTopic,
     // The picked source, recorded on the post as a durable FK. For a direct
     // content-source post this is the ONLY relation back to what it was written
     // from — primaryFeedItemId stays null because nothing was reserved. It can
     // never disturb the content mix: the scheduler counts only posts carrying
     // its own scheduleId, and a manual post has none.
-    contentSourceId: isPickedSource(selection) ? selection.sourceId : undefined,
+    //
+    // A sibling channel is handed it outright: its `selection` is deliberately
+    // not a pick (the topic chose), so the group's quota attribution has to
+    // travel with the instruction rather than be re-derived from it.
+    contentSourceId: isPickedSource(selection) ? selection.sourceId : options.contentSourceId,
   });
 
   // The guard above found something to write from, but a concurrent run claimed
@@ -618,14 +697,18 @@ export async function generatePostFromContext(
   // and leave the source permanently dry.
   const articleCandidateIds = context.feedItems.filter(isConsumableItem).map((f) => f.id);
   const hasEvergreenItems = context.feedItems.some((f) => !isConsumableItem(f));
-  const plan: FeedItemPlan = context.directContentSource
-    ? planDirectContentSource(context.feedItems)
-    : await planFeedItemUsage(
-        articleCandidateIds,
-        context.hasArticleSources,
-        hasEvergreenItems,
-        db
-      );
+  const plan: FeedItemPlan = options.pinnedFeedItemId
+    ? // A sibling channel version: the article is named, was claimed once by this
+      // topic's first channel, and is claimed again by nobody.
+      planPinnedFeedItem(options.pinnedFeedItemId, context.feedItems)
+    : context.directContentSource
+      ? planDirectContentSource(context.feedItems)
+      : await planFeedItemUsage(
+          articleCandidateIds,
+          context.hasArticleSources,
+          hasEvergreenItems,
+          db
+        );
   if (plan.action === "skip") {
     // Article sources are configured but every eligible article is already used
     // (or a concurrent run claimed the last candidate) and no evergreen item is
@@ -654,9 +737,22 @@ export async function generatePostFromContext(
   // plan.action === "mission": no sources — primary.item is null and the existing
   // no-source mission/brand post path is used.
 
+  // ── Which claim is OURS to give back ──────────────────────────────────────
+  // `claimedFeedItemId` is what the post RECORDS. This is what this generation
+  // OWNS. They are the same thing for every generation that reserved its own
+  // article, and deliberately different for a sibling channel version: the
+  // article was claimed once, by the topic, and a sibling that fails must leave
+  // it exactly as it found it.
+  //
+  // Releasing it here would be the worst kind of bug — silent and delayed: the
+  // article would go back in the pool while its first channel's post still
+  // points at it, and a later generation would write a second post about a
+  // story the company has already published.
+  const ownedClaimId = options.pinnedFeedItemId ? null : claimedFeedItemId;
+
   // Frees the claimed article if generation fails before the post is persisted.
   const releaseClaimedFeedItem = async () => {
-    if (claimedFeedItemId) await releaseFeedItem(claimedFeedItemId, db);
+    if (ownedClaimId) await releaseFeedItem(ownedClaimId, db);
   };
 
   // ── Aspect mining ─────────────────────────────────────────────────────────
@@ -691,6 +787,10 @@ export async function generatePostFromContext(
       pattern: initialPattern,
       recentTopics: topicMemory,
       aspect: initialAspect,
+      // Set only for the second and later channels of a content group. The
+      // prompt builder suppresses `recentTopics` when it is present, since
+      // "cover something else" and "cover exactly this" cannot both hold.
+      sharedTopic: options.sharedTopic,
     }
   );
 
@@ -917,6 +1017,11 @@ export async function generatePostFromContext(
       // the status above is untouched by it, so a bulk post is reviewed exactly
       // like any other manual draft.
       generationBatchId: options.generationBatchId ?? null,
+      // The content topic this post is one channel's version of. An association
+      // and nothing more — status, schedule and review are untouched by it, so a
+      // grouped post behaves exactly like an ungrouped one everywhere except in
+      // how the list chooses to display it.
+      contentGroupId: options.contentGroupId ?? null,
       safetyFlagged: safetyResult.flagged,
       safetyFlagReason: safetyResult.flagged
         ? `Flagged terms: ${safetyResult.matchedTerms.join(", ")}`
@@ -1154,6 +1259,13 @@ export async function generatePostFromContext(
       origin: resolvePostOrigin(originSnapshot, null),
       scheduledFor: scheduledFor ?? null,
       generationBatchId: options.generationBatchId ?? null,
+      contentGroupId: options.contentGroupId ?? null,
+      // Both taken from what this generation decided, not read back from the
+      // row: they are what a multi-channel orchestrator pins its SIBLING
+      // channels to, so they have to be exactly the values that went in.
+      primaryFeedItemId: claimedFeedItemId,
+      coreMessage: parsed.coreMessage,
+      topic: parsed.topic ?? null,
       createdAt: post.createdAt,
     },
     warnings,

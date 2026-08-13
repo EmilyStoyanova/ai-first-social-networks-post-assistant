@@ -32,24 +32,117 @@ const CHANNEL_META: Record<string, { label: string; variant: BadgeVariant }> = {
   TIKTOK: { label: "TikTok", variant: "danger" },
 };
 
+/** The badge colours, reused by the version selector so switching looks the same. */
+function channelMetaFor(channel: string): { label: string; variant: BadgeVariant } {
+  return CHANNEL_META[channel] ?? { label: channel, variant: "neutral" };
+}
+
+const VERSION_SELECT_CLASSES: Record<BadgeVariant, string> = {
+  owner: "bg-status-success-bg text-status-success-fg",
+  editor: "bg-surface-subtle text-fg-muted",
+  comingSoon: "bg-surface-subtle text-fg-faint",
+  success: "bg-status-success-bg text-status-success-fg",
+  warning: "bg-status-warning-bg text-status-warning-fg",
+  danger: "bg-status-danger-bg text-status-danger-fg",
+  neutral: "bg-status-neutral-bg text-status-neutral-fg",
+  readonly: "bg-surface-subtle text-fg-faint",
+};
+
+/**
+ * The channel badge, turned into a picker.
+ *
+ * A native `<select>` wearing the badge's own colours, rather than a custom
+ * popover: it is keyboard-operable, screen-reader-labelled and touch-friendly
+ * for free, and on a control whose entire job is "choose one of at most four"
+ * there is nothing a bespoke menu would add. The colours follow the SELECTED
+ * channel, so the card's identity changes with it exactly as the badge's did.
+ */
+function ChannelVersionSelect({
+  versions,
+  selectedId,
+  onSelect,
+  label,
+}: {
+  versions: PostItem[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+  label: string;
+}) {
+  const meta = channelMetaFor(versions.find((v) => v.id === selectedId)?.channel ?? "");
+
+  return (
+    <select
+      aria-label={label}
+      value={selectedId}
+      onChange={(e) => onSelect(e.target.value)}
+      className={`text-micro focus:ring-accent/30 h-[22px] cursor-pointer appearance-none rounded-full border-0 py-0 pr-6 pl-2.5 font-medium outline-none focus:ring-2 ${VERSION_SELECT_CLASSES[meta.variant]}`}
+      // The caret. Inline because the control is a coloured pill rather than a
+      // form field, and Tailwind's form reset strips the native one.
+      style={{
+        backgroundImage:
+          "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 5' fill='none'%3E%3Cpath d='M1 1l3 3 3-3' stroke='currentColor' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\")",
+        backgroundRepeat: "no-repeat",
+        backgroundPosition: "right 0.5rem center",
+        backgroundSize: "0.5rem",
+      }}
+    >
+      {versions.map((v) => (
+        <option key={v.id} value={v.id}>
+          {channelMetaFor(v.channel).label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 interface Props {
   slug: string;
-  post: PostItem;
+  /**
+   * The channel versions of ONE content topic, in channel order.
+   *
+   * A single-element array for an ungrouped post, which is every post written
+   * before multi-channel generation — those render exactly as they always have,
+   * with a plain channel badge and no selector.
+   */
+  posts: PostItem[];
   canDelete: boolean;
   /** Drives which workflow actions the card offers — see lib/posts/post-actions.ts. */
   role: PostRole;
   bufferConnected: boolean;
   onDelete: (id: string) => void;
   onStatusChange?: (id: string, newStatus: string) => void;
-  /** Engagement metrics for this post (v2-7). Optional so callers that do not
+  /** Engagement metrics by post id (v2-7). Optional so callers that do not
    *  show analytics (the approval queue) need not thread it through. */
-  metrics?: PostMetricsView;
+  metrics?: Record<string, PostMetricsView>;
   canManageAnalyticsKey?: boolean;
 }
 
+/**
+ * One content topic, as a card.
+ *
+ * ── Why this is two components ──────────────────────────────────────────────
+ *
+ * The card below holds a great deal of per-post state: the text and hashtags as
+ * they have been edited, the attached image, the live status, an open publish
+ * panel with a chosen Buffer profile, four in-flight flags and five error
+ * strings. Every one of those belongs to ONE Post record. Switching the channel
+ * selector to a sibling while any of it survived would show that sibling with
+ * another post's text, another post's image, or another post's error — and the
+ * publish panel would send the wrong one.
+ *
+ * Reset by REMOUNT rather than by an effect that clears a dozen setters: `key`
+ * is React's own guarantee that no state crosses, and it cannot be defeated by
+ * someone adding a fourteenth `useState` later and forgetting to add it to a
+ * reset list. Which is why the selection has to live OUT here — a remount that
+ * also reset the selection would immediately switch back.
+ *
+ * The versions themselves are the posts that actually exist. A topic whose
+ * LinkedIn generation failed simply has no LinkedIn option; an option that
+ * selected nothing would be a broken control.
+ */
 export function GeneratedPostCard({
   slug,
-  post,
+  posts,
   canDelete,
   role,
   bufferConnected,
@@ -58,6 +151,60 @@ export function GeneratedPostCard({
   metrics,
   canManageAnalyticsKey = false,
 }: Props) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Falls back to the first version whenever the remembered id is gone — the
+  // ordinary consequence of deleting a sibling, not an edge case.
+  const selected = posts.find((p) => p.id === selectedId) ?? posts[0];
+
+  return (
+    <GeneratedPostCardBody
+      // The whole point: every `useState` below belongs to THIS post and is
+      // discarded the moment another version is chosen.
+      key={selected.id}
+      slug={slug}
+      post={selected}
+      versions={posts}
+      onSelectVersion={setSelectedId}
+      canDelete={canDelete}
+      role={role}
+      bufferConnected={bufferConnected}
+      onDelete={onDelete}
+      onStatusChange={onStatusChange}
+      metrics={metrics?.[selected.id]}
+      canManageAnalyticsKey={canManageAnalyticsKey}
+    />
+  );
+}
+
+interface BodyProps {
+  slug: string;
+  post: PostItem;
+  /** Every version of this topic — the selector's options. */
+  versions: PostItem[];
+  onSelectVersion: (id: string) => void;
+  canDelete: boolean;
+  role: PostRole;
+  bufferConnected: boolean;
+  onDelete: (id: string) => void;
+  onStatusChange?: (id: string, newStatus: string) => void;
+  metrics?: PostMetricsView;
+  canManageAnalyticsKey?: boolean;
+}
+
+function GeneratedPostCardBody({
+  slug,
+  post,
+  versions,
+  onSelectVersion,
+  canDelete,
+  role,
+  bufferConnected,
+  onDelete,
+  onStatusChange,
+  metrics,
+  canManageAnalyticsKey = false,
+}: BodyProps) {
   const t = useTranslations("posts");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
@@ -107,10 +254,7 @@ export function GeneratedPostCard({
     post.publishedPostUrl ?? null
   );
 
-  const channelMeta = CHANNEL_META[post.channel] ?? {
-    label: post.channel,
-    variant: "neutral" as BadgeVariant,
-  };
+  const channelMeta = channelMetaFor(post.channel);
 
   // Origin badge — "RSS · TechPowerUp" for a post written from an article,
   // otherwise "Brand Setup". Text-only, matching the channel and status badges
@@ -366,7 +510,20 @@ export function GeneratedPostCard({
       {/* Header: badges + date */}
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant={channelMeta.variant}>{channelMeta.label}</Badge>
+          {/* The channel badge IS the version selector on a grouped card — one
+              control, in the place the channel was already shown, rather than a
+              second "Version" dropdown saying the same thing twice. An ungrouped
+              post has one version, so it keeps the plain badge it always had. */}
+          {versions.length > 1 ? (
+            <ChannelVersionSelect
+              versions={versions}
+              selectedId={post.id}
+              onSelect={onSelectVersion}
+              label={t("channelVersionLabel")}
+            />
+          ) : (
+            <Badge variant={channelMeta.variant}>{channelMeta.label}</Badge>
+          )}
           <StatusBadge status={localStatus.toLowerCase() as PostStatusValue} />
           <span
             title={

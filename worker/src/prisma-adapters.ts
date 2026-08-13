@@ -64,6 +64,8 @@ interface ClaimedRow {
   payload: unknown;
   attempts: number;
   max_attempts: number;
+  /** The previous attempt's progress; requeueing never clears it. */
+  result: unknown;
 }
 
 /** Adapts the shared Prisma client to the job queue's storage seam. */
@@ -105,7 +107,7 @@ export function createPrismaJobStore(prisma: PrismaClient): JobStore {
           FOR UPDATE SKIP LOCKED
           LIMIT 1
         )
-        RETURNING id, type, payload, attempts, max_attempts
+        RETURNING id, type, payload, attempts, max_attempts, result
       `);
 
       const row = rows[0];
@@ -116,7 +118,32 @@ export function createPrismaJobStore(prisma: PrismaClient): JobStore {
         payload: row.payload,
         attempts: Number(row.attempts),
         maxAttempts: Number(row.max_attempts),
+        // Carried through untouched — only this job's own handler knows what its
+        // progress means. Present on a retry, null on a first attempt.
+        result: row.result ?? null,
       };
+    },
+
+    // `updateMany` rather than `update`: the guard is on three columns, not just
+    // the primary key, and `update` cannot express a conditional where. A count
+    // of 0 means the row moved on without us — the reaper requeued it, or it was
+    // cancelled — and the caller must stop, not retry.
+    renewLease: async ({ id, workerId, leaseExpiresAt }) => {
+      const { count } = await prisma.job.updateMany({
+        where: { id, lockedBy: workerId, status: "active" },
+        data: { leaseExpiresAt },
+      });
+      return count === 1;
+    },
+
+    saveProgress: async ({ id, workerId, progress }) => {
+      const { count } = await prisma.job.updateMany({
+        where: { id, lockedBy: workerId, status: "active" },
+        data: {
+          result: progress == null ? Prisma.DbNull : (progress as Prisma.InputJsonValue),
+        },
+      });
+      return count === 1;
     },
 
     complete: async (id, result, now) => {

@@ -24,6 +24,23 @@ const envSchema = z.object({
   WORKER_LEASE_TTL_MS: z.coerce.number().int().positive().default(300_000),
   // Grace window for in-flight work to finish during shutdown before we force exit.
   WORKER_SHUTDOWN_GRACE_MS: z.coerce.number().int().nonnegative().default(30_000),
+  /**
+   * Wall-clock budget for ONE manual bulk-generation attempt.
+   *
+   * The reason this exists at all — and is far larger than the HTTP route's
+   * 240s — is the whole point of moving bulk generation onto the queue: a
+   * worker is not a request and has no function cap to lose a batch to. 30
+   * minutes comfortably covers the largest request the form can make (10 topics
+   * × 4 channels = 40 full generations) without ever being the thing that stops
+   * a run; the per-slot check inside the service still stops cleanly and reports
+   * `time_budget` if it ever were.
+   *
+   * It is a budget rather than no limit because the alternative is a hung
+   * provider call holding a lease forever. Note that exceeding it is not a
+   * failure: the run ends with the posts it wrote and an honest stop reason,
+   * and the job COMPLETES.
+   */
+  WORKER_BULK_BUDGET_MS: z.coerce.number().int().positive().default(1_800_000),
 });
 
 export interface WorkerConfig {
@@ -35,6 +52,7 @@ export interface WorkerConfig {
   heartbeatIntervalMs: number;
   leaseTtlMs: number;
   shutdownGraceMs: number;
+  bulkBudgetMs: number;
 }
 
 export function loadWorkerConfig(
@@ -53,5 +71,6 @@ export function loadWorkerConfig(
     heartbeatIntervalMs: parsed.WORKER_HEARTBEAT_INTERVAL_MS,
     leaseTtlMs: parsed.WORKER_LEASE_TTL_MS,
     shutdownGraceMs: parsed.WORKER_SHUTDOWN_GRACE_MS,
+    bulkBudgetMs: parsed.WORKER_BULK_BUDGET_MS,
   };
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useLocale, useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
@@ -14,6 +14,8 @@ import { COMPANY_MISSION_VALUE, COMPANY_RULES_VALUE } from "@/lib/ai/manual-cont
 import { BulkGenerateFields, type BulkPlanState } from "./bulk-generate-fields";
 import { BatchContentMixFields } from "./batch-content-mix-fields";
 import { BulkResultSummary } from "./bulk-result-summary";
+import { BulkJobProgress } from "./bulk-job-progress";
+import { ChannelMultiSelect } from "./channel-multi-select";
 import {
   batchMixTotal,
   defaultBatchMix,
@@ -25,11 +27,30 @@ import {
 import type { ContentMixDTO } from "@/lib/services/company/get-content-mix.service";
 import {
   BULK_FORM_ANCHOR,
+  clearActiveBulkJob,
   clearBulkDraft,
+  readActiveBulkJob,
+  saveActiveBulkJob,
   saveBulkDraft,
   stillAvailable,
   takeBulkDraft,
+  type ActiveBulkJob,
 } from "@/lib/posts/bulk-draft";
+import {
+  CHANNEL_ORDER,
+  channelLabel,
+  normalizeChannelSelection,
+  toChannelPayload,
+} from "@/lib/posts/channel-selection";
+import {
+  bulkPollIntervalMs,
+  committedPostCount,
+  isTerminalBulkJobPhase,
+  resolveBulkJobPhase,
+  toBulkBatchResponse,
+  type BulkJobPhase,
+  type BulkJobStatus,
+} from "@/lib/posts/bulk-job";
 import {
   MAX_BULK_POSTS,
   isStartDateInPast,
@@ -38,17 +59,6 @@ import {
   validateCustomDistribution,
 } from "@/lib/scheduling/bulk-schedule";
 import { appZoneToday } from "@/lib/scheduling/app-datetime-local";
-
-// Labels and display order only — which of these are actually offered is decided
-// by the company's enabled Buffer profiles (see `availableChannels`).
-const CHANNELS = [
-  { value: "FACEBOOK", label: "Facebook" },
-  { value: "LINKEDIN", label: "LinkedIn" },
-  { value: "INSTAGRAM", label: "Instagram" },
-  { value: "TIKTOK", label: "TikTok" },
-] as const;
-
-type Channel = (typeof CHANNELS)[number]["value"];
 
 /** Three-state override: inherit the source/channel setting, or force on/off. */
 type SourceLinkOverride = "inherit" | "include" | "exclude";
@@ -87,7 +97,12 @@ type GenerateMode = "single" | "multiple";
 
 interface Props {
   slug: string;
-  onGenerated: (post: PostItem) => void;
+  /**
+   * One topic finished. An array because a topic written for three channels is
+   * three independent posts — the grid renders them as one grouped card, but it
+   * is given all three, in the order they were written.
+   */
+  onGenerated: (posts: PostItem[]) => void;
   /**
    * A bulk run finished with at least one post. Bulk returns ids rather than
    * whole posts, so the list reloads from the server instead of being patched
@@ -134,20 +149,28 @@ export function GeneratePostForm({
   const apiError = useApiErrorMessage();
   const locale = useLocale();
 
-  // CHANNELS drives label and order; availableChannels decides membership. The
-  // intersection is taken in CHANNELS order so the list never reshuffles when a
+  // CHANNEL_ORDER drives display order; availableChannels decides membership.
+  // The intersection is taken in that order so the list never reshuffles when a
   // company connects a new profile.
   const channelOptions = useMemo(() => {
     const byChannel = new Map(availableChannels.map((c) => [c.channel, c]));
-    return CHANNELS.flatMap((c) => {
-      const config = byChannel.get(c.value);
-      return config ? [{ value: c.value, label: c.label, config }] : [];
+    return CHANNEL_ORDER.flatMap((value) => {
+      const config = byChannel.get(value);
+      return config ? [{ value: value as string, label: channelLabel(value), config }] : [];
     });
   }, [availableChannels]);
 
-  // "" only when there is nothing to pick — generation is disabled in that case,
-  // so the empty value never reaches the API.
-  const [channel, setChannel] = useState<Channel | "">(() => channelOptions[0]?.value ?? "");
+  const channelValues = useMemo(() => channelOptions.map((c) => c.value), [channelOptions]);
+
+  /**
+   * Every channel this topic is written for.
+   *
+   * Empty only when the company has connected nothing — generation is disabled
+   * in that case, so an empty selection never reaches the API. Otherwise the
+   * selection helpers guarantee at least one entry, all of them currently
+   * available.
+   */
+  const [channels, setChannels] = useState<string[]>(() => channelValues.slice(0, 1));
   // "default" = inherit the selected channel's configured posting language;
   // "en"/"bg" = explicit one-time override.
   const [contentLanguage, setContentLanguage] = useState<"default" | "en" | "bg">("default");
@@ -182,6 +205,33 @@ export function GeneratePostForm({
   const minDate = useMemo(() => appZoneToday(openedAt), [openedAt]);
   const [batch, setBatch] = useState<BulkBatchResponse | null>(null);
 
+  // ── The queued run ────────────────────────────────────────────────────────
+  // `activeJob` is what the browser is WATCHING; `jobStatus` is the last thing
+  // the status endpoint said about it. They are separate because they end at
+  // different moments: polling stops the instant the run is terminal, but its
+  // final state — a failure, its error, what it managed to write — has to stay
+  // on screen after it does.
+  const [activeJob, setActiveJob] = useState<ActiveBulkJob | null>(null);
+  const [jobStatus, setJobStatus] = useState<BulkJobStatus | null>(null);
+  /**
+   * What to say about the run.
+   *
+   * Stored rather than derived at render, because deciding it needs the clock —
+   * "queued" only becomes "waiting for a worker" after enough time has passed —
+   * and reading the clock while rendering is exactly the impurity that makes a
+   * component's output depend on when React happened to re-run it. So it is
+   * settled where a clock reading is a fact rather than a guess: in the poll,
+   * against the status that poll just fetched. A job sat in the queue slides
+   * into the waiting state on the first poll past the threshold.
+   *
+   * Null when this tab has never watched a run in this session.
+   */
+  const [jobPhase, setJobPhase] = useState<BulkJobPhase | null>(null);
+  /** True when this run was adopted from a 409 rather than started by this click. */
+  const [resumedExisting, setResumedExisting] = useState(false);
+  /** The channels that produced nothing on a partial SINGLE generation. */
+  const [channelFailures, setChannelFailures] = useState<string[]>([]);
+
   // ── This batch's content mix ──────────────────────────────────────────────
   // Null means "untouched, so use the saved default". Holding the override as
   // null-or-edits rather than as a copy of the default is what keeps the panel
@@ -205,12 +255,27 @@ export function GeneratePostForm({
   const mixBalanced = batchMixTotal(mixCounts) === plan.numberOfPosts;
 
   const noChannels = channelOptions.length === 0;
-  const selectedChannel = channelOptions.find((c) => c.value === channel) ?? null;
+
+  /**
+   * The channel the per-channel hints below speak for.
+   *
+   * Several channels can be selected, and each has its own posting language, its
+   * own image requirement and its own posting windows — so a hint has to be
+   * about ONE of them or it is about nothing. The first selected is used, and
+   * the hints name it, rather than four hints crowding the form or one hint
+   * silently averaging settings that differ.
+   */
+  const primaryChannel = channelOptions.find((c) => c.value === channels[0]) ?? null;
 
   // The channel's own posting windows decide the times in both distribution
   // modes. Server-authored, carried down with the channel option purely so the
   // preview below can be computed without a round trip.
-  const postingWindows = selectedChannel?.config.postingWindows ?? [];
+  //
+  // Each selected channel is scheduled into ITS OWN windows by the server, so a
+  // multi-channel batch cannot be previewed as one timetable. The preview shows
+  // the first channel's, labelled as such — an honest sample of the period
+  // rather than a promise about all of them.
+  const postingWindows = primaryChannel?.config.postingWindows ?? [];
 
   /**
    * The custom distribution exactly as it will be sent: the days, their counts,
@@ -269,7 +334,16 @@ export function GeneratePostForm({
     // `postingWindows` is a fresh array each render; the channel it came from is
     // what actually changes, so that is what the memo watches.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan, distributionError, customDistribution, channel]);
+  }, [plan, distributionError, customDistribution, channels[0]]);
+
+  /**
+   * A run is in flight and this tab is following it.
+   *
+   * The bulk form's "busy" is no longer `generating`, which now only covers the
+   * few milliseconds of the enqueue request itself. Everything the user waits on
+   * happens after that, so this is what locks the form.
+   */
+  const bulkRunning = activeJob !== null;
 
   /** A bulk request the API would accept — what the Generate button waits for. */
   const bulkReady =
@@ -288,7 +362,7 @@ export function GeneratePostForm({
   // The language "Default" resolves to, mirroring the server's order:
   // ChannelConfig.postingLanguage → Company.defaultLang. Naming it in the option
   // label means the user can see what "Default" means without opening settings.
-  const channelLanguage = selectedChannel?.config.postingLanguage;
+  const channelLanguage = primaryChannel?.config.postingLanguage;
   const languageFromChannel = channelLanguage === "en" || channelLanguage === "bg";
   const resolvedDefaultLang: "en" | "bg" = languageFromChannel
     ? channelLanguage
@@ -297,7 +371,14 @@ export function GeneratePostForm({
   // Only the explicit "do not generate" choice warns. Inheriting a channel that
   // simply has auto-generation off is the pre-existing default for most
   // companies, so warning on it would fire on nearly every first load.
-  const imageWarning = imageOverride === "skip" && selectedChannel?.config.imageRequired === true;
+  //
+  // Across a multi-channel selection ANY channel needing an image is worth the
+  // warning — the point is that a post will be publishable on some channels and
+  // not others, which is precisely the case a per-channel check would miss.
+  const imageRequiringChannels = channelOptions
+    .filter((c) => channels.includes(c.value) && c.config.imageRequired)
+    .map((c) => c.label);
+  const imageWarning = imageOverride === "skip" && imageRequiringChannels.length > 0;
 
   /**
    * Whether this form opened on a restored draft — which makes every choice in
@@ -329,7 +410,6 @@ export function GeneratePostForm({
     if (!draft) return;
     restoredFromDraft.current = true;
 
-    const channels = channelOptions.map((c) => c.value);
     const sources = [
       COMPANY_RULES_VALUE,
       COMPANY_MISSION_VALUE,
@@ -342,7 +422,10 @@ export function GeneratePostForm({
     // only when a draft exists, and settles immediately.
     /* eslint-disable react-hooks/set-state-in-effect */
     setMode(draft.mode);
-    setChannel(stillAvailable(draft.channel, channels, channelOptions[0]?.value ?? ""));
+    // Reduced to what is still on offer — a profile can be disconnected while
+    // the user is in settings, and a checkbox for a channel that is gone would
+    // send a request the server refuses.
+    setChannels(normalizeChannelSelection(draft.channels, channelValues));
     setContentLanguage(draft.contentLanguage);
     setImageOverride(draft.imageOverride);
     setContentSource(stillAvailable(draft.contentSource, sources, COMPANY_RULES_VALUE));
@@ -354,13 +437,13 @@ export function GeneratePostForm({
     setPlan(restoredPlan);
     setMixOverride(draft.mixOverride);
     /* eslint-enable react-hooks/set-state-in-effect */
-  }, [slug, channelOptions, contentSources]);
+  }, [slug, channelValues, contentSources]);
 
   /** Snapshots the form so the trip to settings and back costs nothing typed. */
   function rememberDraft() {
     saveBulkDraft(slug, {
       mode,
-      channel,
+      channels,
       contentLanguage,
       imageOverride,
       contentSource,
@@ -370,6 +453,153 @@ export function GeneratePostForm({
       mixOverride,
     });
   }
+
+  /**
+   * Picks up the run this tab was already watching.
+   *
+   * Bulk generation happens in a worker now, so the browser can leave and come
+   * back while it runs — and a form that looked idle over a live run would
+   * invite a second click, which the queue would refuse as ALREADY_RUNNING. The
+   * id is read back rather than consumed, so it survives every visit until the
+   * run terminates.
+   *
+   * Guarded by a ref rather than by the dependency list because the read is NOT
+   * consume-once: re-running it would hand `setActiveJob` a fresh object each
+   * time and restart the polling effect below in a loop.
+   */
+  const jobRestored = useRef(false);
+  useEffect(() => {
+    if (jobRestored.current) return;
+    jobRestored.current = true;
+    const existing = readActiveBulkJob(slug);
+    // Same reason the draft restore sets state in an effect: browser storage
+    // cannot be read while rendering, so this can only arrive after first paint.
+    // Once per mount, and only when a run is actually in flight.
+    /* eslint-disable react-hooks/set-state-in-effect */
+    if (existing) {
+      setActiveJob(existing);
+      // Shown immediately rather than after the first poll lands, so returning
+      // to the page never presents an idle-looking form over a live run.
+      setJobPhase("queued");
+    }
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [slug]);
+
+  /**
+   * Starts watching a run, and writes it down so a navigation cannot lose it.
+   *
+   * The one place `activeJob` is set from a response — used by both the ordinary
+   * 202 and the 409 that hands back a run already in flight, so the two cannot
+   * drift on what "watching a job" involves.
+   */
+  function adoptJob(next: ActiveBulkJob) {
+    saveActiveBulkJob(slug, next);
+    setActiveJob(next);
+    setJobStatus(null);
+    // "Queued" until the first poll says otherwise — the panel has to appear on
+    // the click rather than five seconds later.
+    setJobPhase("queued");
+  }
+
+  /**
+   * The run is over, one way or another: stop polling and forget the reference.
+   *
+   * `jobStatus` is deliberately kept — a failed run's error and the posts it
+   * managed to write are the whole reason the user is looking at the panel.
+   */
+  const finishJob = useCallback(() => {
+    clearActiveBulkJob(slug);
+    setActiveJob(null);
+  }, [slug]);
+
+  // The grid's refresh callback, held in a ref so the polling effect does not
+  // restart every time the parent re-renders and hands down a new function.
+  const onBulkGeneratedRef = useRef(onBulkGenerated);
+  useEffect(() => {
+    onBulkGeneratedRef.current = onBulkGenerated;
+  });
+
+  /**
+   * Follows the run until it stops.
+   *
+   * Deliberately a self-scheduling `setTimeout` chain rather than a fixed
+   * `setInterval`: the cadence depends on what the job is doing (see
+   * `bulkPollIntervalMs`), and an interval would also stack requests if one poll
+   * outlived its own period.
+   *
+   * The grid is refreshed whenever the count of committed posts has GROWN, so
+   * drafts appear as the worker writes them rather than all at once at the end —
+   * and a poll that reports no new posts costs no server round trip.
+   */
+  useEffect(() => {
+    if (!activeJob) return;
+
+    const jobId = activeJob.jobId;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Local rather than a ref, so it resets naturally per job. Starting at zero
+    // on a RESTORED job is intentional: whatever was written while this tab was
+    // away is new to the grid and worth a refresh.
+    let lastSeenPosts = 0;
+
+    async function poll() {
+      try {
+        const res = await fetch(`/api/v1/companies/${slug}/generate/bulk/${jobId}`);
+
+        if (res.status === 404) {
+          // The row is gone — a pruned queue, or an id from a database that has
+          // since been reset. Keeping the reference would leave the form
+          // permanently "generating" with nothing to generate, so the whole
+          // reference goes: the job, and the panel reporting it.
+          if (!cancelled) {
+            finishJob();
+            setJobPhase(null);
+          }
+          return;
+        }
+        if (!res.ok) throw new Error("status unavailable");
+
+        const json = (await res.json()) as { job: BulkJobStatus };
+        if (cancelled) return;
+
+        setJobStatus(json.job);
+
+        const committed = committedPostCount(json.job.progress);
+        if (committed > lastSeenPosts) {
+          lastSeenPosts = committed;
+          onBulkGeneratedRef.current();
+        }
+
+        const phase = resolveBulkJobPhase(json.job, Date.now());
+        setJobPhase(phase);
+
+        if (isTerminalBulkJobPhase(phase)) {
+          finishJob();
+          // A finished job's result IS the batch summary, so the completed state
+          // is rendered by the same panel the synchronous route's answer always
+          // used — same wording, same explanations, no second design.
+          if (phase === "completed") setBatch(toBulkBatchResponse(json.job.progress));
+          // One last refresh: the final topic commits after the poll that
+          // reported the one before it.
+          onBulkGeneratedRef.current();
+          return;
+        }
+
+        timer = setTimeout(poll, bulkPollIntervalMs(phase));
+      } catch {
+        // A dropped connection is not a failed run. The job is on the server and
+        // carries on regardless, so this backs off and asks again rather than
+        // reporting an error the run did not have.
+        if (!cancelled) timer = setTimeout(poll, 5_000);
+      }
+    }
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeJob, slug, finishJob]);
 
   // Load the company's selectable LLMs once. Failure is silent — the dropdown
   // simply stays at "System default", preserving the pre-v2-5 behaviour. When the
@@ -419,7 +649,11 @@ export function GeneratePostForm({
    */
   function sharedGenerationBody(): Record<string, unknown> {
     return {
-      channel,
+      // Lowercase, which is how the channel is spelled on the wire. Sent as an
+      // array by both modes — one channel is the ordinary case with one entry,
+      // and the server still accepts the old singular `channel` from a client
+      // that has not been updated.
+      channels: toChannelPayload(channels),
       // Omit when "Default" so the server inherits the channel's language.
       ...(contentLanguage !== "default" ? { contentLanguage } : {}),
       ...(hasRssFeedItems && sourceLinkOverride !== "inherit"
@@ -435,15 +669,28 @@ export function GeneratePostForm({
     };
   }
 
+  /**
+   * Writes ONE topic across the selected channels, and waits for it.
+   *
+   * Still synchronous. One topic is at most four generations — the same order of
+   * work this button has always done — so making the user poll for it would be
+   * ceremony without a reason. Only bulk, whose work grows with the batch, needs
+   * a queue.
+   *
+   * A group where some channels succeeded and others did not is a normal result:
+   * the posts that exist are real drafts and are added to the grid, and the
+   * channels that produced nothing are named rather than quietly missing.
+   */
   async function handleGenerate() {
     // Belt-and-braces: the button is already disabled without a channel, and
-    // `generating` already blocks a second click — a bulk run is minutes of
+    // `generating` already blocks a second click — generation is minutes of
     // billed work, so a duplicate submission is not a cosmetic problem.
-    if (!channel || generating) return;
+    if (channels.length === 0 || generating) return;
 
     setGenerating(true);
     setError("");
     setWarnings(null);
+    setChannelFailures([]);
     setBatch(null);
     try {
       const res = await fetch(`/api/v1/companies/${slug}/generate`, {
@@ -455,10 +702,20 @@ export function GeneratePostForm({
         const json = (await res.json()) as { error?: GenerateApiError };
         throw new Error(resolveGenerateError(json.error));
       }
-      const json = (await res.json()) as { post: PostItem; warnings: GenerationWarnings };
-      onGenerated(json.post);
+      const json = (await res.json()) as {
+        post: PostItem;
+        posts?: PostItem[];
+        warnings: GenerationWarnings;
+        failures?: Array<{ channel: string }>;
+      };
+      // `posts` is the multi-channel answer; `post` is the same thing for a
+      // server that predates it, so an older deployment still renders a card.
+      onGenerated(json.posts ?? [json.post]);
       if (json.warnings.duplicate.flagged || json.warnings.safety.flagged) {
         setWarnings(json.warnings);
+      }
+      if (json.failures && json.failures.length > 0) {
+        setChannelFailures(json.failures.map((f) => channelLabel(f.channel)));
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
@@ -468,20 +725,30 @@ export function GeneratePostForm({
   }
 
   /**
-   * Runs a whole batch in one request and reports what came back.
+   * Queues a batch, and starts watching it.
    *
-   * A short batch is a SUCCESS with an account attached, not an error: the posts
-   * that exist are real, committed drafts. Only a run that produced nothing at
-   * all arrives as an error, and it carries the generation's own code, so it is
-   * shown exactly like a failed single generation.
+   * The request no longer generates anything: it returns 202 with a job id and a
+   * worker does the work. Which is why nothing here reports a result — the
+   * response means "accepted", and everything the user is actually waiting for
+   * arrives through the polling effect above.
+   *
+   * Everything that CAN be decided from the request itself is still answered
+   * synchronously by the server (post count, period, distribution, content mix),
+   * so a malformed batch is refused here with the same error it always was
+   * rather than accepted and failed in a worker log.
    */
   async function handleBulkGenerate() {
-    if (!channel || generating || !bulkReady) return;
+    // `activeJob` is part of the guard, not just `generating`: the request
+    // finishes in milliseconds now, so without it a second click during a
+    // multi-minute run would sail straight through to the queue.
+    if (channels.length === 0 || generating || activeJob !== null || !bulkReady) return;
 
     setGenerating(true);
     setError("");
     setWarnings(null);
+    setChannelFailures([]);
     setBatch(null);
+    setResumedExisting(false);
     try {
       const res = await fetch(`/api/v1/companies/${slug}/generate/bulk`, {
         method: "POST",
@@ -492,9 +759,9 @@ export function GeneratePostForm({
           startDate: plan.startDate,
           endDate: plan.endDate,
           // Omitted for an even spread, so the server plans the slots itself
-          // from the channel's windows. In custom mode it carries the user's own
-          // days AND times, and the server schedules exactly those — which is
-          // why the preview above is not an estimate.
+          // from EACH channel's own windows. In custom mode it carries the
+          // user's own days AND times, and every channel version of a topic is
+          // scheduled at the one the user picked.
           ...(plan.distribution === "custom" ? { distribution: customDistribution } : {}),
           // Sent only when a mix is actually driving this run. Its absence is
           // what keeps a company without one — or a batch pinned to a single
@@ -502,18 +769,47 @@ export function GeneratePostForm({
           ...(mixActive ? { sourceMix: toSourceMixPayload(mixCounts) } : {}),
         }),
       });
-      if (!res.ok) {
-        const json = (await res.json()) as { error?: GenerateApiError };
+
+      const json = (await res.json()) as {
+        job?: { jobId: string; batchId: string };
+        error?: GenerateApiError & { jobId?: string | null };
+      };
+
+      // One bulk run per company at a time. When the queue can name the run that
+      // IS going, watch that one — the user came here to see a batch happen, and
+      // an error with no way back to it would be the worst of both answers. It
+      // is emphatically not a second job: nothing new is enqueued.
+      if (res.status === 409) {
+        const running = json.error?.jobId;
+        if (typeof running === "string" && running.length > 0) {
+          setResumedExisting(true);
+          adoptJob({
+            jobId: running,
+            // Unknown from here — this request did not create it. The status
+            // endpoint supplies the real counts on the first poll.
+            batchId: null,
+            requestedTopics: 0,
+            startedAt: new Date().toISOString(),
+          });
+          return;
+        }
         throw new Error(resolveGenerateError(json.error));
       }
-      const json = (await res.json()) as { batch: BulkBatchResponse };
-      setBatch(json.batch);
-      // The batch this draft described has been generated, so restoring it on a
-      // later visit would re-offer a run that already happened. Normally there
-      // is nothing here to clear — the restore consumed it on mount — but a trip
-      // to settings the user never came back from leaves one behind.
+
+      if (!res.ok || !json.job) throw new Error(resolveGenerateError(json.error));
+
+      adoptJob({
+        jobId: json.job.jobId,
+        batchId: json.job.batchId,
+        requestedTopics: plan.numberOfPosts,
+        startedAt: new Date().toISOString(),
+      });
+
+      // The batch this draft described has been queued, so restoring it on a
+      // later visit would re-offer a run that is already happening. Normally
+      // there is nothing here to clear — the restore consumed it on mount — but
+      // a trip to settings the user never came back from leaves one behind.
       clearBulkDraft(slug);
-      onBulkGenerated();
     } catch (err) {
       setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
@@ -546,11 +842,14 @@ export function GeneratePostForm({
               type="button"
               role="tab"
               aria-selected={mode === value}
-              disabled={generating}
+              // Also locked while a queued run is in flight: switching to
+              // single-post mode would hide the panel reporting it.
+              disabled={generating || bulkRunning}
               onClick={() => {
                 setMode(value);
                 setError("");
                 setBatch(null);
+                setChannelFailures([]);
               }}
               className={`rounded-control px-3 py-1.5 text-xs font-semibold transition-colors ${
                 mode === value
@@ -564,11 +863,37 @@ export function GeneratePostForm({
         </div>
       </div>
 
+      {/* A run this tab is following. Completion is not shown here — a finished
+          job's result IS the batch summary, and the panel below already reads
+          one, so there is exactly one place that reports an outcome. */}
+      {jobPhase !== null && jobPhase !== "completed" && (
+        <BulkJobProgress
+          phase={jobPhase}
+          status={jobStatus}
+          requestedTopics={activeJob?.requestedTopics || plan.numberOfPosts}
+        />
+      )}
+
+      {resumedExisting && bulkRunning && (
+        <Alert variant="info" role="status" className="mb-4">
+          {tBulk("jobAlreadyRunning")}
+        </Alert>
+      )}
+
       {batch && <BulkResultSummary batch={batch} locale={locale} />}
 
       {error && (
         <Alert variant="error" className="mb-4">
           {error}
+        </Alert>
+      )}
+
+      {/* Some channels of this topic produced nothing. The ones that did are
+          already in the grid — this names the gap rather than leaving a group
+          silently short of the channels that were asked for. */}
+      {channelFailures.length > 0 && (
+        <Alert variant="warning" className="mb-4">
+          {t("channelsPartial", { channels: channelFailures.join(", ") })}
         </Alert>
       )}
 
@@ -598,33 +923,25 @@ export function GeneratePostForm({
         </Alert>
       )}
 
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="min-w-[160px] flex-1">
-          <label
-            htmlFor="generate-channel"
-            className="text-fg-muted mb-1.5 block text-sm font-medium"
-          >
-            {t("channel")}
-          </label>
-          <select
-            id="generate-channel"
-            value={channel}
-            onChange={(e) => {
-              setChannel(e.target.value as Channel);
+      {/* One topic, one or more channels. Full width above the rest: it is the
+          decision that changes how many posts the click produces, so it reads
+          badly squeezed in beside four dropdowns. */}
+      {!noChannels && (
+        <div className="mb-3">
+          <ChannelMultiSelect
+            available={channelValues}
+            selected={channels}
+            onChange={(next) => {
+              setChannels(next);
               setWarnings(null);
+              setChannelFailures([]);
             }}
-            disabled={generating || noChannels}
-            className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {noChannels && <option value="">{t("noChannelsPlaceholder")}</option>}
-            {channelOptions.map((c) => (
-              <option key={c.value} value={c.value}>
-                {c.label}
-              </option>
-            ))}
-          </select>
+            disabled={generating || bulkRunning}
+          />
         </div>
+      )}
 
+      <div className="flex flex-wrap items-end gap-3">
         <div className="min-w-[140px]">
           <label
             htmlFor="generate-content-language"
@@ -636,7 +953,7 @@ export function GeneratePostForm({
             id="generate-content-language"
             value={contentLanguage}
             onChange={(e) => setContentLanguage(e.target.value as "default" | "en" | "bg")}
-            disabled={generating}
+            disabled={generating || bulkRunning}
             className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <option value="default">
@@ -660,7 +977,7 @@ export function GeneratePostForm({
             id="generate-image"
             value={imageOverride}
             onChange={(e) => setImageOverride(e.target.value as ImageOverride)}
-            disabled={generating}
+            disabled={generating || bulkRunning}
             className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <option value="inherit">{t("imageInherit")}</option>
@@ -680,7 +997,7 @@ export function GeneratePostForm({
             id="generate-content-source"
             value={contentSource}
             onChange={(e) => setContentSource(e.target.value)}
-            disabled={generating}
+            disabled={generating || bulkRunning}
             className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
           >
             <option value={COMPANY_RULES_VALUE}>{t("contentSourceCompanyRules")}</option>
@@ -716,7 +1033,7 @@ export function GeneratePostForm({
               id="generate-source-link"
               value={sourceLinkOverride}
               onChange={(e) => setSourceLinkOverride(e.target.value as SourceLinkOverride)}
-              disabled={generating}
+              disabled={generating || bulkRunning}
               className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <option value="inherit">{t("sourceLinkInherit")}</option>
@@ -738,7 +1055,7 @@ export function GeneratePostForm({
               id="generate-llm"
               value={llmConfigId}
               onChange={(e) => setLlmConfigId(e.target.value)}
-              disabled={generating}
+              disabled={generating || bulkRunning}
               className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <option value="">{t("llmSystemDefault")}</option>
@@ -764,11 +1081,15 @@ export function GeneratePostForm({
         ) : (
           <Button
             variant="primary"
-            loading={generating}
-            disabled={noChannels || generating || !bulkReady}
+            // Spinning for the whole run, not just for the enqueue request: the
+            // request returns in milliseconds, and a button that went idle while
+            // a worker was still writing would invite the second click the queue
+            // then refuses.
+            loading={generating || bulkRunning}
+            disabled={noChannels || generating || bulkRunning || !bulkReady}
             onClick={handleBulkGenerate}
           >
-            {generating
+            {generating || bulkRunning
               ? tBulk("generating", { count: plan.numberOfPosts })
               : tBulk("generateDrafts", { count: plan.numberOfPosts })}
           </Button>
@@ -784,10 +1105,23 @@ export function GeneratePostForm({
           minDate={minDate}
           now={openedAt}
           postingWindows={postingWindows}
-          disabled={generating || noChannels}
+          disabled={generating || bulkRunning || noChannels}
           locale={locale}
         />
       )}
+
+      {/* The preview above is one channel's timetable. Every other selected
+          channel is scheduled into its OWN posting windows, so a topic's
+          versions can legitimately go out at different times — said here rather
+          than discovered when the drafts appear with times nobody previewed. */}
+      {mode === "multiple" &&
+        plan.distribution === "even" &&
+        channels.length > 1 &&
+        primaryChannel && (
+          <p className="text-fg-faint mt-3 text-xs">
+            {tBulk("previewPerChannel", { channel: primaryChannel.label })}
+          </p>
+        )}
 
       {/* Where the posts come from, beside when they go out. Shown only for a
           batch — a single post already answers this with the dropdown above —
@@ -803,7 +1137,7 @@ export function GeneratePostForm({
           onReset={() => setMixOverride(null)}
           numberOfPosts={plan.numberOfPosts}
           sources={contentSources}
-          disabled={generating || noChannels}
+          disabled={generating || bulkRunning || noChannels}
           onLeaveForSettings={rememberDraft}
         />
       )}
@@ -816,24 +1150,20 @@ export function GeneratePostForm({
         </p>
       )}
 
-      {/* One run can take minutes; without this the user is looking at a
-          spinner with no idea whether to wait or reload. */}
-      {mode === "multiple" && generating && (
-        <p className="text-fg-faint mt-3 text-xs">{tBulk("generatingHint")}</p>
-      )}
-
       {/* Advisory, never blocking: the draft is still worth having, and an image
-          can be generated or attached from the post card before publishing. */}
+          can be generated or attached from the post card before publishing. The
+          channels are named, because with several selected the warning is about
+          some of them and not the others. */}
       {imageWarning && (
         <Alert variant="warning" className="mt-3">
-          {t("imageRequiredWarning")}
+          {t("imageRequiredWarningChannels", { channels: imageRequiringChannels.join(", ") })}
         </Alert>
       )}
 
-      {contentLanguage === "default" && selectedChannel && (
+      {contentLanguage === "default" && primaryChannel && (
         <p className="text-fg-faint mt-3 text-xs">
           {languageFromChannel
-            ? t("contentLanguageDefaultHint", { channel: selectedChannel.label })
+            ? t("contentLanguageDefaultHint", { channel: primaryChannel.label })
             : t("contentLanguageDefaultHintCompany")}
         </p>
       )}

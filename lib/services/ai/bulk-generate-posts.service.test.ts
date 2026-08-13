@@ -55,7 +55,9 @@ interface RecordedAudit {
 
 function makeInput(overrides: Partial<BulkGeneratePostsInput> = {}): BulkGeneratePostsInput {
   return {
-    channel: "linkedin",
+    // One channel by default, so every pre-existing test still describes a
+    // single-channel batch — where a topic and a post are the same thing.
+    channels: ["linkedin"],
     numberOfPosts: 5,
     startDate: START,
     endDate: END,
@@ -82,6 +84,12 @@ function post(id: string, options: Record<string, unknown>): GeneratedPostDTO {
     origin: brandSetupOrigin(),
     scheduledFor: (options.scheduledFor as Date | undefined) ?? null,
     generationBatchId: (options.generationBatchId as string | undefined) ?? null,
+    contentGroupId: (options.contentGroupId as string | undefined) ?? null,
+    // Echoed from the pin when one was given, so a fake sibling generation
+    // reports the same article and claim its caller asked it to write from.
+    primaryFeedItemId: (options.pinnedFeedItemId as string | undefined) ?? null,
+    coreMessage: `Core message for ${id}.`,
+    topic: `topic-${id}`,
     createdAt: new Date("2026-08-10T00:00:00.000Z"),
   };
 }
@@ -367,6 +375,46 @@ describe("bulkGeneratePosts — partial success", () => {
     assert.equal(result.data.failed, 3);
     assert.equal(result.data.failures[0].reason, "not_unique");
     assert.equal(calls().length, 3);
+  });
+
+  it("carries the generator's own diagnostics into a partial batch's failure", async () => {
+    const { deps } = makeDeps({
+      succeedFor: 2,
+      thenFail: {
+        success: false,
+        code: "CANNOT_GENERATE_UNIQUE_POST",
+        reason: "semantic_duplicate",
+        attempts: 3,
+      },
+    });
+
+    const result = await bulkGeneratePosts(SLUG, USER_ID, false, makeInput(), deps);
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+
+    const failure = result.data.failures[0];
+    // The coarse grouping the UI switches on…
+    assert.equal(failure.reason, "not_unique");
+    // …and the generator's own account beneath it, which the multi-channel
+    // orchestration layer must pass through rather than flatten to a code.
+    assert.equal(failure.uniquenessReason, "semantic_duplicate");
+    assert.equal(failure.attempts, 3);
+  });
+
+  it("carries a rate limit's retry hint into a partial batch's failure", async () => {
+    const { deps } = makeDeps({
+      succeedFor: 1,
+      thenFail: { success: false, code: "LLM_RATE_LIMITED", retryAfterMs: 30_000 },
+    });
+
+    const result = await bulkGeneratePosts(SLUG, USER_ID, false, makeInput(), deps);
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+
+    assert.equal(result.data.failures[0].code, "LLM_RATE_LIMITED");
+    assert.equal(result.data.failures[0].retryAfterMs, 30_000);
   });
 });
 
@@ -953,6 +1001,35 @@ describe("bulkGeneratePosts — the batch's audit entry", () => {
     assert.equal(entries[0].entityId, BATCH_ID);
     assert.equal(entries[0].userId, USER_ID);
     assert.equal(entries[0].companyId, "company-1");
+  });
+
+  it("keys a multi-channel batch to the company its posts landed in", async () => {
+    const { deps, audits } = makeDeps();
+
+    await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ numberOfPosts: 2, channels: ["linkedin", "facebook"] }),
+      deps
+    );
+
+    const entries = audits();
+    // Still ONE entry for the click, and it knows the company — which now has to
+    // travel out of the topic fan-out rather than off a single generation.
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].companyId, "company-1");
+
+    const meta = entries[0].metadata as Record<string, unknown>;
+    assert.deepEqual(meta.channels, ["linkedin", "facebook"]);
+    // Ambiguous for a multi-channel batch, so it is null rather than one of the
+    // two — old readers of `channel` keep their meaning instead of a wrong answer.
+    assert.equal(meta.channel, null);
+    // Topics vs Post rows: 2 topics × 2 channels is the spend this entry explains.
+    assert.equal(meta.requested, 2);
+    assert.equal(meta.requestedPosts, 4);
+    assert.equal(meta.generatedPosts, 4);
+    assert.equal((meta.contentGroupIds as string[]).length, 2);
   });
 
   it("records what was asked for, what came back, and when it will go out", async () => {

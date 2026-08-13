@@ -65,13 +65,20 @@ export async function claimFeedItem(
  *   • "direct"    — a manually picked non-RSS content source is being read
  *                   directly from its stored extraction; nothing is claimed
  *                   (see planDirectContentSource)
+ *   • "pinned"    — a SIBLING channel version of a topic whose article was
+ *                   already claimed by the first channel of the same content
+ *                   group. The article is named outright; nothing is claimed,
+ *                   and — critically — nothing is RELEASED if this generation
+ *                   fails, because the claim belongs to the topic, not to this
+ *                   one channel (see planPinnedFeedItem)
  */
 export type FeedItemPlan =
   | { action: "mission" }
   | { action: "skip" }
   | { action: "generate"; feedItemId: string }
   | { action: "evergreen" }
-  | { action: "direct" };
+  | { action: "direct" }
+  | { action: "pinned"; feedItemId: string };
 
 /**
  * Resolves the source decision, claiming an article item when one is available.
@@ -123,6 +130,36 @@ export async function planFeedItemUsage(
  */
 export function planDirectContentSource(items: readonly { id: string }[]): FeedItemPlan {
   return items.length > 0 ? { action: "direct" } : { action: "skip" };
+}
+
+/**
+ * The plan for a SIBLING channel version of an already-decided topic.
+ *
+ * Multi-channel generation decides the topic once — which article, which central
+ * claim — and then writes it for each selected channel. Only the first of those
+ * generations claims the article; the rest are handed its id and must write from
+ * exactly that item, because "the same topic across channels" is precisely what
+ * a content group means.
+ *
+ * Claims nothing and touches no rows, so it needs no db: `usedInPost` is already
+ * true from the topic's own claim, and it stays true. It is not a second claim
+ * and must never be treated as one — see the release rule in
+ * generatePostFromContext, where a pinned generation deliberately owns no claim
+ * to release.
+ *
+ * The window is built by the `feed_item` SourceScope, which is restricted to
+ * this one item and drops the `usedInPost` filter (the item is used — by this
+ * very topic). An empty window would mean the item was deleted between the
+ * topic's claim and this sibling's turn: "skip", reported as a per-channel
+ * failure rather than silently writing about something else.
+ */
+export function planPinnedFeedItem(
+  feedItemId: string,
+  items: readonly { id: string }[]
+): FeedItemPlan {
+  return items.some((i) => i.id === feedItemId)
+    ? { action: "pinned", feedItemId }
+    : { action: "skip" };
 }
 
 /**

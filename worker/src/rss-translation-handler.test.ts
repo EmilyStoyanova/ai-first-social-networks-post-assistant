@@ -13,7 +13,11 @@ import {
   RSS_TRANSLATION_JOB_TYPE,
 } from "./rss-translation-handler";
 import { RSS_TRANSLATION_DEDUPE_KEY } from "@/lib/queue/job-types";
-import { enqueueJob, type EnqueueJobInput, type JobInsert } from "@/lib/services/queue/enqueue-job.service";
+import {
+  enqueueJob,
+  type EnqueueJobInput,
+  type JobInsert,
+} from "@/lib/services/queue/enqueue-job.service";
 import type { ClaimInput, EnqueueInput, FailInput, JobRecord, JobStore } from "./job-store";
 import type { TranslationCronSummary } from "@/lib/services/cron/run-translation-cron.service";
 import type { EnqueueJobResult } from "@/lib/services/queue/enqueue-job.service";
@@ -65,6 +69,7 @@ function job(overrides: Partial<JobRecord> = {}): JobRecord {
     payload: {},
     attempts: 1,
     maxAttempts: 5,
+    result: null,
     ...overrides,
   };
 }
@@ -75,6 +80,8 @@ function fakeJobStore() {
   const store: JobStore = {
     enqueue: async (_i: EnqueueInput) => "id",
     claim: async (_i: ClaimInput) => null,
+    renewLease: async () => true,
+    saveProgress: async () => true,
     complete: async (id, result) => {
       completes.push({ id, result });
     },

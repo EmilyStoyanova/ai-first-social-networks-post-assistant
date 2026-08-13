@@ -28,6 +28,23 @@ export interface RecentPostContext {
   imagePrompt?: string | null;
 }
 
+/**
+ * The topic a SIBLING channel version must adapt rather than replace.
+ *
+ * Multi-channel generation decides a topic once and writes it for each selected
+ * channel. Without this the three generations would each pick their own subject
+ * from the same article and the "group" would be three unrelated posts sharing a
+ * headline — which is what a reader would notice first.
+ */
+export interface SharedTopicConstraint {
+  /** The central claim the first channel settled on. Reproduced, not restated. */
+  coreMessage: string;
+  /** Its normalized topic, when the first generation declared one. */
+  topic: string | null;
+  /** The channel that established it, named so the instruction reads concretely. */
+  establishedBy: string;
+}
+
 export interface PromptDiversityHints {
   angle?: ContentAngle;
   pattern?: PostPattern;
@@ -35,6 +52,13 @@ export interface PromptDiversityHints {
   recentTopics?: readonly string[];
   /** Dynamically mined content aspect — mandatory conceptual constraint for the post. */
   aspect?: ContentAspect;
+  /**
+   * Set only for the second and later channels of one content group. Mutually
+   * exclusive with `recentTopics` in effect: see the suppression in
+   * buildUserPrompt, since "cover a different subject" and "cover exactly this
+   * subject" cannot both be true.
+   */
+  sharedTopic?: SharedTopicConstraint;
 }
 
 // ─── Channel metadata ─────────────────────────────────────────────────────────
@@ -505,7 +529,7 @@ function buildUserPrompt(
     ? `Create an original ${channelLabel} post for ${ctx.company.name}.\nWrite in ${lang}.`
     : `Write a ${channelLabel} post for ${ctx.company.name}.`;
 
-  const { angle, pattern, recentTopics, aspect } = diversity ?? {};
+  const { angle, pattern, recentTopics, aspect, sharedTopic } = diversity ?? {};
 
   const angleSection = angle ? `**Content angle: ${angle}**\n${ANGLE_INSTRUCTIONS[angle]}` : "";
 
@@ -517,14 +541,29 @@ function buildUserPrompt(
       ].join("\n\n")
     : "";
 
+  // Suppressed outright when this generation is a sibling channel version: the
+  // topic is already decided, so listing subjects to avoid would contradict the
+  // shared-topic section below — and a prompt that contradicts itself is
+  // resolved by the model, not by us.
   const topicSection =
-    recentTopics && recentTopics.length > 0
+    !sharedTopic && recentTopics && recentTopics.length > 0
       ? [
           "**Topic guidance**",
           "The following subjects have been covered recently — choose a meaningfully different one:",
           recentTopics.map((t) => `- ${t}`).join("\n"),
         ].join("\n")
       : "";
+
+  const sharedTopicSection = sharedTopic
+    ? [
+        "**Shared content topic — mandatory constraint**",
+        `This post is the ${channelLabel} version of a topic already written for ${sharedTopic.establishedBy}. It is the same story told for a different audience.`,
+        `The central claim MUST be this one: ${sharedTopic.coreMessage}`,
+        ...(sharedTopic.topic ? [`Subject: ${sharedTopic.topic}`] : []),
+        "Your coreMessage MUST express that same claim. Do NOT choose a different angle, a different takeaway, or a different part of the source content.",
+        `What changes is HOW it is told: rewrite it from scratch in ${channelLabel}'s register, length, structure and hook, following this post's own channel guidance above. Do not translate, paraphrase, or lightly edit the other channel's wording — a reader who follows both accounts must not see the same sentences twice.`,
+      ].join("\n")
+    : "";
 
   const aspectSection = aspect
     ? [
@@ -548,6 +587,10 @@ function buildUserPrompt(
     patternSection,
     topicSection,
     aspectSection,
+    // Last of the constraint sections, so it is the nearest instruction to the
+    // JSON format block — and so it wins any tension with the angle/pattern
+    // rotation above, which shapes HOW the post reads, not WHAT it is about.
+    sharedTopicSection,
     buildJsonFormatInstruction(imageRequired),
   ]
     .filter(Boolean)
