@@ -922,6 +922,68 @@ describe("bulkGeneratePosts — the request time budget", () => {
     assert.equal(result.data.batchId, BATCH_ID);
   });
 
+  it("sizes the gate from what a topic COST, not from the 45s floor", async () => {
+    // 90s per topic against a 240s budget. Two run (0→90→180s), leaving 60s —
+    // comfortably over the 45s floor, so the old fixed threshold started a third
+    // topic that then needed 90s it did not have. It still wrote its post, since
+    // the LLM call runs first and takes whatever is left, and every image call
+    // after that was aborted at a budget of zero: a committed draft with an image
+    // prompt and no image, reported as a success. Measuring the real cost is what
+    // makes the third topic not start at all.
+    const { deps, calls } = makeDeps({ msPerPost: 90_000 });
+
+    const result = await bulkGeneratePosts(SLUG, USER_ID, false, makeInput(), deps);
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+
+    assert.equal(calls().length, 2);
+    assert.equal(result.data.stopReason, "time_budget");
+    // Nothing failed — three slots were simply never attempted.
+    assert.deepEqual(result.data.failures, []);
+    assert.equal(result.data.notAttempted, 3);
+  });
+
+  it("counts a whole multi-channel topic, not one channel of it", async () => {
+    // The floor never saw the channel count, which is exactly how it came to be
+    // three and a half times too small. Here each topic is two channels of 60s,
+    // so a topic costs 120s: one runs (leaving 120s), a second fits exactly, and
+    // the third is refused with 0s left rather than started on a 45s guess.
+    const { deps, calls } = makeDeps({ msPerPost: 60_000 });
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ channels: ["linkedin", "facebook"] }),
+      deps
+    );
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+
+    // Two topics × two channels = four generations, then the budget is spent.
+    assert.equal(calls().length, 4);
+    assert.equal(result.data.generated, 2);
+    assert.equal(result.data.generatedPosts, 4);
+    assert.equal(result.data.stopReason, "time_budget");
+  });
+
+  it("does not let one cheap topic vouch for the next", async () => {
+    // The maximum seen, not the most recent: a batch that happens to have one
+    // fast topic must not use it as evidence that another would fit.
+    const { deps, calls } = makeDeps({ msPerPost: 110_000 });
+
+    const result = await bulkGeneratePosts(SLUG, USER_ID, false, makeInput(), deps);
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+
+    // 0→110→220s, leaving 20s: under both the observed cost and the floor.
+    assert.equal(calls().length, 2);
+    assert.equal(result.data.stopReason, "time_budget");
+  });
+
   it("always attempts the first slot, however little budget there is", async () => {
     const { deps, calls } = makeDeps({ msPerPost: 1_000, softBudgetMs: 1 });
 

@@ -7,7 +7,9 @@ import type { FeedItemContext } from "./types";
  *
  *   • rss            — `content` is the extracted article body (plain text)
  *   • prompt         — `content` is the brief the user typed (plain text)
- *   • product_page   — `content` is JSON: {title, description, image}
+ *   • product_page   — `content` is JSON: {title, description, image} and, when
+ *                      the source carries an extraction instruction,
+ *                      {instructions, pageText} alongside them
  *   • calendar_event — `content` is JSON: {title, date, description}
  *
  * The two JSON shapes used to reach the model verbatim, as a literal
@@ -87,11 +89,43 @@ function renderCalendarEvent(stored: Record<string, unknown>, limit: number): st
     .join("\n");
 }
 
+/**
+ * Free-text budget for a product page's captured body text.
+ *
+ * Larger than CONTENT_PER_ITEM_LIMIT on purpose, and only for this case: the
+ * instruction names a part of the page ("the events listed this week"), so
+ * truncating the page to a meta-description-sized excerpt would cut away the
+ * very thing that was asked for and leave the instruction pointing at nothing.
+ * A caller that asks for a bigger budget still gets it.
+ */
+export const INSTRUCTED_PAGE_TEXT_LIMIT = 2_500;
+
 function renderProductPage(stored: Record<string, unknown>, limit: number): string {
   const description = stringField(stored, "description");
   // `image` is deliberately dropped: an image URL is noise to a text model, and
   // it competes for the per-item character budget with the description.
-  return ["Product page.", description ? truncate(description, limit) : null]
+  const instructions = stringField(stored, "instructions");
+  if (!instructions) {
+    return ["Product page.", description ? truncate(description, limit) : null]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  // The page as it was actually read. Falls back to the meta description when
+  // the body could not be extracted, so an instruction still has something to
+  // act on rather than silently becoming an invitation to invent.
+  const pageText = stringField(stored, "pageText") ?? description;
+
+  return [
+    "Product page.",
+    `WHAT TO TAKE FROM THIS PAGE: ${truncate(instructions, limit)}`,
+    pageText
+      ? `Page content:\n${truncate(pageText, Math.max(limit, INSTRUCTED_PAGE_TEXT_LIMIT))}`
+      : null,
+    pageText
+      ? "Use only what the page content above actually states. If it does not contain something the instruction asks for, leave that out — do not invent it."
+      : "The page content could not be read. Write only from the title and the instruction above, and do not invent details the page might contain.",
+  ]
     .filter(Boolean)
     .join("\n");
 }

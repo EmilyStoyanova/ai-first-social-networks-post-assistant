@@ -114,6 +114,43 @@ export function bulkGenerationDedupeKey(companySlug: string): string {
 }
 
 /**
+ * One content topic written across SEVERAL channels, on behalf of someone who is
+ * watching — the multi-channel half of the single-post "Generate" button.
+ *
+ * The second job type here that is not a cron fan-out, and it exists for the
+ * same arithmetic reason bulk does, one order of magnitude down. A topic written
+ * for two channels is two full generations; measured against a self-hosted image
+ * worker one channel costs around 158s, so two do not fit inside a 300s function
+ * cap and three never could. The synchronous route's own budget gate could only
+ * ever choose which channel to DROP, and reported the rest as `notAttempted`.
+ *
+ * A queued run has no function cap to be dropped by, so every selected channel
+ * is written. ONE channel is deliberately NOT queued — see the generate route:
+ * it always fitted, and making it poll would be ceremony plus a wire-format
+ * change for every existing client.
+ */
+export const TOPIC_GENERATION_JOB_TYPE = "topic-generation";
+
+/**
+ * Attempts for a queued topic generation.
+ *
+ * Two, against bulk's three, and for a narrower purpose: a per-channel failure
+ * is reported as DATA and completes the job (see the handler), so an attempt is
+ * only ever burned by a job-level fault — a lost lease, a killed process. One
+ * retry covers that. A resumed attempt skips every channel already committed and
+ * continues the SAME topic, so retrying is cheap exactly when it helps.
+ *
+ * Deliberately NOT deduplicated per company, unlike a bulk run. A bulk batch
+ * holds a company-wide lock because it draws N topics from one article pool
+ * while measuring uniqueness against a history it is concurrently writing; one
+ * topic is a single claim, guarded already by the atomic feed-item reservation
+ * and the (article, channel) unique index. Locking here would newly refuse two
+ * colleagues generating at the same time — something the synchronous route has
+ * always allowed — which is a regression, not a safeguard.
+ */
+export const TOPIC_GENERATION_MAX_ATTEMPTS = 2;
+
+/**
  * Attempts for a bulk run.
  *
  * Three rather than the queue's default five, and the reasoning is the cost of a

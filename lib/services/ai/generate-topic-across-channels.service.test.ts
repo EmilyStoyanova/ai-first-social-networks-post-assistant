@@ -389,3 +389,223 @@ describe("generateTopicAcrossChannels — reporting as it goes", () => {
     assert.equal(reports, 2);
   });
 });
+
+// ─── The time budget ──────────────────────────────────────────────────────────
+
+describe("generateTopicAcrossChannels — the time budget", () => {
+  it("attempts every channel when there is no deadline installed", async () => {
+    const { generate, calls } = makeDeps();
+
+    // The default reader is the ambient one, which is +Infinity outside a
+    // deadline. Every path that has all the time it needs — the worker, the
+    // tests — must behave exactly as it did before the budget existed.
+    const outcome = await generateTopicAcrossChannels(makeInput(), { generate });
+
+    assert.equal(calls().length, 3);
+    assert.deepEqual(outcome.notAttempted, []);
+  });
+
+  it("stops starting channels once the remaining budget is too small", async () => {
+    const { generate, calls } = makeDeps();
+
+    // The first channel is never gated, so the budget is not even read for it.
+    // By the time it is, the first generation has spent almost everything.
+    const outcome = await generateTopicAcrossChannels(makeInput(), {
+      generate,
+      remainingBudgetMs: () => 10_000,
+      minChannelBudgetMs: 45_000,
+    });
+
+    // Only the first channel ran, and it is a real committed post.
+    assert.deepEqual(
+      calls().map((c) => c.channel),
+      ["linkedin"]
+    );
+    assert.equal(outcome.posts.length, 1);
+    // The other two are named — not silently missing, and not reported as
+    // generations that went wrong.
+    assert.deepEqual(outcome.notAttempted, ["facebook", "instagram"]);
+    assert.equal(outcome.failures.length, 0);
+  });
+
+  it("always attempts the first channel, however little time is left", async () => {
+    const { generate, calls } = makeDeps();
+
+    const outcome = await generateTopicAcrossChannels(makeInput(), {
+      generate,
+      // Already past the deadline before the first channel starts.
+      remainingBudgetMs: () => -5_000,
+      minChannelBudgetMs: 45_000,
+    });
+
+    // A caller must never be told "no time" without a single try.
+    assert.equal(calls().length, 1);
+    assert.equal(outcome.posts.length, 1);
+    assert.deepEqual(outcome.notAttempted, ["facebook", "instagram"]);
+  });
+
+  it("counts a FAILED first channel as having had its turn", async () => {
+    const { generate, calls } = makeDeps({
+      linkedin: { success: false, code: "LLM_PROVIDER_ERROR" },
+    });
+
+    const outcome = await generateTopicAcrossChannels(makeInput(), {
+      generate,
+      remainingBudgetMs: () => 1_000,
+      minChannelBudgetMs: 45_000,
+    });
+
+    // The budget gate is about time spent, not posts produced: a channel that
+    // burned the budget and failed must not hand its turn to the next one.
+    assert.equal(calls().length, 1);
+    assert.equal(outcome.failures.length, 1);
+    assert.deepEqual(outcome.notAttempted, ["facebook", "instagram"]);
+  });
+
+  it("skips already-generated channels without spending anyone's turn", async () => {
+    const { generate, calls } = makeDeps();
+
+    const outcome = await generateTopicAcrossChannels(
+      makeInput({ alreadyGenerated: ["linkedin"] }),
+      {
+        generate,
+        remainingBudgetMs: () => 1_000,
+        minChannelBudgetMs: 45_000,
+      }
+    );
+
+    // A resumed run must still get one real attempt: `linkedin` was skipped
+    // because it exists, not because it was tried, so `facebook` is the first
+    // channel of THIS call and is never gated.
+    assert.deepEqual(
+      calls().map((c) => c.channel),
+      ["facebook"]
+    );
+    assert.deepEqual(outcome.notAttempted, ["instagram"]);
+  });
+
+  it("keeps every post written before the budget ran out", async () => {
+    const { generate } = makeDeps();
+    // Readings, in order, for channels 2 and 3 — channel 1 is never gated.
+    const budgets = [600_000, 1_000];
+    let i = 0;
+
+    const outcome = await generateTopicAcrossChannels(makeInput(), {
+      generate,
+      remainingBudgetMs: () => budgets[Math.min(i++, budgets.length - 1)],
+      minChannelBudgetMs: 45_000,
+    });
+
+    // The whole reason the budget exists: running out of time degrades into a
+    // partial group rather than losing the posts already committed.
+    assert.equal(outcome.posts.length, 2);
+    assert.deepEqual(outcome.notAttempted, ["instagram"]);
+    assert.notEqual(outcome.anchor, null);
+  });
+});
+
+// ─── The gate calibrates itself from what a channel actually costs ────────────
+
+/**
+ * A run on a fake clock, where each channel costs what the test says it costs.
+ *
+ * The budget and the costs are quoted in the same currency and read from the
+ * same clock, which is the only way the calibration can be tested honestly: the
+ * question it answers — "would another channel like the last one still fit?" —
+ * is meaningless if the two are scripted independently.
+ */
+function timedRun(options: {
+  budgetMs: number;
+  costs: Record<string, number>;
+  script?: Record<string, GenerateDraftPostResult>;
+  input?: Partial<GenerateTopicInput>;
+}): Promise<TopicGenerationOutcome> {
+  let elapsed = 0;
+  const { generate } = makeDeps(options.script ?? {});
+
+  return generateTopicAcrossChannels(makeInput(options.input), {
+    generate: async (slug, channel, userId, isGlobalAdmin, opts) => {
+      const result = await generate!(slug, channel, userId, isGlobalAdmin, opts);
+      // The generation itself is what consumes the clock, exactly as in
+      // production, where the LLM call runs before any image work.
+      elapsed += options.costs[channel] ?? 0;
+      return result;
+    },
+    now: () => elapsed,
+    remainingBudgetMs: () => options.budgetMs - elapsed,
+  });
+}
+
+describe("generateTopicAcrossChannels — sizing the gate from real cost", () => {
+  it("does not start a channel that costs more than the time left", async () => {
+    // The observed failure, to scale. The first channel took 158s (an 80s LLM
+    // call and a 76s image); 82s remained after it. The old gate compared that
+    // against a flat 45s, admitted the second channel, and the LLM alone then
+    // consumed the rest — so every image call was made with a budget of zero,
+    // aborted instantly, and the post was committed with an image prompt and no
+    // image, on a channel whose imageRequired is true.
+    const outcome = await timedRun({
+      budgetMs: 240_000,
+      costs: { linkedin: 158_000, facebook: 158_000, instagram: 158_000 },
+    });
+
+    assert.equal(outcome.posts.length, 1);
+    // Reported, retryable, and — the point — not a draft that can never be
+    // published.
+    assert.deepEqual(outcome.notAttempted, ["facebook", "instagram"]);
+    assert.equal(outcome.failures.length, 0);
+  });
+
+  it("keeps going when channels are genuinely cheap", async () => {
+    // The same budget and the same floor: what changed is only what a channel
+    // costs here. A gate calibrated from measurement must not punish a fast
+    // environment for the sake of a slow one.
+    const outcome = await timedRun({
+      budgetMs: 240_000,
+      costs: { linkedin: 5_000, facebook: 5_000, instagram: 5_000 },
+    });
+
+    assert.equal(outcome.posts.length, 3);
+    assert.deepEqual(outcome.notAttempted, []);
+  });
+
+  it("still applies the floor when no channel has taken measurable time", async () => {
+    // Nothing measured yet is not evidence that a channel is free. With less
+    // than MIN_CHANNEL_BUDGET_MS left, the floor is what refuses the next one.
+    const outcome = await timedRun({
+      budgetMs: 40_000,
+      costs: { linkedin: 0, facebook: 0, instagram: 0 },
+    });
+
+    assert.equal(outcome.posts.length, 1);
+    assert.deepEqual(outcome.notAttempted, ["facebook", "instagram"]);
+  });
+
+  it("learns the cost from a channel that FAILED, not only from one that worked", async () => {
+    // Two minutes of LLM retries ending in a provider error says just as much
+    // about what a channel costs as two minutes ending in a post.
+    const outcome = await timedRun({
+      budgetMs: 240_000,
+      costs: { linkedin: 150_000, facebook: 150_000, instagram: 150_000 },
+      script: { linkedin: { success: false, code: "LLM_PROVIDER_ERROR" } },
+    });
+
+    assert.equal(outcome.failures.length, 1);
+    assert.equal(outcome.posts.length, 0);
+    assert.deepEqual(outcome.notAttempted, ["facebook", "instagram"]);
+  });
+
+  it("holds the bar at the SLOWEST channel seen, not the most recent", async () => {
+    // linkedin costs 150s, facebook 10s, leaving 145s. That is ample for another
+    // facebook and short of another linkedin — so a gate reading only the most
+    // recent channel would admit instagram, and one holding the maximum refuses
+    // it. One cheap channel is not evidence that the next one is cheap.
+    const outcome = await timedRun({
+      budgetMs: 305_000,
+      costs: { linkedin: 150_000, facebook: 10_000, instagram: 150_000 },
+    });
+
+    assert.equal(outcome.posts.length, 2);
+    assert.deepEqual(outcome.notAttempted, ["instagram"]);
+  });
+});

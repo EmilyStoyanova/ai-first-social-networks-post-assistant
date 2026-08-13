@@ -77,6 +77,12 @@ export const API_ERROR_CODES = [
   "INVALID_SOURCE_MIX",
   // Rescheduling — the requested publish time is not one a post can be given.
   "INVALID_SCHEDULE",
+  // Not sent by the API — synthesized by lib/http/read-json-response.ts when
+  // something UPSTREAM of the route answered (a gateway error page, a dropped
+  // connection), so a non-JSON body still reaches the user as a real message
+  // instead of as a JSON parser's complaint about its first character.
+  "SERVER_UNREACHABLE",
+  "REQUEST_TIMED_OUT",
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];

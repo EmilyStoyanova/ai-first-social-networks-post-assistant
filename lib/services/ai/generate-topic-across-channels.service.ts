@@ -49,6 +49,20 @@
  * Every failure is returned per channel so the API and the UI can say which
  * channels exist and which do not, rather than presenting a group of two as if
  * it were the group of three that was asked for.
+ *
+ * ── Why the time budget lives here ──────────────────────────────────────────
+ *
+ * This function is the one place a caller's work MULTIPLIES: "generate a post"
+ * used to mean one generation and now means up to four, without the caller
+ * having asked for anything different. A synchronous caller runs under a
+ * platform function cap, and a run killed by that cap is the worst outcome
+ * available — the posts already written are committed while the caller gets a
+ * connection reset and never learns their ids.
+ *
+ * So the loop refuses to START a channel it cannot finish, under the same
+ * ambient deadline the bulk service and the cron pipelines use, and reports the
+ * channels that never got a turn. Running out of time degrades into the partial
+ * group that is already a supported outcome, instead of into a dropped request.
  */
 
 import {
@@ -57,7 +71,30 @@ import {
   type GenerateDraftPostFailure,
   type GenerationWarnings,
 } from "./generate-draft-post.service";
+import { remainingBudgetMs } from "@/lib/http/request-deadline";
 import type { ManualContentSourceRef } from "@/lib/ai/manual-content-source";
+
+/**
+ * FLOOR for the time that must remain before ANOTHER channel is started.
+ *
+ * A floor, not the threshold itself — the threshold is measured (see
+ * `observedChannelMs` in the loop). This value only covers the case where there
+ * is no measurement worth trusting yet, such as a first channel that failed in
+ * seconds.
+ *
+ * It is deliberately no longer used as the whole answer. A fixed 45s rested on
+ * the assumption a channel "fits in well under a minute", and that assumption is
+ * how a post lost its image: a channel admitted with 82s left spent 86s in the
+ * LLM alone, after which every image call took its AbortSignal from a budget of
+ * zero and was aborted the instant it was made. The post was written, committed,
+ * and left permanently without an image — on a channel whose `imageRequired` is
+ * true, so it could not even be published. Silently, because image generation is
+ * best-effort by design and has nowhere to report to.
+ *
+ * The FIRST channel attempted is never gated — a request must never be told "no
+ * time" without a single try.
+ */
+export const MIN_CHANNEL_BUDGET_MS = 45_000;
 
 /**
  * The topic itself, once some channel has settled it.
@@ -133,6 +170,20 @@ export interface TopicGenerationOutcome {
   /** One entry per channel that was attempted and produced nothing. */
   failures: TopicChannelFailure[];
   /**
+   * Channels never attempted, because the ambient request deadline ran out
+   * before there was time to write them.
+   *
+   * Distinct from `failures` on purpose: nothing was tried, so there is no
+   * generator error to report and no diagnostic to attach — the honest answer is
+   * "this one did not get a turn". A caller shows them beside the failures (both
+   * mean "this channel has no post"), but it must not present them as a
+   * generation that went wrong, and a retry of just these is worth offering.
+   *
+   * Always empty outside a request deadline, which is every path that has all
+   * the time it needs — the worker, and the tests.
+   */
+  notAttempted: string[];
+  /**
    * The topic this group settled on, or null when no channel got far enough to
    * settle one (every channel failed, or the group was already complete). Worth
    * persisting: it is what a later attempt resumes from.
@@ -189,6 +240,15 @@ export interface GenerateTopicDeps {
   generate?: typeof generateDraftPost;
   /** Called after each channel commits, so a long group reports as it goes. */
   onChannelComplete?: (outcome: TopicGenerationOutcome) => Promise<void>;
+  /** Overrides the `MIN_CHANNEL_BUDGET_MS` floor for one run (tests). */
+  minChannelBudgetMs?: number;
+  /** Reads the ambient deadline. Injected so the budget can be tested without waiting. */
+  remainingBudgetMs?: () => number;
+  /**
+   * Wall clock, used only to measure how long a channel took. Injected so the
+   * self-calibrating gate can be tested without actually spending minutes.
+   */
+  now?: () => number;
 }
 
 /**
@@ -207,6 +267,9 @@ export async function generateTopicAcrossChannels(
   deps: GenerateTopicDeps = {}
 ): Promise<TopicGenerationOutcome> {
   const generate = deps.generate ?? generateDraftPost;
+  const budgetLeft = deps.remainingBudgetMs ?? remainingBudgetMs;
+  const minChannelBudgetMs = deps.minChannelBudgetMs ?? MIN_CHANNEL_BUDGET_MS;
+  const now = deps.now ?? Date.now;
   const done = new Set(input.alreadyGenerated ?? []);
 
   const outcome: TopicGenerationOutcome = {
@@ -214,8 +277,35 @@ export async function generateTopicAcrossChannels(
     companyId: null,
     posts: [],
     failures: [],
+    notAttempted: [],
     anchor: input.anchor ?? null,
   };
+
+  // Whether THIS call has started a generation yet. Not the same as
+  // "outcome.posts is non-empty": a first channel that failed has still had its
+  // turn, and a second channel must not be gated on the budget as if it were the
+  // first. Not the same as the loop index either, because `done` channels are
+  // skipped without being attempted.
+  let attemptedAny = false;
+
+  /**
+   * The longest a channel of THIS topic has actually taken, in ms.
+   *
+   * The gate below is calibrated from this rather than from a constant, because
+   * a constant cannot know what a channel costs here: the same generation is a
+   * few seconds against a hosted LLM with images off, and around two and a half
+   * minutes against a self-hosted image worker. A guess that is too small does
+   * not merely mistime the run — it admits a channel that then cannot finish,
+   * and the part that gets dropped is the image, silently.
+   *
+   * The maximum rather than the most recent: one fast channel does not make the
+   * next one cheap, and the question being asked is "could a channel like the
+   * ones I have seen still fit", where the expensive one is the honest answer.
+   *
+   * Includes channels that FAILED. A failure that took two minutes of LLM
+   * retries is evidence about cost just as much as a success is.
+   */
+  let observedChannelMs = 0;
 
   for (const channel of input.channels) {
     // Committed by an earlier attempt. Regenerating it would write a second post
@@ -223,6 +313,31 @@ export async function generateTopicAcrossChannels(
     // index would refuse anyway, but as a crash rather than as a skip.
     if (done.has(channel)) continue;
 
+    // Out of time. Everything already written is committed and returned; the
+    // channels that never got a turn are named, so the caller answers with a
+    // partial group instead of being killed mid-generation by its own function
+    // cap — which is the outcome that loses posts, because they ARE written and
+    // the caller never learns their ids.
+    //
+    // Enough time to FINISH a channel, not merely to begin one. That distinction
+    // is the whole bug this guards: a channel started with less than it costs
+    // still writes its post — the LLM call comes first and gets what is left —
+    // and then every image call derives its AbortSignal from a budget of zero
+    // and is aborted the moment it is made. The result is a committed draft with
+    // an image prompt and no image, which on an `imageRequired` channel cannot
+    // even be published, and which no error is reported for because image
+    // generation is best-effort. Not starting the channel at all is the strictly
+    // better outcome: it is honest, it is reported, and it can be retried.
+    //
+    // No deadline installed means `remainingBudgetMs()` is +Infinity, so this is
+    // inert on every path that has all the time it needs.
+    if (attemptedAny && budgetLeft() < Math.max(observedChannelMs, minChannelBudgetMs)) {
+      outcome.notAttempted.push(channel);
+      continue;
+    }
+    attemptedAny = true;
+
+    const startedAt = now();
     const anchor = outcome.anchor;
 
     const result = await generate(input.slug, channel, input.userId, input.isGlobalAdmin, {
@@ -254,6 +369,10 @@ export async function generateTopicAcrossChannels(
             },
           }),
     });
+
+    // Recorded before the success branch so a failed channel counts too, and
+    // before `continue` can skip it.
+    observedChannelMs = Math.max(observedChannelMs, now() - startedAt);
 
     if (!result.success) {
       // Spread, so every diagnostic the generator attached travels intact —

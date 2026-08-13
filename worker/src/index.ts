@@ -49,6 +49,7 @@ import { postGenerationHandler, POST_GENERATION_JOB_TYPE } from "./post-generati
 import { analyticsSyncHandler, ANALYTICS_SYNC_JOB_TYPE } from "./analytics-sync-handler";
 import { publishSweepHandler, PUBLISH_SWEEP_JOB_TYPE } from "./publish-sweep-handler";
 import { bulkGenerationHandlerFor, BULK_GENERATION_JOB_TYPE } from "./bulk-generation-handler";
+import { topicGenerationHandlerFor, TOPIC_GENERATION_JOB_TYPE } from "./topic-generation-handler";
 import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
 import type { JobRecord } from "./job-store";
 
@@ -85,9 +86,10 @@ async function main(): Promise<void> {
     .register(POST_GENERATION_JOB_TYPE, postGenerationHandler)
     .register(ANALYTICS_SYNC_JOB_TYPE, analyticsSyncHandler)
     .register(PUBLISH_SWEEP_JOB_TYPE, publishSweepHandler)
-    // The one interactive job: a person is waiting on it, so it reports progress
-    // as it goes and resumes rather than repeats on a retry.
-    .register(BULK_GENERATION_JOB_TYPE, bulkGenerationHandlerFor(config));
+    // The two interactive jobs: a person is waiting on each, so they report
+    // progress as they go and resume rather than repeat on a retry.
+    .register(BULK_GENERATION_JOB_TYPE, bulkGenerationHandlerFor(config))
+    .register(TOPIC_GENERATION_JOB_TYPE, topicGenerationHandlerFor(config));
   const orchestrator = new JobOrchestrator({
     store: createPrismaJobStore(prisma),
     registry: handlers,

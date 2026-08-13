@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { formatEventDate, framePrimarySource, renderFeedItemContent } from "./source-content";
+import {
+  formatEventDate,
+  framePrimarySource,
+  renderFeedItemContent,
+  INSTRUCTED_PAGE_TEXT_LIMIT,
+} from "./source-content";
 import type { FeedItemContext } from "./types";
 
 // The event from the production bug report, with the config keys ingestion
@@ -136,6 +141,119 @@ describe("source-content — product pages", () => {
     const rendered = renderFeedItemContent(pageItem);
 
     assert.ok(!rendered.includes("cdn.example.com"));
+  });
+});
+
+describe("source-content — product pages with an extraction instruction", () => {
+  const instructedItem = item({
+    title: "Business events",
+    content: JSON.stringify({
+      title: "Business events",
+      description: "A catalogue of business events.",
+      image: null,
+      instructions: "The events listed for this week, with date and venue.",
+      pageText: "Events this week\nDigital Marketing Summit — 14.08.2026, Sofia Tech Park",
+    }),
+    url: "https://events.example.com/?week=current",
+    sourceType: "product_page",
+    consumable: true,
+  });
+
+  it("states the instruction and the page text the model must satisfy it from", () => {
+    const rendered = renderFeedItemContent(instructedItem);
+
+    assert.ok(rendered.includes("The events listed for this week, with date and venue."));
+    assert.ok(rendered.includes("Digital Marketing Summit — 14.08.2026, Sofia Tech Park"));
+    assert.ok(!rendered.includes('{"title"'));
+  });
+
+  it("gives the page text a bigger budget than the per-item limit", () => {
+    // The instruction names a part of the page; truncating to a meta-description
+    // sized excerpt would cut away the very thing that was asked for.
+    const long = "e".repeat(INSTRUCTED_PAGE_TEXT_LIMIT - 100);
+    const rendered = renderFeedItemContent(
+      item({
+        title: "Events",
+        content: JSON.stringify({ instructions: "The events.", pageText: long }),
+        sourceType: "product_page",
+        consumable: true,
+      })
+    );
+
+    assert.ok(rendered.includes(long), "the page text must survive the default per-item limit");
+  });
+
+  it("truncates page text beyond its own budget", () => {
+    const rendered = renderFeedItemContent(
+      item({
+        title: "Events",
+        content: JSON.stringify({
+          instructions: "The events.",
+          pageText: "e".repeat(INSTRUCTED_PAGE_TEXT_LIMIT + 500),
+        }),
+        sourceType: "product_page",
+        consumable: true,
+      })
+    );
+
+    assert.ok(rendered.endsWith("…") || rendered.includes("…"));
+    assert.ok(rendered.length < INSTRUCTED_PAGE_TEXT_LIMIT + 500);
+  });
+
+  it("forbids inventing what the page does not state", () => {
+    const rendered = renderFeedItemContent(instructedItem);
+
+    assert.match(rendered, /do not invent it/i);
+  });
+
+  it("falls back to the description when the body could not be read", () => {
+    const rendered = renderFeedItemContent(
+      item({
+        title: "Business events",
+        content: JSON.stringify({
+          description: "A catalogue of business events.",
+          instructions: "The events listed for this week.",
+          pageText: null,
+        }),
+        sourceType: "product_page",
+        consumable: true,
+      })
+    );
+
+    assert.ok(rendered.includes("A catalogue of business events."));
+    assert.ok(rendered.includes("The events listed for this week."));
+  });
+
+  it("says so plainly when there is no page content at all", () => {
+    const rendered = renderFeedItemContent(
+      item({
+        title: "Business events",
+        content: JSON.stringify({ instructions: "The events listed for this week." }),
+        sourceType: "product_page",
+        consumable: true,
+      })
+    );
+
+    assert.match(rendered, /could not be read/i);
+    assert.match(rendered, /do not invent/i);
+  });
+
+  it("leaves a product page without an instruction rendering exactly as before", () => {
+    const rendered = renderFeedItemContent(
+      item({
+        title: "Pro Plan",
+        content: JSON.stringify({
+          title: "Pro Plan",
+          description: "Everything in Starter, plus SSO.",
+          image: "https://cdn.example.com/og.png",
+        }),
+        url: "https://shop.example.com/pro-plan",
+        sourceType: "product_page",
+        consumable: true,
+      })
+    );
+
+    assert.equal(rendered, "**Pro Plan**\nProduct page.\nEverything in Starter, plus SSO.");
   });
 });
 

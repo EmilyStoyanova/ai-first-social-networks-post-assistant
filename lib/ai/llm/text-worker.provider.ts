@@ -29,6 +29,22 @@ interface TextWorkerResponse {
   done_reason?: string;
 }
 
+/**
+ * undici rejects every transport failure as the same opaque `TypeError: fetch failed`;
+ * the actual reason (DNS, refused connection, no route, TLS) is only on `err.cause`.
+ * Returns the cause's short syscall code (ENOTFOUND, ECONNREFUSED, ENETUNREACH, …) so
+ * a deployment can tell "worker is down" apart from "worker URL is wrong for this
+ * environment" without shell access to the running function.
+ */
+function transportCauseCode(err: unknown): string | undefined {
+  const cause: unknown = err instanceof Error ? err.cause : undefined;
+  if (cause && typeof cause === "object" && "code" in cause) {
+    const code = (cause as { code: unknown }).code;
+    if (typeof code === "string") return code;
+  }
+  return undefined;
+}
+
 export class TextWorkerProvider implements ILlmProvider {
   constructor(
     private readonly workerUrl: string,
@@ -85,13 +101,20 @@ export class TextWorkerProvider implements ILlmProvider {
         console.warn("[llm-diag] text-worker transport failure: category=timeout");
         throw new LlmProviderError("Text worker request exceeded its deadline");
       }
+      const causeCode = transportCauseCode(err);
+      // Server-side log carries the full cause (host/port included) for operators;
+      // the client-facing message below gets only the short code, so the internal
+      // worker hostname is never echoed back in an API response.
       console.warn(
         `[llm-diag] text-worker transport failure: category=unreachable name=${
           err instanceof Error ? err.name : "unknown"
+        } cause=${
+          err instanceof Error && err.cause instanceof Error ? err.cause.message : "unknown"
         }`
       );
+      const detail = err instanceof Error ? err.message : String(err);
       throw new LlmProviderError(
-        `Text worker unreachable: ${err instanceof Error ? err.message : String(err)}`
+        `Text worker unreachable: ${detail}${causeCode ? ` (${causeCode})` : ""}`
       );
     }
 

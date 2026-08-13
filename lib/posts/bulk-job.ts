@@ -106,7 +106,11 @@ export type BulkJobPhase =
  * again, which is accurate: it is once more waiting for a worker to claim it.
  */
 export function resolveBulkJobPhase(
-  status: BulkJobStatus,
+  // The lifecycle fields only, so a queued TOPIC generation is judged by exactly
+  // this function rather than by a second copy of it. Both status endpoints
+  // report the same lifecycle — they differ only in the progress they carry —
+  // and "how long has this been queued" is a question about the lifecycle.
+  status: { state: BulkJobState; createdAt: string },
   nowMs: number,
   thresholdMs: number = WAITING_FOR_WORKER_MS
 ): BulkJobPhase {

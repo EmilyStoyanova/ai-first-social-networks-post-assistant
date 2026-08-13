@@ -116,7 +116,10 @@ describe("TextWorkerProvider — request shape", () => {
     assert.deepEqual(body.format, schema);
     assert.equal(body.stream, false);
     assert.deepEqual(body.options, { temperature: 0 });
-    assert.ok(!("think" in body), "must not send `think` (some builds ignore format when it is set)");
+    assert.ok(
+      !("think" in body),
+      "must not send `think` (some builds ignore format when it is set)"
+    );
   });
 
   it("maps maxTokens to Ollama options.num_predict to bound generation", async () => {
@@ -172,5 +175,48 @@ describe("TextWorkerProvider — errors", () => {
 
     assert.ok(err instanceof LlmProviderError);
     assert.match((err as Error).message, /Text worker error 500/);
+  });
+
+  it("appends the transport cause code so an opaque 'fetch failed' is diagnosable", async () => {
+    // undici reports every transport failure as the same `TypeError: fetch failed`;
+    // without the cause code a wrong worker URL (ENOTFOUND) is indistinguishable from
+    // a stopped worker (ECONNREFUSED) in the API response.
+    const fetchFailed = new TypeError("fetch failed");
+    fetchFailed.cause = Object.assign(new Error("getaddrinfo ENOTFOUND worker.internal"), {
+      code: "ENOTFOUND",
+    });
+    globalThis.fetch = (async () => {
+      throw fetchFailed;
+    }) as unknown as typeof fetch;
+
+    const err = await new TextWorkerProvider("http://worker.local", "k", "m")
+      .generate(REQUEST)
+      .then(
+        () => null,
+        (e: unknown) => e
+      );
+
+    assert.ok(err instanceof LlmProviderError);
+    assert.equal((err as Error).message, "Text worker unreachable: fetch failed (ENOTFOUND)");
+    // The worker hostname must stay in the server log only, never in the client message.
+    assert.ok(!(err as Error).message.includes("worker.internal"));
+  });
+
+  it("still reports a deadline overrun as a timeout, not an unreachable worker", async () => {
+    const aborted = new Error("This operation was aborted");
+    aborted.name = "AbortError";
+    globalThis.fetch = (async () => {
+      throw aborted;
+    }) as unknown as typeof fetch;
+
+    const err = await new TextWorkerProvider("http://worker.local", "k", "m")
+      .generate(REQUEST)
+      .then(
+        () => null,
+        (e: unknown) => e
+      );
+
+    assert.ok(err instanceof LlmProviderError);
+    assert.match((err as Error).message, /exceeded its deadline/);
   });
 });

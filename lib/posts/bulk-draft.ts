@@ -429,3 +429,95 @@ export function clearActiveBulkJob(slug: string): void {
     // An unreachable store holds no reference to begin with.
   }
 }
+
+// ─── The topic run in flight ──────────────────────────────────────────────────
+
+/**
+ * The queued multi-channel topic generation this tab is watching.
+ *
+ * The same problem the bulk reference solves, for the other queued job: a
+ * multi-channel single generation now happens in a worker, so the browser can
+ * leave and come back while it runs, and a form that looked idle over a live run
+ * would invite a second click — which here is not refused by a dedupe key (see
+ * the enqueue service for why there deliberately is none), so it would simply
+ * generate the topic twice.
+ *
+ * Stored under its own key rather than sharing the bulk one: the two runs can be
+ * in flight at the same moment, and one overwriting the other's id would strand
+ * whichever lost.
+ */
+export interface ActiveTopicJobRef {
+  jobId: string;
+  /** The group every channel version shares; known from the 202. */
+  contentGroupId: string | null;
+  /** Channels asked for — the denominator before any progress exists. */
+  channels: string[];
+  /** When this tab started watching. ISO; used only for display. */
+  startedAt: string;
+}
+
+export function activeTopicJobKey(slug: string): string {
+  return `topic-generate-job:${slug}`;
+}
+
+/**
+ * A stored reference, or null when there is nothing usable.
+ *
+ * Only `jobId` is load-bearing — everything else is display detail the status
+ * endpoint supplies again on the first poll — so a missing group id or an
+ * unreadable channel list degrades to a default rather than throwing the
+ * reference away. Losing the id is what costs the user their run.
+ */
+export function parseActiveTopicJob(raw: string | null): ActiveTopicJobRef | null {
+  if (!raw) return null;
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isRecord(value) || typeof value.jobId !== "string" || value.jobId === "") return null;
+
+  return {
+    jobId: value.jobId,
+    contentGroupId: typeof value.contentGroupId === "string" ? value.contentGroupId : null,
+    channels:
+      Array.isArray(value.channels) && value.channels.every((c) => typeof c === "string")
+        ? (value.channels as string[])
+        : [],
+    startedAt: typeof value.startedAt === "string" ? value.startedAt : "",
+  };
+}
+
+export function saveActiveTopicJob(slug: string, job: ActiveTopicJobRef): void {
+  const store = draftStorage();
+  if (!store) return;
+  try {
+    store.setItem(activeTopicJobKey(slug), JSON.stringify(job));
+  } catch {
+    // The run still happens; this tab just cannot resume watching it after a
+    // navigation, which is exactly the pre-existing behaviour.
+  }
+}
+
+/** The run this tab is watching, WITHOUT consuming it — as for bulk. */
+export function readActiveTopicJob(slug: string): ActiveTopicJobRef | null {
+  const store = draftStorage();
+  if (!store) return null;
+  try {
+    return parseActiveTopicJob(store.getItem(activeTopicJobKey(slug)));
+  } catch {
+    return null;
+  }
+}
+
+export function clearActiveTopicJob(slug: string): void {
+  const store = draftStorage();
+  if (!store) return;
+  try {
+    store.removeItem(activeTopicJobKey(slug));
+  } catch {
+    // An unreachable store holds no reference to begin with.
+  }
+}

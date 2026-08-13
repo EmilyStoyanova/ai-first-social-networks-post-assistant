@@ -51,6 +51,11 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
   const [name, setName] = useState(initialData?.name ?? "");
   const [url, setUrl] = useState(asText(initialData?.config.url));
   const [promptText, setPromptText] = useState(asText(initialData?.config.promptText));
+  // Product page only. Blank = the source keeps its original behaviour (title +
+  // meta description); the key is omitted from the payload entirely.
+  const [extractionInstructions, setExtractionInstructions] = useState(
+    asText(initialData?.config.extractionInstructions)
+  );
   const [eventTitle, setEventTitle] = useState(asText(initialData?.config.title));
   const [eventDate, setEventDate] = useState(asText(initialData?.config.date));
   const [eventDescription, setEventDescription] = useState(asText(initialData?.config.description));
@@ -90,7 +95,14 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
           : {}),
       };
     } else if (type === "product_page") {
-      config = { url: url.trim() };
+      config = {
+        url: url.trim(),
+        // Omitted when blank — an empty string would fail validation instead of
+        // meaning "no instruction".
+        ...(extractionInstructions.trim()
+          ? { extractionInstructions: extractionInstructions.trim() }
+          : {}),
+      };
     } else if (type === "prompt") {
       config = { promptText: promptText.trim() };
     } else if (type === "calendar_event") {
@@ -168,6 +180,26 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
             className={`${BASE} ${NORMAL}`}
             required
           />
+        </div>
+      )}
+
+      {/* Product page — what to extract from it. Optional: blank keeps the
+          original behaviour (the page's title and meta description). */}
+      {type === "product_page" && (
+        <div>
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">
+            {t("extractionInstructions")}{" "}
+            <span className="text-fg-faint font-normal">{t("extractionInstructionsHint")}</span>
+          </label>
+          <textarea
+            rows={3}
+            value={extractionInstructions}
+            onChange={(e) => setExtractionInstructions(e.target.value)}
+            placeholder={t("extractionInstructionsPlaceholder")}
+            className={`${BASE} ${NORMAL} resize-none`}
+            maxLength={1000}
+          />
+          <p className="text-fg-faint mt-1 text-xs">{t("extractionInstructionsHelp")}</p>
         </div>
       )}
 

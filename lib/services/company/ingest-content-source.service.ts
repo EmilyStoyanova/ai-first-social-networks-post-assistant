@@ -250,11 +250,22 @@ export async function runSourceIngestion(
       if (requiresTranslation) translationWorkCreated++;
     }
   } else if (source.type === "product_page") {
-    const meta = await scrapeProductPage(config.url);
+    // What the owner asked to be taken from this page, when they said anything.
+    // Its presence is what turns on body-text extraction: a listing page's
+    // og:description never contains the list the instruction points at, and a
+    // source without an instruction must keep behaving exactly as before.
+    const instructions =
+      typeof config.extractionInstructions === "string" ? config.extractionInstructions.trim() : "";
+    const meta = await scrapeProductPage(config.url, { includeText: instructions.length > 0 });
     const content = JSON.stringify({
       title: meta.ogTitle ?? meta.title,
       description: meta.ogDescription ?? meta.description,
       image: meta.ogImage,
+      // Stored WITH the item, not read from the config at generation time: the
+      // page text was captured under this instruction, so the two belong to the
+      // same snapshot. Editing the instruction takes effect on the next ingest,
+      // which is also when the matching text is re-read.
+      ...(instructions ? { instructions, pageText: meta.pageText } : {}),
     });
     const { outcome, requiresTranslation } = await upsertFeedItem(
       sourceId,

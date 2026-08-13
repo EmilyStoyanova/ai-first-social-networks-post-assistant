@@ -76,7 +76,9 @@
     "START_DATE_IN_PAST": "The start date has already passed. Pick today or a later date.",
     "INVALID_DISTRIBUTION": "Check the dates you assigned posts to — they must fall inside the period and add up to the number of posts requested.",
     "INVALID_SOURCE_MIX": "Check the content mix — every source must be one of this company's enabled sources, and the posts must add up to the number requested.",
-    "INVALID_SCHEDULE": "Pick a publish time in the future."
+    "INVALID_SCHEDULE": "Pick a publish time in the future.",
+    "SERVER_UNREACHABLE": "The server did not respond properly. Try again in a moment.",
+    "REQUEST_TIMED_OUT": "This took too long and was stopped by the server. Try fewer channels at once, or generate them one at a time."
   },
   "brand": {
     "title": "New Post",
@@ -471,6 +473,10 @@
     "organizerHelp": "Who runs the event. The event's own name goes in Event title below.",
     "feedUrl": "Feed URL",
     "pageUrl": "Page URL",
+    "extractionInstructions": "What to extract from the page",
+    "extractionInstructionsHint": "(optional)",
+    "extractionInstructionsPlaceholder": "e.g. the events listed for this week — name, date and venue for each",
+    "extractionInstructionsHelp": "Say which part of the page a post should be built from. When filled in, each ingest reads the page's visible text, not only its title and description.",
     "promptText": "Prompt text",
     "promptTextHint": "(max 5000 chars)",
     "promptPlaceholder": "Describe the content context you want the AI to use…",
@@ -660,6 +666,19 @@
       "uniqueErrorSemanticDuplicate": "After {attempts} attempts the draft kept making the same point as a recent post. Add new source material or try again later.",
       "uniqueErrorJaccardDuplicate": "After {attempts} attempts the wording stayed too close to a recent post. Add new source material or try again later.",
       "uniqueErrorGeneric": "We couldn't create a post different enough from recent ones after {attempts} attempts. Add new source material or try again later.",
+      "topicJob": {
+        "queued": "Queued for generation.",
+        "running": "Generating…",
+        "waitingForWorker": "Waiting for a background worker",
+        "waitingForWorkerHint": "The post is queued and will start as soon as a worker picks it up. Nothing is lost in the meantime — you can leave this page and come back.",
+        "progress": "{done} of {total} channels written",
+        "progressFailures": "{count, plural, one {# channel could not be written.} other {# channels could not be written.}}",
+        "attempt": "Attempt {attempt} of {max}.",
+        "keepWorking": "Writing {channels}. You can leave this page — each version appears as soon as it is ready.",
+        "failed": "Generation stopped before it finished.",
+        "cancelled": "Generation was cancelled.",
+        "failedPartial": "{written, plural, one {# channel version was} other {# channel versions were}} written before it stopped, and {written, plural, one {is} other {are}} in the list below."
+      },
       "bulk": {
         "title": "Generate multiple drafts",
         "modeLabel": "Generation mode",

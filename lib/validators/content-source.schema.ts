@@ -33,7 +33,19 @@ const promptSchema = z.object({
 const productPageSchema = z.object({
   type: z.literal("product_page"),
   ...baseFields,
-  config: z.object({ url: z.string().url("Must be a valid URL.") }),
+  config: z.object({
+    url: z.string().url("Must be a valid URL."),
+    /**
+     * What the post should be built from, in the owner's own words ("the events
+     * listed for this week, with date and venue"). Optional, and absent means
+     * exactly what it always meant: the source contributes its title and meta
+     * description and nothing else. Present, it also makes ingestion read the
+     * page's visible text — a listing page's og:description never contains the
+     * list being asked for. `min(1)` because the form omits the key when blank;
+     * an explicit "" is a malformed payload, not "no instruction".
+     */
+    extractionInstructions: z.string().min(1).max(1000).optional(),
+  }),
 });
 
 /**

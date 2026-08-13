@@ -122,6 +122,57 @@ describe("content-source schema — the calendar event's name is the organizer",
   });
 });
 
+describe("content-source schema — product page extraction instructions", () => {
+  function productPage(config: Record<string, unknown>) {
+    return contentSourceSchema.safeParse({
+      type: "product_page",
+      name: "Events this week",
+      config: { url: "https://events.example.com/?week=current", ...config },
+    });
+  }
+
+  it("accepts a product page with no instruction — every source created before it existed", () => {
+    const result = productPage({});
+
+    assert.ok(result.success);
+    assert.equal(
+      result.data.type === "product_page" ? result.data.config.extractionInstructions : "x",
+      undefined
+    );
+  });
+
+  it("keeps the instruction when one is given", () => {
+    const result = productPage({ extractionInstructions: "The events listed for this week." });
+
+    assert.ok(result.success);
+    assert.equal(
+      result.data.type === "product_page" ? result.data.config.extractionInstructions : null,
+      "The events listed for this week."
+    );
+  });
+
+  it("rejects an empty string rather than reading it as 'no instruction'", () => {
+    // The form omits the key when the field is blank.
+    assert.equal(productPage({ extractionInstructions: "" }).success, false);
+  });
+
+  it("caps the instruction at 1000 characters", () => {
+    assert.ok(productPage({ extractionInstructions: "x".repeat(1000) }).success);
+    assert.equal(productPage({ extractionInstructions: "x".repeat(1001) }).success, false);
+  });
+
+  it("still requires a valid page URL alongside it", () => {
+    assert.equal(
+      contentSourceSchema.safeParse({
+        type: "product_page",
+        name: "Events",
+        config: { extractionInstructions: "The events listed for this week." },
+      }).success,
+      false
+    );
+  });
+});
+
 describe("content-source schema — other types are unchanged", () => {
   it("still accepts an RSS source", () => {
     assert.ok(
