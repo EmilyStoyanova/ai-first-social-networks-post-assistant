@@ -8,6 +8,7 @@ import {
   sourceExtractionInstruction,
   INSTRUCTED_PAGE_TEXT_LIMIT,
 } from "./source-content";
+import { renderExtraction } from "./product-page-extraction";
 import type { FeedItemContext } from "./types";
 
 // The event from the production bug report, with the config keys ingestion
@@ -484,6 +485,17 @@ describe("source-content — an extracted product page is the authoritative sour
     assert.ok(!rendered.includes("RAW PAGE TEXT"), "no page text to mine for a plausible answer");
   });
 
+  it("falls back to the raw page when the extraction failed, rather than to nothing", () => {
+    // `failed` is neither a settled empty answer nor a fact set. Treating it like
+    // `not_found` would tell the model there is nothing on a page that is full.
+    const rendered = renderFeedItemContent(
+      extractedItem({ extractionStatus: "failed", extractedContent: null })
+    );
+
+    assert.ok(rendered.includes("RAW PAGE TEXT"));
+    assert.ok(!rendered.includes("found NOTHING on this page"));
+  });
+
   it("leaves a product page with no instruction completely unchanged", () => {
     const rendered = renderFeedItemContent(
       item({
@@ -500,6 +512,62 @@ describe("source-content — an extracted product page is the authoritative sour
     );
 
     assert.equal(rendered, "**Pro Plan**\nProduct page.\nEverything in Starter, plus SSO.");
+  });
+});
+
+describe("source-content — the structured extraction reaches the prompt whole", () => {
+  /** Twenty items with five fields each — a real catalogue, rendered as stored. */
+  const CATALOGUE = renderExtraction({
+    requestedFields: ["type", "date", "format", "price status", "price"],
+    items: Array.from({ length: 20 }, (_, i) => ({
+      label: `Event ${i + 1}`,
+      fields: {
+        type: i % 2 === 0 ? "Webinar" : "Masterclass",
+        date: `${String(i + 1).padStart(2, "0")}.09.2026`,
+        format: i % 3 === 0 ? "Online" : "In person",
+        "price status": i % 4 === 0 ? "Free" : "Paid",
+        price: i % 4 === 0 ? "not stated" : `${(i + 1) * 10} BGN`,
+      },
+    })),
+    sourceStatedCount: 20,
+    notes: null,
+  });
+
+  const catalogueItem: FeedItemContext = item({
+    title: "Business events",
+    content: JSON.stringify({
+      instructions: "Every event with type, date, format and price.",
+      pageText: "RAW",
+    }),
+    url: "https://events.example.com/",
+    sourceType: "product_page",
+    consumable: true,
+    extractionStatus: "completed",
+    extractedContent: CATALOGUE,
+  });
+
+  it("carries the last item as well as the first", () => {
+    // The budget was raised with the structured rendering for exactly this: the
+    // same twenty events take roughly three times the characters when every
+    // requested field is on its own line.
+    const rendered = renderFeedItemContent(catalogueItem);
+
+    assert.ok(rendered.includes("1. Event 1"));
+    assert.ok(rendered.includes("20. Event 20"), "the tail of a real catalogue must survive");
+    assert.ok(rendered.includes("200 BGN"));
+  });
+
+  it("carries the computed totals the generator is meant to state", () => {
+    const rendered = renderFeedItemContent(catalogueItem);
+
+    assert.match(rendered, /Total items extracted: 20/);
+    assert.match(rendered, /price status — Paid: 15, Free: 5/);
+  });
+
+  it("carries a field the page did not state as unstated, not as a gap", () => {
+    const rendered = renderFeedItemContent(catalogueItem);
+
+    assert.match(rendered, /price: not stated/);
   });
 });
 

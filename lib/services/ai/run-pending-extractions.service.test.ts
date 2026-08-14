@@ -20,6 +20,7 @@ const EXTRACTED: ExtractProductPageOutcome = {
   provider: "TEXT_WORKER",
   model: "qwen3:8b",
   contentLength: 120,
+  itemCount: 3,
 };
 
 describe("runPendingExtractions", () => {

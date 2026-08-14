@@ -2,13 +2,17 @@ import { prisma } from "@/lib/db/client";
 import type { ILlmProvider } from "@/lib/ai/types";
 import {
   buildExtractionPrompts,
+  buildExtractionRepairPrompt,
   ExtractionParseError,
   EXTRACTION_ATTEMPT_TIMEOUT_MS,
   EXTRACTION_ITEM_TIMEOUT_MS,
   MAX_EXTRACTION_ATTEMPTS,
   MAX_EXTRACTION_OUTPUT_TOKENS,
+  MAX_EXTRACTION_REPAIR_ATTEMPTS,
   parseExtractionResponse,
+  type ExtractionOutcome,
 } from "@/lib/ai/product-page-extraction";
+import { pageTextWasTruncated } from "@/lib/integrations/product-page/scraper";
 import { resolveLlmSelection } from "./resolve-llm-selection.service";
 import {
   buildSupportedProvider,
@@ -32,10 +36,26 @@ import {
  * contain this" is a SUCCESS, recorded as `not_found`. It is the correct outcome
  * for an instruction asking for next week's events against a page that lists this
  * week's, and retrying it would only invite the model to invent something.
+ *
+ * A reply that is the wrong SHAPE — prose instead of JSON, an item short of a
+ * field its siblings have, fewer items than the page's own printed count — is
+ * neither of those. It gets one repair call that names the exact problem, and if
+ * that does not fix it the item is recorded `failed` with the problem in
+ * `extractionError`, so the next ingest tries again within the attempt budget.
+ * Storing it instead would be the original bug in a new place: a short list,
+ * indistinguishable from a complete one, treated as the authoritative facts for
+ * every channel.
  */
 
 export type ExtractProductPageOutcome =
-  | { status: "extracted"; provider: string; model: string; contentLength: number }
+  | {
+      status: "extracted";
+      provider: string;
+      model: string;
+      contentLength: number;
+      /** How many things the page turned out to list. Counted, never quoted. */
+      itemCount: number;
+    }
   | { status: "not_found"; reason: string }
   /**
    * No model call was made:
@@ -90,8 +110,27 @@ export interface ExtractProductPageDeps {
   now?: () => Date;
   /** Wall-clock cap for ONE model call. Overridable so tests need not wait. */
   attemptTimeoutMs?: number;
-  /** Wall-clock cap for the whole item. */
+  /** Wall-clock cap for the whole item, across its repair calls. */
   itemTimeoutMs?: number;
+  /** Extra calls spent repairing an unusable reply. Defaults to the module bound. */
+  maxRepairAttempts?: number;
+}
+
+/**
+ * A reply that arrived, parsed, and still could not be trusted as the complete
+ * answer — after its repair call.
+ *
+ * An Error rather than a return value so it joins the existing failure path: the
+ * claim-guarded write, the attempt counter, and the retry on the next ingest are
+ * all exactly what an incomplete extraction needs, and it is a failure in the one
+ * sense that matters here — nothing may be stored.
+ */
+export class IncompleteExtractionError extends Error {
+  readonly code = "INCOMPLETE_EXTRACTION" as const;
+  constructor(problem: string) {
+    super(`The extraction was incomplete and was not stored. ${problem}`);
+    this.name = "IncompleteExtractionError";
+  }
 }
 
 export class ExtractionTimeoutError extends Error {
@@ -229,40 +268,80 @@ export async function extractProductPage(
     today: now(),
   });
 
+  const truncated = pageTextWasTruncated(stored.pageText);
+
   // Diagnostics carry sizes, never the page body or the instruction text.
   const diag = {
     feedItemId: item.id,
     sourceUrl: item.url,
     pageTextLength: stored.pageText.length,
+    pageTextTruncated: truncated,
     instructionLength: stored.instructions.length,
     attempt,
   };
   const startedAtMs = now().getTime();
   const attemptTimeoutMs = deps.attemptTimeoutMs ?? EXTRACTION_ATTEMPT_TIMEOUT_MS;
   const itemTimeoutMs = deps.itemTimeoutMs ?? EXTRACTION_ITEM_TIMEOUT_MS;
+  const maxRepairs = deps.maxRepairAttempts ?? MAX_EXTRACTION_REPAIR_ATTEMPTS;
   console.info("[product-page-extraction] extracting", diag);
 
-  try {
-    const response = await withTimeout(
-      withTimeout(
-        resolved.instance.generate({
-          systemPrompt,
-          userPrompt,
-          // Deterministic: this is fact-gathering, and a second sample must not
-          // produce a different number of events.
-          temperature: 0,
-          // Bounded so a runaway generation cannot outlive the deadline. The
-          // ceiling is deliberately generous — see MAX_EXTRACTION_OUTPUT_TOKENS.
-          maxTokens: MAX_EXTRACTION_OUTPUT_TOKENS,
-        }),
-        attemptTimeoutMs,
-        "attempt"
-      ),
-      itemTimeoutMs,
-      "item"
+  const ask = (prompt: string) =>
+    withTimeout(
+      resolved.instance.generate({
+        systemPrompt,
+        userPrompt: prompt,
+        // Deterministic: this is fact-gathering, and a second sample must not
+        // produce a different number of events.
+        temperature: 0,
+        // Bounded so a runaway generation cannot outlive the deadline. The
+        // ceiling is deliberately generous — see MAX_EXTRACTION_OUTPUT_TOKENS.
+        maxTokens: MAX_EXTRACTION_OUTPUT_TOKENS,
+      }),
+      attemptTimeoutMs,
+      "attempt"
     );
 
-    const outcome = parseExtractionResponse(response.text);
+  /**
+   * Asks, checks, and — for a reply that is merely the wrong shape — asks once
+   * more with the exact problem named. Bounded by `maxRepairs` AND by the item
+   * timeout wrapping it, so a slow model cannot turn a repair into a second wait.
+   *
+   * A THROWN error (a timeout, a dead transport) deliberately does not repair:
+   * nothing about the reply was wrong, so there is nothing to tell the model, and
+   * the retry that helps there is the next ingest rather than the next second.
+   */
+  const askUntilUsable = async (): Promise<{ outcome: ExtractionOutcome; calls: number }> => {
+    let prompt = userPrompt;
+    let last: ExtractionOutcome | null = null;
+
+    for (let call = 1; call <= maxRepairs + 1; call++) {
+      const response = await ask(prompt);
+      const parsed = parseExtractionResponse(response.text, { pageTextTruncated: truncated });
+      if (parsed.status !== "invalid") return { outcome: parsed, calls: call };
+
+      last = parsed;
+      if (call > maxRepairs) break;
+
+      console.warn("[product-page-extraction] reply rejected — repairing", {
+        ...diag,
+        call,
+        problem: parsed.problem,
+      });
+      prompt = buildExtractionRepairPrompt(userPrompt, response.text ?? "", parsed.feedback);
+    }
+
+    return { outcome: last!, calls: maxRepairs + 1 };
+  };
+
+  try {
+    const { outcome, calls } = await withTimeout(askUntilUsable(), itemTimeoutMs, "item");
+
+    // Checked and rejected, twice. Recorded as a failure rather than stored: an
+    // extraction that cannot be shown to be complete must not become the
+    // authoritative fact set that three channels then write posts from.
+    if (outcome.status === "invalid") {
+      throw new IncompleteExtractionError(outcome.problem);
+    }
 
     if (outcome.status === "not_found") {
       // A successful run whose answer is "not on this page". Stored as the
@@ -299,6 +378,9 @@ export async function extractProductPage(
       ...diag,
       elapsedMs: now().getTime() - startedAtMs,
       extractedLength: outcome.content.length,
+      itemCount: outcome.data.items.length,
+      fields: outcome.data.requestedFields,
+      modelCalls: calls,
       provider: resolved.provider,
       model: resolved.model,
     });
@@ -308,6 +390,7 @@ export async function extractProductPage(
       provider: resolved.provider,
       model: resolved.model,
       contentLength: outcome.content.length,
+      itemCount: outcome.data.items.length,
     };
   } catch (err) {
     const error = err instanceof Error ? err.message : "Unknown extraction error.";
@@ -317,6 +400,7 @@ export async function extractProductPage(
       elapsedMs: now().getTime() - startedAtMs,
       timedOut: err instanceof ExtractionTimeoutError,
       emptyResponse: err instanceof ExtractionParseError,
+      incomplete: err instanceof IncompleteExtractionError,
       error,
     });
 

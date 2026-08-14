@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { buildPrompts, buildRetryUserPrompt } from "./prompt-builder";
 import { CHANNEL_POLICIES } from "./channel-policy";
+import { renderExtraction } from "./product-page-extraction";
 import type { BrandContext, FeedItemContext, GenerationContext } from "./types";
 
 function makeCtx(overrides: {
@@ -1263,5 +1264,101 @@ describe("prompt-builder — every channel starts from the same extracted facts"
       userPrompt.lastIndexOf("Cover EVERY item") > userPrompt.indexOf("Shared content topic"),
       "the completeness requirement sits after the shared-topic constraint"
     );
+  });
+});
+
+describe("prompt-builder — the checked extraction is what every channel writes from", () => {
+  /**
+   * Built by the extraction module rather than hand-written, so this asserts the
+   * real thing: whatever `renderExtraction` produces has to survive intact into
+   * every channel's prompt, counts included. A change to the rendering that
+   * dropped items or totals fails here rather than in production.
+   */
+  const CONTENT = renderExtraction({
+    requestedFields: ["type", "date", "format", "price status", "price"],
+    items: [
+      {
+        label: "Energy Update",
+        fields: {
+          type: "Webinar",
+          date: "18.08.2026",
+          format: "Online",
+          "price status": "Free",
+          price: "not stated",
+        },
+      },
+      {
+        label: "HR Masterclass",
+        fields: {
+          type: "Masterclass",
+          date: "19.08.2026",
+          format: "In person",
+          "price status": "Paid",
+          price: "50 BGN",
+        },
+      },
+      {
+        label: "Growth Conference",
+        fields: {
+          type: "Conference",
+          date: "21.08.2026",
+          format: "In person",
+          "price status": "Paid",
+          price: "120 BGN",
+        },
+      },
+    ],
+    sourceStatedCount: 3,
+    notes: null,
+  });
+
+  const ITEM: FeedItemContext = {
+    id: "events",
+    title: "Business events",
+    content: JSON.stringify({
+      instructions: "ALL events this week: name, type, date, format, free or paid, and price.",
+      pageText: "RAW PAGE the model must not have to read again",
+    }),
+    url: "https://events.example.com/",
+    publishedAt: null,
+    sourceType: "product_page",
+    extractionStatus: "completed",
+    extractedContent: CONTENT,
+  };
+
+  const CHANNELS = ["facebook", "linkedin", "instagram"];
+
+  it("gives every channel the same items, fields and computed totals", () => {
+    for (const channel of CHANNELS) {
+      const { userPrompt } = buildPrompts(makeCtx({ channel }), ITEM, "en");
+
+      assert.ok(userPrompt.includes(CONTENT), `${channel} must receive the extraction verbatim`);
+      assert.ok(userPrompt.includes("Total items extracted: 3"), channel);
+      assert.ok(userPrompt.includes("price status — Paid: 2, Free: 1"), channel);
+      assert.ok(userPrompt.includes("Growth Conference"), channel);
+    }
+  });
+
+  it("keeps a field the page did not state visible as unstated", () => {
+    // So the generator writes "price not announced" rather than supplying one.
+    const { userPrompt } = buildPrompts(makeCtx({ channel: "facebook" }), ITEM, "en");
+
+    assert.match(userPrompt, /price: not stated/);
+  });
+
+  it("lets no channel re-read the page it was extracted from", () => {
+    for (const channel of CHANNELS) {
+      const { userPrompt } = buildPrompts(makeCtx({ channel }), ITEM, "en");
+      assert.ok(!userPrompt.includes("RAW PAGE"), channel);
+    }
+  });
+
+  it("does not let a length-focused channel shorten an ALL instruction", () => {
+    // Instagram is the tightest budget of the three; completeness still outranks
+    // the ideal length, and the requirement still sits below the guidance.
+    const { userPrompt } = buildPrompts(makeCtx({ channel: "instagram" }), ITEM, "en");
+
+    assert.match(userPrompt, /completeness wins/);
+    assert.ok(userPrompt.includes("Growth Conference"));
   });
 });

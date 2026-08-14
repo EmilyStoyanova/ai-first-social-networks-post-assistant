@@ -111,8 +111,14 @@ export const INSTRUCTED_PAGE_TEXT_LIMIT = 2_500;
  * every character of it is something the post was asked to carry. Truncating it
  * is dropping events off the end of a list that was gathered precisely so it
  * would be complete.
+ *
+ * Raised with the move to a structured, field-per-line rendering: the same twenty
+ * events that fitted in 4 000 characters of prose take roughly three times that
+ * with every requested field on its own line for every item. Cutting at the old
+ * figure would have re-created, at the last step, the exact truncation the
+ * extraction now goes to some trouble to prevent.
  */
-export const EXTRACTED_CONTENT_LIMIT = 4_000;
+export const EXTRACTED_CONTENT_LIMIT = 12_000;
 
 function renderProductPage(
   item: FeedItemContext,
