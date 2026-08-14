@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/db/client";
 import {
+  MIN_TRANSLATION_ITEM_BUDGET_MS,
   TRANSLATION_BATCH_SIZE,
+  TRANSLATION_ITEM_TIMEOUT_MS,
   resolveTranslationConfig,
 } from "@/lib/ai/feed-item-translation";
 import { translationSelectableWhere } from "@/lib/ai/feed-item-translation-claim";
@@ -65,8 +67,27 @@ async function defaultFindCandidates(companyId: string, limit: number): Promise<
   });
 }
 
+export interface TranslateFeedItemsOptions {
+  companyId: string;
+  limit?: number;
+  shouldStop?: () => boolean;
+  /**
+   * Milliseconds the RUN has left. Optional — omitted, each item keeps its own full budget,
+   * which is the pre-existing behaviour.
+   *
+   * `shouldStop` alone is not enough, and the gap is arithmetic: it is checked BEFORE an item
+   * and an item may then run for TRANSLATION_ITEM_TIMEOUT_MS (210s), so an item started one
+   * millisecond inside a 240s run budget can carry the run to ~450s — past the 300s route cap
+   * the budget exists to respect. Squeezing each item's own budget down to what is actually
+   * left closes that, and below MIN_TRANSLATION_ITEM_BUDGET_MS the loop stops rather than
+   * starting an article it can only time out on. Nothing is lost either way: an unstarted
+   * item stays pending and the continuation job picks it up.
+   */
+  remainingMs?: () => number;
+}
+
 export async function translateFeedItems(
-  opts: { companyId: string; limit?: number; shouldStop?: () => boolean },
+  opts: TranslateFeedItemsOptions,
   deps: TranslateFeedItemsDeps = {}
 ): Promise<TranslateFeedItemsSummary> {
   const limit = opts.limit ?? TRANSLATION_BATCH_SIZE;
@@ -103,8 +124,19 @@ export async function translateFeedItems(
       continue;
     }
 
+    // Too little of the run left to translate anything — stop rather than start an article
+    // that can only time out (and burn one of its five cross-run attempts doing so).
+    const remaining = opts.remainingMs?.();
+    if (remaining !== undefined && remaining <= MIN_TRANSLATION_ITEM_BUDGET_MS) break;
+
     summary.scanned += 1;
-    const outcome: TranslateFeedItemOutcome = await translate(item, cfg.targetLanguage);
+    const outcome: TranslateFeedItemOutcome = await translate(
+      item,
+      cfg.targetLanguage,
+      remaining === undefined
+        ? undefined
+        : { itemTimeoutMs: Math.min(TRANSLATION_ITEM_TIMEOUT_MS, remaining) }
+    );
 
     if (outcome.status === "translated") summary.translated += 1;
     else if (outcome.status === "failed") summary.failed += 1;

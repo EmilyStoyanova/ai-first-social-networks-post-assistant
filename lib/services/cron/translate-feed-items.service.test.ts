@@ -2,7 +2,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { translateFeedItems, type TranslateFeedItemsDeps } from "./translate-feed-items.service";
 import type { TranslateFeedItemOutcome } from "@/lib/services/ai/translate-feed-item.service";
-import { TRANSLATION_BATCH_SIZE } from "@/lib/ai/feed-item-translation";
+import {
+  MIN_TRANSLATION_ITEM_BUDGET_MS,
+  TRANSLATION_BATCH_SIZE,
+  TRANSLATION_ITEM_TIMEOUT_MS,
+} from "@/lib/ai/feed-item-translation";
 
 interface Candidate {
   id: string;
@@ -33,17 +37,25 @@ function makeCandidate(
   };
 }
 
-/** Captures the (item, targetLang) pairs the batch dispatched. */
+/** One dispatch as the batch made it: which item, in which language, on what budget. */
+interface DispatchedCall {
+  id: string;
+  lang: string;
+  itemTimeoutMs?: number;
+}
+
+/** Captures the calls the batch dispatched. */
 function makeDeps(
   candidates: Candidate[],
   outcome: (item: Candidate) => TranslateFeedItemOutcome = () => ({
     status: "translated",
     provider: "GROQ",
     model: "m",
+    mode: "full",
   }),
   companyLang = "bg"
-): TranslateFeedItemsDeps & { calls: Array<{ id: string; lang: string }>; limitSeen: number[] } {
-  const calls: Array<{ id: string; lang: string }> = [];
+): TranslateFeedItemsDeps & { calls: DispatchedCall[]; limitSeen: number[] } {
+  const calls: DispatchedCall[] = [];
   const limitSeen: number[] = [];
   return {
     calls,
@@ -53,8 +65,8 @@ function makeDeps(
       return candidates.slice(0, limit);
     },
     loadCompanyLang: async () => companyLang,
-    translate: (async (item: Candidate, lang: string) => {
-      calls.push({ id: item.id, lang });
+    translate: (async (item: Candidate, lang: string, deps?: { itemTimeoutMs?: number }) => {
+      calls.push({ id: item.id, lang, itemTimeoutMs: deps?.itemTimeoutMs });
       return outcome(item);
     }) as unknown as TranslateFeedItemsDeps["translate"],
   };
@@ -113,7 +125,7 @@ describe("translateFeedItems", () => {
     const deps = makeDeps([makeCandidate("a"), makeCandidate("b"), makeCandidate("c")], (item) =>
       item.id === "b"
         ? { status: "failed", error: "boom", nextRetryAt: new Date() }
-        : { status: "translated", provider: "GROQ", model: "m" }
+        : { status: "translated", provider: "GROQ", model: "m", mode: "full" }
     );
     const summary = await translateFeedItems({ companyId: "c1" }, deps);
 
@@ -152,6 +164,57 @@ describe("translateFeedItems", () => {
     const deps = makeDeps([]);
     const summary = await translateFeedItems({ companyId: "c1" }, deps);
     assert.deepEqual(summary, { scanned: 0, translated: 0, failed: 0, skipped: 0 });
+  });
+
+  it("squeezes each item's own budget down to what the run has left", async () => {
+    // shouldStop is checked BEFORE an item; without this bound the item could then run its
+    // full 210s and carry a 240s run past the route's 300s cap. Here the run has 60s left, so
+    // the item must be given 60s, not 210s.
+    const deps = makeDeps([makeCandidate("a")]);
+    await translateFeedItems({ companyId: "c1", remainingMs: () => 60_000 }, deps);
+
+    assert.equal(deps.calls.length, 1);
+    assert.equal(deps.calls[0].itemTimeoutMs, 60_000);
+  });
+
+  it("never inflates an item's budget above its own cap when the run has plenty left", async () => {
+    const deps = makeDeps([makeCandidate("a")]);
+    await translateFeedItems({ companyId: "c1", remainingMs: () => 10 * 60_000 }, deps);
+    assert.equal(deps.calls[0].itemTimeoutMs, TRANSLATION_ITEM_TIMEOUT_MS);
+  });
+
+  it("leaves the per-item budget untouched when the run does not report one", async () => {
+    const deps = makeDeps([makeCandidate("a")]);
+    await translateFeedItems({ companyId: "c1" }, deps);
+    assert.equal(deps.calls[0].itemTimeoutMs, undefined, "pre-existing behaviour is unchanged");
+  });
+
+  it("stops instead of starting an item it can only time out on", async () => {
+    // Below the floor no translation can finish, so starting one only spends a cross-run
+    // attempt and schedules a backoff. The item stays pending for the continuation job.
+    const deps = makeDeps([makeCandidate("a"), makeCandidate("b")]);
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => MIN_TRANSLATION_ITEM_BUDGET_MS - 1 },
+      deps
+    );
+
+    assert.equal(deps.calls.length, 0, "no item may start on an unusable budget");
+    assert.deepEqual(summary, { scanned: 0, translated: 0, failed: 0, skipped: 0 });
+  });
+
+  it("counts an item skipped for having no source text, without stopping the batch", async () => {
+    // The service returns this WITHOUT an LLM call; the batch must treat it as any other
+    // skip — counted, and the run continues.
+    const deps = makeDeps([makeCandidate("empty"), makeCandidate("b")], (item) =>
+      item.id === "empty"
+        ? { status: "skipped", reason: "empty_source" }
+        : { status: "translated", provider: "GROQ", model: "m", mode: "full" }
+    );
+    const summary = await translateFeedItems({ companyId: "c1" }, deps);
+
+    assert.equal(summary.skipped, 1);
+    assert.equal(summary.translated, 1);
+    assert.equal(deps.calls.length, 2);
   });
 
   it("stops between items when shouldStop signals the deadline", async () => {

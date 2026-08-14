@@ -28,6 +28,8 @@ interface RowState {
   translationAttemptCount: number;
   translationNextRetryAt: Date | null;
   translationLeaseExpiresAt: Date | null;
+  translatedTitle: string | null;
+  translatedContent: string | null;
 }
 
 const num = (v: unknown): number =>
@@ -53,6 +55,8 @@ function makeDb(init: Partial<RowState> = {}) {
     translationAttemptCount: 0,
     translationNextRetryAt: null,
     translationLeaseExpiresAt: null,
+    translatedTitle: null,
+    translatedContent: null,
     ...init,
   };
   const updates: Array<Record<string, unknown>> = [];
@@ -88,6 +92,9 @@ function makeDb(init: Partial<RowState> = {}) {
     },
     get currentStatus() {
       return row.translationStatus;
+    },
+    get row() {
+      return row;
     },
     feedItem: {
       update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
@@ -159,6 +166,7 @@ describe("translateFeedItem — success", () => {
       status: "translated",
       provider: "GROQ",
       model: "llama-3.3-70b-versatile",
+      mode: "full",
     });
 
     const final = db.updates.at(-1)!;
@@ -306,7 +314,9 @@ describe("translateFeedItem — failure", () => {
     );
 
     assert.equal(outcome.status, "failed");
-    assert.match(outcome.status === "failed" ? outcome.error : "", /JSON/i);
+    // The salvage CAN close an unterminated string, so what rejects this is length: 29
+    // characters is a fragment, and the error says so rather than blaming the syntax.
+    assert.match(outcome.status === "failed" ? outcome.error : "", /cut off after \d+ characters/i);
     assert.equal(db.updates.at(-1)!.translationStatus, "failed");
   });
 
@@ -600,6 +610,324 @@ describe("translateFeedItem — diagnostics", () => {
   });
 });
 
+// ─── Missing source text ──────────────────────────────────────────────────────
+
+describe("translateFeedItem — no article body", () => {
+  const EMPTY_BODIES: Array<string | null> = [null, "", "   \n\t "];
+
+  it("never calls the model for an item with neither a title nor a body", async () => {
+    for (const content of EMPTY_BODIES) {
+      const db = makeDb();
+      let calls = 0;
+      const cap = captureConsole();
+      let outcome;
+      try {
+        outcome = await translateFeedItem(
+          makeItem({ title: null, content }),
+          "bg",
+          makeDeps(db, async () => {
+            calls += 1;
+            return { text: GOOD_RESPONSE };
+          })
+        );
+      } finally {
+        cap.stop();
+      }
+
+      assert.deepEqual(outcome, { status: "skipped", reason: "empty_source" });
+      assert.equal(calls, 0, `content ${JSON.stringify(content)} must not reach the LLM`);
+    }
+  });
+
+  it("spends ZERO model calls where it used to spend three", async () => {
+    // The production symptom: articleTextLength 0 → three attempts, each rejected for a
+    // missing "content", then a recorded failure and a backoff.
+    const db = makeDb();
+    let calls = 0;
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem({ title: null, content: null }),
+        "bg",
+        makeDeps(db, async () => {
+          calls += 1;
+          return { text: '{"title":"Заглавие","content":""}' };
+        })
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(calls, 0);
+    assert.ok(
+      !db.updates.some((u) => "translationAttemptCount" in u),
+      "a source with no text must not burn one of the five cross-run attempts"
+    );
+  });
+
+  it("settles the item terminally so it is never retried", async () => {
+    const db = makeDb();
+    const item = makeItem({ title: null, content: null });
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        item,
+        "bg",
+        makeDeps(db, async () => ({ text: GOOD_RESPONSE }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    // "skipped" is not selectable by the translation cron, so there is no retry loop; the
+    // stored hash means re-ingesting the same empty article changes nothing either.
+    assert.equal(db.currentStatus, "skipped");
+    assert.equal(db.row.translationHash, computeTranslationHash(null, null, "bg"));
+    assert.equal(db.row.translationNextRetryAt, null);
+    const final = db.updates.at(-1)!;
+    assert.equal(final.translationError, null, "there is no error here — there was no article");
+  });
+
+  it("does not overwrite a completed translation of the same input", async () => {
+    const hash = computeTranslationHash(null, null, "bg");
+    const db = makeDb({ translationStatus: "completed", translationHash: hash });
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem({ title: null, content: null, translationStatus: "completed" }),
+        "bg",
+        makeDeps(db, async () => ({ text: GOOD_RESPONSE }))
+      );
+    } finally {
+      cap.stop();
+    }
+    assert.equal(db.currentStatus, "completed");
+  });
+
+  it("says in the log why the item was skipped", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem({ title: null, content: null }),
+        "bg",
+        makeDeps(db, async () => ({ text: GOOD_RESPONSE }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    const line = cap.infos.find((a) =>
+      String(a[0]).includes("[rss-translation] nothing to translate")
+    );
+    assert.ok(line, "expected a skip log naming the reason");
+    const payload = line![1] as Record<string, unknown>;
+    assert.equal(payload.reason, "empty_source");
+    assert.equal(payload.articleTextLength, 0);
+  });
+});
+
+describe("translateFeedItem — title-only items", () => {
+  const TITLE_ONLY = { title: "Company launches new service", content: null };
+
+  it("translates the title alone and stores no article body", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem(TITLE_ONLY),
+        "bg",
+        makeDeps(db, async () => ({ text: '{"title":"Компанията пуска нова услуга"}' }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "translated");
+    assert.equal(outcome.status === "translated" && outcome.mode, "title_only");
+    const final = db.updates.at(-1)!;
+    assert.equal(final.translationStatus, "completed");
+    assert.equal(final.translatedTitle, "Компанията пуска нова услуга");
+    assert.equal(final.translatedContent, null, "an article with no body gets no body");
+  });
+
+  it("asks only for a title, so the model cannot be constrained into inventing one", async () => {
+    const db = makeDb();
+    const requests: LlmRequest[] = [];
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem(TITLE_ONLY),
+        "bg",
+        makeDeps(db, async (request) => {
+          requests.push(request);
+          return { text: '{"title":"Заглавие"}' };
+        })
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(requests.length, 1);
+    const schema = requests[0].format as { required: string[] };
+    assert.deepEqual(schema.required, ["title"], "a required `content` would force a fabrication");
+    assert.ok(!requests[0].userPrompt.includes("Content:"));
+  });
+
+  it("discards an article body the model volunteered anyway", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem(TITLE_ONLY),
+        "bg",
+        makeDeps(db, async () => ({
+          text: '{"title":"Заглавие","content":"Съчинена статия, за която няма източник."}',
+        }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(db.row.translatedContent, null, "invented content must never be stored");
+  });
+});
+
+// ─── Targeted retries ─────────────────────────────────────────────────────────
+
+describe("translateFeedItem — retry feedback", () => {
+  it("tells the model what was wrong instead of only re-rolling the sampling", async () => {
+    const db = makeDb();
+    const macedonian = JSON.stringify({
+      title: "Компанијата објави нова услуга",
+      content:
+        "Компанијата денес објави дека новата услуга ќе биде достапна за сите корисници " +
+        "во земјата, бидејќи цената останува иста за постојните претплатници.",
+    });
+    const p = scriptedProvider([macedonian, GOOD_RESPONSE]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(makeItem(), "bg", makeDeps(db, p.generate));
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "translated");
+    assert.equal(p.requests.length, 2);
+    // The first request is the plain translation; the second carries the correction.
+    assert.ok(!p.requests[0].userPrompt.includes("REJECTED"));
+    assert.match(p.requests[1].userPrompt, /YOUR PREVIOUS ANSWER WAS REJECTED/);
+    assert.match(p.requests[1].userPrompt, /not Bulgarian/i);
+    // The original article still travels with the correction.
+    assert.match(p.requests[1].userPrompt, /Content: Original content/);
+  });
+
+  it("sends a JSON-specific correction after malformed JSON", async () => {
+    const db = makeDb();
+    const p = scriptedProvider(["Here you go: the translation is ready.", GOOD_RESPONSE]);
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(makeItem(), "bg", makeDeps(db, p.generate));
+    } finally {
+      cap.stop();
+    }
+
+    assert.match(p.requests[1].userPrompt, /not a single valid JSON object/i);
+  });
+
+  it("names the specific reason on every rejection log", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem(),
+        "bg",
+        makeDeps(db, async () => ({ text: '{"title":"Заглавие","content":""}' }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    const rejections = cap.warns.filter(
+      (a) => a[0] === "[rss-translation] unusable model response"
+    );
+    assert.ok(rejections.length > 0);
+    // An empty translation is its own reason, distinct from "the shape was wrong".
+    assert.equal((rejections[0][1] as Record<string, unknown>).reason, "empty_translation");
+    const failed = cap.warns.find((a) => a[0] === "[rss-translation] item translation FAILED");
+    assert.equal((failed![1] as Record<string, unknown>).failureReason, "empty_translation");
+  });
+
+  it("keeps retries bounded — a permanently bad model costs one attempt, not five", async () => {
+    const db = makeDb();
+    const p = scriptedProvider(["never valid"]);
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(makeItem(), "bg", makeDeps(db, p.generate));
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(p.requests.length, MAX_TRANSLATION_RETRIES + 1);
+    assert.equal(
+      db.updates.filter((u) => "translationAttemptCount" in u).length,
+      1,
+      "the cross-run attempt is counted once, at claim time"
+    );
+    assert.ok((db.row.translationNextRetryAt as Date | null) !== null, "and a backoff is set");
+  });
+});
+
+// ─── JSON salvage, end to end ─────────────────────────────────────────────────
+
+describe("translateFeedItem — JSON salvage", () => {
+  it("completes a reply wrapped in a <think> block instead of failing the item", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem(),
+        "bg",
+        makeDeps(db, async () => ({
+          text: `<think>I should translate this into Bulgarian.</think>\n${GOOD_RESPONSE}`,
+        }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "translated");
+    const done = cap.infos.find((a) => a[0] === "[rss-translation] item translated");
+    const payload = done![1] as Record<string, unknown>;
+    assert.equal(payload.usedRepair, true);
+    assert.deepEqual(payload.repairs, ["stripped_reasoning"], "the log says which salvage ran");
+  });
+
+  it("still fails safely on a reply too corrupted to read", async () => {
+    const db = makeDb();
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem(),
+        "bg",
+        makeDeps(db, async () => ({ text: '{"title":"Заглавие","content":"кратък' }))
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "failed");
+    assert.ok(
+      !db.updates.some((u) => "translatedContent" in u),
+      "a fragment must never be stored as a completed translation"
+    );
+  });
+});
+
 // ─── Provider availability ────────────────────────────────────────────────────
 
 describe("translateFeedItem — no provider", () => {
@@ -831,6 +1159,26 @@ describe("translateFeedItem — timeout", () => {
       (outcome as { nextRetryAt: Date }).nextRetryAt,
       new Date(NOW.getTime() + 5 * 60 * 1000)
     );
+  });
+
+  it("bounds the item by an injected budget below its own default", async () => {
+    // The batch squeezes this down to whatever the run has left, so one article cannot
+    // carry the run past the route's cap. The item budget must actually bite.
+    const db = makeDb();
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(makeItem(), "bg", {
+        ...makeDeps(db, neverSettles),
+        attemptTimeoutMs: 5_000,
+        itemTimeoutMs: 15,
+      });
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "failed");
+    assert.match((outcome as { error: string }).error, /exceeded its (15|5000)ms budget/);
   });
 
   it("does not let a hung item stop the next item from translating", async () => {

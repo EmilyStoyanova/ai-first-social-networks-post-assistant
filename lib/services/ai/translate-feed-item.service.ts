@@ -1,7 +1,10 @@
 import { prisma } from "@/lib/db/client";
 import type { ILlmProvider } from "@/lib/ai/types";
+import type { TranslationReplyMode } from "@/lib/ai/feed-item-translation";
 import {
   buildTranslationPrompts,
+  buildTranslationRetryPrompt,
+  classifyTranslationInput,
   computeTranslationBackoff,
   computeTranslationHash,
   estimateTokenCount,
@@ -9,7 +12,6 @@ import {
   parseTranslationResponse,
   samplingForTry,
   TranslationParseError,
-  TRANSLATION_JSON_SCHEMA,
   MAX_TRANSLATION_ATTEMPTS,
   MAX_TRANSLATION_OUTPUT_TOKENS,
   MAX_TRANSLATION_RETRIES,
@@ -29,6 +31,10 @@ import {
  * Invariants:
  *   • `title`/`content` are never written here — the original article is source
  *     data. Output goes to the translated* columns only.
+ *   • Nothing is ever asked of the model that the source cannot answer. An item with
+ *     no article body is translated as a TITLE ONLY, and one with no text at all is
+ *     settled as `skipped` without a model call — so no reply can be a fabricated
+ *     article, and no retry is spent on a source that is simply missing.
  *   • The provider is the admin default (see resolve-llm-selection.service.ts).
  *     Translation never passes a per-generation llmConfigId, and a provider that
  *     cannot be built is an error — never a silent swap to another provider.
@@ -37,15 +43,25 @@ import {
  */
 
 export type TranslateFeedItemOutcome =
-  | { status: "translated"; provider: string; model: string }
+  | {
+      status: "translated";
+      provider: string;
+      model: string;
+      /** "title_only" when the article had no body — the translation carries no content. */
+      mode: TranslationReplyMode;
+    }
   /**
-   * No LLM call was made because another run owns the item:
+   * No LLM call was made:
    *   • "unchanged"    — hash matches an already-completed translation;
+   *   • "empty_source" — the item has neither a title nor an article body to translate;
    *   • "max_attempts" — the retry budget is exhausted;
    *   • "claimed"      — a concurrent run holds the atomic claim (in flight);
    *   • "superseded"   — a concurrent run finished/reclaimed it after this attempt started.
    */
-  | { status: "skipped"; reason: "unchanged" | "max_attempts" | "claimed" | "superseded" }
+  | {
+      status: "skipped";
+      reason: "unchanged" | "empty_source" | "max_attempts" | "claimed" | "superseded";
+    }
   /** No admin default provider configured; deliberately does NOT count an attempt. */
   | { status: "no_provider" }
   | { status: "failed"; error: string; nextRetryAt: Date };
@@ -194,6 +210,47 @@ export async function translateFeedItem(
     return { status: "skipped", reason: "unchanged" };
   }
 
+  const inputKind = classifyTranslationInput(item.title, item.content);
+
+  // There is nothing to translate. Ingestion legitimately stores bodyless items (a paywall
+  // stub, a failed fetch, a feed entry with no summary), and one with no title either has no
+  // text at all. Asking a translator for {title, content} here produced exactly what the logs
+  // showed: an empty `content`, rejected, regenerated twice, rejected again, then a failure
+  // with a backoff — three model calls spent on a defect no sample can fix. So the item is
+  // settled here instead, WITHOUT a provider, a claim, an attempt, or a retry. `skipped` is
+  // the existing terminal state for "this item is not translated" — it is not selectable by
+  // the cron, and the UI already reads it as "original", which is exactly what generation
+  // will use. The hash is stored so re-ingesting the same empty article changes nothing.
+  if (inputKind === "empty") {
+    const settled = await db.feedItem.updateMany({
+      where: {
+        id: item.id,
+        OR: [
+          { translationStatus: { in: ["pending", "failed", "translating"] } },
+          // A previously completed translation whose article has since lost its text.
+          { translationStatus: "completed", translationHash: { not: hash } },
+        ],
+      },
+      data: {
+        translationStatus: "skipped",
+        translationHash: hash,
+        translationLanguage: targetLang,
+        translationError: null,
+        translationNextRetryAt: null,
+        translationLeaseExpiresAt: null,
+      },
+    });
+    console.info("[rss-translation] nothing to translate — skipping without a model call", {
+      feedItemId: item.id,
+      sourceUrl: item.url,
+      reason: "empty_source",
+      articleTextLength: item.content?.length ?? 0,
+      hasTitle: false,
+      settled: settled.count === 1,
+    });
+    return { status: "skipped", reason: "empty_source" };
+  }
+
   // Exhausted its budget: stays failed, never retried again.
   if (item.translationAttemptCount >= MAX_TRANSLATION_ATTEMPTS) {
     return { status: "skipped", reason: "max_attempts" };
@@ -233,7 +290,7 @@ export async function translateFeedItem(
     return { status: "skipped", reason: "claimed" };
   }
 
-  const { systemPrompt, userPrompt } = buildTranslationPrompts(
+  const { systemPrompt, userPrompt, mode, schema } = buildTranslationPrompts(
     item.title,
     item.content,
     targetLang
@@ -248,6 +305,9 @@ export async function translateFeedItem(
     sourceUrl: item.url,
     promptLength: systemPrompt.length + userPrompt.length,
     articleTextLength: item.content?.length ?? 0,
+    // "title_only" says, in one field, that this item had no article body — the reply
+    // contract, the stored result and the retry budget all follow from it.
+    mode,
     // Rough prompt-token estimate — carried on every log (start/success/failure) so a timeout
     // can be correlated with input size and the num_predict ceiling at a glance.
     promptTokenEstimate: estimateTokenCount(systemPrompt + userPrompt),
@@ -265,10 +325,17 @@ export async function translateFeedItem(
 
   try {
     let translatedTitle: string | null = null;
-    let translatedContent = "";
+    let translatedContent: string | null = null;
     let usedRepair = false;
+    let repairs: string[] = [];
     /** Raw provider payload of the try that SUCCEEDED — source of the Ollama metrics below. */
     let lastResponseRaw: unknown;
+    /**
+     * The prompt for the NEXT try. Starts as the original request and, after a rejected reply,
+     * becomes the original request plus a correction naming the exact defect — so a retry is a
+     * correction rather than a re-roll (see buildTranslationRetryPrompt).
+     */
+    let currentUserPrompt = userPrompt;
 
     // In-request regeneration loop. A bad reply from the self-hosted model (invalid JSON, a
     // decoding loop, drifted language) is usually transient, and a fresh sample seconds later
@@ -301,13 +368,14 @@ export async function translateFeedItem(
       const response = await withTimeout(
         resolved.instance.generate({
           systemPrompt,
-          userPrompt,
+          userPrompt: currentUserPrompt,
           // Schema-constrained structured output: the Ollama `format` schema makes the reply a
-          // strict {title, content} object instead of free-form text. Temperature starts at 0
-          // for fidelity and rises only on a regeneration.
+          // strict object instead of free-form text — {title, content} normally, {title} alone
+          // for a bodyless item, so the model is never constrained to invent an article.
+          // Temperature starts at 0 for fidelity and rises only on a regeneration.
           temperature,
           repeatPenalty,
-          format: TRANSLATION_JSON_SCHEMA,
+          format: schema,
           // Bounded generation: without this Ollama runs unlimited and a runaway article never
           // returns within the deadline. The capped body fits well under this ceiling.
           maxTokens: MAX_TRANSLATION_OUTPUT_TOKENS,
@@ -317,19 +385,21 @@ export async function translateFeedItem(
       );
 
       try {
-        ({ translatedTitle, translatedContent, usedRepair } = parseTranslationResponse(
-          response.text,
-          targetLang
-        ));
+        const parsedReply = parseTranslationResponse(response.text, targetLang, { mode });
+        translatedTitle = parsedReply.translatedTitle;
+        translatedContent = parsedReply.translatedContent;
+        usedRepair = parsedReply.usedRepair;
+        repairs = parsedReply.repairs;
         lastResponseRaw = response.raw;
         break;
       } catch (parseErr) {
         // The transport succeeded (HTTP 200) but the reply was rejected. Log the SHAPE of the
         // raw output — first/last 200 chars and total length only, never the full body — plus
         // the failure `reason` so the modes are distinguishable: invalid JSON, a
-        // schema-validation failure, wrong-language output, or a repetition loop.
+        // schema-validation failure, an empty translation, wrong-language output, or a loop.
         const text = response.text ?? "";
-        const reason = parseErr instanceof TranslationParseError ? parseErr.reason : "invalid_json";
+        const parseError = parseErr instanceof TranslationParseError ? parseErr : null;
+        const reason = parseError?.reason ?? "invalid_json";
         const willRetry = isRetriableParseFailure(reason) && tryIndex < maxTries - 1;
         console.warn("[rss-translation] unusable model response", {
           ...diag,
@@ -337,11 +407,11 @@ export async function translateFeedItem(
           of: maxTries,
           reason,
           willRetry,
-          ...(parseErr instanceof TranslationParseError && parseErr.repetition
+          ...(parseError?.repetition
             ? {
-                repetitionKind: parseErr.repetition.kind,
-                repetitionSample: parseErr.repetition.sample.slice(0, 40),
-                repetitionCount: parseErr.repetition.count,
+                repetitionKind: parseError.repetition.kind,
+                repetitionSample: parseError.repetition.sample.slice(0, 40),
+                repetitionCount: parseError.repetition.count,
               }
             : {}),
           elapsedMs: now().getTime() - tryStartedMs,
@@ -352,6 +422,15 @@ export async function translateFeedItem(
         });
         // Retries exhausted (or a reason regeneration cannot fix) — record the failure.
         if (!willRetry) throw parseErr;
+        // Name the defect in the next request. Without this the retry differs only in its
+        // sampling, and a model that answered in prose (or in Macedonian) has been given no
+        // reason to answer differently.
+        if (parseError) {
+          currentUserPrompt = buildTranslationRetryPrompt(userPrompt, {
+            reason: parseError.reason,
+            feedback: parseError.feedback,
+          });
+        }
       }
     }
 
@@ -386,14 +465,21 @@ export async function translateFeedItem(
       // When true, structured output was NOT clean and the defensive repair salvaged the
       // reply — a signal that Ollama's `format` may not be honoured for this model/worker.
       usedRepair,
-      completionTokenEstimate: estimateTokenCount(translatedContent + (translatedTitle ?? "")),
+      // Exactly WHICH salvage was needed (a <think> block, a fence, a missing brace, a
+      // string closed after a truncation) — the actionable half of usedRepair.
+      ...(repairs.length > 0 ? { repairs } : {}),
+      // Null on a title-only translation: the article had no body, so neither has this.
+      translatedContentLength: translatedContent?.length ?? null,
+      completionTokenEstimate: estimateTokenCount(
+        (translatedContent ?? "") + (translatedTitle ?? "")
+      ),
       // Ollama's own generation metrics when the worker forwards them: total/eval/prompt-eval
       // durations (ms) plus exact token counts and the stop reason. done_reason="length" means
       // the num_predict ceiling was hit (the runaway case we now bound); "stop" is a clean end.
       ...ollamaMetrics(lastResponseRaw),
     });
 
-    return { status: "translated", provider: resolved.provider, model: resolved.model };
+    return { status: "translated", provider: resolved.provider, model: resolved.model, mode };
   } catch (err) {
     const error = err instanceof Error ? err.message : "Unknown translation error.";
     const nextRetryAt = computeTranslationBackoff(attempt, now());
@@ -407,6 +493,9 @@ export async function translateFeedItem(
       // Distinguishes "ran out of time" from "the model kept returning unusable output" —
       // the two need different operator responses (worker capacity vs. model/prompt quality).
       timedOut: err instanceof TranslationTimeoutError,
+      // The final rejection reason when the model's output was the problem, so a run's
+      // failures can be counted by cause without re-reading every warning above them.
+      failureReason: err instanceof TranslationParseError ? err.reason : "transport",
       error,
     });
 

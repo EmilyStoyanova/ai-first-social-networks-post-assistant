@@ -75,6 +75,7 @@ export interface TranslationCronDeps {
   translate?: (opts: {
     companyId: string;
     shouldStop?: () => boolean;
+    remainingMs?: () => number;
   }) => Promise<TranslateFeedItemsSummary>;
   /** How many feed items still await translation (drives the `remaining` diagnostic). */
   countRemaining?: () => Promise<number>;
@@ -200,6 +201,9 @@ export async function runTranslationCron(
   const overBudget = () => now().getTime() >= deadlineMs;
   // Passed into each company's item loop so it, too, stops at the deadline.
   const shouldStop = () => now().getTime() >= deadlineMs;
+  // And how much of the budget is left, so a single article's own timeout is squeezed to fit
+  // inside the run rather than being allowed to overrun it — see TranslateFeedItemsOptions.
+  const remainingMs = () => deadlineMs - now().getTime();
 
   // Real-clock timing, deliberately separate from the injectable `now()` used for the
   // deadline — accurate in production, and it never perturbs deterministic budget tests.
@@ -249,7 +253,9 @@ export async function runTranslationCron(
 
       summary.companiesExamined++;
       try {
-        const t = await timed("translationMs", () => translate({ companyId, shouldStop }));
+        const t = await timed("translationMs", () =>
+          translate({ companyId, shouldStop, remainingMs })
+        );
         summary.companiesProcessed++;
         summary.translated += t.translated;
         summary.failed += t.failed;

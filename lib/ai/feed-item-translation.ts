@@ -108,24 +108,67 @@ export interface TranslatableFeedItem {
  *
  * A completed translation with a null translatedTitle is legitimate (the article
  * had no title), so the title alone never disqualifies the translation.
+ *
+ * The title-only case is the mirror image and is why the second branch exists: an
+ * item whose article body could not be extracted is translated as a TITLE ONLY
+ * (see {@link classifyTranslationInput}), so it completes with a translated title
+ * and no translated body. Falling through to the original there would throw the
+ * one piece of translated text away; taking the translation whole would replace
+ * the original body with an empty string. So the translated title is used and the
+ * body falls back to the original — which stays the factual source either way.
  */
 export function resolveFeedItemContent(item: TranslatableFeedItem): {
   title: string | null;
   content: string | null;
   usedTranslation: boolean;
 } {
-  if (
-    item.translationStatus === "completed" &&
-    item.translatedContent !== null &&
-    item.translatedContent !== undefined
-  ) {
-    return {
-      title: item.translatedTitle ?? null,
-      content: item.translatedContent,
-      usedTranslation: true,
-    };
+  if (item.translationStatus === "completed") {
+    const translatedContent = item.translatedContent;
+    if (translatedContent !== null && translatedContent !== undefined && translatedContent !== "") {
+      return {
+        title: item.translatedTitle ?? null,
+        content: translatedContent,
+        usedTranslation: true,
+      };
+    }
+    // Title-only translation: keep the translated title, keep the original body.
+    if (item.translatedTitle !== null && item.translatedTitle !== undefined) {
+      return { title: item.translatedTitle, content: item.content, usedTranslation: true };
+    }
   }
   return { title: item.title, content: item.content, usedTranslation: false };
+}
+
+// ─── Source-text classification ───────────────────────────────────────────────
+
+/**
+ * What a stored feed item's text can actually support:
+ *
+ *   • full       — there is an article body to translate;
+ *   • title_only — the body is missing or blank, but the item has a title;
+ *   • empty      — neither, so there is nothing to translate at all.
+ *
+ * This exists because RSS ingestion legitimately produces bodyless items: article
+ * extraction returns null for a paywall stub, a non-HTML page, a fetch failure, or
+ * a feed entry with no summary, and the row is still stored (its title and URL are
+ * real). Sending such an item to a translator asked for `{title, content}` is a
+ * request the model cannot satisfy honestly — it either returns an empty `content`
+ * (rejected, retried, rejected again) or invents an article. Both were observed in
+ * production; classifying the input up front is what removes the question.
+ */
+export type TranslationInputKind = "full" | "title_only" | "empty";
+
+function isBlank(text: string | null | undefined): boolean {
+  return text === null || text === undefined || text.trim() === "";
+}
+
+export function classifyTranslationInput(
+  title: string | null,
+  content: string | null
+): TranslationInputKind {
+  if (!isBlank(content)) return "full";
+  if (!isBlank(title)) return "title_only";
+  return "empty";
 }
 
 // ─── Ingestion-time translation-work classification ─────────────────────────────
@@ -224,6 +267,19 @@ export const MAX_TRANSLATION_OUTPUT_TOKENS = 4096;
  */
 export const TRANSLATION_ATTEMPT_TIMEOUT_MS = 90_000;
 export const TRANSLATION_ITEM_TIMEOUT_MS = 210_000;
+
+/**
+ * Least time worth starting an item with.
+ *
+ * The per-item cap above is a bound on ONE article; it is not a bound on the RUN. The
+ * translation cron's own budget is 240s, so an item begun with 5s left could still run for
+ * 210s and push the run to ~450s — past the 300s route cap the budget exists to respect. The
+ * batch therefore squeezes each item's budget down to whatever the run has left (see
+ * translate-feed-items.service.ts) and stops entirely below this floor: less than ~20s cannot
+ * finish a real translation, so starting one only guarantees a timeout, a counted attempt and
+ * a backoff for an article that was never given a chance. It waits for the continuation job.
+ */
+export const MIN_TRANSLATION_ITEM_BUDGET_MS = 20_000;
 
 /**
  * Rough token estimate for DIAGNOSTICS ONLY (~4 chars/token). Cyrillic tokenises higher than
@@ -403,6 +459,26 @@ export const TRANSLATION_JSON_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/**
+ * The schema for a title-only translation — no `content` key at all.
+ *
+ * That absence is the whole point. Handing the {title, content} schema to an item
+ * with no article body CONSTRAINS the model to emit a `content` string, which it
+ * can only fill by inventing one or by leaving it empty; the reply is then either
+ * a fabrication or a rejection. Asking only for what exists removes both.
+ */
+export const TRANSLATION_TITLE_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    title: { type: "string" },
+  },
+  required: ["title"],
+  additionalProperties: false,
+} as const;
+
+/** Which reply contract a translation is working to — set by the input, not the caller. */
+export type TranslationReplyMode = "full" | "title_only";
+
 /** True when the target is Bulgarian in any of the forms the config/company can supply. */
 export function isBulgarianTarget(targetLang: string): boolean {
   const t = targetLang.trim().toLowerCase();
@@ -417,47 +493,242 @@ function languageName(code: string): string {
   return code;
 }
 
+// ─── Bulgarian-language assessment ────────────────────────────────────────────
+
 /**
  * Letters that exist in Serbian / Macedonian / Russian Cyrillic but NOT in the Bulgarian
- * alphabet. Their presence in a reply meant to be Bulgarian means the model drifted into a
- * neighbouring language. Bulgarian's own ъ, ь, ю, я are deliberately excluded — they are
- * native and must never trigger a false rejection.
+ * alphabet. Bulgarian's own ъ, ь, ю, я are deliberately excluded — they are native and must
+ * never count against a translation.
  */
-const NON_BULGARIAN_CYRILLIC = /[ђјљњћџѓѕќыэёЂЈЉЊЋЏЃЅЌЫЭЁ]/u;
+const NON_BULGARIAN_CYRILLIC = /[ђјљњћџѓѕќыэёЂЈЉЊЋЏЃЅЌЫЭЁ]/gu;
+const CYRILLIC_LETTER = /\p{Script=Cyrillic}/gu;
+const LATIN_LETTER = /\p{Script=Latin}/gu;
 
-/** The first non-Bulgarian Cyrillic letter in `text`, or null when the text is clean. */
-function firstNonBulgarianCyrillic(text: string): string | null {
-  const m = text.match(NON_BULGARIAN_CYRILLIC);
-  return m ? m[0] : null;
+/**
+ * Share of Cyrillic letters (of all letters) below which a reply is not a Bulgarian
+ * translation at all — in practice the model echoing the English source back. Deliberately
+ * permissive: a real Bulgarian article runs 85–95 % Cyrillic even when it is thick with
+ * Latin brand names and model numbers, so 40 % separates "translated" from "not translated"
+ * without ever arguing about a tech article's vocabulary.
+ */
+export const MIN_CYRILLIC_SHARE = 0.4;
+/** Below this many letters the script share is noise (a headline, a one-line body). */
+export const MIN_LETTERS_FOR_SCRIPT_CHECK = 40;
+/**
+ * Distinct WORDS carrying a foreign letter that mark the text as written in another language.
+ *
+ * The load-bearing metric, and distinct words rather than occurrences for a specific reason:
+ * a Bulgarian article about Skopje writes "Скопје" five times and that is ONE borrowed word,
+ * however often it appears, while a Macedonian article spreads its ј across "Компанијата",
+ * "објави", "бидејќи", "апликација", "земјата" — dozens of different words, because the letter
+ * belongs to the grammar rather than to a name. Counting occurrences cannot tell those apart;
+ * counting distinct words separates them cleanly at any article length.
+ */
+export const MAX_FOREIGN_BEARING_WORDS = 4;
+/**
+ * Share of Cyrillic letters that may be non-Bulgarian in a text too short for the word count
+ * to mean anything — a one-line reply in Serbian, where two words are already the whole text.
+ * Deliberately high (5 %): at this length only unmistakable density should decide.
+ */
+export const MAX_FOREIGN_CYRILLIC_RATIO = 0.05;
+/** A ratio computed from one or two letters is noise, so the density rule has a floor. */
+export const MIN_FOREIGN_CYRILLIC_OCCURRENCES = 3;
+/**
+ * Distinct foreign letters that condemn a text on their own, however short it is. One stray
+ * ј is a copied proper noun; ј AND љ AND њ together is the Macedonian alphabet, and no amount
+ * of Bulgarian context explains all three.
+ */
+export const MIN_DISTINCT_FOREIGN_CYRILLIC = 3;
+
+export interface BulgarianAssessment {
+  /** "bulgarian" | "foreign_cyrillic" (drifted language) | "not_cyrillic" (untranslated). */
+  verdict: "bulgarian" | "foreign_cyrillic" | "not_cyrillic";
+  cyrillicLetters: number;
+  latinLetters: number;
+  /** Occurrences of letters absent from the Bulgarian alphabet. */
+  foreignCyrillic: number;
+  /** Distinct words carrying at least one of them — see MAX_FOREIGN_BEARING_WORDS. */
+  foreignWords: number;
+  /** The distinct offending letters, lower-cased — the sample shown in logs. */
+  distinctForeign: string[];
+  /** foreignCyrillic / cyrillicLetters, rounded for logging. 0 when there is no Cyrillic. */
+  foreignRatio: number;
 }
+
+function countMatches(text: string, re: RegExp): number {
+  return (text.match(re) ?? []).length;
+}
+
+/** Distinct lower-cased words containing at least one non-Bulgarian Cyrillic letter. */
+function countForeignBearingWords(text: string): number {
+  const words = text.toLowerCase().split(/[^\p{L}]+/u);
+  const bearing = new Set<string>();
+  for (const word of words) {
+    if (word !== "" && NON_BULGARIAN_CYRILLIC.test(word)) bearing.add(word);
+    // A /g/ regex carries lastIndex between .test() calls; reset so each word is independent.
+    NON_BULGARIAN_CYRILLIC.lastIndex = 0;
+  }
+  return bearing.size;
+}
+
+/**
+ * Measures how Bulgarian a translation is, instead of asking whether it is perfect.
+ *
+ * The previous check rejected the whole reply on the FIRST non-Bulgarian Cyrillic letter,
+ * which in production meant a fully Bulgarian article was thrown away — and retried three
+ * times — because it carried one "ј" inside a copied Macedonian place name or one "ы" in a
+ * quoted Russian title. That is a proofreading nit being treated as a language failure.
+ *
+ * So two independent, measured signals replace it, and both have to clear a floor before
+ * they can reject anything:
+ *
+ *   • script    — a reply that is not predominantly Cyrillic was never translated at all
+ *                 (the model echoing the English source), which the old check could not see;
+ *   • alphabet  — how WIDELY foreign letters are spread through the vocabulary, which is what
+ *                 separates a language (the letters are in its grammar, so they appear in
+ *                 many different words) from a borrowing (one name, however often repeated).
+ *
+ * Three conditions condemn a text, each covering a length the others cannot: many distinct
+ * foreign-bearing words (a real article in another language), three distinct foreign letters
+ * (a whole neighbouring alphabet, however short the sample), and sheer density (a one-line
+ * reply, where there is no vocabulary to count). One stray letter satisfies none of them.
+ *
+ * Text is assessed as a whole (title and body together): a title is far too short to judge
+ * on its own, and judging it separately is how a two-word headline gets condemned.
+ */
+export function assessBulgarian(text: string): BulgarianAssessment {
+  const cyrillicLetters = countMatches(text, CYRILLIC_LETTER);
+  const latinLetters = countMatches(text, LATIN_LETTER);
+  const foreignMatches = text.match(NON_BULGARIAN_CYRILLIC) ?? [];
+  const foreignCyrillic = foreignMatches.length;
+  const distinctForeign = [...new Set(foreignMatches.map((c) => c.toLowerCase()))].sort();
+  const foreignWords = countForeignBearingWords(text);
+  const foreignRatio =
+    cyrillicLetters === 0 ? 0 : Math.round((foreignCyrillic / cyrillicLetters) * 10_000) / 10_000;
+
+  const totalLetters = cyrillicLetters + latinLetters;
+  const base = {
+    cyrillicLetters,
+    latinLetters,
+    foreignCyrillic,
+    foreignWords,
+    distinctForeign,
+    foreignRatio,
+  };
+
+  if (
+    totalLetters >= MIN_LETTERS_FOR_SCRIPT_CHECK &&
+    cyrillicLetters / totalLetters < MIN_CYRILLIC_SHARE
+  ) {
+    return { verdict: "not_cyrillic", ...base };
+  }
+
+  const drifted =
+    foreignWords >= MAX_FOREIGN_BEARING_WORDS ||
+    distinctForeign.length >= MIN_DISTINCT_FOREIGN_CYRILLIC ||
+    (foreignCyrillic >= MIN_FOREIGN_CYRILLIC_OCCURRENCES &&
+      foreignRatio > MAX_FOREIGN_CYRILLIC_RATIO);
+
+  return { verdict: drifted ? "foreign_cyrillic" : "bulgarian", ...base };
+}
+
+// ─── Prompts ──────────────────────────────────────────────────────────────────
+
+export interface TranslationPrompts {
+  systemPrompt: string;
+  userPrompt: string;
+  /** Derived from the input text — a bodyless item is never asked for a body. */
+  mode: TranslationReplyMode;
+  /** The Ollama `format` schema matching `mode`. */
+  schema: typeof TRANSLATION_JSON_SCHEMA | typeof TRANSLATION_TITLE_JSON_SCHEMA;
+}
+
+/** The JSON-discipline lines, shared by both modes so they cannot drift apart. */
+const JSON_DISCIPLINE = [
+  "Output nothing before or after the JSON — no reasoning, no <think> block, no commentary, no summaries, no code fences.",
+  "Make sure the JSON is complete and ends with its closing brace.",
+];
 
 export function buildTranslationPrompts(
   title: string | null,
   content: string | null,
   targetLang: string
-): { systemPrompt: string; userPrompt: string } {
-  const lines = [
-    `You are a professional translator. Translate the article title and body into ${languageName(targetLang)}.`,
-    "Preserve meaning exactly. Keep proper names, URLs, brand names, and facts unchanged.",
-  ];
+): TranslationPrompts {
+  const mode: TranslationReplyMode =
+    classifyTranslationInput(title, content) === "full" ? "full" : "title_only";
+  const language = languageName(targetLang);
+
+  const lines =
+    mode === "full"
+      ? [
+          `You are a professional translator. Translate the article title and body into ${language}.`,
+          "Preserve meaning exactly. Keep proper names, URLs, brand names, and facts unchanged.",
+        ]
+      : [
+          `You are a professional translator. Translate the article title into ${language}.`,
+          "Preserve meaning exactly. Keep proper names, URLs, brand names, and facts unchanged.",
+        ];
+
   if (isBulgarianTarget(targetLang)) {
     lines.push(
       "Translate ONLY into natural, fluent Bulgarian, written in Bulgarian Cyrillic.",
       "Do NOT use Serbian, Macedonian, Russian, or any mixed-language words, letters, or spelling."
     );
   }
-  lines.push(
-    'Respond with ONLY a single, complete JSON object of exactly this shape: {"title": "...", "content": "..."}',
-    "Output nothing before or after the JSON — no reasoning, no commentary, no summaries, no code fences.",
-    "Make sure the JSON is complete and ends with its closing brace.",
-    'If the article has no title, use an empty string "" for "title".'
-  );
+
+  if (mode === "full") {
+    lines.push(
+      'Respond with ONLY a single, complete JSON object of exactly this shape: {"title": "...", "content": "..."}',
+      ...JSON_DISCIPLINE,
+      'If the article has no title, use an empty string "" for "title".'
+    );
+  } else {
+    lines.push(
+      'Respond with ONLY a single, complete JSON object of exactly this shape: {"title": "..."}',
+      ...JSON_DISCIPLINE,
+      // Stated as a prohibition rather than left unsaid: an unqualified "translate this
+      // article" against a title alone is an invitation to write the article.
+      "The article body is not available. Translate the title and NOTHING else — do not write, summarise, expand, or invent an article body, and do not add any other key to the JSON."
+    );
+  }
+
   const systemPrompt = lines.join("\n");
-
   const cappedContent = capTranslationContent(content);
-  const userPrompt = [`Title: ${title ?? ""}`, `Content: ${cappedContent ?? ""}`].join("\n");
+  const userPrompt =
+    mode === "full"
+      ? [`Title: ${title ?? ""}`, `Content: ${cappedContent ?? ""}`].join("\n")
+      : `Title: ${title ?? ""}`;
 
-  return { systemPrompt, userPrompt };
+  return {
+    systemPrompt,
+    userPrompt,
+    mode,
+    schema: mode === "full" ? TRANSLATION_JSON_SCHEMA : TRANSLATION_TITLE_JSON_SCHEMA,
+  };
+}
+
+/**
+ * The prompt for a regeneration, carrying the ORIGINAL request plus what was wrong with the
+ * last reply.
+ *
+ * Varying the sampling (see {@link samplingForTry}) is what stops a retry being a rerun; this
+ * is what makes it a CORRECTION. A model told only "try again" reproduces the same class of
+ * mistake — it emitted prose because it thought prose was wanted, and it drifted into
+ * Macedonian because it did not notice. Naming the defect is the cheapest thing that changes
+ * either. Mirrors `buildExtractionRepairPrompt` in product-page-extraction.ts.
+ */
+export function buildTranslationRetryPrompt(
+  originalUserPrompt: string,
+  failure: { reason: TranslationParseFailure; feedback: string }
+): string {
+  return [
+    originalUserPrompt,
+    "",
+    "---",
+    "YOUR PREVIOUS ANSWER WAS REJECTED.",
+    failure.feedback,
+    "Answer again in full. Return ONLY the corrected JSON object — no apology, no explanation, no reasoning.",
+  ].join("\n");
 }
 
 /**
@@ -465,61 +736,122 @@ export function buildTranslationPrompts(
  * modes are distinguishable at a glance:
  *   • invalid_json      — not parseable as JSON even after the fallback repair;
  *   • schema_validation — valid JSON but the wrong shape (missing/!string title|content);
+ *   • empty_translation — the right shape, but the model returned no text to store;
  *   • wrong_language    — right shape, but the text is not Bulgarian (drifted language);
  *   • repetition        — right shape and language, but the body is a decoding loop.
  */
 export type TranslationParseFailure =
-  "invalid_json" | "schema_validation" | "wrong_language" | "repetition";
+  "invalid_json" | "schema_validation" | "empty_translation" | "wrong_language" | "repetition";
+
+/** The correction sent back to the model, per failure reason. */
+const DEFAULT_FEEDBACK: Record<TranslationParseFailure, string> = {
+  invalid_json:
+    "Your reply was not a single valid JSON object. Answer with ONE complete JSON object and nothing else: no reasoning, no <think> block, no markdown fences, no text before or after it. Every string must be closed with a quote and the object must end with }.",
+  schema_validation:
+    "Your JSON did not have the required shape. Return exactly the keys described above, each holding a plain string, and nothing else.",
+  empty_translation:
+    "You returned an empty translation. Translate the text you were given and put the result in the JSON — do not return an empty string.",
+  wrong_language:
+    "Your translation was not Bulgarian. Write it again in standard Bulgarian Cyrillic only, using the Bulgarian alphabet (а б в г д е ж з и й к л м н о п р с т у ф х ц ч ш щ ъ ь ю я). Do not use Russian, Macedonian or Serbian letters or spelling.",
+  repetition:
+    "Your translation broke down and repeated the same word or phrase over and over. Translate the text once, from the beginning, as normal continuous prose.",
+};
 
 export class TranslationParseError extends Error {
   readonly code = "TRANSLATION_PARSE_ERROR" as const;
   readonly reason: TranslationParseFailure;
+  /**
+   * What to tell the MODEL on the retry — distinct from `message`, which is for the
+   * operator and lands in `translationError`. See {@link buildTranslationRetryPrompt}.
+   */
+  readonly feedback: string;
   /** Present only for `repetition`: the looping unit and its repeat count, for logging. */
   readonly repetition?: RepetitionFinding;
   constructor(
     message: string,
     reason: TranslationParseFailure = "invalid_json",
-    repetition?: RepetitionFinding
+    options: { feedback?: string; repetition?: RepetitionFinding } = {}
   ) {
     super(message);
     this.name = "TranslationParseError";
     this.reason = reason;
-    this.repetition = repetition;
+    this.feedback = options.feedback ?? DEFAULT_FEEDBACK[reason];
+    this.repetition = options.repetition;
   }
 }
 
 /**
  * Whether regenerating is worth a retry slot. Every parse failure here is a MODEL-output
- * defect — a different sample of the same prompt can come out clean — so all of them are
- * retriable, which is the point of {@link samplingForTry} varying the sampling per try.
- * Kept as an explicit predicate (rather than "always true") so a future non-retriable
- * reason has one obvious place to be excluded.
+ * defect — a different sample of the same prompt, with the defect named back to it, can come
+ * out clean — so all of them are retriable. Kept as an explicit predicate (rather than
+ * "always true") so a future non-retriable reason has one obvious place to be excluded.
+ *
+ * Note what is NOT on this list, because that is the point: a source article with no body is
+ * not a parse failure at all. It never reaches the model (see
+ * {@link classifyTranslationInput}), so it can never spend a retry on a defect no sample can
+ * fix.
  */
 export function isRetriableParseFailure(reason: TranslationParseFailure): boolean {
   return (
     reason === "invalid_json" ||
     reason === "schema_validation" ||
+    reason === "empty_translation" ||
     reason === "wrong_language" ||
     reason === "repetition"
   );
 }
 
+// ─── JSON salvage ─────────────────────────────────────────────────────────────
+
 /**
- * Repairs the ONE truncation the self-hosted model actually produces: a complete
- * object whose trailing "}" it forgot to emit before stopping (observed live —
- * qwen3:8b returns HTTP 200 with `{"title":"…","content":"…"` and no closing brace).
- * Both string values are fully terminated; only structural close braces are missing.
- *
- * The scan tracks JSON string state so braces inside translated text are ignored, and
- * it repairs ONLY when generation stopped cleanly OUTSIDE any string with unclosed
- * objects. A cut mid-string (an unterminated value) is left exactly as-is so JSON.parse
- * still rejects it — this salvages a whole object, never a partial string value.
+ * What had to be done to a reply before it could be parsed. Reported so an operator can see
+ * whether structured output is being honoured at all, and which defect is recurring.
  */
-function completeTruncatedJson(candidate: string): string {
+export type JsonRepair =
+  | "stripped_reasoning"
+  | "stripped_fence"
+  | "trimmed_prose"
+  | "escaped_control_chars"
+  | "closed_string"
+  | "closed_object";
+
+/**
+ * Salvaged content shorter than this is not a translation, it is a fragment.
+ *
+ * The gate applies only to a reply cut off mid-string. Closing an unterminated string always
+ * "works" — it just may produce two words — so length is what separates a translation the
+ * model had all but finished from one it barely started. Rejecting the fragment sends the
+ * item back for a regeneration, which is the right answer; rejecting the near-complete one
+ * would spend an attempt re-doing work that is already usable.
+ */
+export const MIN_REPAIRED_CONTENT_CHARS = 200;
+
+/**
+ * Removes a reasoning model's `<think>` block. qwen3 emits one before its answer even when
+ * told not to; an unclosed block means the reasoning ran to the generation limit and the
+ * answer never came, so everything from the opening tag is dropped and the reply is then
+ * (correctly) found to hold no JSON. Mirrors `findJsonObject` in product-page-extraction.ts.
+ */
+function stripReasoning(raw: string): string {
+  return raw.replace(/<think>[\s\S]*?<\/think>/gi, " ").replace(/<think>[\s\S]*$/i, " ");
+}
+
+/** The content of a ``` fence, or null when the reply is not fenced. */
+function unfence(raw: string): string | null {
+  const closed = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (closed) return closed[1];
+  // A fence opened and never closed — the same truncation, one level out.
+  const open = raw.match(/```(?:json)?\s*([\s\S]*)$/i);
+  return open ? open[1] : null;
+}
+
+/** The first COMPLETE, balanced JSON object in `text` at or after `start`, or null. */
+function firstBalancedObject(text: string, start: number): string | null {
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (const ch of candidate) {
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
     if (inString) {
       if (escaped) escaped = false;
       else if (ch === "\\") escaped = true;
@@ -528,71 +860,183 @@ function completeTruncatedJson(candidate: string): string {
     }
     if (ch === '"') inString = true;
     else if (ch === "{") depth += 1;
-    else if (ch === "}") depth -= 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
   }
-  // Only a clean truncation (not inside a string, with objects still open) is repairable.
-  if (!inString && depth > 0) return candidate + "}".repeat(depth);
-  return candidate;
+  return null;
 }
 
 /**
- * Isolates the JSON object from a model reply. Tolerates ``` fences and leading/trailing
- * prose (the model is told not to add them, but occasionally does), and repairs a reply
- * truncated just before its closing brace. It never loosens validation: the result is
- * still handed to JSON.parse and the strict field checks below, so anything that is not a
- * well-formed object — genuinely brace-less prose, or a value cut off mid-string — is rejected.
+ * Repairs an object the model stopped emitting part-way through.
+ *
+ * Three defects, all observed on the self-hosted worker, all of them the model running out
+ * of output budget rather than misunderstanding the contract:
+ *
+ *   • a raw newline/tab inside a string value — legal prose, illegal JSON;
+ *   • a value cut off mid-string, so the string never closes;
+ *   • one or more closing braces missing at the very end.
+ *
+ * Everything else is left to fail. In particular a cut that lands between a comma and the
+ * next key produces `{"a":"b",}`, which is repaired to nothing and still rejected — there is
+ * no half-written value to keep there, so "repairing" it would only invent structure.
  */
-function extractJson(raw: string): string {
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const body = (fenced ? fenced[1] : raw).trim();
+function repairTruncatedJson(candidate: string): { text: string; repairs: JsonRepair[] } {
+  const repairs: JsonRepair[] = [];
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  let depth = 0;
+  let escapedControl = false;
+
+  for (const ch of candidate) {
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        out += ch;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        out += ch;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        out += ch;
+        continue;
+      }
+      const code = ch.codePointAt(0) ?? 0;
+      if (code < 0x20) {
+        escapedControl = true;
+        out += ch === "\n" ? "\\n" : ch === "\r" ? "\\r" : ch === "\t" ? "\\t" : " ";
+        continue;
+      }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") depth -= 1;
+    out += ch;
+  }
+
+  if (escapedControl) repairs.push("escaped_control_chars");
+
+  if (inString) {
+    // A dangling backslash would become an invalid escape once the quote is added.
+    if (escaped) out = out.slice(0, -1);
+    // Drop the final, almost certainly half-written word and mark the cut with the same
+    // marker capTranslationContent uses, so a shortened translation reads as an excerpt.
+    out = `${out.replace(/\s+\S*$/u, "")} […]"`;
+    repairs.push("closed_string");
+  }
+  if (depth > 0) {
+    out += "}".repeat(depth);
+    repairs.push("closed_object");
+  }
+  return { text: out, repairs };
+}
+
+/**
+ * Isolates a parseable JSON object from a model reply.
+ *
+ * Tolerant about packaging, strict about substance. `<think>` blocks, ``` fences and prose
+ * around the object are all stripped, and a truncated object is repaired — none of which
+ * loosens validation, because the result is still handed to JSON.parse and to the field
+ * checks below. A reply with no object at all is prose, and prose is rejected.
+ */
+function extractJson(raw: string): { text: string; repairs: JsonRepair[] } {
+  const repairs: JsonRepair[] = [];
+
+  const withoutReasoning = stripReasoning(raw);
+  if (withoutReasoning !== raw) repairs.push("stripped_reasoning");
+
+  const fenced = unfence(withoutReasoning);
+  if (fenced !== null) repairs.push("stripped_fence");
+  const body = (fenced ?? withoutReasoning).trim();
+
   const start = body.indexOf("{");
   if (start === -1) {
     throw new TranslationParseError("Translation response contained no JSON object.");
   }
-  // A closing brace after the opening one → complete object; slice it out, dropping any
-  // trailing prose. No closing brace → a truncated reply; take everything from the opening
-  // brace and let completeTruncatedJson add the missing close (or leave a bad cut to fail).
-  const end = body.lastIndexOf("}");
-  const candidate = end > start ? body.slice(start, end + 1) : body.slice(start);
-  return completeTruncatedJson(candidate);
+
+  // A complete object wins outright, and taking the FIRST balanced one (rather than slicing
+  // to the last "}" anywhere in the reply) is what keeps trailing commentary — which may
+  // itself contain braces — out of the candidate.
+  // A complete object still goes through the repair pass: its braces balance, but a raw
+  // newline the model left inside a string value is legal prose and illegal JSON, and that
+  // is a whole-item failure for a reply that is otherwise perfect. The pass is a no-op on
+  // clean JSON, so nothing else changes.
+  const balanced = firstBalancedObject(body, start);
+  const candidate = balanced ?? body.slice(start);
+  if (balanced !== null && balanced.length !== body.length) repairs.push("trimmed_prose");
+
+  const repaired = repairTruncatedJson(candidate);
+  return { text: repaired.text, repairs: [...repairs, ...repaired.repairs] };
+}
+
+// ─── Reply validation ─────────────────────────────────────────────────────────
+
+export interface ParseTranslationOptions {
+  /** "full" expects a translated body; "title_only" must never store one. */
+  mode?: TranslationReplyMode;
+}
+
+export interface ParsedTranslation {
+  translatedTitle: string | null;
+  /** Null in title-only mode — the article had no body, so the translation has none. */
+  translatedContent: string | null;
+  /** True when the primary JSON.parse failed and the defensive salvage rescued the reply. */
+  usedRepair: boolean;
+  /** Exactly which repairs the salvage applied; empty on the clean path. */
+  repairs: JsonRepair[];
+  /** Present for Bulgarian targets — the measured basis of the language verdict. */
+  language?: BulgarianAssessment;
 }
 
 /**
- * Parses and validates the model's reply against {@link TRANSLATION_JSON_SCHEMA}.
+ * Parses and validates the model's reply against the schema for its {@link TranslationReplyMode}.
  *
- * Primary path: with Ollama structured output the reply is already a clean JSON object, so
- * we `JSON.parse` it directly. Fallback path: only if that throws do we run the defensive
- * repair ({@link extractJson}: fences, surrounding prose, a missing closing brace) — the
- * repair is a salvage net, never the first mechanism. `usedRepair` reports which path won,
- * so operators can tell whether structured output is actually being honoured.
+ * Primary path: with Ollama structured output the reply is already a clean JSON object, so we
+ * `JSON.parse` it directly. Fallback path: only if that throws do we run {@link extractJson} —
+ * a salvage net, never the first mechanism. `usedRepair`/`repairs` report which path won and
+ * what it cost, so operators can tell whether structured output is being honoured.
  *
- * After parsing, the object is schema-validated (title + content present and correctly
- * typed), language-checked for Bulgarian targets, and finally screened for decoding loops
- * ({@link detectRepetition}) — a loop is valid JSON in the right language, so it has to be
- * caught here or it ships. Every rejection throws a {@link TranslationParseError} carrying a
- * `reason`; the caller regenerates while retries remain, then records a failure with backoff.
+ * After parsing, the object is schema-validated, language-checked for Bulgarian targets
+ * ({@link assessBulgarian}), and finally screened for decoding loops ({@link detectRepetition})
+ * — a loop is valid JSON in the right language, so it has to be caught here or it ships. Every
+ * rejection throws a {@link TranslationParseError} carrying a `reason` and the `feedback` the
+ * retry sends back to the model; the caller regenerates while retries remain, then records a
+ * failure with backoff.
  */
 export function parseTranslationResponse(
   raw: string,
-  targetLang?: string
-): {
-  translatedTitle: string | null;
-  translatedContent: string;
-  /** True when the primary JSON.parse failed and the defensive repair salvaged the reply. */
-  usedRepair: boolean;
-} {
+  targetLang?: string,
+  options: ParseTranslationOptions = {}
+): ParsedTranslation {
+  const mode: TranslationReplyMode = options.mode ?? "full";
+
   let parsed: unknown;
   let usedRepair = false;
+  let repairs: JsonRepair[] = [];
   try {
     // Primary: structured output should be a clean, complete JSON object.
     parsed = JSON.parse(raw.trim());
   } catch {
-    // Fallback: strip fences/prose and repair a missing closing brace, then re-parse.
     usedRepair = true;
+    let salvaged: { text: string; repairs: JsonRepair[] };
     try {
-      parsed = JSON.parse(extractJson(raw));
+      salvaged = extractJson(raw);
     } catch (err) {
       if (err instanceof TranslationParseError) throw err;
+      throw new TranslationParseError("Translation response was not valid JSON.", "invalid_json");
+    }
+    repairs = salvaged.repairs;
+    try {
+      parsed = JSON.parse(salvaged.text);
+    } catch {
       throw new TranslationParseError("Translation response was not valid JSON.", "invalid_json");
     }
   }
@@ -606,16 +1050,6 @@ export function parseTranslationResponse(
 
   const record = parsed as Record<string, unknown>;
 
-  if (
-    !("content" in record) ||
-    typeof record.content !== "string" ||
-    record.content.trim() === ""
-  ) {
-    throw new TranslationParseError(
-      'Translation response is missing a non-empty "content".',
-      "schema_validation"
-    );
-  }
   if (!("title" in record)) {
     throw new TranslationParseError(
       'Translation response is missing "title".',
@@ -629,21 +1063,58 @@ export function parseTranslationResponse(
       "schema_validation"
     );
   }
-  const content = record.content;
+  const normalisedTitle = typeof title === "string" && title.trim() !== "" ? title : null;
 
-  // Wrong-language guard (Bulgarian targets only): reject text that carries letters exclusive
-  // to Serbian/Macedonian/Russian, so a mislanguaged translation fails rather than shipping.
-  if (targetLang && isBulgarianTarget(targetLang)) {
-    const offending =
-      firstNonBulgarianCyrillic(content) ??
-      firstNonBulgarianCyrillic(typeof title === "string" ? title : "");
-    if (offending) {
+  // Title-only: the model was never given a body, so whatever it may have put in a `content`
+  // key is invented and is dropped here rather than stored.
+  if (mode === "title_only") {
+    if (normalisedTitle === null) {
       throw new TranslationParseError(
-        `Translation is not Bulgarian — contains "${offending}" (Serbian/Macedonian/Russian).`,
-        "wrong_language"
+        'Translation response is missing a non-empty "title".',
+        "empty_translation"
       );
     }
+    if (repairs.includes("closed_string")) {
+      // A title is a line long; one cut mid-way is a fragment, never an excerpt worth keeping.
+      throw new TranslationParseError(
+        "Translation response was cut off inside the title.",
+        "invalid_json"
+      );
+    }
+    assertBulgarianEnough(normalisedTitle, targetLang);
+    return {
+      translatedTitle: normalisedTitle,
+      translatedContent: null,
+      usedRepair,
+      repairs,
+      ...languageOf(normalisedTitle, targetLang),
+    };
   }
+
+  if (!("content" in record) || typeof record.content !== "string") {
+    throw new TranslationParseError(
+      'Translation response is missing "content".',
+      "schema_validation"
+    );
+  }
+  const content = record.content;
+  if (content.trim() === "") {
+    throw new TranslationParseError(
+      'Translation response is missing a non-empty "content".',
+      "empty_translation"
+    );
+  }
+  if (repairs.includes("closed_string") && content.trim().length < MIN_REPAIRED_CONTENT_CHARS) {
+    // Salvage produced a fragment rather than a translation — reject it as the malformed
+    // reply it is, instead of storing two words as a completed translation.
+    throw new TranslationParseError(
+      `Translation response was cut off after ${content.trim().length} characters.`,
+      "invalid_json"
+    );
+  }
+
+  const languageText = `${normalisedTitle ?? ""}\n${content}`;
+  assertBulgarianEnough(languageText, targetLang);
 
   // Degeneration guard: a decoding loop is well-formed JSON in the right language, so it
   // passes every check above and would otherwise be stored as a completed translation.
@@ -652,10 +1123,39 @@ export function parseTranslationResponse(
     throw new TranslationParseError(
       `Translation degenerated into a ${loop.kind} loop ("${loop.sample}" ×${loop.count}).`,
       "repetition",
-      loop
+      { repetition: loop }
     );
   }
 
-  const normalisedTitle = typeof title === "string" && title.trim() !== "" ? title : null;
-  return { translatedTitle: normalisedTitle, translatedContent: content, usedRepair };
+  return {
+    translatedTitle: normalisedTitle,
+    translatedContent: content,
+    usedRepair,
+    repairs,
+    ...languageOf(languageText, targetLang),
+  };
+}
+
+/** The measured assessment, when the target is Bulgarian; nothing otherwise. */
+function languageOf(text: string, targetLang?: string): { language?: BulgarianAssessment } {
+  if (!targetLang || !isBulgarianTarget(targetLang)) return {};
+  return { language: assessBulgarian(text) };
+}
+
+/** Throws `wrong_language` when a Bulgarian target got something that is measurably not it. */
+function assertBulgarianEnough(text: string, targetLang?: string): void {
+  if (!targetLang || !isBulgarianTarget(targetLang)) return;
+  const a = assessBulgarian(text);
+  if (a.verdict === "bulgarian") return;
+
+  if (a.verdict === "not_cyrillic") {
+    throw new TranslationParseError(
+      `Translation is not Bulgarian — only ${a.cyrillicLetters} of ${a.cyrillicLetters + a.latinLetters} letters are Cyrillic (the source appears untranslated).`,
+      "wrong_language"
+    );
+  }
+  throw new TranslationParseError(
+    `Translation is not Bulgarian — ${a.foreignWords} distinct word(s) and ${a.foreignCyrillic} of ${a.cyrillicLetters} Cyrillic letters (${(a.foreignRatio * 100).toFixed(1)}%) carry Serbian/Macedonian/Russian letters: ${a.distinctForeign.join(", ")}.`,
+    "wrong_language"
+  );
 }

@@ -3,8 +3,14 @@ import assert from "node:assert/strict";
 import {
   MAX_TRANSLATION_ATTEMPTS,
   MAX_TRANSLATION_CONTENT_CHARS,
+  MIN_REPAIRED_CONTENT_CHARS,
+  MIN_TRANSLATION_ITEM_BUDGET_MS,
+  TRANSLATION_TITLE_JSON_SCHEMA,
+  assessBulgarian,
   buildTranslationPrompts,
+  buildTranslationRetryPrompt,
   capTranslationContent,
+  classifyTranslationInput,
   computeTranslationBackoff,
   computeTranslationHash,
   detectRepetition,
@@ -223,6 +229,33 @@ describe("resolveFeedItemContent", () => {
     assert.deepEqual(r, { ...ORIGINAL, usedTranslation: false });
   });
 
+  it("uses a title-only translation's title while keeping the original body", () => {
+    // A body-less article is translated as a title only, so there is no translated body to
+    // use — but the translated title is real and the original article stays the source.
+    const r = resolveFeedItemContent({
+      title: "Original title",
+      content: null,
+      translatedTitle: "Заглавие",
+      translatedContent: null,
+      translationStatus: "completed",
+    });
+    assert.deepEqual(r, { title: "Заглавие", content: null, usedTranslation: true });
+  });
+
+  it("never lets an empty translated body erase the original article", () => {
+    const r = resolveFeedItemContent({
+      ...ORIGINAL,
+      translatedTitle: "Заглавие",
+      translatedContent: "",
+      translationStatus: "completed",
+    });
+    assert.deepEqual(r, {
+      title: "Заглавие",
+      content: "Original content",
+      usedTranslation: true,
+    });
+  });
+
   it("keeps a completed translation whose source article had no title", () => {
     const r = resolveFeedItemContent({
       title: null,
@@ -244,6 +277,7 @@ describe("parseTranslationResponse", () => {
       translatedTitle: "Заглавие",
       translatedContent: "Съдържание",
       usedRepair: false,
+      repairs: [],
     });
   });
 
@@ -270,18 +304,20 @@ describe("parseTranslationResponse", () => {
       translatedTitle: "Заглавие",
       translatedContent: "Пълно съдържание на статията.",
       // The primary JSON.parse failed and the defensive repair salvaged it — the fallback
-      // still works, and it flags that it had to be used.
+      // still works, and it flags that it had to be used, and how.
       usedRepair: true,
+      repairs: ["closed_object"],
     });
   });
 
-  it("still rejects a reply cut off mid-string (an unterminated value is not salvaged)", () => {
-    // Distinct from the missing-brace case: the content value itself is truncated, so the
-    // string never closes. Repairing this would fabricate a partial translation — it must fail.
+  it("rejects a reply cut off mid-string when only a fragment survives", () => {
+    // The content value itself is truncated. Closing the string always "works", so length is
+    // what decides: two words are a fragment, not a translation, and storing them as a
+    // completed translation would be worse than regenerating.
     assert.throws(
       () =>
         parseTranslationResponse('{"title":"Заглавие","content":"Частичен превод, който бе отря'),
-      TranslationParseError
+      (err: unknown) => err instanceof TranslationParseError && err.reason === "invalid_json"
     );
   });
 
@@ -339,9 +375,16 @@ describe("parseTranslationResponse", () => {
   });
 
   it("rejects Serbian/Macedonian-looking output for a Bulgarian target", () => {
-    // Macedonian uses "ј" (and Serbian "ђ/ћ/џ"); none exist in the Bulgarian alphabet, so a
-    // reply carrying them is a language drift and must be rejected as wrong_language.
-    const macedonian = '{"title":"Наслов","content":"Ова е текст напишан на македонски јазик."}';
+    // Macedonian uses "ј" (and Serbian "ђ/ћ/џ"); none exist in the Bulgarian alphabet. A
+    // translation genuinely written in one of them carries them at percent-level density,
+    // which is what the guard measures.
+    const macedonian = JSON.stringify({
+      title: "Компанијата објави нова услуга",
+      content:
+        "Компанијата денес објави дека новата услуга ќе биде достапна за сите корисници. " +
+        "Јас мислам дека ова е добра вест за малите бизниси во земјата, бидејќи цената " +
+        "останува иста. Услугата ќе се користи преку мобилната апликација.",
+    });
     assert.throws(
       () => parseTranslationResponse(macedonian, "bg"),
       (e: unknown) => {
@@ -356,6 +399,47 @@ describe("parseTranslationResponse", () => {
       () => parseTranslationResponse(serbian, "bg"),
       (e: unknown) => e instanceof TranslationParseError && e.reason === "wrong_language"
     );
+  });
+
+  it("rejects an untranslated (Latin-script) reply for a Bulgarian target", () => {
+    // The old letter-based guard could not see this at all: an English reply carries no
+    // non-Bulgarian Cyrillic, so it passed as a "Bulgarian" translation.
+    const english = JSON.stringify({
+      title: "Company launches new service",
+      content:
+        "The company announced today that its new service will be available to all customers " +
+        "from next month, and that the price will remain unchanged for existing subscribers.",
+    });
+    assert.throws(
+      () => parseTranslationResponse(english, "bg"),
+      (e: unknown) => e instanceof TranslationParseError && e.reason === "wrong_language"
+    );
+  });
+
+  it("accepts Bulgarian carrying one isolated foreign Cyrillic letter", () => {
+    // The production failure this fixes: a fully Bulgarian article with a single copied "ј"
+    // in a place name was rejected outright, then regenerated twice, then failed.
+    const raw = JSON.stringify({
+      title: "Нова услуга за малкия бизнес",
+      content:
+        "Компанията обяви, че услугата ще бъде достъпна и в Скопје от следващия месец. " +
+        "Цената остава непроменена за съществуващите клиенти, а поддръжката се разширява.",
+    });
+    const r = parseTranslationResponse(raw, "bg");
+    assert.match(r.translatedContent!, /Скопје/, "the translation is kept exactly as returned");
+    assert.equal(r.language?.verdict, "bulgarian");
+    assert.equal(r.language?.foreignCyrillic, 1, "the letter is still counted, just not fatal");
+  });
+
+  it("accepts Bulgarian quoting a foreign name repeatedly, while the ratio stays low", () => {
+    const raw = JSON.stringify({
+      title: "Партньорство",
+      content:
+        "Компанията подписа договор с фирма от Скопје. Екипът в Скопје ще отговаря за " +
+        "поддръжката, а офисът в Скопје се разширява с още десет служители през есента. " +
+        "Инвестицията остава непроменена спрямо обявената в началото на годината сума.",
+    });
+    assert.equal(parseTranslationResponse(raw, "bg").language?.verdict, "bulgarian");
   });
 
   it("accepts clean Bulgarian (including native ъ/я/ю) for a Bulgarian target", () => {
@@ -612,10 +696,291 @@ describe("isRetriableParseFailure", () => {
     for (const reason of [
       "invalid_json",
       "schema_validation",
+      "empty_translation",
       "wrong_language",
       "repetition",
     ] as const) {
       assert.equal(isRetriableParseFailure(reason), true, reason);
     }
+  });
+});
+
+// ─── classifyTranslationInput ─────────────────────────────────────────────────
+
+describe("classifyTranslationInput", () => {
+  it("calls an item with an article body 'full'", () => {
+    assert.equal(classifyTranslationInput("Title", "Body"), "full");
+    assert.equal(classifyTranslationInput(null, "Body"), "full");
+  });
+
+  it("calls a body-less item with a title 'title_only'", () => {
+    assert.equal(classifyTranslationInput("Title", null), "title_only");
+    assert.equal(classifyTranslationInput("Title", ""), "title_only");
+    // Whitespace-only is empty: extraction returning "\n \t" is a failed extraction.
+    assert.equal(classifyTranslationInput("Title", "  \n\t "), "title_only");
+  });
+
+  it("calls an item with neither 'empty'", () => {
+    assert.equal(classifyTranslationInput(null, null), "empty");
+    assert.equal(classifyTranslationInput("", ""), "empty");
+    assert.equal(classifyTranslationInput("   ", "\n"), "empty");
+  });
+});
+
+// ─── Title-only translation ───────────────────────────────────────────────────
+
+describe("buildTranslationPrompts — title-only mode", () => {
+  it("asks for a title-only reply and forbids writing an article body", () => {
+    const p = buildTranslationPrompts("Company launches new service", null, "bg");
+
+    assert.equal(p.mode, "title_only");
+    assert.match(p.systemPrompt, /Translate the article title into Bulgarian/);
+    assert.match(p.systemPrompt, /\{"title": "\.\.\."\}/);
+    assert.match(p.systemPrompt, /do not write, summarise, expand, or invent an article body/i);
+    // The body key must not even be mentioned as something to fill.
+    assert.ok(!p.systemPrompt.includes('"content"'));
+    assert.equal(p.userPrompt, "Title: Company launches new service");
+    assert.ok(!p.userPrompt.includes("Content:"), "there is no body to send");
+  });
+
+  it("constrains structured output to a title-only schema", () => {
+    // The schema is the enforcement: a {title, content} schema would REQUIRE the model to
+    // emit a content string, which it can only do by inventing one.
+    assert.deepEqual(
+      buildTranslationPrompts("T", null, "bg").schema,
+      TRANSLATION_TITLE_JSON_SCHEMA
+    );
+    assert.deepEqual(TRANSLATION_TITLE_JSON_SCHEMA, {
+      type: "object",
+      properties: { title: { type: "string" } },
+      required: ["title"],
+      additionalProperties: false,
+    });
+  });
+
+  it("keeps the full contract whenever there IS a body", () => {
+    const p = buildTranslationPrompts("T", "C", "bg");
+    assert.equal(p.mode, "full");
+    assert.deepEqual(p.schema, TRANSLATION_JSON_SCHEMA);
+  });
+
+  it("keeps the Bulgarian guardrails in title-only mode", () => {
+    assert.match(buildTranslationPrompts("T", null, "bg").systemPrompt, /Bulgarian Cyrillic/);
+  });
+});
+
+describe("parseTranslationResponse — title-only mode", () => {
+  const opts = { mode: "title_only" } as const;
+
+  it("stores the translated title and NO content", () => {
+    const r = parseTranslationResponse('{"title":"Заглавие"}', "bg", opts);
+    assert.equal(r.translatedTitle, "Заглавие");
+    assert.equal(r.translatedContent, null, "a body-less article must not gain a body");
+  });
+
+  it("discards a body the model invented anyway", () => {
+    // The whole point: whatever it wrote there was not translated from anything.
+    const raw = '{"title":"Заглавие","content":"Съчинена статия, която никой не е писал."}';
+    assert.equal(parseTranslationResponse(raw, "bg", opts).translatedContent, null);
+  });
+
+  it("rejects a reply with no usable title", () => {
+    for (const raw of ['{"title":""}', '{"title":"   "}', '{"title":null}']) {
+      assert.throws(
+        () => parseTranslationResponse(raw, "bg", opts),
+        (e: unknown) => e instanceof TranslationParseError && e.reason === "empty_translation",
+        raw
+      );
+    }
+  });
+
+  it("still rejects a non-Bulgarian title", () => {
+    const raw = JSON.stringify({ title: "Ѓорѓи ја објави новата апликација за сите корисници" });
+    assert.throws(
+      () => parseTranslationResponse(raw, "bg", opts),
+      (e: unknown) => e instanceof TranslationParseError && e.reason === "wrong_language"
+    );
+  });
+
+  it("rejects a title cut off mid-string rather than storing the fragment", () => {
+    assert.throws(
+      () => parseTranslationResponse('{"title":"Компанията обяви нова', "bg", opts),
+      (e: unknown) => e instanceof TranslationParseError && e.reason === "invalid_json"
+    );
+  });
+});
+
+// ─── JSON salvage ─────────────────────────────────────────────────────────────
+
+describe("parseTranslationResponse — JSON salvage", () => {
+  it("strips a reasoning model's <think> block", () => {
+    const raw =
+      '<think>The user wants Bulgarian. Let me translate carefully.</think>\n{"title":"Заглавие","content":"Съдържание"}';
+    const r = parseTranslationResponse(raw);
+    assert.equal(r.translatedContent, "Съдържание");
+    assert.ok(r.repairs.includes("stripped_reasoning"));
+  });
+
+  it("rejects a reply that is nothing but an unclosed <think> block", () => {
+    // The reasoning ran to the generation limit and the answer never came. There is no
+    // translation in there to salvage.
+    assert.throws(
+      () => parseTranslationResponse("<think>Let me think about how to phrase this"),
+      (e: unknown) => e instanceof TranslationParseError && e.reason === "invalid_json"
+    );
+  });
+
+  it("takes the FIRST complete object, ignoring trailing commentary with braces in it", () => {
+    const raw =
+      '{"title":"Заглавие","content":"Съдържание"}\nNote: the shape was {title, content}.';
+    const r = parseTranslationResponse(raw);
+    assert.equal(r.translatedContent, "Съдържание");
+    assert.ok(r.repairs.includes("trimmed_prose"));
+  });
+
+  it("salvages an unclosed code fence", () => {
+    const raw = '```json\n{"title":"Заглавие","content":"Съдържание"}';
+    const r = parseTranslationResponse(raw);
+    assert.equal(r.translatedContent, "Съдържание");
+    assert.ok(r.repairs.includes("stripped_fence"));
+  });
+
+  it("escapes raw newlines the model left inside a string value", () => {
+    // Legal prose, illegal JSON — and a whole-item failure before this.
+    const raw = '{"title":"Заглавие","content":"Първи ред\nВтори ред"}';
+    const r = parseTranslationResponse(raw);
+    assert.equal(r.translatedContent, "Първи ред\nВтори ред");
+    assert.ok(r.repairs.includes("escaped_control_chars"));
+  });
+
+  it("salvages a long translation cut off mid-sentence, marking it as an excerpt", () => {
+    const body = "Компанията обяви новата услуга за малкия бизнес в страната. ".repeat(6);
+    const r = parseTranslationResponse(`{"title":"Заглавие","content":"${body}недовърш`, "bg");
+
+    assert.ok(r.repairs.includes("closed_string"));
+    assert.ok(r.repairs.includes("closed_object"));
+    assert.ok(r.translatedContent!.length > MIN_REPAIRED_CONTENT_CHARS);
+    assert.match(r.translatedContent!, /\[…\]$/, "the cut is marked, not hidden");
+    assert.ok(!r.translatedContent!.includes("недовърш"), "the half-written word is dropped");
+    assert.equal(r.usedRepair, true);
+  });
+
+  it("does not accept a corrupted reply as a translation", () => {
+    // Salvage never invents structure: a cut between a comma and the next key, prose with no
+    // object at all, and a fragment of a value all still fail.
+    for (const raw of [
+      '{"title":"x","content":"y",',
+      "I'm afraid I can't do that.",
+      '{"title":"x","con',
+    ]) {
+      assert.throws(() => parseTranslationResponse(raw), TranslationParseError, raw);
+    }
+  });
+});
+
+// ─── assessBulgarian ──────────────────────────────────────────────────────────
+
+describe("assessBulgarian", () => {
+  const BG =
+    "Компанията обяви нова услуга за малкия бизнес в България. Тя ще бъде достъпна от " +
+    "следващия месец във всички големи градове, а цената остава непроменена.";
+
+  it("passes clean Bulgarian, including its native ъ/ь/ю/я", () => {
+    assert.equal(assessBulgarian(`${BG} Ъгъл, ютия, ябълка, Пловдьв.`).verdict, "bulgarian");
+  });
+
+  it("passes Bulgarian carrying one borrowed word, however often it repeats", () => {
+    // One distinct foreign-bearing word is a name, not a language.
+    const a = assessBulgarian(`${BG} Офисът в Скопје, екипът в Скопје и складът в Скопје.`);
+    assert.equal(a.verdict, "bulgarian");
+    assert.equal(a.foreignWords, 1);
+    assert.equal(a.foreignCyrillic, 3, "the letters are counted — they are just not fatal");
+  });
+
+  it("catches a language by how WIDELY its letters are spread through the vocabulary", () => {
+    const macedonian =
+      "Компанијата денес објави дека новата услуга ќе биде достапна за сите корисници " +
+      "во земјата, бидејќи цената останува иста за постојните претплатници.";
+    const a = assessBulgarian(macedonian);
+    assert.equal(a.verdict, "foreign_cyrillic");
+    assert.ok(a.foreignWords >= 4, `expected many foreign-bearing words, got ${a.foreignWords}`);
+  });
+
+  it("catches Russian, whose ы and э are spread the same way", () => {
+    const russian =
+      "Компания объявила, что новые тарифы вступят в силу с первого числа. Мы считаем, " +
+      "что эти изменения были необходимы, а старые условия сохранятся для клиентов.";
+    assert.equal(assessBulgarian(russian).verdict, "foreign_cyrillic");
+  });
+
+  it("catches a short reply by density, where there is no vocabulary to count", () => {
+    assert.equal(assessBulgarian("Ђорђе је отишао кући.").verdict, "foreign_cyrillic");
+  });
+
+  it("catches a whole foreign alphabet however short the sample", () => {
+    // Three DIFFERENT foreign letters is not a borrowing under any reading.
+    assert.equal(assessBulgarian("Њега љуби џак").verdict, "foreign_cyrillic");
+  });
+
+  it("catches an untranslated Latin-script reply", () => {
+    const a = assessBulgarian(
+      "The company announced today that the new service will be available next month."
+    );
+    assert.equal(a.verdict, "not_cyrillic");
+    assert.equal(a.cyrillicLetters, 0);
+  });
+
+  it("does not call a short Bulgarian headline untranslated", () => {
+    // Below MIN_LETTERS_FOR_SCRIPT_CHECK the script share is noise — a title naming an
+    // English product is still a Bulgarian title.
+    assert.equal(assessBulgarian("Нов RTX 5090 GPU").verdict, "bulgarian");
+  });
+
+  it("does not condemn Bulgarian that is thick with Latin brand names", () => {
+    const techy =
+      "NVIDIA GeForce RTX 5090 Founders Edition вече се предлага в България на цена, " +
+      "която производителят обяви миналата седмица за пазара в Европа.";
+    assert.equal(assessBulgarian(techy).verdict, "bulgarian");
+  });
+});
+
+// ─── Retry feedback ───────────────────────────────────────────────────────────
+
+describe("buildTranslationRetryPrompt", () => {
+  it("repeats the original request and names the defect", () => {
+    const prompt = buildTranslationRetryPrompt("Title: T\nContent: C", {
+      reason: "wrong_language",
+      feedback: "Your translation was not Bulgarian.",
+    });
+
+    // The evidence must travel with the correction — a model asked to fix an answer it can
+    // no longer see edits from memory.
+    assert.match(prompt, /Title: T\nContent: C/);
+    assert.match(prompt, /YOUR PREVIOUS ANSWER WAS REJECTED/);
+    assert.match(prompt, /was not Bulgarian/);
+  });
+
+  it("gives every failure reason its own specific correction", () => {
+    const feedback = (
+      [
+        "invalid_json",
+        "schema_validation",
+        "empty_translation",
+        "wrong_language",
+        "repetition",
+      ] as const
+    ).map((reason) => new TranslationParseError("x", reason).feedback);
+
+    assert.equal(new Set(feedback).size, feedback.length, "a generic retry teaches nothing");
+    assert.match(feedback[0], /JSON/i);
+    assert.match(feedback[3], /Bulgarian/i);
+    assert.match(feedback[4], /repeated/i);
+  });
+});
+
+describe("MIN_TRANSLATION_ITEM_BUDGET_MS", () => {
+  it("is a real floor, well under one item's own cap", () => {
+    assert.ok(MIN_TRANSLATION_ITEM_BUDGET_MS > 0);
+    assert.ok(MIN_TRANSLATION_ITEM_BUDGET_MS < TRANSLATION_ITEM_TIMEOUT_MS);
   });
 });
