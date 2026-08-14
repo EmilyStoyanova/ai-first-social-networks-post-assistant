@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   deletePostCore,
   isPostExclusiveAsset,
+  DELETABLE_POST_STATUSES,
   type DeletableMediaAsset,
   type DeletePostDeps,
 } from "./delete-post.service";
@@ -55,7 +56,12 @@ interface FakeDb {
   metrics: Array<{ postId: string }>;
   snapshots: Array<{ postId: string }>;
   assets: DeletableMediaAsset[];
-  auditLogs: Array<{ postId: string; deletedMediaAssetIds: string[]; orphaned: string[] }>;
+  auditLogs: Array<{
+    postId: string;
+    status: string;
+    deletedMediaAssetIds: string[];
+    orphaned: string[];
+  }>;
   cloudinary: Set<string>;
 }
 
@@ -204,6 +210,7 @@ function makeDeps(db: FakeDb, options: DepsOptions = {}): DeletePostDeps {
     async audit(input) {
       db.auditLogs.push({
         postId: input.postId,
+        status: input.status,
         deletedMediaAssetIds: input.deletedMediaAssetIds,
         orphaned: input.orphanedCloudinaryIds,
       });
@@ -559,13 +566,29 @@ describe("deleteDraft — Cloudinary failure is safe", () => {
 });
 
 describe("deleteDraft — status guard", () => {
-  for (const status of [
-    "pending_approval",
-    "approved",
-    "rejected",
-    "sent_to_buffer",
-    "published",
-  ]) {
+  // Everything upstream of publishing that was never acted on. A rejected post
+  // reaches that status only out of `pending_approval`, so like a draft it has
+  // no Buffer counterpart and nothing outside this database survives it.
+  for (const status of DELETABLE_POST_STATUSES) {
+    it(`deletes a ${status} post and its semantics`, async () => {
+      const db = makeDb();
+      db.posts[0].status = status;
+
+      const result = await deletePostCore(SLUG, POST_ID, USER_ID, false, makeDeps(db));
+
+      assert.equal(result.success, true);
+      assert.equal(
+        db.posts.find((p) => p.id === POST_ID),
+        undefined
+      );
+      assert.equal(
+        db.semantics.find((s) => s.postId === POST_ID),
+        undefined
+      );
+    });
+  }
+
+  for (const status of ["pending_approval", "approved", "sent_to_buffer", "published"]) {
     it(`refuses to delete a ${status} post`, async () => {
       const db = makeDb();
       db.posts[0].status = status;
@@ -581,12 +604,92 @@ describe("deleteDraft — status guard", () => {
     });
   }
 
-  it("refuses a non-draft even for a global admin", async () => {
+  it("refuses an undeletable status even for a global admin", async () => {
     const db = makeDb();
     db.posts[0].status = "published";
 
     const result = await deletePostCore(SLUG, POST_ID, USER_ID, true, makeDeps(db));
     assert.equal(result.success === false && result.code, "INVALID_STATUS");
+  });
+
+  it("records which status was deleted, since the row will not say", async () => {
+    const db = makeDb();
+    db.posts[0].status = "rejected";
+
+    await deletePostCore(SLUG, POST_ID, USER_ID, false, makeDeps(db));
+
+    assert.equal(db.auditLogs[0].status, "rejected");
+  });
+});
+
+describe("deleteDraft — a rejected post stops influencing generation", () => {
+  // The reason this matters more for a rejection than for a draft: a rejection
+  // is a verdict. Until the row is gone the generator keeps measuring new
+  // candidates against something the company explicitly refused to say, so the
+  // refused topic stays reserved forever.
+  it("drops out of the semantic gate", async () => {
+    const db = makeDb();
+    db.posts[0].status = "rejected";
+
+    const before = createSemanticGate(COMPANY_ID, CHANNEL, {
+      provider: providerReturning(vec(0)),
+      store: semanticStoreOver(db),
+    });
+    assert.equal((await before({ coreMessage: "x" })).matchedPostId, POST_ID);
+
+    await deletePostCore(SLUG, POST_ID, USER_ID, false, makeDeps(db));
+
+    const after = createSemanticGate(COMPANY_ID, CHANNEL, {
+      provider: providerReturning(vec(0)),
+      store: semanticStoreOver(db),
+    });
+    const result = await after({ coreMessage: "x" });
+    assert.equal(result.decision, "accept");
+    assert.notEqual(result.matchedPostId, POST_ID);
+  });
+
+  it("drops out of the Jaccard/recent-post window", async () => {
+    const db = makeDb();
+    db.posts[0].status = "rejected";
+    const candidate = "Our new roasting profile brings out the caramel notes in every cup.";
+
+    assert.equal(
+      checkDuplicatePost({ candidateText: candidate, recentPosts: recentPostsOver(db) }).flagged,
+      true
+    );
+
+    await deletePostCore(SLUG, POST_ID, USER_ID, false, makeDeps(db));
+
+    assert.equal(
+      checkDuplicatePost({ candidateText: candidate, recentPosts: recentPostsOver(db) }).flagged,
+      false
+    );
+  });
+
+  it("cleans the image generated for it, exactly as for a draft", async () => {
+    const db = makeDb({ assets: [AI_ASSET] });
+    db.posts[0].status = "rejected";
+    db.posts[0].mediaAssetId = AI_ASSET.id;
+
+    const result = await deletePostCore(SLUG, POST_ID, USER_ID, false, makeDeps(db));
+
+    assert.deepEqual(result.success && result.data.deletedMediaAssetIds, [AI_ASSET.id]);
+    assert.deepEqual(db.assets, []);
+    assert.equal(db.cloudinary.has(AI_ASSET.cloudinaryId), false);
+  });
+
+  it("still leaves shared media alone", async () => {
+    const db = makeDb({ assets: [ARTICLE_ASSET] });
+    db.posts[0].status = "rejected";
+    db.posts[0].mediaAssetId = ARTICLE_ASSET.id;
+
+    await deletePostCore(SLUG, POST_ID, USER_ID, false, makeDeps(db));
+
+    assert.deepEqual(
+      db.assets.map((a) => a.id),
+      [ARTICLE_ASSET.id]
+    );
+    assert.equal(db.cloudinary.has(ARTICLE_ASSET.cloudinaryId), true);
   });
 });
 

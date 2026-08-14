@@ -11,9 +11,10 @@ export const AUDIT_ACTIONS = {
   POST_REJECTED: "POST_REJECTED",
   POST_EDITED: "POST_EDITED",
   /**
-   * A draft was permanently deleted, together with everything that existed only
-   * because it did. The Post row is gone, so this log line — which survives, on
-   * the company — is the only remaining record that it ever existed.
+   * A draft or a rejected post was permanently deleted, together with everything
+   * that existed only because it did. The Post row is gone, so this log line —
+   * which survives, on the company — is the only remaining record that it ever
+   * existed. `metadata.status` says which of the two it was.
    */
   POST_DELETED: "POST_DELETED",
   POST_VERSION_RESTORED: "POST_VERSION_RESTORED",

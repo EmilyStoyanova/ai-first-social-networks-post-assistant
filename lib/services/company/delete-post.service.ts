@@ -3,11 +3,12 @@ import { AUDIT_ACTIONS, createAuditLog } from "@/lib/services/audit/audit-log.se
 import { deleteImageFromCloudinary } from "@/lib/integrations/cloudinary/delete-image";
 
 /**
- * Permanently deleting a DRAFT post.
+ * Permanently deleting a post that never left the building — a DRAFT or a
+ * REJECTED one.
  *
  * ── Why this is a hard delete, and why it is scoped so tightly ───────────────
  *
- * A draft that is deleted must stop existing for generation. Two mechanisms
+ * A post that is deleted must stop existing for generation. Two mechanisms
  * would otherwise keep repeating it back at the user:
  *
  *   • the Jaccard/recent-post check, which reads `Post` rows directly
@@ -21,8 +22,27 @@ import { deleteImageFromCloudinary } from "@/lib/integrations/cloudinary/delete-
  * declares: the cascade is a safety net in the database, this is the stated
  * intent in the code, and it is what the tests can hold onto.
  *
- * Only `draft` is deletable. Anything further along the workflow has been seen,
- * approved, or sent somewhere, and its history is the point.
+ * ── What may be deleted ─────────────────────────────────────────────────────
+ *
+ * `draft` and `rejected`, and nothing else.
+ *
+ * They are the same case despite looking like two. A post can only be rejected
+ * out of `pending_approval` (see post-approval.service), which is upstream of
+ * every publishing step — so neither status has ever been handed to Buffer, has
+ * a `bufferUpdateId`, or exists anywhere outside this database. Deleting one
+ * destroys nothing that happened; it removes something that was proposed and
+ * turned down.
+ *
+ * Rejected posts are in fact the ones that most need to go. A draft is usually
+ * deleted because the user changed their mind, but a rejection is a verdict —
+ * "we are not saying this" — and until the row is gone the generator keeps
+ * measuring new candidates against it as though it were the company's own voice,
+ * through both the Jaccard window and the semantic gate. A rejected post left in
+ * place quietly reserves its topic forever.
+ *
+ * `approved`, `sent_to_buffer` and `published` stay undeletable. Those have been
+ * acted on — the last two have a counterpart on a social network that deleting a
+ * row here would not touch — and their history is the point.
  *
  * ── Media ────────────────────────────────────────────────────────────────────
  *
@@ -39,8 +59,15 @@ import { deleteImageFromCloudinary } from "@/lib/integrations/cloudinary/delete-
  * reported back in `orphanedCloudinaryIds` rather than failing the delete.
  */
 
-/** The only status this service will delete. */
-export const DELETABLE_POST_STATUS = "draft";
+/**
+ * The statuses this service will delete — see the docblock. Lowercase, matching
+ * the `PostStatus` enum as Prisma returns it.
+ */
+export const DELETABLE_POST_STATUSES = ["draft", "rejected"] as const;
+
+export function isDeletableStatus(status: string): boolean {
+  return (DELETABLE_POST_STATUSES as readonly string[]).includes(status);
+}
 
 export interface DeletableMediaAsset {
   id: string;
@@ -97,6 +124,8 @@ export interface DeletePostDeps {
     companyId: string;
     userId: string;
     postId: string;
+    /** Which of the two deletable statuses this was — the row will not say. */
+    status: string;
     deletedMediaAssetIds: string[];
     orphanedCloudinaryIds: string[];
   }): Promise<void>;
@@ -160,7 +189,7 @@ export async function deletePostCore(
   // No membership → the company is not this user's to know about.
   if (!access) return { success: false, code: "NOT_FOUND" };
   if (!access.canDelete) {
-    return { success: false, code: "FORBIDDEN", message: "Only owners can delete drafts." };
+    return { success: false, code: "FORBIDDEN", message: "Only owners can delete posts." };
   }
 
   // Scoped by companyId, so another company's post id reads as NOT_FOUND rather
@@ -168,11 +197,11 @@ export async function deletePostCore(
   const post = await deps.loadPost(postId, access.companyId);
   if (!post) return { success: false, code: "NOT_FOUND" };
 
-  if (post.status !== DELETABLE_POST_STATUS) {
+  if (!isDeletableStatus(post.status)) {
     return {
       success: false,
       code: "INVALID_STATUS",
-      message: `Only draft posts can be deleted; this post is ${post.status}.`,
+      message: `Only draft and rejected posts can be deleted; this post is ${post.status}.`,
     };
   }
 
@@ -196,6 +225,7 @@ export async function deletePostCore(
     companyId: access.companyId,
     userId,
     postId: post.id,
+    status: post.status,
     deletedMediaAssetIds,
     orphanedCloudinaryIds,
   });
@@ -289,6 +319,7 @@ export const prismaDeletePostDeps: DeletePostDeps = {
       entityType: "post",
       entityId: input.postId,
       metadata: {
+        status: input.status,
         deletedMediaAssetIds: input.deletedMediaAssetIds,
         orphanedCloudinaryIds: input.orphanedCloudinaryIds,
       },

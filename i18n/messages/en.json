@@ -606,6 +606,7 @@
     "connectBufferToPublish": "Connect Buffer to publish",
     "awaitingScheduledTime": "Waiting for its scheduled time",
     "deleteDraft": "Delete this draft?",
+    "deleteRejected": "Delete this rejected post for good?",
     "autoApprovedInfo": "This post was automatically approved because the channel is using Fully Automated mode. You can edit it or publish it to Buffer immediately.",
     "viewActivity": "View activity",
     "publishPanel": {

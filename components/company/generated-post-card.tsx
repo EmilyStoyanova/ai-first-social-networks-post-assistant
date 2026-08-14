@@ -281,6 +281,9 @@ function GeneratedPostCardBody({
   const isRejected = localStatus === "REJECTED";
   const isSentToBuffer = localStatus === "SENT_TO_BUFFER";
   const isEditable = isDraft || isPendingApproval || isRejected;
+  // Mirrors DELETABLE_POST_STATUSES on the server, which is what actually
+  // enforces it — this only decides whether the button is worth offering.
+  const isDeletable = isDraft || isRejected;
 
   // ── Lazy URL resolution for old published posts ───────────────────────────
   const urlFetchedRef = useRef(false);
@@ -794,12 +797,18 @@ function GeneratedPostCardBody({
           </a>
         )}
 
-        {/* Delete — draft only, owner/admin */}
+        {/* Delete — draft or rejected, owner/admin. Both are posts that never
+            left the building, so nothing outside this database survives them.
+            The confirmation names which one, because deleting a rejected post is
+            the more consequential of the two: it is the only way to stop a
+            turned-down idea from reserving its topic against future generations. */}
         {canDelete &&
-          isDraft &&
+          isDeletable &&
           (confirmDelete ? (
             <>
-              <p className="text-fg-muted text-xs">{t("deleteDraft")}</p>
+              <p className="text-fg-muted text-xs">
+                {isRejected ? t("deleteRejected") : t("deleteDraft")}
+              </p>
               <Button variant="danger" size="sm" loading={deleting} onClick={handleDelete}>
                 {deleting ? tCommon("deleting") : tCommon("confirm")}
               </Button>
