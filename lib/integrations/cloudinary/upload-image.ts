@@ -1,8 +1,9 @@
-import crypto from "crypto";
 import { requestSignal } from "@/lib/http/request-deadline";
+import { buildCloudinarySignature } from "./signature";
 
 /**
- * The one place that talks to Cloudinary.
+ * Uploading to Cloudinary — one half of this folder, which is the only place
+ * that talks to Cloudinary (see ./delete-image.ts for the other).
  *
  * Signed uploads only — the API secret never leaves the server, and the
  * signature is computed over the same parameter set that is sent. Callers hand
@@ -26,17 +27,6 @@ const UPLOAD_TIMEOUT_MS = 25_000;
 
 export const CLOUDINARY_NOT_CONFIGURED =
   "Image upload is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.";
-
-function buildSignature(params: Record<string, string>, secret: string): string {
-  const str = Object.keys(params)
-    .sort()
-    .map((k) => `${k}=${params[k]}`)
-    .join("&");
-  return crypto
-    .createHash("sha1")
-    .update(str + secret)
-    .digest("hex");
-}
 
 interface CloudinaryUploadResponse {
   public_id: string;
@@ -68,7 +58,7 @@ export async function uploadImageToCloudinary(
 
   const timestamp = String(Math.floor(Date.now() / 1000));
   const signParams: Record<string, string> = { folder, timestamp };
-  const signature = buildSignature(signParams, apiSecret);
+  const signature = buildCloudinarySignature(signParams, apiSecret);
 
   const form = new FormData();
   // A File already carries its name; a bare Blob needs one supplied, or

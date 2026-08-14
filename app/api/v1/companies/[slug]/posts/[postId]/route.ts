@@ -26,8 +26,15 @@ export async function DELETE(
         );
       case "FORBIDDEN":
         return NextResponse.json(
-          { error: { code: "FORBIDDEN", message: "Forbidden" } },
+          { error: { code: "FORBIDDEN", message: result.message ?? "Forbidden" } },
           { status: 403 }
+        );
+      // Anything past `draft` has been reviewed, approved or sent — 409, because
+      // the request is well-formed and the caller may not repeat it.
+      case "INVALID_STATUS":
+        return NextResponse.json(
+          { error: { code: "INVALID_STATUS", message: result.message ?? "Not a draft" } },
+          { status: 409 }
         );
     }
   }
