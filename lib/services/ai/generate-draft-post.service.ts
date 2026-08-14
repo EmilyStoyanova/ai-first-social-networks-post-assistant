@@ -293,6 +293,16 @@ export interface GenerateDraftPostDeps {
    */
   semanticGate?: SemanticGate;
   /**
+   * The duplicate-aware generation loop.
+   *
+   * Injected for the same reason `semanticGate` is: what this function HANDS the
+   * loop is a decision of its own, and the mock provider cannot express it — its
+   * canned response declares no topic, so Topic Memory can never fire through
+   * it. Wrapping the real loop is how a test observes whether a sibling channel
+   * is judged against a memory the prompt already told it to ignore.
+   */
+  generateWithRetry?: typeof generateWithRetry;
+  /**
    * Resolves an ACTIVE provider-state row by id for per-generation selection.
    * Injected in tests; production reads the DB. Returns null when no active row
    * matches the id. Only the provider enum is returned — credentials and model
@@ -583,6 +593,7 @@ export async function generatePostFromContext(
   const autoImage = deps.autoImage ?? autoGeneratePostImage;
   const autoSourceImage = deps.autoSourceImage ?? autoApplySourceImage;
   const recordCalibration = deps.recordCalibration ?? recordSemanticCalibration;
+  const runGenerationLoop = deps.generateWithRetry ?? generateWithRetry;
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
 
@@ -608,6 +619,28 @@ export async function generatePostFromContext(
         (r.promptSnapshot as Record<string, unknown> | null)?.topic as string | null | undefined
     )
   );
+
+  /**
+   * Topic Memory as the GENERATION LOOP sees it — empty for a sibling channel.
+   *
+   * `buildPrompts` already drops the "subjects to avoid" list when `sharedTopic`
+   * is set, because "cover something else" and "cover exactly this" cannot both
+   * hold. The judge has to follow the same rule, and used not to: the loop still
+   * received the full memory, so `isTopicRepeated` could reject a sibling for
+   * producing the very topic it was ORDERED to produce. Each retry then asked it
+   * to "choose a MEANINGFULLY DIFFERENT conceptual topic" — the exact opposite of
+   * the mandatory constraint in the same prompt — so the model could only obey
+   * one of them. Three attempts later the channel aborted with
+   * CANNOT_GENERATE_UNIQUE_POST / topic_repeated, and a multi-channel request
+   * quietly came back with fewer posts than channels.
+   *
+   * Only Topic Memory is waived, and only for a dictated topic. Jaccard and the
+   * semantic gate still run in full: those compare the candidate's TEXT and its
+   * central claim against this channel's own posts, and a sibling that comes back
+   * near-verbatim to something already published here is a real duplicate that
+   * must still be refused.
+   */
+  const loopTopicMemory = options.sharedTopic ? [] : topicMemory;
 
   // Diversity/Jaccard signals use only the most recent 10, as before.
   const recentRows10 = recentRows.slice(0, 10);
@@ -809,7 +842,7 @@ export async function generatePostFromContext(
   try {
     // The generation LLM calls (incl. retries) — timed into the `llm` phase.
     generationResult = await recordPhase("llm", () =>
-      generateWithRetry(
+      runGenerationLoop(
         provider,
         systemPrompt,
         userPrompt,
@@ -819,7 +852,9 @@ export async function generatePostFromContext(
           recentAngles,
           initialPattern,
           recentPatterns,
-          recentTopics: topicMemory,
+          // Empty for a sibling channel — see loopTopicMemory. The prompt and the
+          // judge must agree about whether the topic is this generation's to pick.
+          recentTopics: loopTopicMemory,
           initialAspect,
           aspectPool,
           aspectUsedIds: usedAspectIds,

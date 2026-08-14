@@ -40,6 +40,28 @@
  * so one article backs one post per channel and same-channel duplication stays
  * impossible.
  *
+ * ── Why there is a second pass ──────────────────────────────────────────────
+ *
+ * A channel attempted BEFORE any anchor existed had to find a topic of its own,
+ * and it was judged against its own history while doing so. A channel with
+ * hundreds of posts behind it fails that far more often than a fresh one — and
+ * because the channels are attempted in a fixed order, the busiest channel is
+ * usually the one asked to go first.
+ *
+ * Its failure said nothing about the topic that a LATER channel then settled on.
+ * That topic is new: this channel has never written it, and being pinned to a
+ * sibling's topic is precisely the mechanism that exists for writing it. Yet the
+ * first pass left it with no post at all, so asking for two channels routinely
+ * produced one — the busiest channel exhausted its own options, the quiet one
+ * anchored a topic, and nobody ever offered that topic back.
+ *
+ * So every channel that failed while the topic was still undecided gets exactly
+ * one more attempt once it is decided, pinned like any other sibling. Bounded
+ * (one extra attempt per such channel), gated by the same budget, and it changes
+ * no verdict: the pinned attempt runs the full gates again, so a channel that
+ * genuinely cannot carry the topic still fails — with the pinned attempt's
+ * reason, which is the informative one.
+ *
  * ── Partial groups are a real outcome ───────────────────────────────────────
  *
  * A channel that fails does not fail the topic: the others are already
@@ -307,36 +329,26 @@ export async function generateTopicAcrossChannels(
    */
   let observedChannelMs = 0;
 
-  for (const channel of input.channels) {
-    // Committed by an earlier attempt. Regenerating it would write a second post
-    // for a channel that already has one — which the (article, channel) unique
-    // index would refuse anyway, but as a crash rather than as a skip.
-    if (done.has(channel)) continue;
+  /**
+   * Channels that failed while `outcome.anchor` was still null.
+   *
+   * Kept apart from the failures themselves because the two say different
+   * things: a failure records that this channel produced nothing, while this
+   * records that it never got to see the topic. Only the latter earns a second
+   * attempt — a channel that failed WITH an anchor was already pinned to the
+   * topic and refusing it twice is just spending money to hear the same answer.
+   */
+  const failedBeforeAnchor: string[] = [];
 
-    // Out of time. Everything already written is committed and returned; the
-    // channels that never got a turn are named, so the caller answers with a
-    // partial group instead of being killed mid-generation by its own function
-    // cap — which is the outcome that loses posts, because they ARE written and
-    // the caller never learns their ids.
-    //
-    // Enough time to FINISH a channel, not merely to begin one. That distinction
-    // is the whole bug this guards: a channel started with less than it costs
-    // still writes its post — the LLM call comes first and gets what is left —
-    // and then every image call derives its AbortSignal from a budget of zero
-    // and is aborted the moment it is made. The result is a committed draft with
-    // an image prompt and no image, which on an `imageRequired` channel cannot
-    // even be published, and which no error is reported for because image
-    // generation is best-effort. Not starting the channel at all is the strictly
-    // better outcome: it is honest, it is reported, and it can be retried.
-    //
-    // No deadline installed means `remainingBudgetMs()` is +Infinity, so this is
-    // inert on every path that has all the time it needs.
-    if (attemptedAny && budgetLeft() < Math.max(observedChannelMs, minChannelBudgetMs)) {
-      outcome.notAttempted.push(channel);
-      continue;
-    }
+  /** The gate on starting another channel. The first attempt is never gated. */
+  function hasBudgetForAnotherChannel(): boolean {
+    if (!attemptedAny) return true;
+    return budgetLeft() >= Math.max(observedChannelMs, minChannelBudgetMs);
+  }
+
+  /** One channel's generation, with the timing measurement the gate is sized from. */
+  async function runChannel(channel: string) {
     attemptedAny = true;
-
     const startedAt = now();
     const anchor = outcome.anchor;
 
@@ -370,27 +382,17 @@ export async function generateTopicAcrossChannels(
           }),
     });
 
-    // Recorded before the success branch so a failed channel counts too, and
-    // before `continue` can skip it.
+    // Recorded whatever the verdict: a failure that took two minutes of LLM
+    // retries is evidence about cost just as much as a success is.
     observedChannelMs = Math.max(observedChannelMs, now() - startedAt);
+    return result;
+  }
 
-    if (!result.success) {
-      // Spread, so every diagnostic the generator attached travels intact —
-      // `reason`/`attempts` on a uniqueness abort, `retryAfterMs` on a rate
-      // limit — and so a field added to the failure type later needs no change
-      // here to keep reaching the API.
-      outcome.failures.push({
-        ...result,
-        channel,
-        message: result.message ?? defaultFailureMessage(result),
-      });
-      // Deliberately continue rather than abandon the topic. The remaining
-      // channels are independent generations; one channel's provider hiccup or
-      // near-duplicate is no reason to deny the others a post. If this was the
-      // anchoring attempt, the next channel simply becomes the anchor.
-      continue;
-    }
-
+  /** Files a successful generation, settling the topic if it is the first. */
+  function recordSuccess(
+    channel: string,
+    result: Extract<Awaited<ReturnType<typeof generate>>, { success: true }>
+  ) {
     outcome.posts.push({
       channel,
       postId: result.post.id,
@@ -412,11 +414,99 @@ export async function generateTopicAcrossChannels(
         establishedBy: channel,
       };
     }
+  }
+
+  /** Wraps a generator failure with the channel it belongs to. */
+  function toFailure(
+    channel: string,
+    result: Extract<Awaited<ReturnType<typeof generate>>, { success: false }>
+  ): TopicChannelFailure {
+    // Spread, so every diagnostic the generator attached travels intact —
+    // `reason`/`attempts` on a uniqueness abort, `retryAfterMs` on a rate
+    // limit — and so a field added to the failure type later needs no change
+    // here to keep reaching the API.
+    return { ...result, channel, message: result.message ?? defaultFailureMessage(result) };
+  }
+
+  for (const channel of input.channels) {
+    // Committed by an earlier attempt. Regenerating it would write a second post
+    // for a channel that already has one — which the (article, channel) unique
+    // index would refuse anyway, but as a crash rather than as a skip.
+    if (done.has(channel)) continue;
+
+    // Out of time. Everything already written is committed and returned; the
+    // channels that never got a turn are named, so the caller answers with a
+    // partial group instead of being killed mid-generation by its own function
+    // cap — which is the outcome that loses posts, because they ARE written and
+    // the caller never learns their ids.
+    //
+    // Enough time to FINISH a channel, not merely to begin one. That distinction
+    // is the whole bug this guards: a channel started with less than it costs
+    // still writes its post — the LLM call comes first and gets what is left —
+    // and then every image call derives its AbortSignal from a budget of zero
+    // and is aborted the moment it is made. The result is a committed draft with
+    // an image prompt and no image, which on an `imageRequired` channel cannot
+    // even be published, and which no error is reported for because image
+    // generation is best-effort. Not starting the channel at all is the strictly
+    // better outcome: it is honest, it is reported, and it can be retried.
+    //
+    // No deadline installed means `remainingBudgetMs()` is +Infinity, so this is
+    // inert on every path that has all the time it needs.
+    if (!hasBudgetForAnotherChannel()) {
+      outcome.notAttempted.push(channel);
+      continue;
+    }
+
+    // Read BEFORE the generation: whether this channel got to see a topic is
+    // what decides if it has earned a second attempt below.
+    const hadAnchor = outcome.anchor !== null;
+    const result = await runChannel(channel);
+
+    if (!result.success) {
+      outcome.failures.push(toFailure(channel, result));
+      if (!hadAnchor) failedBeforeAnchor.push(channel);
+      // Deliberately continue rather than abandon the topic. The remaining
+      // channels are independent generations; one channel's provider hiccup or
+      // near-duplicate is no reason to deny the others a post. If this was the
+      // anchoring attempt, the next channel simply becomes the anchor.
+      continue;
+    }
+
+    recordSuccess(channel, result);
 
     // Reported after each channel so a caller persisting progress records the
     // anchor as soon as it exists — which is what makes a retry resume THIS
     // topic rather than invent a new one for the channels still missing.
     await deps.onChannelComplete?.(outcome);
+  }
+
+  // ── Second pass: the topic exists now, so offer it to whoever missed it ─────
+  // Empty on the ordinary run where nothing failed, and on a resumed run where
+  // the anchor was supplied up front (every channel then had it from the start).
+  if (outcome.anchor !== null) {
+    for (const channel of failedBeforeAnchor) {
+      // Stop rather than report `notAttempted`: this channel is ALREADY in
+      // `failures` from its first attempt, and naming it in both places would
+      // describe one channel's single outcome twice.
+      if (!hasBudgetForAnotherChannel()) break;
+
+      const result = await runChannel(channel);
+      const previous = outcome.failures.findIndex((f) => f.channel === channel);
+
+      if (!result.success) {
+        // The pinned attempt's reason replaces the unpinned one. Both are true,
+        // but only this one answers the question a reader is actually asking —
+        // "why is this channel missing from the topic I asked for".
+        const failure = toFailure(channel, result);
+        if (previous >= 0) outcome.failures[previous] = failure;
+        else outcome.failures.push(failure);
+        continue;
+      }
+
+      if (previous >= 0) outcome.failures.splice(previous, 1);
+      recordSuccess(channel, result);
+      await deps.onChannelComplete?.(outcome);
+    }
   }
 
   return outcome;

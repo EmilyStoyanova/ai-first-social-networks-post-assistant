@@ -2382,3 +2382,116 @@ void _nullableCoreMessage;
 function context(): GenerationContext {
   return makeContext();
 }
+
+// ─── Topic Memory vs. a dictated topic ───────────────────────────────────────
+
+/**
+ * A sibling channel version is ORDERED to reproduce the anchor's topic — the
+ * prompt builder drops the "subjects to avoid" list precisely so the two
+ * instructions cannot contradict each other (see prompt-builder.ts).
+ *
+ * The judge has to follow the same rule. When it did not, a sibling could be
+ * rejected for producing the topic it was told to produce, each retry asked it
+ * to "choose a MEANINGFULLY DIFFERENT conceptual topic" against a mandatory
+ * constraint saying the opposite, and after three attempts the channel aborted
+ * with CANNOT_GENERATE_UNIQUE_POST — which is how a two-channel request came
+ * back with one post.
+ *
+ * The loop is wrapped rather than replaced: what it is HANDED is the decision
+ * under test, and the mock provider cannot express it (its canned response
+ * declares no topic, so Topic Memory can never fire through it).
+ */
+describe("generatePostFromContext — Topic Memory and a dictated topic", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const ROWS: RecentRow[] = [
+    { id: "p1", content: "post one", promptSnapshot: { topic: "Authentic Lisbon" } },
+    { id: "p2", content: "post two", promptSnapshot: { topic: "Barcelona Nightlife" } },
+  ];
+
+  const SHARED_TOPIC = {
+    coreMessage: "The one thing this topic says.",
+    topic: "Authentic Lisbon",
+    establishedBy: "facebook",
+  };
+
+  /** Captures the diversity options the generation loop was handed. */
+  function captureDeps(rows: RecentRow[]) {
+    const { deps, created } = makeDeps(rows);
+    let seenTopics: readonly string[] | undefined;
+    deps.generateWithRetry = async (provider, system, user, recent, diversity, gate, max) => {
+      seenTopics = diversity?.recentTopics;
+      const { generateWithRetry } = await import("@/lib/ai/generate-with-retry");
+      return generateWithRetry(provider, system, user, recent, diversity, gate, max);
+    };
+    return { deps, created, seenTopics: () => seenTopics };
+  }
+
+  it("hands the loop no topic memory when the topic was dictated", async () => {
+    const { deps, seenTopics } = captureDeps(ROWS);
+
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { sharedTopic: SHARED_TOPIC },
+      deps
+    );
+
+    assert.ok(result.success);
+    // Empty, not merely "does not contain the shared topic": the sibling must not
+    // be steered away from ANY subject, because its subject is already chosen.
+    assert.deepEqual(seenTopics(), []);
+  });
+
+  it("still hands the loop the full memory when the topic is this post's to pick", async () => {
+    const { deps, seenTopics } = captureDeps(ROWS);
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.deepEqual(seenTopics(), ["authentic lisbon", "barcelona nightlife"]);
+  });
+
+  it("keeps the prompt and the judge in agreement", async () => {
+    // The prompt already suppresses the avoid-list for a sibling. This asserts
+    // the pair, so the two can never drift apart again: no avoid-list in the
+    // prompt AND no memory in the judge, from the same generation.
+    const { deps, created, seenTopics } = captureDeps(ROWS);
+
+    await generatePostFromContext(context(), "co-1", { sharedTopic: SHARED_TOPIC }, deps);
+
+    const snapshot = created()!.promptSnapshot as Record<string, unknown>;
+    assert.doesNotMatch(snapshot.userPrompt as string, /Topic guidance/);
+    assert.deepEqual(seenTopics(), []);
+  });
+
+  it("leaves the Jaccard window untouched for a sibling", async () => {
+    // Only Topic Memory is waived. A sibling that comes back near-verbatim to a
+    // post already on THIS channel is still a real duplicate, and the loop needs
+    // the recent posts in order to notice.
+    const { deps } = makeDeps(ROWS);
+    let seenRecent: Array<{ id: string }> | undefined;
+    deps.generateWithRetry = async (provider, system, user, recent, diversity, gate, max) => {
+      seenRecent = recent;
+      const { generateWithRetry } = await import("@/lib/ai/generate-with-retry");
+      return generateWithRetry(provider, system, user, recent, diversity, gate, max);
+    };
+
+    await generatePostFromContext(context(), "co-1", { sharedTopic: SHARED_TOPIC }, deps);
+
+    assert.deepEqual(
+      seenRecent?.map((r) => r.id),
+      ["p1", "p2"]
+    );
+  });
+});

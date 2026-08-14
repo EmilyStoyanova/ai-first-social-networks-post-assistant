@@ -609,3 +609,216 @@ describe("generateTopicAcrossChannels — sizing the gate from real cost", () =>
     assert.deepEqual(outcome.notAttempted, ["instagram"]);
   });
 });
+
+// ─── The second pass ──────────────────────────────────────────────────────────
+
+/**
+ * A generation double driven by a per-channel SEQUENCE, so a channel can fail
+ * once and succeed on its next attempt. `undefined` in a sequence means "behave
+ * like the default success"; running off the end of a sequence does the same.
+ */
+function makeSequencedDeps(script: Record<string, Array<GenerateDraftPostResult | undefined>>): {
+  generate: NonNullable<Parameters<typeof generateTopicAcrossChannels>[1]>["generate"];
+  calls: () => RecordedCall[];
+} {
+  const calls: RecordedCall[] = [];
+  const cursor: Record<string, number> = {};
+  let n = 0;
+
+  return {
+    calls: () => calls,
+    generate: async (_slug, channel, _userId, _isGlobalAdmin, opts = {}) => {
+      calls.push({ channel, options: opts as Record<string, unknown> });
+      const attempt = cursor[channel] ?? 0;
+      cursor[channel] = attempt + 1;
+      const scripted = script[channel]?.[attempt];
+      if (scripted) return scripted;
+      n += 1;
+      return {
+        success: true,
+        post: post(`post-${n}`, opts as Record<string, unknown>),
+        warnings: {
+          duplicate: { flagged: false, similarityScore: null, matchedPostId: null },
+        },
+      } as GenerateDraftPostResult;
+    },
+  };
+}
+
+const UNIQUENESS_ABORT: GenerateDraftPostResult = {
+  success: false,
+  code: "CANNOT_GENERATE_UNIQUE_POST",
+  reason: "topic_repeated",
+  attempts: 3,
+};
+
+describe("generateTopicAcrossChannels — offering the topic to whoever missed it", () => {
+  it("writes a channel that failed before the topic existed", async () => {
+    // The real shape of the bug: the busiest channel goes first, exhausts its
+    // own history looking for a topic, and the quiet channel then settles one it
+    // has never seen. Asking for two channels used to return one post.
+    const { generate } = makeSequencedDeps({ linkedin: [UNIQUENESS_ABORT] });
+
+    const outcome = await generateTopicAcrossChannels(
+      makeInput({ channels: ["linkedin", "facebook"] }),
+      { generate }
+    );
+
+    assert.deepEqual(outcome.posts.map((p) => p.channel).sort(), ["facebook", "linkedin"]);
+    assert.deepEqual(outcome.failures, []);
+  });
+
+  it("pins the retry to the settled topic instead of letting it pick again", async () => {
+    const { generate, calls } = makeSequencedDeps({ linkedin: [UNIQUENESS_ABORT] });
+
+    await generateTopicAcrossChannels(makeInput({ channels: ["linkedin", "facebook"] }), {
+      generate,
+    });
+
+    const retry = calls().at(-1)!;
+    assert.equal(retry.channel, "linkedin");
+    assert.equal(retry.options.pinnedFeedItemId, "article-1");
+    assert.equal(
+      (retry.options.sharedTopic as { establishedBy: string } | undefined)?.establishedBy,
+      "facebook"
+    );
+    // Its FIRST attempt had neither — it was trying to settle the topic itself.
+    assert.equal(calls()[0].options.pinnedFeedItemId, undefined);
+    assert.equal(calls()[0].options.sharedTopic, undefined);
+  });
+
+  it("does not retry a channel that already had the topic when it failed", async () => {
+    // facebook is a sibling here — it was pinned and still failed. Asking again
+    // spends money to hear the same answer.
+    const { generate, calls } = makeSequencedDeps({ facebook: [UNIQUENESS_ABORT] });
+
+    const outcome = await generateTopicAcrossChannels(
+      makeInput({ channels: ["linkedin", "facebook"] }),
+      { generate }
+    );
+
+    assert.equal(calls().length, 2);
+    assert.deepEqual(
+      outcome.failures.map((f) => f.channel),
+      ["facebook"]
+    );
+  });
+
+  it("keeps the pinned attempt's reason when the retry also fails", async () => {
+    const { generate } = makeSequencedDeps({
+      linkedin: [
+        UNIQUENESS_ABORT,
+        { success: false, code: "POST_TOO_LONG_WITH_URL", message: "Too long for LinkedIn." },
+      ],
+    });
+
+    const outcome = await generateTopicAcrossChannels(
+      makeInput({ channels: ["linkedin", "facebook"] }),
+      { generate }
+    );
+
+    // One entry, not two: a channel has one outcome, and the informative one is
+    // what happened when it was actually given the topic.
+    assert.equal(outcome.failures.length, 1);
+    assert.equal(outcome.failures[0].channel, "linkedin");
+    assert.equal(outcome.failures[0].code, "POST_TOO_LONG_WITH_URL");
+  });
+
+  it("recovers every anchorless failure, not just the first", async () => {
+    const { generate } = makeSequencedDeps({
+      linkedin: [UNIQUENESS_ABORT],
+      facebook: [UNIQUENESS_ABORT],
+    });
+
+    const outcome = await generateTopicAcrossChannels(
+      makeInput({ channels: ["linkedin", "facebook", "instagram"] }),
+      { generate }
+    );
+
+    assert.equal(outcome.posts.length, 3);
+    assert.equal(outcome.anchor?.establishedBy, "instagram");
+    assert.deepEqual(outcome.failures, []);
+  });
+
+  it("reports a recovered channel through onChannelComplete", async () => {
+    const { generate } = makeSequencedDeps({ linkedin: [UNIQUENESS_ABORT] });
+    const reported: string[][] = [];
+
+    await generateTopicAcrossChannels(makeInput({ channels: ["linkedin", "facebook"] }), {
+      generate,
+      onChannelComplete: async (partial) => {
+        reported.push(partial.posts.map((p) => p.channel));
+      },
+    });
+
+    // The recovery is progress like any other — a caller persisting it must see
+    // the channel appear, not discover it only in the final result.
+    assert.deepEqual(reported, [["facebook"], ["facebook", "linkedin"]]);
+  });
+
+  it("runs no second pass when nothing was ever anchorless", async () => {
+    // A resumed run: the topic was supplied, so every channel had it from the
+    // start and a failure means the channel genuinely cannot carry it.
+    const { generate, calls } = makeSequencedDeps({ linkedin: [UNIQUENESS_ABORT] });
+
+    const outcome = await generateTopicAcrossChannels(
+      makeInput({
+        channels: ["linkedin", "facebook"],
+        anchor: {
+          primaryFeedItemId: "article-9",
+          coreMessage: "Settled earlier.",
+          topic: "topic-a",
+          establishedBy: "instagram",
+        },
+      }),
+      { generate }
+    );
+
+    assert.equal(calls().length, 2);
+    assert.deepEqual(
+      outcome.failures.map((f) => f.channel),
+      ["linkedin"]
+    );
+  });
+
+  it("runs no second pass when no channel ever settled a topic", async () => {
+    const { generate, calls } = makeSequencedDeps({
+      linkedin: [UNIQUENESS_ABORT, UNIQUENESS_ABORT],
+      facebook: [UNIQUENESS_ABORT, UNIQUENESS_ABORT],
+    });
+
+    const outcome = await generateTopicAcrossChannels(
+      makeInput({ channels: ["linkedin", "facebook"] }),
+      { generate }
+    );
+
+    assert.equal(calls().length, 2);
+    assert.equal(outcome.anchor, null);
+    assert.equal(outcome.failures.length, 2);
+  });
+
+  it("stops the second pass when the budget runs out, leaving the failure standing", async () => {
+    const { generate, calls } = makeSequencedDeps({ linkedin: [UNIQUENESS_ABORT] });
+    // Enough for the two first-pass channels, then nothing left for the retry.
+    const budgets = [Infinity, 10_000];
+    let i = 0;
+
+    const outcome = await generateTopicAcrossChannels(
+      makeInput({ channels: ["linkedin", "facebook"] }),
+      {
+        generate,
+        minChannelBudgetMs: 45_000,
+        remainingBudgetMs: () => budgets[Math.min(i++, budgets.length - 1)],
+      }
+    );
+
+    assert.equal(calls().length, 2);
+    assert.deepEqual(
+      outcome.failures.map((f) => f.channel),
+      ["linkedin"]
+    );
+    // Named once, as a failure. A channel that was tried and failed is not also
+    // a channel that never got a turn.
+    assert.deepEqual(outcome.notAttempted, []);
+  });
+});
