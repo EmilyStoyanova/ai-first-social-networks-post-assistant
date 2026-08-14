@@ -10,6 +10,7 @@ import {
   resolveTranslationConfig,
   type TranslationConfig,
 } from "@/lib/ai/feed-item-translation";
+import { computeExtractionHash, extractionInstructionsOf } from "@/lib/ai/product-page-extraction";
 import type { Prisma } from "@prisma/client";
 
 export type IngestContentSourceResult =
@@ -23,6 +24,13 @@ export type IngestContentSourceResult =
        * the manual route's translation enqueue; NOT part of the public API response.
        */
       translationWorkCreated: number;
+      /**
+       * Product-page items this run left needing an LLM extraction (new, or whose
+       * page text / instruction changed). Drives the manual route's extraction
+       * enqueue, exactly as the field above drives translation's; NOT part of the
+       * public API response.
+       */
+      extractionWorkCreated: number;
     }
   | { success: false; code: "NOT_FOUND" | "FORBIDDEN" | "INGEST_FAILED"; message?: string };
 
@@ -31,6 +39,12 @@ interface ExistingTranslation {
   translationHash: string | null;
   translationStatus: string | null;
   translationAttemptCount: number;
+}
+
+/** The same, for product-page extraction. */
+export interface ExistingExtraction {
+  extractionHash: string | null;
+  extractionStatus: string | null;
 }
 
 /**
@@ -80,6 +94,67 @@ function translationFieldsForUpdate(
   };
 }
 
+/**
+ * Extraction state to write for a feed item whose source carries an instruction.
+ *
+ * Ingestion never calls the model — it only records that there is work and what
+ * input that work is against, exactly as it does for translation. The LLM step is
+ * a queued job (see runPendingExtractions), because one extraction is a
+ * large-context call against a self-hosted model and an HTTP ingest request is
+ * the wrong place to wait for it.
+ *
+ * An unchanged hash on an item that already has a result leaves the row alone:
+ * a cron tick that re-scrapes an unchanged page must not spend a model call, and
+ * must not reset a `not_found` answer back to pending forever.
+ */
+export function extractionFieldsFor(
+  hash: string | null,
+  existing: ExistingExtraction | undefined
+): Record<string, unknown> {
+  // No instruction on this source — the item keeps null extraction fields, and a
+  // source whose instruction was REMOVED is cleared back to that state.
+  if (hash === null) {
+    return existing?.extractionStatus
+      ? {
+          extractionStatus: null,
+          extractionHash: null,
+          extractedContent: null,
+          extractionError: null,
+          extractedAt: null,
+          extractionAttemptCount: 0,
+        }
+      : {};
+  }
+  const settled =
+    existing?.extractionStatus === "completed" || existing?.extractionStatus === "not_found";
+  if (settled && existing?.extractionHash === hash) return {};
+
+  return {
+    extractionStatus: "pending",
+    extractionHash: hash,
+    extractionError: null,
+    // A changed page or instruction is a fresh question, so it gets a fresh
+    // attempt budget — otherwise an item that exhausted its retries on an old
+    // page could never be extracted again.
+    extractionAttemptCount: 0,
+  };
+}
+
+/**
+ * Whether the item now needs an extraction run — the enqueue signal.
+ *
+ * Exported, with the writer above, so the decision is testable without a
+ * database: which ingests cost a model call and which do not is the part of this
+ * file most worth pinning down.
+ */
+export function requiresExtractionWork(
+  hash: string | null,
+  existing: ExistingExtraction | undefined
+): boolean {
+  if (hash === null) return false;
+  return Object.keys(extractionFieldsFor(hash, existing)).length > 0;
+}
+
 async function upsertFeedItem(
   sourceId: string,
   companyId: string,
@@ -91,16 +166,27 @@ async function upsertFeedItem(
   translation: TranslationConfig | null,
   existingTranslations: Map<string, ExistingTranslation>,
   /** The article's own image. Only RSS resolves one; every other type passes null. */
-  sourceImageUrl: string | null = null
-): Promise<{ outcome: "created" | "updated"; requiresTranslation: boolean }> {
+  sourceImageUrl: string | null = null,
+  /**
+   * sha256(pageText + instructions) for a product page with an extraction
+   * instruction; null for every other item, which is what "no extraction" means.
+   */
+  extractionHash: string | null = null,
+  existingExtractions?: Map<string, ExistingExtraction>
+): Promise<{
+  outcome: "created" | "updated";
+  requiresTranslation: boolean;
+  requiresExtraction: boolean;
+}> {
   // Same input the translation hash is computed from everywhere (title+content+target).
   const hash = computeTranslationHash(title, content, translation?.targetLanguage ?? "");
   if (existingUrls.has(url)) {
     const existing = existingTranslations.get(url);
+    const existingExtraction = existingExtractions?.get(url);
     await prisma.feedItem.update({
       where: { sourceId_url: { sourceId, url } },
       // title/content always carry the ORIGINAL article text — translation never
-      // writes here (v2-4).
+      // writes here (v2-4). Nor does extraction: `content` stays the raw scrape.
       data: {
         title,
         content,
@@ -111,11 +197,13 @@ async function upsertFeedItem(
         // resolves a better one.
         ...(sourceImageUrl ? { sourceImageUrl } : {}),
         ...translationFieldsForUpdate(translation, hash, existing),
+        ...extractionFieldsFor(extractionHash, existingExtraction),
       },
     });
     return {
       outcome: "updated",
       requiresTranslation: requiresTranslationWork(translation, hash, false, existing),
+      requiresExtraction: requiresExtractionWork(extractionHash, existingExtraction),
     };
   } else {
     await prisma.feedItem.create({
@@ -128,12 +216,14 @@ async function upsertFeedItem(
         publishedAt,
         sourceImageUrl,
         ...translationFieldsForCreate(translation),
+        ...extractionFieldsFor(extractionHash, undefined),
       },
     });
     existingUrls.add(url);
     return {
       outcome: "created",
       requiresTranslation: requiresTranslationWork(translation, hash, true, undefined),
+      requiresExtraction: requiresExtractionWork(extractionHash, undefined),
     };
   }
 }
@@ -167,7 +257,12 @@ export async function runSourceIngestion(
   source: IngestableSource,
   companyId: string,
   options?: RunSourceIngestionOptions
-): Promise<{ created: number; updated: number; translationWorkCreated: number }> {
+): Promise<{
+  created: number;
+  updated: number;
+  translationWorkCreated: number;
+  extractionWorkCreated: number;
+}> {
   const sourceId = source.id;
   const config = source.config as Record<string, string>;
 
@@ -190,6 +285,8 @@ export async function runSourceIngestion(
       translationHash: true,
       translationStatus: true,
       translationAttemptCount: true,
+      extractionHash: true,
+      extractionStatus: true,
     },
   });
   const existingUrls = new Set(existingRows.map((r) => r.url));
@@ -203,12 +300,22 @@ export async function runSourceIngestion(
       },
     ])
   );
+  const existingExtractions = new Map<string, ExistingExtraction>(
+    existingRows.map((r) => [
+      r.url,
+      { extractionHash: r.extractionHash, extractionStatus: r.extractionStatus },
+    ])
+  );
 
   let created = 0;
   let updated = 0;
   // Feed items this run left genuinely needing translation — the precise signal (not
   // created/updated) the manual ingest route uses to enqueue translation.
   let translationWorkCreated = 0;
+  // The same signal for product-page extraction: an item whose page text or
+  // instruction changed (or which has never been extracted) needs a model call,
+  // and a re-scrape that produced identical input does not.
+  let extractionWorkCreated = 0;
 
   if (source.type === "rss") {
     const items = await parseFeed(config.url);
@@ -254,20 +361,20 @@ export async function runSourceIngestion(
     // Its presence is what turns on body-text extraction: a listing page's
     // og:description never contains the list the instruction points at, and a
     // source without an instruction must keep behaving exactly as before.
-    const instructions =
-      typeof config.extractionInstructions === "string" ? config.extractionInstructions.trim() : "";
-    const meta = await scrapeProductPage(config.url, { includeText: instructions.length > 0 });
+    const instructions = extractionInstructionsOf(source.config);
+    const meta = await scrapeProductPage(config.url, { includeText: instructions !== null });
     const content = JSON.stringify({
       title: meta.ogTitle ?? meta.title,
       description: meta.ogDescription ?? meta.description,
       image: meta.ogImage,
-      // Stored WITH the item, not read from the config at generation time: the
-      // page text was captured under this instruction, so the two belong to the
-      // same snapshot. Editing the instruction takes effect on the next ingest,
-      // which is also when the matching text is re-read.
+      // The RAW page, stored with the item and never overwritten by the
+      // extraction step that runs later. It is the input a stored result was
+      // derived from, which is what makes a wrong extraction diagnosable — and
+      // what lets a re-run start from the page rather than from its own last
+      // answer.
       ...(instructions ? { instructions, pageText: meta.pageText } : {}),
     });
-    const { outcome, requiresTranslation } = await upsertFeedItem(
+    const { outcome, requiresTranslation, requiresExtraction } = await upsertFeedItem(
       sourceId,
       companyId,
       config.url,
@@ -276,11 +383,15 @@ export async function runSourceIngestion(
       null,
       existingUrls,
       translation,
-      existingTranslations
+      existingTranslations,
+      null,
+      instructions ? computeExtractionHash(meta.pageText, instructions) : null,
+      existingExtractions
     );
     if (outcome === "created") created++;
     else updated++;
     if (requiresTranslation) translationWorkCreated++;
+    if (requiresExtraction) extractionWorkCreated++;
   } else if (source.type === "prompt") {
     const stableUrl = `prompt:${sourceId}`;
     const { outcome, requiresTranslation } = await upsertFeedItem(
@@ -326,7 +437,7 @@ export async function runSourceIngestion(
     data: { lastFetchedAt: new Date() },
   });
 
-  return { created, updated, translationWorkCreated };
+  return { created, updated, translationWorkCreated, extractionWorkCreated };
 }
 
 export async function ingestContentSource(
@@ -357,11 +468,9 @@ export async function ingestContentSource(
   if (!source) return { success: false, code: "NOT_FOUND" };
 
   try {
-    const { created, updated, translationWorkCreated } = await runSourceIngestion(
-      source,
-      companyId
-    );
-    return { success: true, created, updated, translationWorkCreated };
+    const { created, updated, translationWorkCreated, extractionWorkCreated } =
+      await runSourceIngestion(source, companyId);
+    return { success: true, created, updated, translationWorkCreated, extractionWorkCreated };
   } catch (err) {
     return {
       success: false,

@@ -1,9 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  extractionFoundNothing,
   formatEventDate,
   framePrimarySource,
   renderFeedItemContent,
+  sourceExtractionInstruction,
   INSTRUCTED_PAGE_TEXT_LIMIT,
 } from "./source-content";
 import type { FeedItemContext } from "./types";
@@ -356,5 +358,165 @@ describe("source-content — primary source framing", () => {
 
     assert.ok(framing.heading.includes("CONTENT BRIEF"));
     assert.ok(!framing.instruction.includes("link"));
+  });
+});
+
+describe("source-content — sourceExtractionInstruction", () => {
+  function pageItem(stored: Record<string, unknown>, sourceType = "product_page"): FeedItemContext {
+    return item({ content: JSON.stringify(stored), sourceType, consumable: true });
+  }
+
+  it("returns the instruction a product page carries", () => {
+    assert.equal(
+      sourceExtractionInstruction(pageItem({ instructions: "List every event." })),
+      "List every event."
+    );
+  });
+
+  it("is null for a product page without one", () => {
+    assert.equal(sourceExtractionInstruction(pageItem({ description: "A page." })), null);
+  });
+
+  it("is null for every other source type, even if the JSON has the key", () => {
+    // Only a product page can carry one, so a stray key on another type must not
+    // silently switch that source into instruction mode.
+    assert.equal(
+      sourceExtractionInstruction(pageItem({ instructions: "List every event." }, "rss")),
+      null
+    );
+  });
+
+  it("is null for a missing item, unparseable content, or a blank instruction", () => {
+    assert.equal(sourceExtractionInstruction(null), null);
+    assert.equal(
+      sourceExtractionInstruction(item({ content: "not json", sourceType: "product_page" })),
+      null
+    );
+    assert.equal(sourceExtractionInstruction(pageItem({ instructions: "   " })), null);
+  });
+});
+
+describe("source-content — an extracted product page is the authoritative source", () => {
+  const EXTRACTED = [
+    "Next week: 17–23 August 2026",
+    "Total events: 2",
+    "1. Energy Update — Webinar — 18.08.2026 — Online — Free",
+    "2. HR Masterclass — Masterclass — 19.08.2026 — In person — Paid, 50 BGN",
+  ].join("\n");
+
+  function extractedItem(overrides: Partial<FeedItemContext> = {}): FeedItemContext {
+    return item({
+      title: "Business events",
+      content: JSON.stringify({
+        title: "Business events",
+        description: "A catalogue of business events.",
+        instructions: "Every event next week with type, date and price.",
+        pageText: "RAW PAGE TEXT that the model must no longer have to read",
+      }),
+      url: "https://events.example.com/?week=current",
+      sourceType: "product_page",
+      consumable: true,
+      extractedContent: EXTRACTED,
+      extractionStatus: "completed",
+      ...overrides,
+    });
+  }
+
+  it("renders the extracted facts, complete, as the source block", () => {
+    const rendered = renderFeedItemContent(extractedItem());
+
+    assert.ok(rendered.includes("Energy Update"));
+    assert.ok(rendered.includes("HR Masterclass"));
+    assert.ok(rendered.includes("50 BGN"));
+    assert.ok(rendered.includes("Total events: 2"));
+  });
+
+  it("does NOT also hand over the raw page for the model to re-interpret", () => {
+    // The architectural point: extraction happened once, at ingestion. Showing the
+    // page as well invites each channel to derive its own list and disagree.
+    const rendered = renderFeedItemContent(extractedItem());
+
+    assert.ok(!rendered.includes("RAW PAGE TEXT"));
+  });
+
+  it("gives every channel byte-identical source facts", () => {
+    // Nothing in the rendering depends on the channel — the facts are a property
+    // of the feed item, so a Facebook version and a LinkedIn version of one topic
+    // cannot disagree about how many events there were.
+    const facts = extractedItem();
+
+    assert.equal(renderFeedItemContent(facts), renderFeedItemContent({ ...facts }));
+  });
+
+  it("survives the default per-item budget — a list is not truncated to an excerpt", () => {
+    const long = Array.from({ length: 40 }, (_, i) => `${i + 1}. Event ${i + 1} — Webinar — Free`);
+    const rendered = renderFeedItemContent(extractedItem({ extractedContent: long.join("\n") }));
+
+    assert.ok(rendered.includes("40. Event 40"), "the tail of the list must reach the prompt");
+  });
+
+  it("forbids adding to or dropping from the extracted set", () => {
+    const rendered = renderFeedItemContent(extractedItem());
+
+    assert.match(rendered, /Do not add an item, a date, a price or a category that is not listed/);
+    assert.match(rendered, /do not drop one to save space/);
+  });
+
+  it("falls back to the raw page while extraction is still queued", () => {
+    // Not a second design — it keeps generation possible before the worker has
+    // run, at the cost of the model doing the reading itself.
+    const rendered = renderFeedItemContent(
+      extractedItem({ extractionStatus: "pending", extractedContent: null })
+    );
+
+    assert.ok(rendered.includes("RAW PAGE TEXT"));
+    assert.match(rendered, /WHAT TO TAKE FROM THIS PAGE/);
+  });
+
+  it("says plainly that nothing was found, and shows no page to invent from", () => {
+    // A `week=current` page against a "next week" instruction.
+    const rendered = renderFeedItemContent(
+      extractedItem({ extractionStatus: "not_found", extractedContent: null })
+    );
+
+    assert.match(rendered, /found NOTHING on this page matching that instruction/);
+    assert.match(rendered, /Do not invent any/);
+    assert.ok(!rendered.includes("RAW PAGE TEXT"), "no page text to mine for a plausible answer");
+  });
+
+  it("leaves a product page with no instruction completely unchanged", () => {
+    const rendered = renderFeedItemContent(
+      item({
+        title: "Pro Plan",
+        content: JSON.stringify({
+          title: "Pro Plan",
+          description: "Everything in Starter, plus SSO.",
+          image: "https://cdn.example.com/og.png",
+        }),
+        url: "https://shop.example.com/pro-plan",
+        sourceType: "product_page",
+        consumable: true,
+      })
+    );
+
+    assert.equal(rendered, "**Pro Plan**\nProduct page.\nEverything in Starter, plus SSO.");
+  });
+});
+
+describe("source-content — extractionFoundNothing", () => {
+  it("is true only for a product page whose extraction came back empty", () => {
+    assert.equal(
+      extractionFoundNothing(item({ sourceType: "product_page", extractionStatus: "not_found" })),
+      true
+    );
+    assert.equal(
+      extractionFoundNothing(item({ sourceType: "product_page", extractionStatus: "completed" })),
+      false
+    );
+    assert.equal(
+      extractionFoundNothing(item({ sourceType: "rss", extractionStatus: "not_found" })),
+      false
+    );
+    assert.equal(extractionFoundNothing(null), false);
   });
 });

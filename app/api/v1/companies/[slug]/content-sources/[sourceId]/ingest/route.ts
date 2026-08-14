@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { ingestContentSource } from "@/lib/services/company/ingest-content-source.service";
 import { enqueueTranslationAfterIngest } from "@/lib/services/company/enqueue-translation-after-ingest";
+import { enqueueExtractionAfterIngest } from "@/lib/services/company/enqueue-extraction-after-ingest";
 
 export async function POST(
   _req: Request,
@@ -46,6 +47,12 @@ export async function POST(
   // re-lists unchanged items every poll, which are NOT translation work). Best-effort and
   // swallowed, so it never affects the response below.
   await enqueueTranslationAfterIngest(result.translationWorkCreated, { slug, sourceId });
+
+  // The same, for a product page whose instruction says what to take from it. The
+  // scrape happened above; turning the page into the requested facts is an LLM
+  // call and belongs to a worker, not to this request — see
+  // run-pending-extractions.service.ts.
+  await enqueueExtractionAfterIngest(result.extractionWorkCreated, { slug, sourceId });
 
   return NextResponse.json({ created: result.created, updated: result.updated });
 }

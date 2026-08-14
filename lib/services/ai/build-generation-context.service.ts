@@ -256,6 +256,11 @@ async function loadContext(
             translatedTitle: true,
             translatedContent: true,
             translationStatus: true,
+            // The product-page extraction result. Read here, with the row, so the
+            // prompt builder and aspect mining see the same authoritative text
+            // rather than each re-deriving it from the raw page.
+            extractedContent: true,
+            extractionStatus: true,
             // `name` rides along on a join that already exists — it and `type`
             // are frozen into the post's origin snapshot at generation time.
             source: { select: { name: true, type: true, config: true } },
@@ -342,6 +347,10 @@ async function loadContext(
         sourceType: f.source.type,
         sourceName: f.source.name,
         sourceLinkPreference: extractSourceLinkPreference(f.source.config),
+        // Carried through untouched: what to DO with it is one decision, made in
+        // source-content.ts, so the prompt and the aspect miner cannot diverge.
+        extractedContent: f.extractedContent,
+        extractionStatus: f.extractionStatus,
         // rss/product_page → single-use article; prompt/calendar_event → evergreen.
         consumable: isConsumableSourceType(f.source.type),
         usedTranslation: resolved.usedTranslation,

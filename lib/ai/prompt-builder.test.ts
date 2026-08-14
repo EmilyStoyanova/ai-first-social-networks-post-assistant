@@ -1048,3 +1048,220 @@ describe("prompt-builder — imageRequired", () => {
     );
   });
 });
+
+describe("prompt-builder — the source's own extraction instruction", () => {
+  const INSTRUCTION =
+    "List every event next week: name, type, date, online or in person, free or paid.";
+
+  function listingItem(overrides: Partial<FeedItemContext> = {}): FeedItemContext {
+    return {
+      id: "events",
+      title: "Business events",
+      content: JSON.stringify({
+        instructions: INSTRUCTION,
+        pageText: "Energy Update — webinar, 11.08.2026, free",
+      }),
+      url: "https://events.example.com/?week=current",
+      publishedAt: null,
+      sourceType: "product_page",
+      ...overrides,
+    };
+  }
+
+  it("states the instruction verbatim as a required-content section", () => {
+    const { userPrompt } = buildPrompts(makeCtx({}), listingItem(), "en");
+
+    assert.ok(userPrompt.includes(INSTRUCTION));
+    assert.match(userPrompt, /Required content/);
+  });
+
+  it("tells the model to cover every item rather than one example", () => {
+    // The production failure: a mined aspect narrowed a five-event listing to one
+    // webinar, and the post presented that single event as the whole subject.
+    const { userPrompt } = buildPrompts(makeCtx({}), listingItem(), "en");
+
+    assert.match(userPrompt, /Cover EVERY item/);
+    assert.match(userPrompt, /do not replace the list with a general observation/i);
+  });
+
+  it("puts completeness above the channel's ideal length, but not above its maximum", () => {
+    const { userPrompt } = buildPrompts(makeCtx({}), listingItem(), "en");
+
+    assert.match(userPrompt, /completeness wins/);
+    assert.match(userPrompt, /stay within the channel's maximum/);
+  });
+
+  it("outranks every other constraint by sitting last, next to the JSON block", () => {
+    // Order is the mechanism, not decoration: the aspect and shared-topic
+    // sections are both phrased as mandatory, so the one that must win has to be
+    // the nearest instruction to the output format.
+    const { userPrompt } = buildPrompts(makeCtx({}), listingItem(), "en", [], {
+      aspect: { id: "a1", title: "T", focus: "one single webinar", visualConcept: "a desk" },
+      sharedTopic: {
+        coreMessage: "There are five events this week.",
+        topic: "weekly events",
+        establishedBy: "linkedin",
+      },
+    });
+
+    // `lastIndexOf`: the instruction also appears up in the source block, which
+    // is where the model reads the page — the requirement section is the second
+    // occurrence, and it is the one that has to come last.
+    const requirement = userPrompt.lastIndexOf(INSTRUCTION);
+    assert.ok(requirement > userPrompt.indexOf("one single webinar"));
+    assert.ok(requirement > userPrompt.indexOf("There are five events"));
+    assert.ok(requirement < userPrompt.indexOf('"coreMessage"'), "still above the JSON block");
+  });
+
+  it("adds nothing for a source that carries no instruction", () => {
+    const plain = listingItem({
+      content: JSON.stringify({ title: "Pro Plan", description: "Everything, plus SSO." }),
+    });
+
+    const { userPrompt } = buildPrompts(makeCtx({}), plain, "en");
+
+    assert.ok(!userPrompt.includes("Required content"));
+  });
+});
+
+describe("prompt-builder — an extraction that found nothing", () => {
+  const NOTHING_FOUND: FeedItemContext = {
+    id: "events",
+    title: "Business events",
+    content: JSON.stringify({
+      instructions: "Every event next week with its type and price.",
+      pageText: "Events THIS week: Energy Update — 11.08.2026",
+    }),
+    url: "https://events.example.com/?week=current",
+    publishedAt: null,
+    sourceType: "product_page",
+    extractionStatus: "not_found",
+    extractedContent: null,
+  };
+
+  it("drops the 'cover every item' requirement — there are no items", () => {
+    // Two mandatory sections saying "there is nothing" and "list all of it" is a
+    // contradiction the model resolves, which is how an invented list gets written.
+    const { userPrompt } = buildPrompts(makeCtx({}), NOTHING_FOUND, "en");
+
+    assert.ok(!userPrompt.includes("Required content"));
+    assert.ok(!userPrompt.includes("Cover EVERY item"));
+  });
+
+  it("still tells the model the page had nothing and forbids inventing", () => {
+    const { userPrompt } = buildPrompts(makeCtx({}), NOTHING_FOUND, "en");
+
+    assert.match(userPrompt, /found NOTHING on this page/);
+    assert.match(userPrompt, /Do not invent any/);
+  });
+
+  it("keeps the requirement when the extraction DID find items", () => {
+    const { userPrompt } = buildPrompts(
+      makeCtx({}),
+      {
+        ...NOTHING_FOUND,
+        extractionStatus: "completed",
+        extractedContent: "1. Energy Update — Webinar — Free",
+      },
+      "en"
+    );
+
+    assert.match(userPrompt, /Required content/);
+    assert.match(userPrompt, /Cover EVERY item/);
+  });
+});
+
+describe("prompt-builder — every channel starts from the same extracted facts", () => {
+  const EXTRACTED = [
+    "Total events: 3",
+    "1. Energy Update — Webinar — 18.08.2026 — Online — Free",
+    "2. HR Masterclass — Masterclass — 19.08.2026 — In person — Paid, 50 BGN",
+    "3. Growth Conference — Conference — 21.08.2026 — In person — Paid, 120 BGN",
+  ].join("\n");
+
+  const EXTRACTED_ITEM: FeedItemContext = {
+    id: "events",
+    title: "Business events",
+    content: JSON.stringify({
+      instructions: "Every event next week with its type, date, format and price.",
+      pageText: "RAW PAGE the model must not have to read again",
+    }),
+    url: "https://events.example.com/?week=current",
+    publishedAt: null,
+    sourceType: "product_page",
+    extractionStatus: "completed",
+    extractedContent: EXTRACTED,
+  };
+
+  /**
+   * The facts a prompt was given — from the extracted-data heading to the end of
+   * the source section. Deliberately not the whole prompt: the channel's name is
+   * in the opening line and its guidance is meant to differ.
+   */
+  function factsBlock(userPrompt: string): string {
+    const start = userPrompt.indexOf("EXTRACTED SOURCE DATA");
+    assert.notEqual(start, -1, "the prompt must carry the extracted data");
+    return userPrompt.slice(start, userPrompt.indexOf("\n---", start));
+  }
+
+  it("hands Facebook and LinkedIn byte-identical source facts", () => {
+    // Requirement: the two may present the facts differently, but they must never
+    // disagree about how many events there are, or their dates and prices.
+    const facebook = buildPrompts(
+      makeCtx({ channel: "facebook" }),
+      EXTRACTED_ITEM,
+      "en"
+    ).userPrompt;
+    const linkedin = buildPrompts(
+      makeCtx({ channel: "linkedin" }),
+      EXTRACTED_ITEM,
+      "en"
+    ).userPrompt;
+
+    assert.equal(factsBlock(facebook), factsBlock(linkedin));
+    for (const prompt of [facebook, linkedin]) {
+      assert.ok(prompt.includes("Total events: 3"));
+      assert.ok(prompt.includes("Growth Conference"));
+      assert.ok(prompt.includes("120 BGN"));
+    }
+  });
+
+  it("still differs in channel guidance — style is per channel, facts are not", () => {
+    const facebook = buildPrompts(makeCtx({ channel: "facebook" }), EXTRACTED_ITEM, "en");
+    const linkedin = buildPrompts(makeCtx({ channel: "linkedin" }), EXTRACTED_ITEM, "en");
+
+    assert.notEqual(facebook.systemPrompt, linkedin.systemPrompt);
+  });
+
+  it("shows no channel the raw page to re-derive its own list from", () => {
+    for (const channel of ["facebook", "linkedin", "instagram"]) {
+      const { userPrompt } = buildPrompts(makeCtx({ channel }), EXTRACTED_ITEM, "en");
+      assert.ok(!userPrompt.includes("RAW PAGE"), `${channel} must not receive the raw page`);
+    }
+  });
+
+  it("keeps the sibling-channel constraint compatible with the full list", () => {
+    // A sibling is told to make the same central claim in its own register; that
+    // must not read as permission to shorten the list.
+    const { userPrompt } = buildPrompts(
+      makeCtx({ channel: "facebook" }),
+      EXTRACTED_ITEM,
+      "en",
+      [],
+      {
+        sharedTopic: {
+          coreMessage: "Three business events run next week, one of them free.",
+          topic: "events next week",
+          establishedBy: "linkedin",
+        },
+      }
+    );
+
+    assert.ok(userPrompt.includes("Growth Conference"));
+    assert.match(userPrompt, /do not drop one to save space/);
+    assert.ok(
+      userPrompt.lastIndexOf("Cover EVERY item") > userPrompt.indexOf("Shared content topic"),
+      "the completeness requirement sits after the shared-topic constraint"
+    );
+  });
+});

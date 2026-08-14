@@ -50,6 +50,10 @@ import { analyticsSyncHandler, ANALYTICS_SYNC_JOB_TYPE } from "./analytics-sync-
 import { publishSweepHandler, PUBLISH_SWEEP_JOB_TYPE } from "./publish-sweep-handler";
 import { bulkGenerationHandlerFor, BULK_GENERATION_JOB_TYPE } from "./bulk-generation-handler";
 import { topicGenerationHandlerFor, TOPIC_GENERATION_JOB_TYPE } from "./topic-generation-handler";
+import {
+  productPageExtractionHandler,
+  PRODUCT_PAGE_EXTRACTION_JOB_TYPE,
+} from "./product-page-extraction-handler";
 import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
 import type { JobRecord } from "./job-store";
 
@@ -86,6 +90,9 @@ async function main(): Promise<void> {
     .register(POST_GENERATION_JOB_TYPE, postGenerationHandler)
     .register(ANALYTICS_SYNC_JOB_TYPE, analyticsSyncHandler)
     .register(PUBLISH_SWEEP_JOB_TYPE, publishSweepHandler)
+    // Turns a scraped product page into the facts its extraction instruction
+    // asked for, before any post is written from it.
+    .register(PRODUCT_PAGE_EXTRACTION_JOB_TYPE, productPageExtractionHandler)
     // The two interactive jobs: a person is waiting on each, so they report
     // progress as they go and resume rather than repeat on a retry.
     .register(BULK_GENERATION_JOB_TYPE, bulkGenerationHandlerFor(config))

@@ -9,7 +9,10 @@ import type { FeedItemContext } from "./types";
  *   • prompt         — `content` is the brief the user typed (plain text)
  *   • product_page   — `content` is JSON: {title, description, image} and, when
  *                      the source carries an extraction instruction,
- *                      {instructions, pageText} alongside them
+ *                      {instructions, pageText} alongside them. That raw page is
+ *                      the INPUT to the ingestion-time extraction step; once it
+ *                      has run, the item's `extractedContent` column holds the
+ *                      requested facts and is what this module renders.
  *   • calendar_event — `content` is JSON: {title, date, description}
  *
  * The two JSON shapes used to reach the model verbatim, as a literal
@@ -100,7 +103,22 @@ function renderCalendarEvent(stored: Record<string, unknown>, limit: number): st
  */
 export const INSTRUCTED_PAGE_TEXT_LIMIT = 2_500;
 
-function renderProductPage(stored: Record<string, unknown>, limit: number): string {
+/**
+ * Budget for a completed extraction result.
+ *
+ * The most generous of the three, because this text is already the answer: it was
+ * produced by asking a model for exactly the requested facts and nothing else, so
+ * every character of it is something the post was asked to carry. Truncating it
+ * is dropping events off the end of a list that was gathered precisely so it
+ * would be complete.
+ */
+export const EXTRACTED_CONTENT_LIMIT = 4_000;
+
+function renderProductPage(
+  item: FeedItemContext,
+  stored: Record<string, unknown>,
+  limit: number
+): string {
   const description = stringField(stored, "description");
   // `image` is deliberately dropped: an image URL is noise to a text model, and
   // it competes for the per-item character budget with the description.
@@ -111,9 +129,42 @@ function renderProductPage(stored: Record<string, unknown>, limit: number): stri
       .join("\n");
   }
 
-  // The page as it was actually read. Falls back to the meta description when
-  // the body could not be extracted, so an instruction still has something to
-  // act on rather than silently becoming an invitation to invent.
+  const extracted = item.extractedContent?.trim();
+
+  // The normal path once the ingestion-time extraction has run: the prompt gets
+  // the FACTS, not the page. The raw page is deliberately left out — including
+  // both would invite the model to re-derive its own list and disagree with the
+  // one its sibling channels were given.
+  if (item.extractionStatus === "completed" && extracted) {
+    return [
+      "Product page — the facts below were extracted from it in advance, against this instruction:",
+      truncate(instructions, limit),
+      "",
+      "EXTRACTED SOURCE DATA — the complete and only permitted set of facts for this post:",
+      truncate(extracted, Math.max(limit, EXTRACTED_CONTENT_LIMIT)),
+      "",
+      "Every item above was extracted because it matches the instruction. Do not add an item, a date, a price or a category that is not listed, and do not drop one to save space.",
+    ].join("\n");
+  }
+
+  // The extraction ran and answered "not on this page" — an instruction asking
+  // for next week against a page listing this week. Saying so plainly is the
+  // whole point of storing that outcome: the alternative is a model handed an
+  // instruction and a page that cannot satisfy it, which is how a confident,
+  // entirely invented list gets written.
+  if (item.extractionStatus === "not_found") {
+    return [
+      "Product page.",
+      `The source was asked for: ${truncate(instructions, limit)}`,
+      "The extraction step found NOTHING on this page matching that instruction. There are no items to write about.",
+      "Do not invent any. If there is nothing to report, say so plainly rather than describing items the page does not contain.",
+    ].join("\n");
+  }
+
+  // Extraction has not run yet (queued, in flight, or it failed). Falling back to
+  // the raw page keeps a generation possible rather than blocking it, at the cost
+  // of the model doing the reading itself — which is exactly the arrangement the
+  // extraction step replaces, so it is a fallback and not a second design.
   const pageText = stringField(stored, "pageText") ?? description;
 
   return [
@@ -152,12 +203,45 @@ export function renderFeedItemContent(
   if (stored && item.sourceType === "calendar_event") {
     body = renderCalendarEvent(stored, limit);
   } else if (stored && item.sourceType === "product_page") {
-    body = renderProductPage(stored, limit);
+    body = renderProductPage(item, stored, limit);
   } else {
     body = truncate(raw, limit);
   }
 
   return [title ? `**${title}**` : null, body || null].filter(Boolean).join("\n");
+}
+
+/**
+ * The extraction instruction a feed item carries, or null when it has none.
+ *
+ * Only a product page can have one (see the schema), and it is the single most
+ * authoritative thing in a generation: the owner has said, in their own words,
+ * what a post from this page must contain. Everything else the pipeline decides
+ * — the rotated angle, the writing pattern, the mined content aspect — is a
+ * heuristic about HOW to write, and none of them may quietly overrule it.
+ *
+ * Exported so the prompt builder can state it as a requirement and aspect mining
+ * can stand down: an aspect reaches the prompt as "build this post around this
+ * one focus", which is the exact opposite of "list everything on the page".
+ */
+export function sourceExtractionInstruction(item: FeedItemContext | null): string | null {
+  if (!item || item.sourceType !== "product_page") return null;
+  const stored = parseStored(item.content?.trim() ?? "");
+  return stored ? stringField(stored, "instructions") : null;
+}
+
+/**
+ * Whether the ingestion-time extraction ran and found nothing on the page.
+ *
+ * Separate from the instruction itself because the two answer different
+ * questions. The instruction still exists — it is why aspect mining must stay
+ * out of the way — but there is nothing to cover, so the prompt must NOT also
+ * carry "include every item the instruction asks for". A prompt that says both
+ * "there are no items" and "list them all" is resolved by the model, which is
+ * precisely how an invented list gets written.
+ */
+export function extractionFoundNothing(item: FeedItemContext | null): boolean {
+  return item?.sourceType === "product_page" && item.extractionStatus === "not_found";
 }
 
 /** The heading and instruction that introduce the primary source in a prompt. */

@@ -29,6 +29,24 @@ export const RSS_TRANSLATION_JOB_TYPE = "rss-translation";
  */
 export const RSS_TRANSLATION_DEDUPE_KEY = "cron:rss-translation";
 
+/**
+ * Product-page extraction drain: turn scraped pages into the facts their
+ * `extractionInstructions` asked for, across all companies.
+ *
+ * Queued for the same reason translation is — it is an LLM call that ingestion
+ * must not wait on inside an HTTP request — and enqueued the same way: by
+ * whichever ingest produced the work, manual or cron.
+ */
+export const PRODUCT_PAGE_EXTRACTION_JOB_TYPE = "product-page-extraction";
+
+/**
+ * Stable dedupe key for the extraction drain. Same guarantee as the sweeps above:
+ * the partial unique index `jobs_dedupe_active_key` rejects a second enqueue while
+ * one drain is queued or running, so two ingests finishing together collapse into
+ * one run rather than racing over the same pending items.
+ */
+export const PRODUCT_PAGE_EXTRACTION_DEDUPE_KEY = "cron:product-page-extraction";
+
 /** Post generation fan-out: generate/fill weekly schedules, auto-approve, publish, retry. */
 export const POST_GENERATION_JOB_TYPE = "post-generation";
 

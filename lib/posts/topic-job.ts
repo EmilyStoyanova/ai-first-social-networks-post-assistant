@@ -129,16 +129,36 @@ export function newTopicPosts<TPost>(
   return fresh;
 }
 
+/** A channel with no post, and the generator's own account of why — if it has one. */
+export interface ChannelGap {
+  channel: string;
+  /**
+   * The failure this channel reported, or null when it was never attempted.
+   *
+   * The null is meaningful rather than missing data: a channel the deadline left
+   * no time for produced no error because nothing was run for it, and telling
+   * the user "it did not get a turn" is a different (and much more retryable)
+   * message than any generation failure.
+   */
+  failure: TopicJobFailure | null;
+}
+
 /**
- * The channels this topic has no version for, in the order they were asked for.
+ * The channels this topic has no version for, in the order they were asked for,
+ * each with whatever the run knows about why.
  *
- * Failures and never-attempted channels are named together because they mean the
- * same thing to the person looking at the card — this topic has no post for that
- * channel — which is exactly how the synchronous path already reports them.
+ * Failures and never-attempted channels are listed together because they mean
+ * the same thing to the person looking at the card — this topic has no post for
+ * that channel — but they are not flattened to bare names: the code on a failure
+ * is the only place the reason exists, and a caller that drops it leaves the user
+ * with a channel that silently produced nothing and no way to find out why.
  */
-export function missingChannels(progress: TopicJobProgress | null): string[] {
+export function channelGaps(progress: TopicJobProgress | null): ChannelGap[] {
   if (!progress) return [];
-  return [...(progress.failures ?? []).map((f) => f.channel), ...(progress.notAttempted ?? [])];
+  return [
+    ...(progress.failures ?? []).map((failure) => ({ channel: failure.channel, failure })),
+    ...(progress.notAttempted ?? []).map((channel) => ({ channel, failure: null })),
+  ];
 }
 
 /**

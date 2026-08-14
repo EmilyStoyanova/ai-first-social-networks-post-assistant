@@ -3,6 +3,7 @@ import type { ContentAspect } from "@/lib/ai/content-aspect";
 import { selectAspect } from "@/lib/ai/content-aspect";
 import { buildPrimaryFingerprint, extractAspects } from "@/lib/ai/aspect-extractor";
 import { loadAspectPoolData, allAspectsUsed } from "@/lib/ai/aspect-pool-store";
+import { sourceExtractionInstruction } from "@/lib/ai/source-content";
 
 export interface ResolvedAspect {
   aspect: ContentAspect | undefined;
@@ -47,6 +48,19 @@ export async function resolveGenerationAspect(params: {
   provider: ILlmProvider;
 }): Promise<ResolvedAspect> {
   const { primary, snapshots, provider } = params;
+
+  // The source already says what this post must contain. An aspect is mined to
+  // answer the opposite question — which single facet of a source to narrow a
+  // post down to — and it reaches the prompt as "you MUST build this post around
+  // this focus. Do NOT replace it with a more prominent theme from the source
+  // content." Against an instruction like "list every event with its type and
+  // price" that constraint does not refine the post, it overrides the request:
+  // the mined focus picks one event and the other four are never written.
+  //
+  // So mining stands down rather than being outranked in the prompt. It also
+  // saves an LLM call per generation on exactly the path where the source text is
+  // longest, which is the path most likely to be running out of time already.
+  if (sourceExtractionInstruction(primary)) return EMPTY;
 
   const fingerprint = buildPrimaryFingerprint(primary);
   if (!fingerprint || !primary) return EMPTY;

@@ -389,6 +389,30 @@ model FeedItem {
   /// lease means the worker died mid-translation and the item is reclaimable.
   translationLeaseExpiresAt DateTime? @map("translation_lease_expires_at")
 
+  // Product-page extraction. Written only for `product_page` sources whose config
+  // carries `extractionInstructions` — the owner's own description of what a post
+  // from that page must be built from.
+  //
+  // Same contract as translation above, for the same reason: `content` keeps the
+  // RAW scraped page (title/description/pageText JSON) and is never overwritten,
+  // so the input a result was derived from stays auditable and a re-extraction
+  // always starts from the page rather than from its own previous output.
+  // Generation prefers `extractedContent`, and only on `completed`.
+  extractedContent       String?   @map("extracted_content")
+  /// pending | extracting | completed | not_found | failed
+  ///
+  /// `not_found` is a SUCCESSFUL run whose answer was "the page does not contain
+  /// this" — the honest outcome for an instruction asking for next week's events
+  /// on a page that lists only this week's. Distinct from `failed` (the model or
+  /// transport broke) because it must never be retried, and distinct from
+  /// `completed` because generation must not write a post from it.
+  extractionStatus       String?   @map("extraction_status")
+  /// sha256(pageText + instructions) — an unchanged page and instruction skip re-extraction.
+  extractionHash         String?   @map("extraction_hash")
+  extractionError        String?   @map("extraction_error")
+  extractedAt            DateTime? @map("extracted_at")
+  extractionAttemptCount Int       @default(0) @map("extraction_attempt_count")
+
   source ContentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   // A feed item backs at most one post PER CHANNEL — one topic, written once for
   // each social channel it was generated for. Enforced at the DB level by the
@@ -406,6 +430,8 @@ model FeedItem {
   @@index([translationStatus, translationNextRetryAt])
   // Recovery scan: reclaim in-flight claims ('translating') whose lease expired.
   @@index([translationStatus, translationLeaseExpiresAt])
+  // Drives the product-page extraction drain: pending items, oldest first.
+  @@index([extractionStatus, createdAt])
   @@map("feed_items")
 }
 

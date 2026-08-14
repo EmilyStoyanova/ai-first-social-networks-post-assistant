@@ -80,6 +80,19 @@ export interface FeedItemContext {
   /** ContentSource.config.includeSourceLink of the item's source; undefined = inherit. */
   sourceLinkPreference?: boolean;
   /**
+   * The facts a product page's extraction instruction asked for, produced once at
+   * ingestion (see lib/ai/product-page-extraction.ts) rather than re-derived per
+   * channel. Authoritative when `extractionStatus` is "completed": every channel
+   * version of a topic reads this same text, so they cannot disagree about how
+   * many events there were.
+   *
+   * Undefined for every other source type and for contexts assembled before the
+   * step existed.
+   */
+  extractedContent?: string | null;
+  /** pending | extracting | completed | not_found | failed — see the schema. */
+  extractionStatus?: string | null;
+  /**
    * The public web address a reader could open for this item, or null when it
    * has none.
    *

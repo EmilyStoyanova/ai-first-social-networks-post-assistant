@@ -1,8 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  channelGaps,
   hasNoPosts,
-  missingChannels,
   newTopicPosts,
   summarizeTopicJob,
   type TopicJobProgress,
@@ -110,7 +110,7 @@ describe("newTopicPosts", () => {
   });
 });
 
-describe("missingChannels", () => {
+describe("channelGaps", () => {
   it("names failures and never-attempted channels together", () => {
     // They mean the same thing to the person looking at the card: this topic has
     // no version for that channel.
@@ -119,11 +119,42 @@ describe("missingChannels", () => {
       notAttempted: ["instagram"],
     });
 
-    assert.deepEqual(missingChannels(p), ["facebook", "instagram"]);
+    assert.deepEqual(
+      channelGaps(p).map((g) => g.channel),
+      ["facebook", "instagram"]
+    );
+  });
+
+  it("carries the failure's own diagnostics through, not just the channel name", () => {
+    // The code is the only place the reason exists — a caller that flattens this
+    // to a name leaves the user with a channel that produced nothing and no way
+    // to find out why.
+    const gaps = channelGaps(
+      progress({
+        failures: [
+          {
+            channel: "facebook",
+            code: "CANNOT_GENERATE_UNIQUE_POST",
+            reason: "semantic_duplicate",
+            attempts: 3,
+          },
+        ],
+      })
+    );
+
+    assert.equal(gaps[0].failure?.code, "CANNOT_GENERATE_UNIQUE_POST");
+    assert.equal(gaps[0].failure?.reason, "semantic_duplicate");
+    assert.equal(gaps[0].failure?.attempts, 3);
+  });
+
+  it("distinguishes a channel that never got a turn from one that failed", () => {
+    const gaps = channelGaps(progress({ notAttempted: ["instagram"] }));
+
+    assert.equal(gaps[0].failure, null);
   });
 
   it("is empty for a complete topic", () => {
-    assert.deepEqual(missingChannels(progress()), []);
+    assert.deepEqual(channelGaps(progress()), []);
   });
 });
 

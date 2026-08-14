@@ -8,7 +8,12 @@ import {
 } from "./post-pattern";
 import type { ContentAspect } from "./content-aspect";
 import { getChannelPolicy } from "./channel-policy";
-import { framePrimarySource, renderFeedItemContent } from "./source-content";
+import {
+  extractionFoundNothing,
+  framePrimarySource,
+  renderFeedItemContent,
+  sourceExtractionInstruction,
+} from "./source-content";
 
 export interface BuiltPrompts {
   systemPrompt: string;
@@ -578,6 +583,30 @@ function buildUserPrompt(
       ].join("\n")
     : "";
 
+  // What the SOURCE itself says this post must contain, when its owner said
+  // anything. Nothing else in this prompt is a direct instruction from a person
+  // about this specific page, which is why it is stated as outranking the
+  // heuristics — and why aspect mining stands down entirely when it is present
+  // (see resolveGenerationAspect): "build the post around this one focus" and
+  // "cover every item on the page" cannot both be obeyed, and the mined focus
+  // was silently winning.
+  // Suppressed when the extraction ran and found nothing: the source block above
+  // already says there is nothing to write about, and "cover every item" beside
+  // it would be a contradiction for the model to resolve.
+  const extractionInstruction = extractionFoundNothing(primary)
+    ? null
+    : sourceExtractionInstruction(primary);
+  const extractionSection = extractionInstruction
+    ? [
+        "**Required content — the source's own extraction instruction. This outranks every guidance section above.**",
+        extractionInstruction,
+        "Cover EVERY item the source block above provides, with every detail it gives for each one. Do not present one item as an example and summarise the rest away, and do not replace the list with a general observation about the subject.",
+        "Take those items from the source block and from nothing else. If a detail the instruction asks for is missing there, omit it for that item rather than inventing it — and never add an item that is not listed.",
+        "Where this conflicts with the ideal length above, completeness wins: stay within the channel's maximum, and if the full list will not fit, compress each item to the bare details rather than dropping items.",
+        "Your coreMessage must state what the list as a whole says (how many items, of what kinds), not a claim about a single one of them.",
+      ].join("\n")
+    : "";
+
   return [
     intro,
     feedSection,
@@ -591,6 +620,10 @@ function buildUserPrompt(
     // JSON format block — and so it wins any tension with the angle/pattern
     // rotation above, which shapes HOW the post reads, not WHAT it is about.
     sharedTopicSection,
+    // …and after even that: a shared topic decides WHICH story every channel
+    // tells, while this decides what the post must actually contain. A sibling
+    // channel of a digest is still a digest.
+    extractionSection,
     buildJsonFormatInstruction(imageRequired),
   ]
     .filter(Boolean)

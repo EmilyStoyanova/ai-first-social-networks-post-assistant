@@ -764,6 +764,7 @@
       "channelsMultiHint": "The same topic will be written {count} times — once per channel, each in that channel's own style. They stay separate posts you approve and publish independently.",
       "channelsAtLeastOne": "Pick at least one channel.",
       "channelsPartial": "Nothing could be written for {channels}. The other channels were generated and are in the list below.",
+      "channelNotAttempted": "This channel never got a turn — the run ran out of time. Generating it again usually works.",
       "imageRequiredWarningChannels": "Publishing to {channels} requires an image. The drafts will still be created — attach or generate an image before publishing."
     },
     "channelVersionLabel": "Channel version"

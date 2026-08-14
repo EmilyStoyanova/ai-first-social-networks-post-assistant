@@ -131,6 +131,50 @@ describe("resolveGenerationAspect — the aspect belongs to the primary article"
     assert.equal(prompts.length, 0, "no primary, nothing to mine");
   });
 
+  it("stands down when the source already says what the post must contain", async () => {
+    // The production failure this guards. A product page told to "list every
+    // event with its type and price" was mined for an aspect anyway, and the
+    // mined focus — one webinar — reached the prompt as "you MUST build this
+    // post around this focus", so four of the five events were never written.
+    const listing: FeedItemContext = {
+      id: "events",
+      title: "Business events",
+      content: JSON.stringify({
+        instructions: "List every event this week with its type and whether it is free.",
+        pageText: "Energy Update — webinar, 11.08.2026, free\nHR Meetup — meetup, 16.08.2026",
+      }),
+      url: "https://events.example.com/?week=current",
+      publishedAt: null,
+      sourceType: "product_page",
+    };
+    const { provider, prompts } = makeProvider(CLOSURE_ASPECTS);
+
+    const resolved = await resolveGenerationAspect({ primary: listing, snapshots: [], provider });
+
+    assert.equal(resolved.aspect, undefined, "no focus may be imposed on top of the instruction");
+    assert.equal(resolved.fingerprint, null, "nothing is recorded, so no pool is reused later");
+    assert.equal(prompts.length, 0, "and the extraction LLM call is not made at all");
+  });
+
+  it("still mines a product page that carries no instruction", async () => {
+    // Standing down is scoped to an explicit instruction — an ordinary product
+    // page keeps the aspect rotation it has always had.
+    const page: FeedItemContext = {
+      id: "pro-plan",
+      title: "Pro Plan",
+      content: JSON.stringify({ title: "Pro Plan", description: "Everything, plus SSO." }),
+      url: "https://shop.example.com/pro",
+      publishedAt: null,
+      sourceType: "product_page",
+    };
+    const { provider, prompts } = makeProvider(CLOSURE_ASPECTS);
+
+    const resolved = await resolveGenerationAspect({ primary: page, snapshots: [], provider });
+
+    assert.equal(prompts.length, 1);
+    assert.ok(resolved.aspect);
+  });
+
   it("proceeds without an aspect when extraction fails", async () => {
     // Fail-open: a broken extraction must never block generation.
     const provider: ILlmProvider = {
@@ -141,5 +185,54 @@ describe("resolveGenerationAspect — the aspect belongs to the primary article"
     const resolved = await resolveGenerationAspect({ primary: CLOSURE, snapshots: [], provider });
     assert.equal(resolved.aspect, undefined);
     assert.deepEqual(resolved.pool, []);
+  });
+});
+
+describe("resolveGenerationAspect — an extracted product page", () => {
+  const EXTRACTED_LISTING: FeedItemContext = {
+    id: "events",
+    title: "Business events",
+    content: JSON.stringify({
+      instructions: "List every event next week with its type and price.",
+      pageText: "raw page",
+    }),
+    url: "https://events.example.com/?week=current",
+    publishedAt: null,
+    sourceType: "product_page",
+    extractionStatus: "completed",
+    extractedContent: [
+      "Total events: 3",
+      "1. Energy Update — Webinar — Free",
+      "2. HR Masterclass — Masterclass — 50 BGN",
+      "3. Growth Conference — Conference — 120 BGN",
+    ].join("\n"),
+  };
+
+  it("cannot narrow an extracted list of three events down to one focus", async () => {
+    // Aspect mining answers "which single facet of this source should the post be
+    // about", which is the opposite of what an all-items extraction is for. It
+    // has to stand down even now that the facts arrive pre-extracted.
+    const { provider, prompts } = makeProvider(CLOSURE_ASPECTS);
+
+    const resolved = await resolveGenerationAspect({
+      primary: EXTRACTED_LISTING,
+      snapshots: [],
+      provider,
+    });
+
+    assert.equal(resolved.aspect, undefined);
+    assert.equal(prompts.length, 0, "and it costs no model call");
+  });
+
+  it("stands down for a not-found extraction too", async () => {
+    const { provider } = makeProvider(CLOSURE_ASPECTS);
+
+    const resolved = await resolveGenerationAspect({
+      primary: { ...EXTRACTED_LISTING, extractionStatus: "not_found", extractedContent: null },
+      snapshots: [],
+      provider,
+    });
+
+    assert.equal(resolved.aspect, undefined);
   });
 });
