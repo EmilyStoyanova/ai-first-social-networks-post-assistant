@@ -27,6 +27,27 @@ function bulkDraft(overrides: Partial<PostRow> = {}): PostRow {
   };
 }
 
+/**
+ * A SINGLE manually generated post with a chosen time, as the generation form
+ * writes it (generate-draft-post.service.ts: `manuallyScheduled` is derived from
+ * `scheduledFor` with no `scheduleId`).
+ *
+ * Byte-identical to `bulkDraft` — and that IS the assertion. `PostRow` is the
+ * whole shape the approval and publishing rules read, and there is no batch
+ * field in it, so nothing downstream can tell a single post from a bulk one.
+ * Kept as its own factory because the single-post flow is what the regression
+ * tests below are about, and a reader should not have to know they are the same.
+ */
+function singleDraft(overrides: Partial<PostRow> = {}): PostRow {
+  return {
+    companyId: "co-1",
+    status: "draft",
+    scheduledFor: SOFIA_NOON,
+    manuallyScheduled: true,
+    ...overrides,
+  };
+}
+
 /** A cron post: a time the weekly filler estimated, no batch. */
 function cronPost(overrides: Partial<PostRow> = {}): PostRow {
   return {
@@ -147,18 +168,20 @@ describe("approvePost — a manual bulk draft scheduled for later", () => {
     assert.equal(decidePublish(candidate, SOFIA_NOON), "publish");
   });
 
-  it("approves one whose slot has already gone by", async () => {
-    // Approval is not clock-dependent: whether a late post still goes out is the
-    // sweep's decision (past_due parks it), not a reason to refuse the approval
-    // and strand the post in draft.
+  it("refuses one whose slot has already gone by, asking for a new time", async () => {
+    // Approval IS clock-dependent for these now. It used to be granted, on the
+    // reasoning that the sweep would decide whether a late post still went out —
+    // but the sweep can only park it, so all that produced was an approved post
+    // that would never publish and said nothing about why. Asking for a new time
+    // is the answer the person can act on. See the SCHEDULE_MISSED block below.
     const { deps, updates } = makeDeps(bulkDraft(), {
       now: new Date("2026-08-14T09:00:00.000Z"),
     });
 
     const result = await approvePost("p-1", "owner-1", false, deps);
 
-    assert.equal(result.success, true);
-    assert.equal(updates()[0].status, "approved");
+    assert.equal(result.success === false && result.code, "SCHEDULE_MISSED");
+    assert.deepEqual(updates(), []);
   });
 
   it("approves it for a global admin without a membership", async () => {
@@ -276,6 +299,199 @@ describe("approvePost — unchanged for other posts", () => {
   });
 });
 
+// ─── The same guarantee, for a SINGLE manually generated post ────────────────
+// The generation form can give one post a time (`scheduledFor` + the derived
+// `manuallyScheduled`), exactly as a bulk run gives one to each of its posts.
+// These pin down that approving such a post does not deliver it, and that the
+// sweep is what does — the single-post half of the guarantee the block above
+// establishes for bulk.
+
+describe("approvePost — a single manually generated post scheduled for later", () => {
+  it("approves it at 11:48 without sending it to Buffer", async () => {
+    const { deps, updates, audits } = makeDeps(singleDraft());
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+
+    assert.deepEqual(result, { success: true, status: "APPROVED" });
+
+    const data = updates()[0];
+    assert.equal(updates().length, 1);
+    assert.equal(data.status, "approved");
+    assert.equal(data.approvedById, "owner-1");
+    // Approved and waiting — never delivered, and never made to LOOK delivered.
+    assert.notEqual(data.status, "sent_to_buffer");
+    for (const field of ["bufferUpdateId", "publishedAt", "publishedPostUrl"]) {
+      assert.equal(field in data, false, `${field} must not be written by an approval`);
+    }
+    assert.deepEqual(audits(), ["POST_APPROVED"], "approval only — no publish entry");
+  });
+
+  it("remains eligible for the sweep, which waits for 12:00 and then sends it", async () => {
+    const post = singleDraft();
+    const { deps, updates } = makeDeps(post);
+
+    await approvePost("p-1", "owner-1", false, deps);
+
+    // The approval writes neither field, so these are what the sweep reads.
+    for (const field of ["scheduledFor", "manuallyScheduled"]) {
+      assert.equal(field in updates()[0], false, `${field} must survive the approval`);
+    }
+
+    const candidate = {
+      scheduledFor: post.scheduledFor,
+      manuallyScheduled: post.manuallyScheduled,
+    };
+    assert.equal(decidePublish(candidate, APPROVED_AT), "not_due");
+    assert.equal(decidePublish(candidate, SOFIA_NOON), "publish");
+  });
+
+  it("is indistinguishable from a bulk post to both rules", async () => {
+    // The requirement in one assertion: from the publishing system's point of
+    // view a hand-scheduled single post IS a hand-scheduled bulk post. Nothing
+    // reads `generationBatchId` to decide any of this.
+    const single = singleDraft();
+    const bulk = bulkDraft();
+
+    assert.deepEqual(single, bulk);
+
+    for (const at of [APPROVED_AT, SOFIA_NOON]) {
+      assert.equal(
+        decidePublish(single, at),
+        decidePublish(bulk, at),
+        `single and bulk must agree at ${at.toISOString()}`
+      );
+    }
+    assert.equal(canApprove(single, APPROVED_AT), canApprove(bulk, APPROVED_AT));
+  });
+
+  it("leaves an UNSCHEDULED single draft to the immediate publish path", async () => {
+    // No time was chosen, so there is nothing to wait for: approval alone is
+    // refused and the card's approve-and-publish action stays the way out. That
+    // is the pre-existing behaviour for every ordinary draft, unchanged.
+    const { deps, updates } = makeDeps(
+      singleDraft({ scheduledFor: null, manuallyScheduled: false })
+    );
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+
+    assert.equal(result.success, false);
+    assert.equal(result.success === false && result.code, "INVALID_TRANSITION");
+    assert.deepEqual(updates(), []);
+  });
+});
+
+// ─── A missed slot must be rescheduled before it can be approved ─────────────
+// Enforced in the SERVICE, not just on the card: POST /api/v1/posts/[id]/approve
+// is reachable without the UI, and a post approved after its slot would be
+// committed to a publish at a moment nobody named.
+
+describe("approvePost — its chosen time has already gone by", () => {
+  const ONE_MINUTE_LATE = new Date(SOFIA_NOON.getTime() + 60_000);
+
+  it("refuses a direct API approval one minute after the slot", async () => {
+    const { deps, updates, audits } = makeDeps(singleDraft(), { now: ONE_MINUTE_LATE });
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+
+    assert.equal(result.success, false);
+    assert.equal(result.success === false && result.code, "SCHEDULE_MISSED");
+    // Nothing written, so the post is intact and one reschedule is all it needs.
+    assert.deepEqual(updates(), []);
+    assert.deepEqual(audits(), []);
+  });
+
+  it("refuses one whose slot is exactly now", async () => {
+    const { deps, updates } = makeDeps(singleDraft(), { now: SOFIA_NOON });
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+
+    assert.equal(result.success === false && result.code, "SCHEDULE_MISSED");
+    assert.deepEqual(updates(), []);
+  });
+
+  it("refuses one whose slot is days gone", async () => {
+    const { deps } = makeDeps(singleDraft(), { now: new Date("2026-08-20T09:00:00.000Z") });
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+
+    assert.equal(result.success === false && result.code, "SCHEDULE_MISSED");
+  });
+
+  it("refuses a submitted post too, not only a draft", async () => {
+    const { deps } = makeDeps(singleDraft({ status: "pending_approval" }), {
+      now: ONE_MINUTE_LATE,
+    });
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+
+    assert.equal(result.success === false && result.code, "SCHEDULE_MISSED");
+  });
+
+  it("refuses a global admin as well — a missed time is not a permission", async () => {
+    const { deps } = makeDeps(singleDraft(), { role: null, now: ONE_MINUTE_LATE });
+
+    const result = await approvePost("p-1", "admin-1", true, deps);
+
+    assert.equal(result.success === false && result.code, "SCHEDULE_MISSED");
+  });
+
+  it("names the missed time, so the card can explain itself", async () => {
+    const { deps } = makeDeps(singleDraft(), { now: ONE_MINUTE_LATE });
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+    const message = result.success === false ? (result.message ?? "") : "";
+
+    assert.match(message, /2026-08-12T09:00:00\.000Z/);
+    assert.match(message, /new publish time/);
+  });
+
+  it("approves it once it has been rescheduled into the future", async () => {
+    // Reschedule → choose a future time → Approve, through the real service.
+    const rescheduled = singleDraft({
+      scheduledFor: new Date(ONE_MINUTE_LATE.getTime() + 60 * 60 * 1000),
+    });
+    const { deps, updates, audits } = makeDeps(rescheduled, { now: ONE_MINUTE_LATE });
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+
+    assert.deepEqual(result, { success: true, status: "APPROVED" });
+    assert.equal(updates()[0].status, "approved");
+    // Still not published — the sweep does that at the new time.
+    assert.notEqual(updates()[0].status, "sent_to_buffer");
+    assert.deepEqual(audits(), ["POST_APPROVED"]);
+  });
+
+  it("leaves a post already approved before its slot alone", async () => {
+    // The distinction that matters: this post WAS approved in time, so the
+    // sweep's grace is what applies to it and this rule must not reach it. The
+    // status refusal answers first, and no reschedule is demanded of it.
+    const { deps } = makeDeps(singleDraft({ status: "approved" }), { now: ONE_MINUTE_LATE });
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+
+    assert.equal(result.success === false && result.code, "INVALID_TRANSITION");
+  });
+
+  it("does not apply to a cron post whose estimate has passed", async () => {
+    const { deps, updates } = makeDeps(cronPost(), { now: ONE_MINUTE_LATE });
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+
+    assert.equal(result.success, true);
+    assert.equal(updates()[0].status, "approved");
+  });
+
+  it("does not apply to an unscheduled submitted post", async () => {
+    const { deps } = makeDeps(cronPost({ scheduledFor: null, manuallyScheduled: false }), {
+      now: ONE_MINUTE_LATE,
+    });
+
+    const result = await approvePost("p-1", "owner-1", false, deps);
+
+    assert.equal(result.success, true);
+  });
+});
+
 // ─── The rule on its own ─────────────────────────────────────────────────────
 
 describe("canApprove", () => {
@@ -283,29 +499,96 @@ describe("canApprove", () => {
   const automatic = { scheduledFor: SOFIA_NOON, manuallyScheduled: false };
   const unscheduled = { scheduledFor: null, manuallyScheduled: false };
 
+  // 11:48, twelve minutes before the 12:00 slot — the schedule is still ahead, so
+  // these cases are about STATUS alone.
+  const BEFORE = APPROVED_AT;
+
   it("accepts a submitted post whatever its origin", () => {
     for (const post of [manual, automatic, unscheduled]) {
-      assert.equal(canApprove({ status: "pending_approval", ...post }), true);
+      assert.equal(canApprove({ status: "pending_approval", ...post }, BEFORE), null);
     }
   });
 
   it("accepts a draft only when a person chose its time", () => {
-    assert.equal(canApprove({ status: "draft", ...manual }), true);
-    assert.equal(canApprove({ status: "draft", ...automatic }), false);
-    assert.equal(canApprove({ status: "draft", ...unscheduled }), false);
+    assert.equal(canApprove({ status: "draft", ...manual }, BEFORE), null);
+    assert.equal(canApprove({ status: "draft", ...automatic }, BEFORE), "INVALID_TRANSITION");
+    assert.equal(canApprove({ status: "draft", ...unscheduled }, BEFORE), "INVALID_TRANSITION");
   });
 
   it("rejects a bulk draft with no time — there is nothing to wait for", () => {
     // Approving it would leave a post that is never due and never publishes.
     assert.equal(
-      canApprove({ status: "draft", scheduledFor: null, manuallyScheduled: true }),
-      false
+      canApprove({ status: "draft", scheduledFor: null, manuallyScheduled: true }, BEFORE),
+      "INVALID_TRANSITION"
     );
   });
 
   it("accepts no other status", () => {
     for (const status of ["approved", "rejected", "sent_to_buffer", "published", "failed"]) {
-      assert.equal(canApprove({ status, ...manual }), false, `${status} must not be approvable`);
+      assert.equal(
+        canApprove({ status, ...manual }, BEFORE),
+        "INVALID_TRANSITION",
+        `${status} must not be approvable`
+      );
     }
+  });
+
+  // ── The second question: has the post's own time gone by? ──────────────────
+
+  it("refuses a hand-scheduled post whose time has passed", () => {
+    // One minute past is past — no grace here, deliberately. The person did not
+    // approve in time, so the 12:00 promise cannot be kept and a new one is owed.
+    const oneMinuteLate = new Date(SOFIA_NOON.getTime() + 60_000);
+
+    for (const status of ["draft", "pending_approval"]) {
+      assert.equal(canApprove({ status, ...manual }, oneMinuteLate), "SCHEDULE_MISSED");
+    }
+  });
+
+  it("refuses one whose time is exactly now", () => {
+    // The slot has arrived, so it can no longer be published AT it — the same
+    // reason refuseScheduleTime will not let that instant be chosen.
+    assert.equal(canApprove({ status: "draft", ...manual }, SOFIA_NOON), "SCHEDULE_MISSED");
+  });
+
+  it("accepts one a millisecond before its time", () => {
+    const justInTime = new Date(SOFIA_NOON.getTime() - 1);
+
+    assert.equal(canApprove({ status: "draft", ...manual }, justInTime), null);
+  });
+
+  it("refuses one whose time is far in the past", () => {
+    assert.equal(
+      canApprove({ status: "draft", ...manual }, new Date("2026-09-01T09:00:00.000Z")),
+      "SCHEDULE_MISSED"
+    );
+  });
+
+  it("accepts it again once it has been rescheduled into the future", () => {
+    // The whole flow: Reschedule → choose a future time → Approve.
+    const now = new Date(SOFIA_NOON.getTime() + 60_000);
+    const missed = { status: "draft", ...manual };
+    assert.equal(canApprove(missed, now), "SCHEDULE_MISSED");
+
+    const rescheduled = { ...missed, scheduledFor: new Date(now.getTime() + 60 * 60 * 1000) };
+    assert.equal(canApprove(rescheduled, now), null);
+  });
+
+  it("names the status refusal ahead of the schedule one", () => {
+    // A post that cannot be approved at all should not be told to pick a new
+    // time — that would be advice it cannot act on.
+    assert.equal(
+      canApprove({ status: "sent_to_buffer", ...manual }, new Date(SOFIA_NOON.getTime() + 60_000)),
+      "INVALID_TRANSITION"
+    );
+  });
+
+  it("ignores the clock for posts nobody hand-scheduled", () => {
+    // A cron estimate is not a promise, and an unscheduled post has no time to
+    // miss. Both keep approving exactly as before, however late it is.
+    const late = new Date("2026-09-01T09:00:00.000Z");
+
+    assert.equal(canApprove({ status: "pending_approval", ...automatic }, late), null);
+    assert.equal(canApprove({ status: "pending_approval", ...unscheduled }, late), null);
   });
 });

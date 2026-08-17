@@ -36,6 +36,22 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
           },
           { status: 422 }
         );
+      case "SCHEDULE_MISSED":
+        // 409: the post is approvable and the caller may approve it — its own
+        // publish time is what conflicts, and a reschedule resolves it. Enforced
+        // here and not only in the card, so this route cannot be used to approve
+        // a post into a time that no longer exists.
+        return NextResponse.json(
+          {
+            error: {
+              code: "SCHEDULE_MISSED",
+              message:
+                result.message ??
+                "The scheduled publication time has passed. Choose a new time first.",
+            },
+          },
+          { status: 409 }
+        );
     }
   }
 

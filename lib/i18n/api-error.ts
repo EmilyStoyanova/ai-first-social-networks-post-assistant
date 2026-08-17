@@ -80,6 +80,9 @@ export const API_ERROR_CODES = [
   "INVALID_SOURCE_MIX",
   // Rescheduling — the requested publish time is not one a post can be given.
   "INVALID_SCHEDULE",
+  // Approval — the post's own hand-chosen time went by before anybody approved
+  // it, so a new one has to be picked first.
+  "SCHEDULE_MISSED",
   // Not sent by the API — synthesized by lib/http/read-json-response.ts when
   // something UPSTREAM of the route answered (a gateway error page, a dropped
   // connection), so a non-JSON body still reaches the user as a real message

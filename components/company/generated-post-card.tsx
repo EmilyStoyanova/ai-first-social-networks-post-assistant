@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useSyncExternalStore } from "react";
 import Image from "next/image";
 import { useTranslations } from "next-intl";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
@@ -22,6 +22,9 @@ import { canReschedule } from "@/lib/scheduling/reschedule-policy";
 import { resolvePostActions, type PostRole } from "@/lib/posts/post-actions";
 import { PostMetricsStrip } from "./post-metrics-strip";
 import type { PostMetricsView } from "@/lib/services/analytics/get-post-metrics.service";
+
+/** A store that never changes — only the server/client snapshot split is wanted. */
+const NEVER_CHANGES = () => () => {};
 
 type BadgeVariant =
   "owner" | "editor" | "comingSoon" | "success" | "warning" | "danger" | "neutral" | "readonly";
@@ -274,16 +277,28 @@ function GeneratedPostCardBody({
   const origin = post.origin;
   const originLabel = originLabelFor(origin);
 
-  // Read once per mount: a card that sits open past its post's slot keeps
-  // offering plain Approve, which stays correct — the sweep publishes it.
-  const [openedAt] = useState(() => new Date());
+  // Client-only clock, for the single question that needs one: has a hand-chosen
+  // publish time already gone by? The server's clock is not the viewer's, so
+  // comparing during SSR would render an Approve button and hydrate a warning in
+  // its place (React #418). This resolves undefined through hydration — which
+  // reports the schedule as not missed — and the real instant afterwards, so the
+  // warning appears in a second render rather than a mismatched first one. Same
+  // pattern, and same reason, as the past-due notice in PostSchedulePanel.
+  const hydrated = useSyncExternalStore(
+    NEVER_CHANGES,
+    () => true,
+    () => false
+  );
+
+  // Which publish action the card offers never depends on the clock; only whether
+  // approval is withheld pending a new time does.
   const actions = resolvePostActions({
     role,
     status: localStatus,
     bufferConnected,
     manuallyScheduled,
     scheduledFor,
-    now: openedAt,
+    now: hydrated ? new Date() : undefined,
   });
 
   // The same rule the reschedule service enforces, asked before the control is
@@ -614,6 +629,16 @@ function GeneratedPostCardBody({
         </div>
       )}
 
+      {/* Its chosen time went by with nobody approving it, so approval is
+          withheld until there is a new one. Sits directly above the schedule
+          panel, which is where the time is still shown and where the new one is
+          picked — the Reschedule button in the action bar opens it. */}
+      {actions.scheduleMissed && (
+        <Alert variant="warning" role="status" className="mb-3">
+          {tSchedule("missedBeforeApproval")}
+        </Alert>
+      )}
+
       {/* Publish time, and the form for choosing one. Renders nothing at all for
           an unscheduled post with the editor closed — the "Schedule" button in
           the action bar is what says so. */}
@@ -780,7 +805,14 @@ function GeneratedPostCardBody({
             first. An automatic post reads as unscheduled here on purpose — its
             time is the weekly filler's estimate, which nobody promised. */}
         {scheduleAllowed && !scheduleOpen && (
-          <Button variant="secondary" size="sm" onClick={() => setScheduleOpen(true)}>
+          <Button
+            // Primary when the missed time is what is holding the post up: with
+            // Approve withheld, picking a new time is the only step left, so it
+            // takes the place Approve would have had.
+            variant={actions.scheduleMissed ? "primary" : "secondary"}
+            size="sm"
+            onClick={() => setScheduleOpen(true)}
+          >
             {manuallyScheduled && scheduledFor ? tSchedule("reschedule") : tSchedule("schedule")}
           </Button>
         )}

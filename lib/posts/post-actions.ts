@@ -20,10 +20,18 @@
  * those: it is a real editorial decision about someone else's work, so it stays.
  *
  * The one exception to "approve and publish are one decision" is a post whose
- * time a person chose (a manual bulk post, still ahead of its slot). There they
- * are two decisions — approve it now, publish it at 12:00 — so the owner is
- * offered approval alone and the sweep does the rest.
+ * time a person chose — in a bulk run, in the single-post generation form, or
+ * from the card. There they are two decisions taken by two actors: the owner
+ * approves, and the publishing sweep sends it at the chosen time. So the owner is
+ * offered approval alone, and the card never publishes such a post itself.
+ *
+ * And if that time has already gone by with nobody approving it, there is no
+ * decision left to take on the post as it stands: the owner is asked for a new
+ * time first (`scheduleMissed`), because approving would otherwise commit the
+ * post to a publish at a moment nobody named.
  */
+
+import { missedItsSchedule } from "@/lib/scheduling/publish-window";
 
 /** The acting user's effective role. A global admin is treated as an owner. */
 export type PostRole = "owner" | "editor";
@@ -47,7 +55,17 @@ export interface PostActionsInput {
   manuallyScheduled?: boolean;
   /** The named time, ISO, as the client holds it. */
   scheduledFor?: string | null;
-  /** Evaluated against `scheduledFor`. Passed in so this stays pure. */
+  /**
+   * The current instant, for the one question that needs it: has a hand-chosen
+   * time already gone by? Nothing else here reads a clock.
+   *
+   * Optional, and omitting it reports the schedule as NOT missed. That is the
+   * server-render answer: the server's clock is not the viewer's, so comparing
+   * during SSR would render one action and hydrate another (React #418). The card
+   * passes a clock only once hydrated, and the approve route enforces the rule
+   * regardless — so the worst an omitted clock can do is offer an Approve that
+   * comes back as SCHEDULE_MISSED.
+   */
   now?: Date;
 }
 
@@ -68,6 +86,15 @@ export interface PostActions {
    * belongs to the owner in that state, so the card explains instead of asking.
    */
   awaitingSchedule: boolean;
+  /**
+   * Whether a hand-chosen publish time went by before anybody approved the post.
+   *
+   * Approval is withheld — `approveOnly` is false — because that moment cannot be
+   * honoured any more. The card says so and points at Reschedule, which is the
+   * one action that makes the post approvable again. `approvePost` enforces the
+   * same rule (SCHEDULE_MISSED).
+   */
+  scheduleMissed: boolean;
   /**
    * Whether that action still has to approve, which is what its label says.
    * False for an already-approved post — including one auto-approved by a
@@ -104,6 +131,8 @@ export function resolvePostActions({
       approveAndPublish: false,
       approveOnly: false,
       awaitingSchedule: false,
+      // An editor cannot approve, so nothing is being withheld from them.
+      scheduleMissed: false,
       approvalPending: false,
       reject: false,
       // Buffer is not an editor's concern — they cannot publish either way.
@@ -113,28 +142,45 @@ export function resolvePostActions({
 
   const publishable = PUBLISHABLE.has(status);
 
-  // Held back by its own schedule: a person set a time still in the future, so
-  // publishing now is not on offer. Mirrors blocksOnDemandPublish in
-  // lib/scheduling/publish-window.ts, which is what actually enforces it — this
-  // only keeps the card from proposing an action the server would refuse.
-  // A past-due post is NOT held: publishing it by hand is its recovery path.
-  const scheduledAhead =
-    manuallyScheduled &&
-    scheduledFor !== null &&
+  // A person chose this post's time, so the SWEEP publishes it and this card
+  // never does. Mirrors blocksOnDemandPublish in lib/scheduling/publish-window.ts,
+  // which is what actually enforces it — this only keeps the card from proposing
+  // an action the server would refuse.
+  //
+  // No clock is consulted, and that is deliberate: the rule holds before the
+  // slot, at it, and after it. Comparing against a `now` was what let a post a
+  // few minutes past its slot quietly turn back into "Approve & publish", which
+  // is the bypass this closes. A post whose slot is long gone is recovered by
+  // rescheduling it (the schedule panel says so), not by publishing it by hand.
+  const sweepOwnsPublish = manuallyScheduled && scheduledFor !== null;
+
+  // …and whether the time it is waiting for has already gone by. Asked through
+  // the same predicate the approve route enforces, so the card cannot offer an
+  // approval the server would refuse. Only relevant while approval is still
+  // outstanding: a post approved BEFORE its slot is the sweep's problem now, and
+  // the grace window exists precisely to absorb a late tick for it.
+  const awaitingApproval = sweepOwnsPublish && publishable && status !== "APPROVED";
+  const scheduleMissed =
+    awaitingApproval &&
     now !== undefined &&
-    new Date(scheduledFor).getTime() > now.getTime();
+    missedItsSchedule(
+      { scheduledFor: new Date(scheduledFor as string), manuallyScheduled: true },
+      now
+    );
 
   return {
     // An owner approving their own submission is a formality; skip straight to
     // the decision that matters.
     submitForApproval: false,
-    approveAndPublish: publishable && bufferConnected && !scheduledAhead,
-    approveOnly: scheduledAhead && publishable && status !== "APPROVED",
-    awaitingSchedule: scheduledAhead && status === "APPROVED",
+    approveAndPublish: publishable && bufferConnected && !sweepOwnsPublish,
+    // Withheld until the post has a time that can still be honoured.
+    approveOnly: awaitingApproval && !scheduleMissed,
+    awaitingSchedule: sweepOwnsPublish && status === "APPROVED",
+    scheduleMissed,
     approvalPending: publishable && status !== "APPROVED",
     reject: status === "PENDING_APPROVAL",
     // Pointless while the post is waiting for its time — the sweep needs Buffer,
     // but that is a company-settings problem, not this post's next step.
-    connectBufferHint: publishable && !bufferConnected && !scheduledAhead,
+    connectBufferHint: publishable && !bufferConnected && !sweepOwnsPublish,
   };
 }

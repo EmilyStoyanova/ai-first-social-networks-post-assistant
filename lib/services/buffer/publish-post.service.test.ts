@@ -589,7 +589,7 @@ describe("approveAndPublishPost — manually scheduled", () => {
     );
   });
 
-  it("sends it once due", async () => {
+  it("refuses it exactly on time too — the sweep is what sends it", async () => {
     const h = makeDeps(
       makePost({ status: "approved", scheduledFor: SOFIA_NOON, manuallyScheduled: true }),
       { role: "owner", now: SOFIA_NOON }
@@ -597,13 +597,36 @@ describe("approveAndPublishPost — manually scheduled", () => {
 
     const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
 
-    assert.equal(result.success, true);
-    assert.equal(h.sent().length, 1);
+    assert.equal(result.success === false && result.code, "NOT_DUE");
+    assert.deepEqual(h.sent(), []);
+    assert.deepEqual(h.updates(), []);
   });
 
-  it("still lets an owner publish a manual post whose slot is long gone", async () => {
-    // The sweep parks these rather than firing them late; publishing by hand is
-    // the recovery path, so it must stay open.
+  it("refuses one that is overdue but still inside the sweep's grace window", async () => {
+    // The reported confusion, and the bypass this closes: a 12:00 post approved
+    // at 12:04 used to go out at 12:04 by hand, because it had technically become
+    // due. The sweep still delivers it — see publishScheduledPosts — but the card
+    // does not, because nobody asked for a publish, only for an approval.
+    const h = makeDeps(
+      makePost({ status: "pending_approval", scheduledFor: SOFIA_NOON, manuallyScheduled: true }),
+      { role: "owner", now: new Date(SOFIA_NOON.getTime() + 4 * 60 * 1000) }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(result.success === false && result.code, "NOT_DUE");
+    assert.deepEqual(h.sent(), []);
+    // Nothing at all was written, so the post is still approvable through the
+    // plain approve route and still carries the time it was given.
+    assert.deepEqual(h.updates(), []);
+    assert.deepEqual(h.audits(), []);
+  });
+
+  it("refuses a manual post whose slot is long gone — a reschedule is its way out", async () => {
+    // The sweep parks these rather than firing them late. Recovery moved from
+    // "publish it by hand" to "give it a new time", which the card's schedule
+    // panel offers; publishing it here would be the same unasked-for immediate
+    // send, just later.
     const h = makeDeps(
       makePost({ status: "approved", scheduledFor: SOFIA_NOON, manuallyScheduled: true }),
       { role: "owner", now: new Date("2026-08-14T09:00:00.000Z") }
@@ -611,21 +634,23 @@ describe("approveAndPublishPost — manually scheduled", () => {
 
     const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
 
-    assert.equal(result.success, true);
-    assert.equal(h.sent().length, 1);
+    assert.equal(result.success === false && result.code, "NOT_DUE");
+    assert.deepEqual(h.sent(), []);
   });
 
-  it("keeps manuallyScheduled out of the update, so the post keeps its promised time", async () => {
+  it("names the schedule in the refusal without claiming the time is still ahead", async () => {
+    // The message is shown for an overdue post as well now, so it must not say
+    // the post "cannot be published before then".
     const h = makeDeps(
       makePost({ status: "approved", scheduledFor: SOFIA_NOON, manuallyScheduled: true }),
-      { role: "owner", now: SOFIA_NOON }
+      { role: "owner", now: new Date(SOFIA_NOON.getTime() + 4 * 60 * 1000) }
     );
 
-    await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+    const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+    const message = result.success === false ? (result.message ?? "") : "";
 
-    assert.equal(h.updates().length, 1);
-    assert.equal("manuallyScheduled" in h.updates()[0], false);
-    assert.equal("scheduledFor" in h.updates()[0], false);
+    assert.match(message, /2026-08-12T09:00:00\.000Z/);
+    assert.doesNotMatch(message, /before then/);
   });
 });
 
@@ -650,6 +675,22 @@ describe("approveAndPublishPost — schedules the gate must not touch", () => {
 
     assert.equal(result.success, true);
     assert.equal(h.sent().length, 1);
+  });
+
+  it("keeps scheduledFor and manuallyScheduled out of the update it writes", async () => {
+    // Exercised on an automatic post because a hand-scheduled one no longer
+    // reaches this write at all. The invariant is unchanged: publishing records
+    // delivery and never rewrites the time or whose time it was.
+    const h = makeDeps(
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, manuallyScheduled: false }),
+      { role: "owner", now: SOFIA_NOON }
+    );
+
+    await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
+
+    assert.equal(h.updates().length, 1);
+    assert.equal("manuallyScheduled" in h.updates()[0], false);
+    assert.equal("scheduledFor" in h.updates()[0], false);
   });
 
   it("publishes an automatic post scheduled days out", async () => {

@@ -25,6 +25,8 @@
  * than inferred from a Prisma `where`.
  */
 
+import { refuseScheduleTime } from "./reschedule-policy";
+
 /**
  * How early a CRON-scheduled post may be sent. Unchanged from the original
  * publisher: the sweep is daily, so without a look-ahead an automatic post
@@ -148,7 +150,8 @@ export function partitionByPublishDecision<T extends PublishCandidate>(
  * This is the condition under which the two decisions "this is fit to publish"
  * and "publish it now" come apart, so it is what both of the rules that keep them
  * apart are written against: `blocksOnDemandPublish` here, and which drafts
- * `approvePost` will approve without publishing.
+ * `approvePost` will approve without publishing. For such a post those two
+ * decisions belong to different actors — the owner approves, the sweep publishes.
  */
 export function isManuallyScheduled(
   post: PublishCandidate
@@ -157,28 +160,60 @@ export function isManuallyScheduled(
 }
 
 /**
- * Whether an ON-DEMAND publish — an owner pressing the button on the card, not a
- * sweep — has to be refused because a person named a later time for this post.
+ * Whether a hand-scheduled post has already sailed past the time it was given.
  *
- * This is the guarantee that a manually scheduled post cannot go out early. The
- * sweep already honours `scheduledFor` (see `decidePublish`), but the card's
- * approve-and-publish action bypasses the sweep entirely, so without this a
- * 12:00 post approved at 11:48 was sent at 11:48.
+ * The gate on APPROVING one. A post nobody approved before its slot cannot be
+ * published at the time it promised — that moment is gone — so approving it would
+ * mean approving a publish at some other, unstated time. The honest answer is to
+ * ask for a new time first, and `canApprove` refuses until there is one.
  *
- * Deliberately NOT `decidePublish(...) !== "publish"`, which would be wrong in
- * both directions for a person's own button press:
+ * Distinct from the sweep's grace, on purpose, and the difference is WHEN the
+ * approval happened:
  *
- *   • A post with no `scheduledFor` is "not_due" forever, yet publishing one on
- *     demand is the normal case — that is what the button has always been for.
- *   • A manual post that is "past_due" must stay hand-publishable. The sweep
- *     refuses to fire it silently and parks it precisely so a person can decide;
- *     blocking them here too would strand it with no way out but a reschedule.
+ *   • Approved BEFORE the slot, sweep running slightly late — `decidePublish`
+ *     still sends it inside `PAST_DUE_GRACE_MS`. The person did their part on
+ *     time; absorbing a late tick is exactly what the grace is for.
+ *   • Not approved UNTIL after the slot — this predicate, with no grace at all.
+ *     One minute past is past.
  *
- * So only one case is refused: a manual post whose time is still ahead of us.
- * Automatic posts are untouched and keep publishing on demand as before.
+ * The comparison itself is `refuseScheduleTime` — the same rule that decides
+ * whether a time may be chosen in the first place — so "a time that is no longer
+ * usable" has one definition, and a slot exactly equal to `now` counts as gone by
+ * here for precisely the reason it cannot be picked there.
  */
-export function blocksOnDemandPublish(post: PublishCandidate, now: Date): boolean {
-  return isManuallyScheduled(post) && post.scheduledFor.getTime() > now.getTime();
+export function missedItsSchedule(post: PublishCandidate, now: Date): boolean {
+  return isManuallyScheduled(post) && refuseScheduleTime(post.scheduledFor, now) !== null;
+}
+
+/**
+ * Whether an ON-DEMAND publish — an owner pressing the button on the card, not a
+ * sweep — has to be refused because a person named this post's time.
+ *
+ * A hand-chosen schedule means the SWEEP owns delivery, full stop. The card's
+ * approve-and-publish action bypasses the sweep entirely, so anything it is
+ * allowed to send is a post going out at a moment nobody chose.
+ *
+ * Note what this does NOT depend on: the clock. Being time-independent is the
+ * whole rule, and it is what changed here. The gate used to refuse only a post
+ * whose slot was still ahead, which left the grace window (`PAST_DUE_GRACE_MS`)
+ * as a hole the card could publish through: a 09:30 post approved at 09:34 was
+ * sent at 09:34, by hand, because it had technically become due. That reads to
+ * the person who set 09:30 as "approving published it immediately" — and they
+ * are right that they never asked for a publish, only for an approval.
+ *
+ * Recovery for a post whose slot is long gone is therefore a RESCHEDULE, not a
+ * hand publish: the sweep parks it (`decidePublish` → "past_due") and the card's
+ * schedule panel shows that and offers a new time. `decidePublish` and the sweep's
+ * own grace are untouched — a post inside the grace is still delivered by the
+ * sweep exactly as before. This only closes the card's bypass.
+ *
+ * Still deliberately NOT `decidePublish(...) !== "publish"`: a post with no
+ * `scheduledFor` is "not_due" forever, yet publishing one on demand is the
+ * normal case and what the button has always been for. Automatic (cron)
+ * schedules are untouched too — nobody promised those times.
+ */
+export function blocksOnDemandPublish(post: PublishCandidate): boolean {
+  return isManuallyScheduled(post);
 }
 
 /**

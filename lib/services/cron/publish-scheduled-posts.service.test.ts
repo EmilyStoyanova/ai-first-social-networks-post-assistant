@@ -142,6 +142,63 @@ describe("publishScheduledPosts — a manual schedule is honoured, not approxima
   });
 });
 
+describe("publishScheduledPosts — a single manually generated post", () => {
+  // A post the generation form scheduled on its own, approved and left waiting.
+  // The sweep is what delivers it, and it must do so on exactly the same terms
+  // as a bulk post: `Row` holds every field the selection reads and has no batch
+  // field, so "single" and "bulk" are the same row to this service.
+
+  it("is not sent while its chosen time is still ahead", async () => {
+    const { sent, parked, summary } = await sweep([manual("single", "2026-08-20T09:00:00.000Z")]);
+
+    assert.deepEqual(sent, []);
+    assert.deepEqual(parked, []);
+    assert.equal(summary.published, 0);
+  });
+
+  it("is sent once its scheduled time is reached", async () => {
+    // The other half: approving early must not publish early, but it must also
+    // not strand the post — the sweep picks it up at its slot.
+    const { sent, summary } = await sweep([manual("single", "2026-08-20T07:00:00.000Z")]);
+
+    assert.deepEqual(sent, ["single"]);
+    assert.equal(summary.published, 1);
+  });
+
+  it("is still sent by the sweep when overdue inside the grace window", async () => {
+    // The counterpart to the card no longer publishing these (see
+    // blocksOnDemandPublish): a post approved in time must not be stranded just
+    // because the tick that should have sent it ran late. The grace recovery
+    // lives HERE and is deliberately unchanged — the sweep is its only user.
+    //
+    // Note this candidate is ALREADY approved: publishCandidateWhere selects on
+    // status "approved", so a post whose approval was withheld for a missed
+    // schedule (SCHEDULE_MISSED) never reaches this query at all. The two rules
+    // cannot fight over the same post.
+    const { sent, parked, summary } = await sweep([
+      manual("overdue", new Date(NOW.getTime() - 4 * 60 * 1000).toISOString()),
+    ]);
+
+    assert.deepEqual(sent, ["overdue"]);
+    assert.deepEqual(parked, []);
+    assert.equal(summary.published, 1);
+  });
+
+  it("is treated identically to a bulk post scheduled for the same instant", async () => {
+    for (const at of ["2026-08-20T09:00:00.000Z", "2026-08-20T06:30:00.000Z"]) {
+      const single = await sweep([manual("single", at)]);
+      const bulk = await sweep([manual("bulk", at)]);
+
+      assert.deepEqual(
+        single.sent.length,
+        bulk.sent.length,
+        `single and bulk must agree for a slot at ${at}`
+      );
+      assert.deepEqual(single.parked.length, bulk.parked.length);
+    }
+  });
+});
+
 describe("publishScheduledPosts — automatic posts keep their old behaviour", () => {
   it("still sends inside the 48-hour look-ahead", async () => {
     const { sent } = await sweep([

@@ -225,9 +225,10 @@ export interface PublishPostDeps {
  * rejects therefore keeps the status it arrived with — it is never left approved
  * but unpublished, and the owner can simply try again.
  *
- * It will NOT publish a manually scheduled post before its time — that is
- * `blocksOnDemandPublish`, and it returns NOT_DUE. Approving such a post is a
- * separate action (approvePost); the publishing sweep sends it once due.
+ * It will NOT publish a manually scheduled post at all — that is
+ * `blocksOnDemandPublish`, and it returns NOT_DUE whatever the clock says. A time
+ * a person chose is the sweep's to honour, so approving such a post is a separate
+ * action (approvePost) and the sweep is the only thing that delivers it.
  *
  * Nor will it publish to a profile on another social network — that is
  * `checkProfileChannel`, and it returns CHANNEL_MISMATCH. The caller supplies
@@ -281,18 +282,19 @@ export async function approveAndPublishPost(
     };
   }
 
-  // A person named a later time for this post, so this action must not send it —
-  // approving is not the same as publishing early. It is refused outright rather
-  // than approved-and-held, so nothing is written on a request that cannot do
-  // what it was asked to do; the card offers a plain Approve for these posts
-  // (see lib/posts/post-actions.ts) and the sweep sends them once due.
-  if (blocksOnDemandPublish(post, at)) {
+  // A person named this post's time, so delivery belongs to the sweep and not to
+  // this action — at any clock reading, including after the time has passed.
+  // Refused outright rather than approved-and-held, so nothing is written on a
+  // request that cannot do what it was asked to do; the card offers a plain
+  // Approve for these posts (see lib/posts/post-actions.ts).
+  if (blocksOnDemandPublish(post)) {
     return {
       success: false,
       code: "NOT_DUE",
       message:
-        `This post is scheduled for ${(post.scheduledFor as Date).toISOString()} and cannot be ` +
-        `published before then. Approve it and it will be published automatically at that time.`,
+        `This post is scheduled for ${(post.scheduledFor as Date).toISOString()} and is sent by ` +
+        `the scheduled publishing run rather than on demand. Approve it and that run will ` +
+        `publish it; if its time has already gone by, pick a new one.`,
     };
   }
 
@@ -374,8 +376,10 @@ export async function approveAndPublishPost(
       bufferUpdateId: bufferResult.updateId,
       publishedPostUrl: bufferResult.publishedUrl,
       publishedAt: at,
-      // manuallyScheduled/scheduledFor are deliberately absent: a hand-scheduled
-      // post keeps the time a person gave it for the lifetime of the post.
+      // manuallyScheduled/scheduledFor are deliberately absent: publishing
+      // records delivery and never rewrites when a post was due or whose time
+      // that was. (A hand-scheduled post cannot reach this write at all — see
+      // blocksOnDemandPublish above — so this now guards the automatic ones.)
       ...(needsApproval ? { approvedById: userId, approvedAt: at } : {}),
     },
   });

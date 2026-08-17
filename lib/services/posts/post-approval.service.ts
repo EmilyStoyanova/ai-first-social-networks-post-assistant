@@ -1,12 +1,26 @@
 import { prisma } from "@/lib/db/client";
 import type { Prisma } from "@prisma/client";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
-import { isManuallyScheduled } from "@/lib/scheduling/publish-window";
+import { isManuallyScheduled, missedItsSchedule } from "@/lib/scheduling/publish-window";
 
 export type ApprovalError = "NOT_FOUND" | "FORBIDDEN" | "INVALID_TRANSITION";
 
 export type ApprovalResult =
   { success: true; status: string } | { success: false; code: ApprovalError; message?: string };
+
+/**
+ * Approving can fail one way the other two transitions cannot: the post's own
+ * hand-chosen publish time went by before anybody approved it. Declared only
+ * here, so `submitForApproval` and `rejectPost` — which have no schedule to miss —
+ * keep exhaustive error handling in their routes.
+ */
+export type ApprovePostError = ApprovalError | "SCHEDULE_MISSED";
+
+export type ApprovePostResult =
+  { success: true; status: string } | { success: false; code: ApprovePostError; message?: string };
+
+/** Why an approval was refused, or null when it may go ahead. */
+export type ApprovalRefusal = "INVALID_TRANSITION" | "SCHEDULE_MISSED";
 
 /**
  * Which posts `approvePost` will move to `approved`.
@@ -26,14 +40,34 @@ export type ApprovalResult =
  * lib/posts/post-actions.ts), and an ordinary draft still reaches `approved` only
  * by being submitted first. Widening it would also quietly hand cron drafts to
  * the publisher's 48-hour look-ahead, which is not this change's business.
+ *
+ * ── The second question: is the post's own time still ahead? ─────────────────
+ *
+ * A hand-chosen time that has gone by cannot be honoured, and approving anyway
+ * would commit the post to a publish at some moment nobody named. So such a post
+ * is refused with SCHEDULE_MISSED until it is given a new time — see
+ * `missedItsSchedule`, which is also what the card reads to swap Approve for
+ * Reschedule. Status is decided first, because "this post cannot be approved at
+ * all" is a better answer than "pick a new time" for one that is already sent.
+ *
+ * Returns the refusal rather than a boolean: the two are different answers to the
+ * user, and only the caller can turn them into responses.
  */
-export function canApprove(post: {
-  status: string;
-  scheduledFor: Date | null;
-  manuallyScheduled: boolean;
-}): boolean {
-  if (post.status === "pending_approval") return true;
-  return post.status === "draft" && isManuallyScheduled(post);
+export function canApprove(
+  post: {
+    status: string;
+    scheduledFor: Date | null;
+    manuallyScheduled: boolean;
+  },
+  now: Date
+): ApprovalRefusal | null {
+  const statusAllows =
+    post.status === "pending_approval" || (post.status === "draft" && isManuallyScheduled(post));
+  if (!statusAllows) return "INVALID_TRANSITION";
+
+  if (missedItsSchedule(post, now)) return "SCHEDULE_MISSED";
+
+  return null;
 }
 
 // ─── Minimal DB interface for testability ─────────────────────────────────────
@@ -164,8 +198,9 @@ export async function submitForApproval(
 /**
  * Approves a post without publishing it.
  *
- * Owner-only. Accepts a submitted post, and a manual bulk draft whose time is
- * still to come — see `canApprove` for why those two and nothing else.
+ * Owner-only. Accepts a submitted post, and a hand-scheduled draft whose time is
+ * still to come — see `canApprove` for why those two and nothing else, and why a
+ * post whose time has already gone by is refused until it is rescheduled.
  *
  * Nothing here talks to Buffer, and that is the point for a scheduled post: the
  * post is left `approved` with its `scheduledFor` and `manuallyScheduled` exactly
@@ -177,7 +212,7 @@ export async function approvePost(
   userId: string,
   isGlobalAdmin: boolean,
   deps: ApprovalDeps = {}
-): Promise<ApprovalResult> {
+): Promise<ApprovePostResult> {
   const db: ApprovalDb = deps.db ?? prisma;
   const auditLog = deps.auditLog ?? createAuditLog;
   const at = (deps.now ?? (() => new Date()))();
@@ -187,19 +222,32 @@ export async function approvePost(
 
   if (!ctx.isOwner) return { success: false, code: "FORBIDDEN" };
 
-  if (
-    !canApprove({
+  const refusal = canApprove(
+    {
       status: ctx.postStatus,
       scheduledFor: ctx.scheduledFor,
       manuallyScheduled: ctx.manuallyScheduled,
-    })
-  ) {
+    },
+    at
+  );
+
+  if (refusal === "INVALID_TRANSITION") {
     return {
       success: false,
       code: "INVALID_TRANSITION",
       message:
         `Only posts awaiting approval — or a post scheduled for a later time — can be ` +
         `approved. Current status: ${ctx.postStatus.toUpperCase()}.`,
+    };
+  }
+
+  if (refusal === "SCHEDULE_MISSED") {
+    return {
+      success: false,
+      code: "SCHEDULE_MISSED",
+      message:
+        `This post was scheduled for ${(ctx.scheduledFor as Date).toISOString()} and that time ` +
+        `has passed. Choose a new publish time before approving it.`,
     };
   }
 

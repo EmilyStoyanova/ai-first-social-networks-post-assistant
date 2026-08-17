@@ -7,6 +7,7 @@ import {
   blocksOnDemandPublish,
   decidePublish,
   isManuallyScheduled,
+  missedItsSchedule,
   partitionByPublishDecision,
   pastDueMessage,
   type PublishCandidate,
@@ -220,73 +221,110 @@ describe("isManuallyScheduled", () => {
   });
 });
 
+describe("missedItsSchedule", () => {
+  const NOON = new Date("2026-08-12T09:00:00.000Z");
+  const manual = { scheduledFor: NOON, manuallyScheduled: true };
+
+  it("is false while the chosen time is still ahead", () => {
+    assert.equal(missedItsSchedule(manual, new Date(NOON.getTime() - 12 * 60 * 1000)), false);
+    assert.equal(missedItsSchedule(manual, new Date(NOON.getTime() - 1)), false);
+  });
+
+  it("is true at the slot itself", () => {
+    // The same boundary refuseScheduleTime draws: an instant that has arrived is
+    // not one a post can still be scheduled for.
+    assert.equal(missedItsSchedule(manual, NOON), true);
+  });
+
+  it("is true one minute later, with no grace of its own", () => {
+    // Explicitly NOT the sweep's grace. That window forgives a late TICK for a
+    // post approved on time; this asks whether the APPROVAL was on time.
+    assert.equal(missedItsSchedule(manual, new Date(NOON.getTime() + 60_000)), true);
+  });
+
+  it("is true inside the sweep's grace window, where decidePublish still sends", () => {
+    // The two rules deliberately disagree here, and the disagreement is the
+    // feature: approve at 11:59 and a 12:04 sweep still delivers; try to approve
+    // at 12:04 and you are asked for a new time instead.
+    const insideGrace = new Date(NOON.getTime() + PAST_DUE_GRACE_MS - 1);
+
+    assert.equal(decidePublish(manual, insideGrace), "publish");
+    assert.equal(missedItsSchedule(manual, insideGrace), true);
+  });
+
+  it("is true far past the slot", () => {
+    assert.equal(missedItsSchedule(manual, new Date("2026-09-01T09:00:00.000Z")), true);
+  });
+
+  it("is false for a cron estimate, however late — nobody promised that time", () => {
+    assert.equal(
+      missedItsSchedule({ scheduledFor: NOON, manuallyScheduled: false }, new Date("2026-09-01")),
+      false
+    );
+  });
+
+  it("is false for a post with no time to miss", () => {
+    assert.equal(
+      missedItsSchedule({ scheduledFor: null, manuallyScheduled: true }, new Date("2026-09-01")),
+      false
+    );
+    assert.equal(
+      missedItsSchedule({ scheduledFor: null, manuallyScheduled: false }, new Date("2026-09-01")),
+      false
+    );
+  });
+});
+
 describe("blocksOnDemandPublish", () => {
   const NOON = new Date("2026-08-12T09:00:00.000Z");
+  const manual = { scheduledFor: NOON, manuallyScheduled: true };
 
-  it("blocks a manual post whose time is still ahead", () => {
-    assert.equal(
-      blocksOnDemandPublish(
-        { scheduledFor: NOON, manuallyScheduled: true },
-        new Date("2026-08-12T08:48:00.000Z")
-      ),
-      true
-    );
+  it("blocks a manual post at every moment in its life", () => {
+    // Before the slot, exactly on it, four minutes past it, and days past it.
+    // The card is refused throughout, while the sweep's own view of each moment
+    // (decidePublish, untouched) still varies — which is the whole design: one
+    // actor publishes these, and it is not the card.
+    const moments: Array<[string, Date, string]> = [
+      ["twelve minutes early", new Date(NOON.getTime() - 12 * 60 * 1000), "not_due"],
+      ["one millisecond early", new Date(NOON.getTime() - 1), "not_due"],
+      ["exactly on time", NOON, "publish"],
+      // The bypass this closes: a 12:00 post approved at 12:04 used to be
+      // sendable by hand because it had technically become due, which reads to
+      // whoever set 12:00 as "approving published it immediately".
+      ["four minutes late, inside the grace", new Date(NOON.getTime() + 4 * 60 * 1000), "publish"],
+      ["days late, past the grace", new Date("2026-08-14T09:00:00.000Z"), "past_due"],
+    ];
+
+    for (const [label, now, sweepDecision] of moments) {
+      assert.equal(decidePublish(manual, now), sweepDecision, `sweep, ${label}`);
+      assert.equal(blocksOnDemandPublish(manual), true, `card must be refused ${label}`);
+    }
   });
 
-  it("blocks it one millisecond early", () => {
-    assert.equal(
-      blocksOnDemandPublish(
-        { scheduledFor: NOON, manuallyScheduled: true },
-        new Date(NOON.getTime() - 1)
-      ),
-      true
-    );
-  });
+  it("keeps the sweep's grace intact — the recovery logic is not removed", () => {
+    // A post inside the grace is still DELIVERED, just by the sweep. Past the
+    // grace the sweep still parks it, and the way out is a reschedule (the
+    // schedule panel says so) rather than an immediate hand publish.
+    const insideGrace = new Date(NOON.getTime() + PAST_DUE_GRACE_MS - 1);
+    const pastGrace = new Date(NOON.getTime() + PAST_DUE_GRACE_MS + 1);
 
-  it("allows it exactly on time", () => {
-    assert.equal(
-      blocksOnDemandPublish({ scheduledFor: NOON, manuallyScheduled: true }, NOON),
-      false
-    );
-  });
-
-  it("allows a manual post that is past due — publishing by hand is its way out", () => {
-    // decidePublish says "past_due" here and the sweep parks it; a person must
-    // still be able to send it, so this predicate must NOT follow that decision.
-    const late = new Date("2026-08-14T09:00:00.000Z");
-    assert.equal(decidePublish({ scheduledFor: NOON, manuallyScheduled: true }, late), "past_due");
-    assert.equal(
-      blocksOnDemandPublish({ scheduledFor: NOON, manuallyScheduled: true }, late),
-      false
-    );
+    assert.equal(decidePublish(manual, insideGrace), "publish");
+    assert.equal(decidePublish(manual, pastGrace), "past_due");
   });
 
   it("allows an unscheduled post, which is the ordinary publish-now case", () => {
     // decidePublish calls this "not_due" forever; on demand it is the norm.
     assert.equal(decidePublish({ scheduledFor: null, manuallyScheduled: false }, NOON), "not_due");
-    assert.equal(
-      blocksOnDemandPublish({ scheduledFor: null, manuallyScheduled: false }, NOON),
-      false
-    );
+    assert.equal(blocksOnDemandPublish({ scheduledFor: null, manuallyScheduled: false }), false);
   });
 
   it("allows an unscheduled post that came from a bulk run", () => {
-    assert.equal(
-      blocksOnDemandPublish({ scheduledFor: null, manuallyScheduled: true }, NOON),
-      false
-    );
+    assert.equal(blocksOnDemandPublish({ scheduledFor: null, manuallyScheduled: true }), false);
   });
 
   it("never blocks an automatic post, however far out its estimate is", () => {
-    for (const now of [
-      new Date("2026-08-12T08:48:00.000Z"),
-      new Date("2026-08-01T09:00:00.000Z"),
-      new Date("2026-01-01T09:00:00.000Z"),
-    ]) {
-      assert.equal(
-        blocksOnDemandPublish({ scheduledFor: NOON, manuallyScheduled: false }, now),
-        false
-      );
-    }
+    // Nobody promised a cron time, so on-demand publishing stays exactly as it
+    // was for these — including the 48-hour look-ahead.
+    assert.equal(blocksOnDemandPublish({ scheduledFor: NOON, manuallyScheduled: false }), false);
   });
 });
