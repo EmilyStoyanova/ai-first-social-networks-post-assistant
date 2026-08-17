@@ -263,6 +263,17 @@ export function createTopicGenerationHandler(deps: TopicGenerationHandlerDeps = 
             autoGenerateImageOverride: input.generateImage,
             llmConfigId: input.llmConfigId,
             contentSource: parseManualContentSource(input.contentSource),
+            // The time the user picked, applied to every channel of the topic —
+            // one post, one time. Carried on the payload rather than recomputed,
+            // so a retry schedules the channels it still owes to exactly the
+            // instant the channels it already wrote went to.
+            ...(input.scheduledFor === undefined
+              ? {}
+              : {
+                  scheduledFor: Object.fromEntries(
+                    remaining.map((c) => [c, new Date(input.scheduledFor as string)])
+                  ),
+                }),
             // The topic an earlier attempt settled on. Null on a first attempt,
             // where the first channel to succeed settles it.
             anchor: resume?.anchor ?? null,

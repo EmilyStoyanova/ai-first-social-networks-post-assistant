@@ -74,6 +74,21 @@ export const topicGenerationPayloadSchema = z
     llmConfigId: z.string().min(1).optional(),
     /** The raw dropdown value; `parseManualContentSource` reads it worker-side. */
     contentSource: z.string().min(1).optional(),
+    /**
+     * When every channel version of this topic should go out, as an ISO-8601
+     * instant. Omitted = unscheduled drafts, which is what a queued topic run
+     * has always produced.
+     *
+     * An instant rather than a wall clock, for the same reason the route takes
+     * one: the zone conversion happens once, in the form, and neither the queue
+     * nor the worker has to know which zone the user was reading.
+     *
+     * The freshness check stays at the ROUTE, deliberately. It is a question
+     * about the moment the request was made — "is this time still ahead?" — and
+     * a worker picking the job up later would ask it against a different clock
+     * and could refuse a schedule the user was told had been accepted.
+     */
+    scheduledFor: z.iso.datetime({ offset: true }).optional(),
   })
   .strict()
   .refine((p) => new Set(p.channels).size === p.channels.length, {

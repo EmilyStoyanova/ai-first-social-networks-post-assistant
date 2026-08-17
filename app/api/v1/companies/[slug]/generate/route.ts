@@ -4,6 +4,7 @@ import { auth } from "@/lib/auth";
 import { generateTopicAcrossChannels } from "@/lib/services/ai/generate-topic-across-channels.service";
 import { parseManualContentSource } from "@/lib/ai/manual-content-source";
 import { generationErrorResponse } from "@/lib/http/generation-error-response";
+import { refuseScheduleTime } from "@/lib/scheduling/reschedule-policy";
 import { createRequestDeadline, runInRequestDeadline } from "@/lib/http/request-deadline";
 import { BULK_CHANNELS } from "@/lib/queue/bulk-generation-payload";
 import { enqueueTopicGeneration } from "@/lib/services/queue/enqueue-topic-generation.service";
@@ -122,6 +123,21 @@ const bodySchema = z.object({
   // pooled behaviour. The id's KIND is not accepted from the client — the
   // service reads the source's type from the DB (see resolveManualContentSource).
   contentSource: z.string().min(1).optional(),
+  /**
+   * When this post should go out, as an ISO-8601 instant. Omitted = an
+   * unscheduled draft, which is what this route has always produced and still
+   * produces by default.
+   *
+   * The wire carries an INSTANT, not a wall clock: the form converts the day and
+   * time the user picked using the business zone (lib/scheduling/
+   * app-datetime-local.ts), exactly as the bulk form does, so there is no second
+   * place where a time could be read in the wrong zone.
+   *
+   * Only the shape is checked here. Whether the instant is far enough in the
+   * future is the scheduling rule's business, and it is applied below through
+   * the same function the reschedule service uses.
+   */
+  scheduledFor: z.iso.datetime({ offset: true }).optional(),
 });
 
 /**
@@ -196,6 +212,33 @@ async function handlePost(req: Request, { params }: { params: Promise<{ slug: st
     );
   }
 
+  /**
+   * The publish time, if one was asked for, checked against the same rule a
+   * reschedule is checked against.
+   *
+   * Refused here rather than absorbed, because generation is minutes of billed
+   * work: a form left open past the time it named would otherwise write a post
+   * straight into the past-due state and strand it. Every channel of the topic
+   * gets the SAME instant — the user named one time for one post, and a topic's
+   * channel versions are that post, so spreading them the way bulk does would be
+   * answering a question nobody asked.
+   */
+  const scheduledFor = parsed.data.scheduledFor;
+  if (scheduledFor !== undefined) {
+    const refusal = refuseScheduleTime(new Date(scheduledFor), new Date());
+    if (refusal !== null) {
+      return NextResponse.json(
+        {
+          error: {
+            code: refusal.code,
+            message: "message" in refusal ? refusal.message : "That time cannot be used.",
+          },
+        },
+        { status: 422 }
+      );
+    }
+  }
+
   // Several channels is more work than a function cap allows — see the docblock.
   // Queued and answered 202, before any generation starts, so the client is
   // never left holding a connection over work that cannot finish on it.
@@ -207,6 +250,7 @@ async function handlePost(req: Request, { params }: { params: Promise<{ slug: st
       generateImage: parsed.data.generateImage,
       llmConfigId: parsed.data.llmConfigId,
       contentSource: parsed.data.contentSource,
+      scheduledFor,
     });
 
     if (!queued.success) {
@@ -251,6 +295,12 @@ async function handlePost(req: Request, { params }: { params: Promise<{ slug: st
         autoGenerateImageOverride: parsed.data.generateImage,
         llmConfigId: parsed.data.llmConfigId,
         contentSource: parseManualContentSource(parsed.data.contentSource),
+        // One instant for every channel — see above. Absent when the user did
+        // not pick a time, which leaves the unscheduled draft this route has
+        // always written.
+        ...(scheduledFor === undefined
+          ? {}
+          : { scheduledFor: Object.fromEntries(channels.map((c) => [c, new Date(scheduledFor)])) }),
       })
   );
 

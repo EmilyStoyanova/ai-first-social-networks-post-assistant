@@ -22,7 +22,7 @@ interface PostRow {
   mediaAssetId: string | null;
   mediaAsset: { url: string } | null;
   scheduledFor: Date | null;
-  generationBatchId: string | null;
+  manuallyScheduled: boolean;
 }
 
 function makePost(overrides: Partial<PostRow> = {}): PostRow {
@@ -39,7 +39,7 @@ function makePost(overrides: Partial<PostRow> = {}): PostRow {
     // Unscheduled and not from a bulk run — the plain "publish this now" case
     // every test below is about unless it says otherwise.
     scheduledFor: null,
-    generationBatchId: null,
+    manuallyScheduled: false,
     ...overrides,
   };
 }
@@ -326,7 +326,6 @@ describe("approveAndPublishPost — policy", () => {
 // only the sweep may send a manually scheduled post, and only once it is due.
 
 const SOFIA_NOON = new Date("2026-08-12T09:00:00.000Z"); // 12:00 Europe/Sofia (UTC+3)
-const BATCH_ID = "batch-1";
 
 describe("approveAndPublishPost — manually scheduled", () => {
   it("does not send a future-scheduled bulk post approved 12 minutes early", async () => {
@@ -334,7 +333,7 @@ describe("approveAndPublishPost — manually scheduled", () => {
       makePost({
         status: "pending_approval",
         scheduledFor: SOFIA_NOON,
-        generationBatchId: BATCH_ID,
+        manuallyScheduled: true,
       }),
       { role: "owner", now: new Date("2026-08-12T08:48:00.000Z") } // 11:48 Sofia
     );
@@ -355,7 +354,7 @@ describe("approveAndPublishPost — manually scheduled", () => {
       makePost({
         status: "pending_approval",
         scheduledFor: SOFIA_NOON,
-        generationBatchId: BATCH_ID,
+        manuallyScheduled: true,
       }),
       { role: "owner", now: new Date(SOFIA_NOON.getTime() - 1000) }
     );
@@ -371,7 +370,7 @@ describe("approveAndPublishPost — manually scheduled", () => {
       makePost({
         status: "pending_approval",
         scheduledFor: SOFIA_NOON,
-        generationBatchId: BATCH_ID,
+        manuallyScheduled: true,
       }),
       { now: new Date("2026-08-12T08:48:00.000Z") }
     );
@@ -385,7 +384,7 @@ describe("approveAndPublishPost — manually scheduled", () => {
   it("refuses an already-approved post whose time is still ahead", async () => {
     // The state the fixed flow leaves a post in: approved, waiting for the sweep.
     const h = makeDeps(
-      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: BATCH_ID }),
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, manuallyScheduled: true }),
       { role: "owner", now: new Date("2026-08-12T08:48:00.000Z") }
     );
 
@@ -401,7 +400,7 @@ describe("approveAndPublishPost — manually scheduled", () => {
       makePost({
         status: "pending_approval",
         scheduledFor: SOFIA_NOON,
-        generationBatchId: BATCH_ID,
+        manuallyScheduled: true,
       }),
       { role: "owner", now: new Date("2026-08-12T08:48:00.000Z") }
     );
@@ -417,7 +416,7 @@ describe("approveAndPublishPost — manually scheduled", () => {
 
   it("sends it once due", async () => {
     const h = makeDeps(
-      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: BATCH_ID }),
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, manuallyScheduled: true }),
       { role: "owner", now: SOFIA_NOON }
     );
 
@@ -431,7 +430,7 @@ describe("approveAndPublishPost — manually scheduled", () => {
     // The sweep parks these rather than firing them late; publishing by hand is
     // the recovery path, so it must stay open.
     const h = makeDeps(
-      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: BATCH_ID }),
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, manuallyScheduled: true }),
       { role: "owner", now: new Date("2026-08-14T09:00:00.000Z") }
     );
 
@@ -441,16 +440,16 @@ describe("approveAndPublishPost — manually scheduled", () => {
     assert.equal(h.sent().length, 1);
   });
 
-  it("keeps generationBatchId out of the update, so the post stays in its batch", async () => {
+  it("keeps manuallyScheduled out of the update, so the post keeps its promised time", async () => {
     const h = makeDeps(
-      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: BATCH_ID }),
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, manuallyScheduled: true }),
       { role: "owner", now: SOFIA_NOON }
     );
 
     await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
 
     assert.equal(h.updates().length, 1);
-    assert.equal("generationBatchId" in h.updates()[0], false);
+    assert.equal("manuallyScheduled" in h.updates()[0], false);
     assert.equal("scheduledFor" in h.updates()[0], false);
   });
 });
@@ -465,10 +464,10 @@ describe("approveAndPublishPost — schedules the gate must not touch", () => {
   });
 
   it("publishes an automatic cron post early, keeping its look-ahead", async () => {
-    // generationBatchId === null means the weekly filler picked the time as an
+    // manuallyScheduled === false means the weekly filler picked the time as an
     // estimate. That behaviour is deliberately unchanged.
     const h = makeDeps(
-      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: null }),
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, manuallyScheduled: false }),
       { role: "owner", now: new Date("2026-08-12T08:48:00.000Z") }
     );
 
@@ -480,7 +479,7 @@ describe("approveAndPublishPost — schedules the gate must not touch", () => {
 
   it("publishes an automatic post scheduled days out", async () => {
     const h = makeDeps(
-      makePost({ status: "approved", scheduledFor: SOFIA_NOON, generationBatchId: null }),
+      makePost({ status: "approved", scheduledFor: SOFIA_NOON, manuallyScheduled: false }),
       { role: "owner", now: new Date("2026-08-01T09:00:00.000Z") }
     );
 
@@ -495,7 +494,7 @@ describe("approveAndPublishPost — schedules the gate must not touch", () => {
       makePost({
         status: "pending_approval",
         scheduledFor: SOFIA_NOON,
-        generationBatchId: BATCH_ID,
+        manuallyScheduled: true,
       }),
       { role: "editor", now: new Date("2026-08-12T08:48:00.000Z") }
     );
@@ -508,7 +507,7 @@ describe("approveAndPublishPost — schedules the gate must not touch", () => {
 
   it("checks status before the schedule — a rejected post is INVALID_STATUS", async () => {
     const h = makeDeps(
-      makePost({ status: "rejected", scheduledFor: SOFIA_NOON, generationBatchId: BATCH_ID }),
+      makePost({ status: "rejected", scheduledFor: SOFIA_NOON, manuallyScheduled: true }),
       { role: "owner", now: new Date("2026-08-12T08:48:00.000Z") }
     );
 

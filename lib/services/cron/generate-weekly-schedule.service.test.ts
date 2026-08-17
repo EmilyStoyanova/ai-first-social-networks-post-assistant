@@ -192,6 +192,8 @@ class Harness {
         sourceImageUrl: null,
         origin: brandSetupOrigin(),
         scheduledFor: options.scheduledFor ?? null,
+        // Cron names no time of its own choosing — see generateDraftPost.
+        manuallyScheduled: false,
         // Cron generation is never part of a manual bulk batch, and never
         // multi-channel: the weekly scheduler fills one channel at a time, so
         // its posts are ungrouped exactly as they have always been.

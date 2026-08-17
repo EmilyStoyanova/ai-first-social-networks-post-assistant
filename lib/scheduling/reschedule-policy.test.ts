@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { canReschedule, refuseReschedule } from "./reschedule-policy";
+import { canReschedule, refuseReschedule, refuseScheduleTime } from "./reschedule-policy";
 
 const NOW = new Date("2026-08-20T07:00:00.000Z");
 const FUTURE = new Date("2026-08-25T09:00:00.000Z");
@@ -130,5 +130,39 @@ describe("canReschedule — whether the card offers the control", () => {
   it("says nothing about the time, which the form has not been given yet", () => {
     // An empty form has no instant to judge — that check belongs to the submit.
     assert.equal(canReschedule("approved", true), true);
+  });
+});
+
+describe("refuseScheduleTime — the half that applies to a post not yet written", () => {
+  it("accepts a future instant", () => {
+    assert.equal(refuseScheduleTime(FUTURE, NOW), null);
+  });
+
+  it("refuses a time that has already gone by", () => {
+    // The generation form's whole reason for asking: a post written straight
+    // into the past is one the publisher parks rather than sends, so the request
+    // is refused before minutes of billed generation are spent on it.
+    assert.deepEqual(refuseScheduleTime(PAST, NOW)?.code, "INVALID_SCHEDULE");
+  });
+
+  it("refuses the current instant, which is not in the future", () => {
+    assert.deepEqual(refuseScheduleTime(NOW, NOW)?.code, "INVALID_SCHEDULE");
+  });
+
+  it("refuses an unparseable date", () => {
+    assert.deepEqual(refuseScheduleTime(new Date("nonsense"), NOW)?.code, "INVALID_SCHEDULE");
+  });
+
+  it("is exactly the clock half of refuseReschedule", () => {
+    // The two must never diverge: a time the generation form accepts has to be
+    // one a reschedule of the resulting post would accept as well. Checked on a
+    // status whose permission half always passes, so only the clock is in play.
+    for (const when of [FUTURE, PAST, NOW, new Date("nonsense")]) {
+      assert.deepEqual(
+        refuseReschedule({ status: "draft" }, false, when, NOW),
+        refuseScheduleTime(when, NOW),
+        when.toString()
+      );
+    }
   });
 });

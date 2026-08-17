@@ -22,7 +22,7 @@ interface Row {
   mediaAssetId: string | null;
   mediaAsset: { url: string } | null;
   scheduledFor: Date | null;
-  generationBatchId: string | null;
+  manuallyScheduled: boolean;
   lastError: string | null;
 }
 
@@ -34,18 +34,18 @@ function row(overrides: Partial<Row> & { id: string }): Row {
     mediaAssetId: null,
     mediaAsset: null,
     scheduledFor: null,
-    generationBatchId: null,
+    manuallyScheduled: false,
     lastError: null,
     ...overrides,
   };
 }
 
 function manual(id: string, scheduledFor: string): Row {
-  return row({ id, generationBatchId: "batch-1", scheduledFor: new Date(scheduledFor) });
+  return row({ id, manuallyScheduled: true, scheduledFor: new Date(scheduledFor) });
 }
 
 function automatic(id: string, scheduledFor: string): Row {
-  return row({ id, generationBatchId: null, scheduledFor: new Date(scheduledFor) });
+  return row({ id, manuallyScheduled: false, scheduledFor: new Date(scheduledFor) });
 }
 
 /** Runs one sweep over a fixed candidate set, capturing what it sent and parked. */

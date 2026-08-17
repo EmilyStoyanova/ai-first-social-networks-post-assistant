@@ -34,11 +34,12 @@ export interface PostItem {
   /** When the post is due to go out. Null for drafts that were never scheduled. */
   scheduledFor: string | null;
   /**
-   * True when a person chose this post's publish time — i.e. it came from a
-   * manual bulk generation. Such a schedule is honoured exactly (the publisher
-   * neither fires it early nor fires it late, see lib/scheduling/publish-window),
-   * so the card shows the time and offers a reschedule; an automatic post's
-   * `scheduledFor` is an estimate and is not presented as a promise.
+   * True when a person chose this post's publish time — in a bulk run, in the
+   * single-post generation form, or from the card itself. Such a schedule is
+   * honoured exactly (the publisher neither fires it early nor fires it late,
+   * see lib/scheduling/publish-window), so the card presents the time as a
+   * commitment; an automatic post's `scheduledFor` is an estimate and is shown
+   * as one.
    */
   manuallyScheduled: boolean;
   /** Where the post was written from — a content source, or Brand Setup. */
@@ -78,7 +79,7 @@ const SELECT = {
   approvedById: true,
   publishedPostUrl: true,
   scheduledFor: true,
-  generationBatchId: true,
+  manuallyScheduled: true,
   contentGroupId: true,
   createdAt: true,
   mediaAsset: { select: { url: true, sourceUrl: true } },
@@ -149,7 +150,7 @@ function toItem(r: {
     source: { name: string; type: string };
   } | null;
   scheduledFor: Date | null;
-  generationBatchId: string | null;
+  manuallyScheduled: boolean;
   contentGroupId: string | null;
   createdAt: Date;
 }): PostItem {
@@ -176,7 +177,7 @@ function toItem(r: {
     previousMediaUrl: r.previousMediaAsset?.url ?? null,
     origin: resolvePostOrigin(r, r.primaryFeedItem),
     scheduledFor: r.scheduledFor?.toISOString() ?? null,
-    manuallyScheduled: r.generationBatchId !== null,
+    manuallyScheduled: r.manuallyScheduled,
     contentGroupId: r.contentGroupId,
     createdAt: r.createdAt.toISOString(),
   };

@@ -9,15 +9,16 @@
  *
  * Two kinds of schedule exist, and they mean different things:
  *
- *   • A CRON schedule (`generationBatchId === null`) is the weekly filler's
+ *   • A CRON schedule (`manuallyScheduled === false`) is the weekly filler's
  *     estimate of a good time. It has always been publishable up to
  *     `PUBLISH_LOOKAHEAD_MS` early, from when the sweep ran daily and could not
  *     hit an arbitrary hour. That behaviour is unchanged here, deliberately: the
  *     automated pipeline's timing is not this module's to renegotiate.
  *
- *   • A MANUAL BULK schedule (`generationBatchId !== null`) is a person naming a
- *     time. Publishing that two days early is not an approximation, it is
- *     ignoring the instruction — so those posts wait until they are due.
+ *   • A MANUAL schedule (`manuallyScheduled === true`) is a person naming a
+ *     time — in a bulk run, in the single-post generation form, or from the
+ *     post's own card. Publishing that two days early is not an approximation,
+ *     it is ignoring the instruction — so those posts wait until they are due.
  *
  * Kept pure and separate from the publisher so every branch is testable without
  * a database or a Buffer client, and so the rule can be read in one place rather
@@ -77,8 +78,12 @@ export const PAST_DUE_GRACE_MS = 3 * PUBLISH_SWEEP_INTERVAL_MS;
 /** The post fields the rule reads. */
 export interface PublishCandidate {
   scheduledFor: Date | null;
-  /** Non-null iff the post came from a manual bulk generation. */
-  generationBatchId: string | null;
+  /**
+   * True iff a PERSON named this post's time — `Post.manuallyScheduled`. Stored
+   * on the row rather than derived from `generationBatchId`, which only ever
+   * implied it for as long as bulk was the one way to name a time.
+   */
+  manuallyScheduled: boolean;
 }
 
 export type PublishDecision =
@@ -103,7 +108,7 @@ export function decidePublish(post: PublishCandidate, now: Date): PublishDecisio
 
   // Automatic posts keep the look-ahead they have always had, including the
   // long-standing behaviour that a late one still goes out.
-  if (post.generationBatchId === null) {
+  if (!post.manuallyScheduled) {
     return due <= nowMs + PUBLISH_LOOKAHEAD_MS ? "publish" : "not_due";
   }
 
@@ -136,9 +141,9 @@ export function partitionByPublishDecision<T extends PublishCandidate>(
  * Whether a PERSON chose this post's publish time, as opposed to the weekly
  * filler estimating one for it.
  *
- * Both halves are required. `generationBatchId` is what distinguishes a manual
- * bulk post from a cron post, and a time is what there is to honour — a bulk post
- * without one has nothing to wait for and is an ordinary draft.
+ * Both halves are required. The flag is what distinguishes a hand-scheduled post
+ * from a cron post, and a time is what there is to honour — a flag without one
+ * has nothing to wait for and is an ordinary draft.
  *
  * This is the condition under which the two decisions "this is fit to publish"
  * and "publish it now" come apart, so it is what both of the rules that keep them
@@ -147,8 +152,8 @@ export function partitionByPublishDecision<T extends PublishCandidate>(
  */
 export function isManuallyScheduled(
   post: PublishCandidate
-): post is PublishCandidate & { scheduledFor: Date; generationBatchId: string } {
-  return post.generationBatchId !== null && post.scheduledFor !== null;
+): post is PublishCandidate & { scheduledFor: Date; manuallyScheduled: true } {
+  return post.manuallyScheduled && post.scheduledFor !== null;
 }
 
 /**

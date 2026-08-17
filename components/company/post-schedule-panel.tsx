@@ -9,47 +9,86 @@ import { TimeSlotSelect } from "@/components/ui/TimeSlotSelect";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { APP_TIME_ZONE, formatDateTime } from "@/lib/i18n/format-date";
 import { decidePublish } from "@/lib/scheduling/publish-window";
-import { canReschedule } from "@/lib/scheduling/reschedule-policy";
 import { fromAppDateTimeLocal, toAppDateTimeLocal } from "@/lib/scheduling/app-datetime-local";
 import { SLOT_MINUTES, snapToSlot } from "@/lib/scheduling/time-slots";
-import type { PostRole } from "@/lib/posts/post-actions";
 
 /** A store that never changes — only the server/client snapshot split is wanted. */
 const NEVER_CHANGES = () => () => {};
 
 interface Props {
   postId: string;
-  /** ISO instant the post is due to go out. */
-  scheduledFor: string;
-  /** Uppercase status, as the card holds it. */
-  status: string;
-  role: PostRole;
+  /**
+   * ISO instant the post is due to go out, or null when it has no time yet.
+   * Null is the ordinary state of a manually generated draft, not an edge case.
+   */
+  scheduledFor: string | null;
+  /**
+   * Whether a PERSON chose that time. False covers two different posts — one
+   * with no time at all, and a cron post carrying the weekly filler's estimate —
+   * and both are treated the same way here, because neither has a publish time
+   * anybody promised.
+   */
+  manuallyScheduled: boolean;
+  /** Whether the editor is showing. Owned by the card, which also owns the button. */
+  open: boolean;
+  onClose: () => void;
+  /** The saved instant, ISO. The card is the one holding the post's schedule. */
+  onScheduled: (scheduledFor: string) => void;
 }
 
 /**
- * The publish time of a manually scheduled post, and the way to change it.
+ * A post's publish time, and the form for choosing one.
  *
- * Only manually scheduled posts get this: their time is a promise the publisher
- * keeps exactly (lib/scheduling/publish-window.ts), so it is worth showing and
- * worth being able to change. An automatic post's `scheduledFor` is the weekly
- * filler's estimate, and presenting it as a commitment would be a lie.
+ * ── What is shown, and when ─────────────────────────────────────────────────
+ *
+ * The "Scheduled for …" line appears only for a MANUALLY scheduled post: its
+ * time is a promise the publisher keeps exactly (lib/scheduling/publish-window),
+ * so it is worth stating. An automatic post's `scheduledFor` is the weekly
+ * filler's estimate, which the publisher may bring forward by up to 48 hours —
+ * presenting that as a commitment would be a lie, so it reads as unscheduled
+ * here and the card offers to give it a real time instead.
  *
  * The past-due notice is the visible half of the past-due policy: the publisher
  * refuses to fire a long-missed post rather than sending it late and silently, so
  * something has to say so and offer the one way out.
+ *
+ * ── Why the button is not in here ───────────────────────────────────────────
+ *
+ * It belongs in the card's action bar, beside Approve, Edit and Delete —
+ * scheduling is one of the things a person does to a post, and putting it
+ * anywhere else would make it the one action that lives somewhere of its own.
+ * So the card owns `open`, and this component owns everything the schedule
+ * itself needs: the two fields, the conversion, the request, and the errors.
  */
-export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props) {
+export function PostSchedulePanel({
+  postId,
+  scheduledFor,
+  manuallyScheduled,
+  open,
+  onClose,
+  onScheduled,
+}: Props) {
   const t = useTranslations("posts.schedule");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
 
-  const [when, setWhen] = useState(scheduledFor);
-  const [open, setOpen] = useState(false);
   // The chosen instant, split the way it is chosen: a calendar day, and one of
   // the times the publishing sweep can hit. Both are business-zone wall clock,
   // and only `fromAppDateTimeLocal` turns them back into an instant.
-  const [day, setDay] = useState("");
-  const [time, setTime] = useState("");
+  //
+  // Seeded from the post's own time whenever it has one — including an automatic
+  // estimate, which is a perfectly good starting value even though it is not
+  // shown as a commitment. The time of day is snapped, because a post at 16:15
+  // is published by the 16:30 sweep anyway, so 16:30 is what its time already
+  // meant and it is the value the picker can offer. Nothing is written until
+  // Save; an existing off-slot time is not migrated behind anyone's back, and
+  // the line above keeps reading back the real one.
+  const [day, setDay] = useState(() =>
+    scheduledFor === null ? "" : toAppDateTimeLocal(scheduledFor).slice(0, 10)
+  );
+  const [time, setTime] = useState(() =>
+    scheduledFor === null ? "" : (snapToSlot(toAppDateTimeLocal(scheduledFor).slice(11, 16)) ?? "")
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -64,32 +103,13 @@ export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props)
     () => false
   );
 
-  // `generationBatchId` is only read as "a person chose this time", which is
-  // exactly what `manuallyScheduled` means; the panel renders for nothing else.
+  const showsTime = manuallyScheduled && scheduledFor !== null;
+
   const pastDue =
     hydrated &&
-    decidePublish({ scheduledFor: new Date(when), generationBatchId: "manual" }, new Date()) ===
+    showsTime &&
+    decidePublish({ scheduledFor: new Date(scheduledFor), manuallyScheduled: true }, new Date()) ===
       "past_due";
-
-  const rescheduleAllowed = canReschedule(status, role === "owner");
-
-  /**
-   * Opens the editor on the post's current time, with the time of day moved to a
-   * slot.
-   *
-   * Snapped rather than shown as-is because a post at 16:15 is published by the
-   * 16:30 sweep anyway — so 16:30 is what its time already meant, and it is the
-   * value the picker can offer. The post itself is untouched until Save; nothing
-   * migrates an existing off-slot time behind anyone's back, and the line above
-   * keeps reading back the real one.
-   */
-  function handleOpen() {
-    const local = toAppDateTimeLocal(when);
-    setDay(local.slice(0, 10));
-    setTime(snapToSlot(local.slice(11, 16)) ?? "");
-    setError("");
-    setOpen(true);
-  }
 
   async function handleSave() {
     const instant = day === "" || time === "" ? null : fromAppDateTimeLocal(`${day}T${time}`);
@@ -111,8 +131,8 @@ export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props)
         throw new Error(apiError(json.error));
       }
       const json = (await res.json()) as { scheduledFor: string };
-      setWhen(json.scheduledFor);
-      setOpen(false);
+      onScheduled(json.scheduledFor);
+      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
     } finally {
@@ -120,21 +140,19 @@ export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props)
     }
   }
 
+  // Nothing to say about a post with no promised time and no open editor. The
+  // card still offers the button — that is where "this post is unscheduled"
+  // shows, rather than in an empty box here.
+  if (!showsTime && !open) return null;
+
   return (
     <div className="mb-3">
-      <div className="text-fg-muted flex flex-wrap items-center gap-2 text-xs">
-        <CalendarClock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        <span>{t("scheduledFor", { date: formatDateTime(when) })}</span>
-        {rescheduleAllowed && !open && (
-          <button
-            type="button"
-            onClick={handleOpen}
-            className="text-fg-faint hover:text-fg underline transition-colors"
-          >
-            {t("reschedule")}
-          </button>
-        )}
-      </div>
+      {showsTime && (
+        <div className="text-fg-muted flex flex-wrap items-center gap-2 text-xs">
+          <CalendarClock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span>{t("scheduledFor", { date: formatDateTime(scheduledFor) })}</span>
+        </div>
+      )}
 
       {pastDue && !open && (
         <Alert variant="warning" role="status" className="mt-2">
@@ -148,7 +166,7 @@ export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props)
             htmlFor={`reschedule-${postId}`}
             className="text-fg-faint mb-1 block text-xs font-semibold tracking-wide uppercase"
           >
-            {t("newTime")}
+            {showsTime ? t("newTime") : t("publishTime")}
           </label>
           {/* A date and a slot, not a datetime-local: the publishing sweep runs
               every half hour, so those are the only times a post can actually
@@ -174,6 +192,11 @@ export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props)
           <p className="text-fg-faint mb-2 text-xs">
             {t("slotHint", { minutes: SLOT_MINUTES })} {t("timeZoneHint", { zone: APP_TIME_ZONE })}
           </p>
+          {/* Scheduling is not approval, and a card that quietly implied
+              otherwise would be inviting someone to think the post is on its
+              way out. The sweep publishes it at this time only once it has
+              been approved — see approvePost. */}
+          <p className="text-fg-faint mb-2 text-xs">{t("approvalStillRequired")}</p>
           {error && (
             <Alert variant="error" className="mb-2">
               {error}
@@ -193,7 +216,7 @@ export function PostSchedulePanel({ postId, scheduledFor, status, role }: Props)
               variant="ghost"
               size="sm"
               onClick={() => {
-                setOpen(false);
+                onClose();
                 setError("");
               }}
             >

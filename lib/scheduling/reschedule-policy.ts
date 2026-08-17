@@ -27,6 +27,35 @@ export type RescheduleRefusal =
   | { code: "INVALID_SCHEDULE"; message: string };
 
 /**
+ * Whether an instant is one a post may be scheduled FOR, ignoring the post.
+ *
+ * Split out because it is the half of the rule that applies to a post which does
+ * not exist yet: generation can be asked to write a post already scheduled, and
+ * there is no status or owner to consider — only whether the time makes sense.
+ * The reschedule rule below calls this rather than restating it, so a time the
+ * generation form accepts is exactly a time a reschedule would accept.
+ */
+export function refuseScheduleTime(when: Date, now: Date): RescheduleRefusal | null {
+  if (Number.isNaN(when.getTime())) {
+    return { code: "INVALID_SCHEDULE", message: "That is not a valid date." };
+  }
+
+  // The safety property. Accepting a past time would put the post straight
+  // inside the publisher's grace window, turning "choose a time for this" into
+  // "publish it immediately" — the exact silent late publish the past-due
+  // policy exists to prevent.
+  if (when.getTime() <= now.getTime()) {
+    return {
+      code: "INVALID_SCHEDULE",
+      message:
+        "Pick a time in the future — a post cannot be scheduled for a moment that has passed.",
+    };
+  }
+
+  return null;
+}
+
+/**
  * The whole rule, with no database in it: may this person move this post to this
  * time? Separated from the service so every branch is directly testable, and so
  * the order of the checks is visible in one place — status and permission are
@@ -54,19 +83,7 @@ export function refuseReschedule(
     return { code: "FORBIDDEN" };
   }
 
-  // The safety property. Accepting a past time would put the post straight back
-  // inside the publisher's grace window, turning "this missed its slot, choose a
-  // new one" into "publish it immediately" — the exact silent late publish the
-  // past-due policy exists to prevent.
-  if (when.getTime() <= now.getTime()) {
-    return {
-      code: "INVALID_SCHEDULE",
-      message:
-        "Pick a time in the future — a post cannot be scheduled for a moment that has passed.",
-    };
-  }
-
-  return null;
+  return refuseScheduleTime(when, now);
 }
 
 /**

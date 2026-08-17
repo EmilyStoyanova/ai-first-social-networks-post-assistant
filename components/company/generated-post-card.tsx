@@ -18,6 +18,7 @@ import { PostActivityModal } from "./post-activity-modal";
 import { PostSchedulePanel } from "./post-schedule-panel";
 import { ImagePickerModal, type GalleryMediaItem } from "@/components/media/ImagePickerModal";
 import { formatDateTime } from "@/lib/i18n/format-date";
+import { canReschedule } from "@/lib/scheduling/reschedule-policy";
 import { resolvePostActions, type PostRole } from "@/lib/posts/post-actions";
 import { PostMetricsStrip } from "./post-metrics-strip";
 import type { PostMetricsView } from "@/lib/services/analytics/get-post-metrics.service";
@@ -206,6 +207,7 @@ function GeneratedPostCardBody({
   canManageAnalyticsKey = false,
 }: BodyProps) {
   const t = useTranslations("posts");
+  const tSchedule = useTranslations("posts.schedule");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
   const originLabelFor = usePostOriginLabel();
@@ -233,6 +235,15 @@ function GeneratedPostCardBody({
 
   // ── Activity state ────────────────────────────────────────────────────────
   const [activityOpen, setActivityOpen] = useState(false);
+
+  // ── Schedule state ────────────────────────────────────────────────────────
+  // Held here rather than in the panel because the schedule is not only the
+  // panel's business: which workflow actions the card offers depends on it (a
+  // post whose time is still ahead is approved, not published), so the card has
+  // to see a newly chosen time immediately rather than after a page reload.
+  const [scheduledFor, setScheduledFor] = useState<string | null>(post.scheduledFor);
+  const [manuallyScheduled, setManuallyScheduled] = useState(post.manuallyScheduled);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
 
   // ── Image picker state ────────────────────────────────────────────────────
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -270,10 +281,14 @@ function GeneratedPostCardBody({
     role,
     status: localStatus,
     bufferConnected,
-    manuallyScheduled: post.manuallyScheduled,
-    scheduledFor: post.scheduledFor,
+    manuallyScheduled,
+    scheduledFor,
     now: openedAt,
   });
+
+  // The same rule the reschedule service enforces, asked before the control is
+  // offered — so the card never proposes a schedule change the server refuses.
+  const scheduleAllowed = canReschedule(localStatus, role === "owner");
 
   const isDraft = localStatus === "DRAFT";
   const isPendingApproval = localStatus === "PENDING_APPROVAL";
@@ -594,17 +609,22 @@ function GeneratedPostCardBody({
         </div>
       )}
 
-      {/* Publish time — only for a post whose time a person chose. An automatic
-          post's scheduledFor is an estimate the publisher may bring forward, so
-          showing it as a commitment would misrepresent it. */}
-      {post.manuallyScheduled && post.scheduledFor && (
-        <PostSchedulePanel
-          postId={post.id}
-          scheduledFor={post.scheduledFor}
-          status={localStatus}
-          role={role}
-        />
-      )}
+      {/* Publish time, and the form for choosing one. Renders nothing at all for
+          an unscheduled post with the editor closed — the "Schedule" button in
+          the action bar is what says so. */}
+      <PostSchedulePanel
+        postId={post.id}
+        scheduledFor={scheduledFor}
+        manuallyScheduled={manuallyScheduled}
+        open={scheduleOpen}
+        onClose={() => setScheduleOpen(false)}
+        onScheduled={(when) => {
+          setScheduledFor(when);
+          // What the server just wrote: a time a person picked is a promise,
+          // whatever the post's schedule was before.
+          setManuallyScheduled(true);
+        }}
+      />
 
       {/* Published info */}
       {publishedAt && (
@@ -743,6 +763,18 @@ function GeneratedPostCardBody({
         {isEditable && (
           <Button variant="ghost" size="sm" onClick={() => setEditOpen(true)}>
             {tCommon("edit")}
+          </Button>
+        )}
+
+        {/* Schedule — beside the other things a person does to a post, rather
+            than tucked in with the metadata above. The label is the whole
+            distinction between a scheduled post and an unscheduled one: a post
+            with a promised time is being MOVED, one without is getting its
+            first. An automatic post reads as unscheduled here on purpose — its
+            time is the weekly filler's estimate, which nobody promised. */}
+        {scheduleAllowed && !scheduleOpen && (
+          <Button variant="secondary" size="sm" onClick={() => setScheduleOpen(true)}>
+            {manuallyScheduled && scheduledFor ? tSchedule("reschedule") : tSchedule("schedule")}
           </Button>
         )}
 

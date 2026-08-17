@@ -2495,3 +2495,86 @@ describe("generatePostFromContext — Topic Memory and a dictated topic", () => 
     );
   });
 });
+
+// ─── Whose time is on the post ────────────────────────────────────────────────
+// `manuallyScheduled` is the publisher's discriminator: false lets a post go out
+// up to 48 hours early, true makes the sweep wait for the named instant and park
+// the post rather than fire it late. It is derived here rather than passed in, so
+// what the derivation actually does is worth pinning down.
+
+describe("generatePostFromContext — manuallyScheduled", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const NOON = new Date("2026-08-20T09:00:00.000Z");
+
+  it("is false for the unscheduled draft the single flow has always written", async () => {
+    const { deps, created } = makeDeps();
+    const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.equal(created()!.manuallyScheduled, false);
+    assert.equal(created()!.scheduledFor, null);
+    assert.equal(result.post.manuallyScheduled, false);
+  });
+
+  it("is true when a time was given and no weekly schedule owns it", async () => {
+    // The single-post form and bulk both land here: somebody picked a time.
+    const { deps, created } = makeDeps();
+    const result = await generatePostFromContext(
+      makeContext(),
+      "co-1",
+      { scheduledFor: NOON },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(created()!.manuallyScheduled, true);
+    assert.deepEqual(created()!.scheduledFor, NOON);
+    // Echoed on the DTO so the client renders the new card's schedule with no
+    // refetch — and reads it as a promise rather than an estimate.
+    assert.equal(result.post.manuallyScheduled, true);
+  });
+
+  it("is false for a cron post, whose time is the weekly filler's estimate", async () => {
+    // `scheduleId` is what makes it cron, and cron is the only scheduler that
+    // picks times nobody promised. Getting this wrong would strip the automated
+    // pipeline of its 48-hour look-ahead.
+    const { deps, created } = makeDeps();
+    const result = await generatePostFromContext(
+      makeContext(),
+      "co-1",
+      { scheduledFor: NOON, scheduleId: "sched-1", initialStatus: "pending_approval" },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(created()!.manuallyScheduled, false);
+    assert.equal(result.post.manuallyScheduled, false);
+  });
+
+  it("is not made true by a batch id alone", async () => {
+    // The batch is an association now, not the discriminator. A batched post
+    // with no time has nothing to wait for and is an ordinary draft.
+    const { deps, created } = makeDeps();
+    const result = await generatePostFromContext(
+      makeContext(),
+      "co-1",
+      { generationBatchId: "batch-1" },
+      deps
+    );
+
+    assert.ok(result.success);
+    assert.equal(created()!.manuallyScheduled, false);
+    assert.equal(created()!.generationBatchId, "batch-1");
+  });
+});

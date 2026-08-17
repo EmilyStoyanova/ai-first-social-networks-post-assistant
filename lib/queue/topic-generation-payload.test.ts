@@ -127,3 +127,34 @@ describe("parseTopicGenerationProgress", () => {
     assert.equal(parseTopicGenerationProgress({ posts: "not an array" }), null);
   });
 });
+
+describe("topicGenerationPayloadSchema — the publish time", () => {
+  it("carries an ISO instant across the queue", () => {
+    const parsed = topicGenerationPayloadSchema.safeParse(
+      payload({ scheduledFor: "2026-08-25T09:00:00.000Z" })
+    );
+    assert.equal(parsed.success, true);
+    if (!parsed.success) return;
+    assert.equal(parsed.data.scheduledFor, "2026-08-25T09:00:00.000Z");
+  });
+
+  it("stays optional, so an unscheduled topic run is unchanged", () => {
+    const parsed = topicGenerationPayloadSchema.safeParse(payload());
+    assert.equal(parsed.success, true);
+    if (!parsed.success) return;
+    assert.equal(parsed.data.scheduledFor, undefined);
+  });
+
+  it("refuses a wall clock, which would carry no zone across the boundary", () => {
+    // The whole point of sending an instant: the zone conversion happens once,
+    // in the form, and neither the queue nor the worker has to guess at it.
+    assert.equal(
+      topicGenerationPayloadSchema.safeParse(payload({ scheduledFor: "2026-08-25T09:00" })).success,
+      false
+    );
+    assert.equal(
+      topicGenerationPayloadSchema.safeParse(payload({ scheduledFor: "2026-08-25" })).success,
+      false
+    );
+  });
+});

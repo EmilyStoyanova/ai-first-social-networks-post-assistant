@@ -506,12 +506,11 @@ model Post {
   // The content TOPIC this post is one channel's version of. One id shared by
   // every channel version written from the same topic in the same request.
   //
-  // Deliberately NOT `generationBatchId`, which is a different fact and is
-  // load-bearing elsewhere: a batch is one "generate N posts" click (many
-  // topics), and its non-NULL-ness is what tells the publisher a PERSON chose
-  // the time (lib/scheduling/publish-window.ts). Overloading it would either
-  // regroup a batch into its topics or make every single-post generation look
-  // manually scheduled.
+  // Deliberately NOT `generationBatchId`, which is a different fact: a batch is
+  // one "generate N posts" click and spans MANY topics, so grouping by it would
+  // fold a whole run into one card. (The batch id also used to double as the
+  // publisher's "a person chose this time" flag; that has since moved to
+  // `manuallyScheduled`, which is now the only thing that answers it.)
   //
   // NULL = an ungrouped post: everything generated before this column existed,
   // and every cron post. Those render exactly as they always have — the card
@@ -553,10 +552,23 @@ model Post {
   // its own), so the only fact worth persisting is which posts came from the
   // same click. The batch summary is returned to the caller, never stored.
   //
-  // Also the publisher's discriminator: NULL means "this time is the weekly
-  // filler's estimate" (publishable early), non-NULL means "a person named this
-  // time" (published only once due). Never clear or reuse it.
+  // Purely an association. It used to double as the publisher's discriminator —
+  // see `manuallyScheduled`, which now holds that fact on its own.
   generationBatchId String?       @map("generation_batch_id")
+  // Whether a PERSON named this post's publish time, as opposed to the weekly
+  // filler estimating one for it. THE publisher's discriminator: false means
+  // `scheduledFor` is an estimate and the post may go out early (up to the cron
+  // look-ahead), true means the time is a promise and the post waits for it —
+  // and is parked rather than fired late once the grace window passes. See
+  // lib/scheduling/publish-window.ts.
+  //
+  // Split out from `generationBatchId` because the two are different facts that
+  // only used to coincide: manual BULK generation was the one way a person could
+  // name a time, so "belongs to a batch" was a usable stand-in for "somebody
+  // chose this". A single post can now be scheduled at generation and from its
+  // own card, neither of which is a batch — so the fact is stored directly
+  // instead of inferred from an association that no longer implies it.
+  manuallyScheduled Boolean       @default(false) @map("manually_scheduled")
   channel          SocialChannel
   content          String
   language         String        @default("en")

@@ -14,12 +14,12 @@ export type ApprovalResult =
  *   • `pending_approval` — the workflow's own step. Somebody handed the post over
  *     for review, and this is that review.
  *
- *   • `draft`, but ONLY when a person already chose the post's publish time (a
- *     manual bulk post). Those are created as drafts and nobody submits them, so
- *     the sole route to `approved` was the card's publish button — which sends to
- *     Buffer immediately and so cannot be used on a post scheduled for 12:00
- *     without breaking the schedule it was created with. Approval really is the
- *     whole action for these: the publishing sweep sends them once due.
+ *   • `draft`, but ONLY when a person already chose the post's publish time.
+ *     Those are created as drafts and nobody submits them, so the sole route to
+ *     `approved` was the card's publish button — which sends to Buffer
+ *     immediately and so cannot be used on a post scheduled for 12:00 without
+ *     breaking the schedule it was given. Approval really is the whole action
+ *     for these: the publishing sweep sends them once due.
  *
  * Deliberately NOT opened to drafts in general. For every other post approving
  * and publishing remain one decision, taken through approveAndPublishPost (see
@@ -30,7 +30,7 @@ export type ApprovalResult =
 export function canApprove(post: {
   status: string;
   scheduledFor: Date | null;
-  generationBatchId: string | null;
+  manuallyScheduled: boolean;
 }): boolean {
   if (post.status === "pending_approval") return true;
   return post.status === "draft" && isManuallyScheduled(post);
@@ -50,14 +50,14 @@ export interface ApprovalDb {
         companyId: true;
         status: true;
         scheduledFor: true;
-        generationBatchId: true;
+        manuallyScheduled: true;
       };
     }) => Promise<{
       companyId: string;
       status: string;
       scheduledFor: Date | null;
-      /** Non-null iff the post came from a manual bulk generation. */
-      generationBatchId: string | null;
+      /** True iff a PERSON named this post's publish time. */
+      manuallyScheduled: boolean;
     } | null>;
     update: (args: {
       where: { id: string };
@@ -93,10 +93,10 @@ async function resolveContext(
       isOwner: boolean;
       companyId: string;
       scheduledFor: Date | null;
-      generationBatchId: string | null;
+      manuallyScheduled: boolean;
     }
 > {
-  // scheduledFor/generationBatchId are read for every transition, not just
+  // scheduledFor/manuallyScheduled are read for every transition, not just
   // approval, so all three share one query shape. Only `canApprove` reads them.
   const post = await db.post.findUnique({
     where: { id: postId },
@@ -104,7 +104,7 @@ async function resolveContext(
       companyId: true,
       status: true,
       scheduledFor: true,
-      generationBatchId: true,
+      manuallyScheduled: true,
     },
   });
   if (!post) return { ok: false, code: "NOT_FOUND" };
@@ -113,7 +113,7 @@ async function resolveContext(
     postStatus: post.status,
     companyId: post.companyId,
     scheduledFor: post.scheduledFor,
-    generationBatchId: post.generationBatchId,
+    manuallyScheduled: post.manuallyScheduled,
   };
 
   if (isGlobalAdmin) {
@@ -168,7 +168,7 @@ export async function submitForApproval(
  * still to come — see `canApprove` for why those two and nothing else.
  *
  * Nothing here talks to Buffer, and that is the point for a scheduled post: the
- * post is left `approved` with its `scheduledFor` and `generationBatchId` exactly
+ * post is left `approved` with its `scheduledFor` and `manuallyScheduled` exactly
  * as they were, which is precisely what publishScheduledPosts looks for. It goes
  * out on the first sweep at or after its own time, and not before.
  */
@@ -191,21 +191,21 @@ export async function approvePost(
     !canApprove({
       status: ctx.postStatus,
       scheduledFor: ctx.scheduledFor,
-      generationBatchId: ctx.generationBatchId,
+      manuallyScheduled: ctx.manuallyScheduled,
     })
   ) {
     return {
       success: false,
       code: "INVALID_TRANSITION",
       message:
-        `Only posts awaiting approval — or a bulk post scheduled for a later time — can be ` +
+        `Only posts awaiting approval — or a post scheduled for a later time — can be ` +
         `approved. Current status: ${ctx.postStatus.toUpperCase()}.`,
     };
   }
 
   // status is the only field this writes besides the approver stamp. scheduledFor
-  // and generationBatchId are untouched, so the sweep still sees the same post it
-  // would have seen: same time, same batch.
+  // and manuallyScheduled are untouched, so the sweep still sees the same post it
+  // would have seen: same time, same promise about it.
   await db.post.update({
     where: { id: postId },
     data: { status: "approved", approvedById: userId, approvedAt: at },

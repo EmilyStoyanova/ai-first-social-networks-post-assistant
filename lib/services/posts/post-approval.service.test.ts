@@ -13,7 +13,7 @@ interface PostRow {
   companyId: string;
   status: string;
   scheduledFor: Date | null;
-  generationBatchId: string | null;
+  manuallyScheduled: boolean;
 }
 
 /** A manual bulk post as bulkGeneratePosts writes it: a draft with a time. */
@@ -22,7 +22,7 @@ function bulkDraft(overrides: Partial<PostRow> = {}): PostRow {
     companyId: "co-1",
     status: "draft",
     scheduledFor: SOFIA_NOON,
-    generationBatchId: "batch-1",
+    manuallyScheduled: true,
     ...overrides,
   };
 }
@@ -33,7 +33,7 @@ function cronPost(overrides: Partial<PostRow> = {}): PostRow {
     companyId: "co-1",
     status: "pending_approval",
     scheduledFor: SOFIA_NOON,
-    generationBatchId: null,
+    manuallyScheduled: false,
     ...overrides,
   };
 }
@@ -118,14 +118,14 @@ describe("approvePost — a manual bulk draft scheduled for later", () => {
     assert.deepEqual(audits(), ["POST_APPROVED"], "approval only — no publish entry");
   });
 
-  it("leaves scheduledFor and generationBatchId untouched", async () => {
+  it("leaves scheduledFor and manuallyScheduled untouched", async () => {
     // The sweep finds the post by exactly these two fields, so an approval that
     // rewrote either would either lose the schedule or turn the post automatic.
     const { deps, updates } = makeDeps(bulkDraft());
 
     await approvePost("p-1", "owner-1", false, deps);
 
-    for (const field of ["scheduledFor", "generationBatchId"]) {
+    for (const field of ["scheduledFor", "manuallyScheduled"]) {
       assert.equal(field in updates()[0], false, `${field} must survive the approval`);
     }
   });
@@ -141,7 +141,7 @@ describe("approvePost — a manual bulk draft scheduled for later", () => {
     // Unchanged by the approval, so this is what the sweep will read.
     const candidate = {
       scheduledFor: post.scheduledFor,
-      generationBatchId: post.generationBatchId,
+      manuallyScheduled: post.manuallyScheduled,
     };
     assert.equal(decidePublish(candidate, APPROVED_AT), "not_due");
     assert.equal(decidePublish(candidate, SOFIA_NOON), "publish");
@@ -198,7 +198,7 @@ describe("approvePost — unchanged for other posts", () => {
 
   it("refuses a plain draft, which must still be submitted first", async () => {
     const { deps, updates, audits } = makeDeps(
-      bulkDraft({ scheduledFor: null, generationBatchId: null })
+      bulkDraft({ scheduledFor: null, manuallyScheduled: false })
     );
 
     const result = await approvePost("p-1", "owner-1", false, deps);
@@ -249,7 +249,7 @@ describe("approvePost — unchanged for other posts", () => {
   });
 
   it("names the status it refused, so the card can explain itself", async () => {
-    const { deps } = makeDeps(bulkDraft({ scheduledFor: null, generationBatchId: null }));
+    const { deps } = makeDeps(bulkDraft({ scheduledFor: null, manuallyScheduled: false }));
 
     const result = await approvePost("p-1", "owner-1", false, deps);
 
@@ -279,9 +279,9 @@ describe("approvePost — unchanged for other posts", () => {
 // ─── The rule on its own ─────────────────────────────────────────────────────
 
 describe("canApprove", () => {
-  const manual = { scheduledFor: SOFIA_NOON, generationBatchId: "batch-1" };
-  const automatic = { scheduledFor: SOFIA_NOON, generationBatchId: null };
-  const unscheduled = { scheduledFor: null, generationBatchId: null };
+  const manual = { scheduledFor: SOFIA_NOON, manuallyScheduled: true };
+  const automatic = { scheduledFor: SOFIA_NOON, manuallyScheduled: false };
+  const unscheduled = { scheduledFor: null, manuallyScheduled: false };
 
   it("accepts a submitted post whatever its origin", () => {
     for (const post of [manual, automatic, unscheduled]) {
@@ -298,7 +298,7 @@ describe("canApprove", () => {
   it("rejects a bulk draft with no time — there is nothing to wait for", () => {
     // Approving it would leave a post that is never due and never publishes.
     assert.equal(
-      canApprove({ status: "draft", scheduledFor: null, generationBatchId: "b-1" }),
+      canApprove({ status: "draft", scheduledFor: null, manuallyScheduled: true }),
       false
     );
   });

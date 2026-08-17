@@ -1,6 +1,7 @@
 {
   "common": {
     "cancel": "Cancel",
+    "clear": "Clear",
     "confirm": "Confirm",
     "delete": "Delete",
     "deleting": "Deleting…",
@@ -619,14 +620,22 @@
     "schedule": {
       "scheduledFor": "Scheduled for {date}",
       "pastDue": "This publish time has passed, so the post was not sent. Pick a new time to put it back in the queue.",
+      "schedule": "Schedule",
       "reschedule": "Reschedule",
+      "publishTime": "Publish time",
+      "publishTimeOptional": "Publish time (optional)",
       "newTime": "New publish time",
       "save": "Save time",
       "saving": "Saving…",
       "timeZoneHint": "Times are shown in {zone}.",
       "newDate": "New publish date",
       "newTimeOfDay": "New publish time of day",
-      "slotHint": "Publishing runs every {minutes} minutes, so times are set on the hour or the half hour."
+      "slotHint": "Publishing runs every {minutes} minutes, so times are set on the hour or the half hour.",
+      "optionalHint": "Leave this empty to save an unscheduled draft you can schedule later.",
+      "pickBothParts": "Pick both a date and a time.",
+      "invalidDate": "That date does not exist.",
+      "timeInPast": "Pick a time in the future.",
+      "approvalStillRequired": "The post still has to be approved — a schedule on its own does not publish it."
     },
     "generate": {
       "title": "Generate a draft post",

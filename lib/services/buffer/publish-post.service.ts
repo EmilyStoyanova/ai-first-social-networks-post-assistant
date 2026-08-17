@@ -93,7 +93,7 @@ export interface PublishPostDb {
         mediaAssetId: true;
         mediaAsset: { select: { url: true } };
         scheduledFor: true;
-        generationBatchId: true;
+        manuallyScheduled: true;
       };
     }) => Promise<{
       companyId: string;
@@ -104,8 +104,8 @@ export interface PublishPostDb {
       mediaAssetId: string | null;
       mediaAsset: { url: string } | null;
       scheduledFor: Date | null;
-      /** Non-null iff the post came from a manual bulk generation. */
-      generationBatchId: string | null;
+      /** True iff a PERSON named this post's publish time. */
+      manuallyScheduled: boolean;
     } | null>;
     update: (args: {
       where: { id: string };
@@ -182,7 +182,7 @@ export async function approveAndPublishPost(
       mediaAssetId: true,
       mediaAsset: { select: { url: true } },
       scheduledFor: true,
-      generationBatchId: true,
+      manuallyScheduled: true,
     },
   });
 
@@ -290,8 +290,8 @@ export async function approveAndPublishPost(
       bufferUpdateId: bufferResult.updateId,
       publishedPostUrl: bufferResult.publishedUrl,
       publishedAt: at,
-      // generationBatchId is deliberately absent: a manual bulk post keeps its
-      // batch for the lifetime of the post (see prisma/schema.prisma).
+      // manuallyScheduled/scheduledFor are deliberately absent: a hand-scheduled
+      // post keeps the time a person gave it for the lifetime of the post.
       ...(needsApproval ? { approvedById: userId, approvedAt: at } : {}),
     },
   });

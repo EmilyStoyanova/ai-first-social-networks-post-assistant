@@ -83,6 +83,7 @@ function post(id: string, options: Record<string, unknown>): GeneratedPostDTO {
     sourceImageUrl: null,
     origin: brandSetupOrigin(),
     scheduledFor: (options.scheduledFor as Date | undefined) ?? null,
+    manuallyScheduled: options.scheduledFor != null,
     generationBatchId: (options.generationBatchId as string | undefined) ?? null,
     contentGroupId: (options.contentGroupId as string | undefined) ?? null,
     // Echoed from the pin when one was given, so a fake sibling generation

@@ -105,10 +105,16 @@ export interface GeneratedPostDTO {
   origin: PostOriginView;
   /**
    * The slot this post was written into, or null when generation was not asked
-   * for one (the single manual flow). Echoed from the caller's option rather
-   * than read back — nothing between here and the insert can change it.
+   * for one. Echoed from the caller's option rather than read back — nothing
+   * between here and the insert can change it.
    */
   scheduledFor: Date | null;
+  /**
+   * Whether that slot is a promise a person made rather than the weekly filler's
+   * estimate — mirrors `PostItem.manuallyScheduled`, so the client can render
+   * the new card's schedule panel straight from this response with no refetch.
+   */
+  manuallyScheduled: boolean;
   /** The bulk run this post belongs to; null for a single manual generation. */
   generationBatchId: string | null;
   /** The content topic this post is one channel's version of; null when ungrouped. */
@@ -325,17 +331,25 @@ export interface GeneratePostOptions {
   generatedById?: string;
   /** Weekly schedule this post belongs to (cron generation only). */
   scheduleId?: string;
+  /**
+   * When this post is due to go out.
+   *
+   * Who set it decides how it is honoured, and that is read off `scheduleId`
+   * rather than asked for separately: cron always passes one and never lets a
+   * person near the time, every other caller passes none and only ever gets a
+   * time because a person named it. See the `manuallyScheduled` write below.
+   */
   scheduledFor?: Date;
   /**
    * The manual bulk run this post belongs to — one id shared by every post of
    * one bulk request (see bulk-generate-posts.service.ts). Undefined for single
    * manual generation and for cron, which have no batch.
    *
-   * It changes nothing about how the post is generated or reviewed — a bulk post
-   * is an ordinary manual draft. It IS load-bearing at publish time: it is how
-   * the publisher tells a time a person chose from one the weekly filler
-   * estimated, so it must never be cleared or reused
-   * (lib/scheduling/publish-window.ts).
+   * Purely an association: it changes nothing about how the post is generated,
+   * reviewed, scheduled or published. What the publisher reads is
+   * `manuallyScheduled`, which is written from `scheduledFor`/`scheduleId` and
+   * is true for a bulk post because a person named its time, not because it
+   * belongs to a batch.
    */
   generationBatchId?: string;
   /**
@@ -587,6 +601,18 @@ export async function generatePostFromContext(
   options: GeneratePostOptions = {},
   deps: GenerateDraftPostDeps = {}
 ): Promise<GenerateDraftPostResult> {
+  /**
+   * Whether the time this post is being given is a person's promise.
+   *
+   * Derived rather than passed, because there is exactly one automated
+   * scheduler and it is the one that owns `scheduleId`: cron sets both fields,
+   * every other caller (bulk, the generation form, a multi-channel topic run)
+   * sets a time only because somebody picked one. Deriving it here means no
+   * caller can schedule a post and forget to say whose time it is — which would
+   * be silent, and would hand the post to the publisher's 48-hour look-ahead.
+   */
+  const manuallyScheduled = options.scheduledFor != null && options.scheduleId == null;
+
   const db: GenerateDraftPostDb = deps.db ?? prisma;
   const auditLog = deps.auditLog ?? createAuditLog;
   const embed = deps.embed ?? embedPost;
@@ -1048,6 +1074,9 @@ export async function generatePostFromContext(
       generatedById: generatedById ?? null,
       scheduleId: scheduleId ?? null,
       scheduledFor: scheduledFor ?? null,
+      // Whose time that is — the publisher's discriminator. See the derivation
+      // at the top of this function.
+      manuallyScheduled,
       // Which bulk run wrote this post, if any. An association and nothing more:
       // the status above is untouched by it, so a bulk post is reviewed exactly
       // like any other manual draft.
@@ -1293,6 +1322,7 @@ export async function generatePostFromContext(
       // client renders the new card from this response with no refetch.
       origin: resolvePostOrigin(originSnapshot, null),
       scheduledFor: scheduledFor ?? null,
+      manuallyScheduled,
       generationBatchId: options.generationBatchId ?? null,
       contentGroupId: options.contentGroupId ?? null,
       // Both taken from what this generation decided, not read back from the

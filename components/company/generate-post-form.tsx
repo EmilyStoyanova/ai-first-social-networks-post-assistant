@@ -75,7 +75,11 @@ import {
   planCustomSlots,
   validateCustomDistribution,
 } from "@/lib/scheduling/bulk-schedule";
-import { appZoneToday } from "@/lib/scheduling/app-datetime-local";
+import { appZoneToday, fromAppDateTimeLocal } from "@/lib/scheduling/app-datetime-local";
+import { refuseScheduleTime } from "@/lib/scheduling/reschedule-policy";
+import { SLOT_MINUTES } from "@/lib/scheduling/time-slots";
+import { TimeSlotSelect } from "@/components/ui/TimeSlotSelect";
+import { APP_TIME_ZONE } from "@/lib/i18n/format-date";
 
 /** Three-state override: inherit the source/channel setting, or force on/off. */
 type SourceLinkOverride = "inherit" | "include" | "exclude";
@@ -203,6 +207,9 @@ export function GeneratePostForm({
 }: Props) {
   const t = useTranslations("posts.generate");
   const tBulk = useTranslations("posts.generate.bulk");
+  // The post card's schedule wording, reused verbatim: the same field means the
+  // same thing whether it is filled in before generation or after it.
+  const tSchedule = useTranslations("posts.schedule");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
   const locale = useLocale();
@@ -243,6 +250,15 @@ export function GeneratePostForm({
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [warnings, setWarnings] = useState<GenerationWarnings | null>(null);
+
+  // ── Single-post publish time ──────────────────────────────────────────────
+  // Optional, and empty by default: an unscheduled draft is what this form has
+  // always produced, and scheduling is an extra a user opts into rather than a
+  // field they must clear. Held as a day plus a slot — the same pair the post
+  // card's picker uses, and for the same reason: the publishing sweep runs every
+  // half hour, so those are the only times a post can actually go out at.
+  const [singleDay, setSingleDay] = useState("");
+  const [singleTime, setSingleTime] = useState("");
 
   // ── Bulk mode ─────────────────────────────────────────────────────────────
   const [mode, setMode] = useState<GenerateMode>("single");
@@ -401,6 +417,49 @@ export function GeneratePostForm({
     // what actually changes, so that is what the memo watches.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan, distributionError, customDistribution, channels[0]]);
+
+  /**
+   * The instant the single-post fields name, or null when they name none.
+   *
+   * Null covers both "the user wants no schedule" (both fields empty) and "the
+   * pair is not yet a usable time" (one filled in, or a day that does not
+   * exist). `scheduleIncomplete` below is what tells those two apart, because
+   * only one of them should stop the button.
+   *
+   * Converted with the same business-zone helper the bulk form and the post card
+   * use, so a time typed here means what it says on every screen that reads it
+   * back afterwards.
+   */
+  const singleScheduledFor = useMemo(
+    () =>
+      singleDay === "" || singleTime === ""
+        ? null
+        : fromAppDateTimeLocal(`${singleDay}T${singleTime}`),
+    [singleDay, singleTime]
+  );
+
+  /** Half a time. Worth blocking on: the other half was going to be ignored. */
+  const scheduleIncomplete = (singleDay === "") !== (singleTime === "");
+
+  /**
+   * Both fields filled in, and still naming no instant. The date input can hold
+   * a day that does not exist (2026-02-30), which the API refuses.
+   */
+  const scheduleUnusable = !scheduleIncomplete && singleDay !== "" && singleScheduledFor === null;
+
+  /**
+   * A time already gone by. Refused by the API — generation is minutes of work,
+   * and a post written straight into the past-due state is stranded — so the
+   * button must not offer it either. Measured against the clock the form opened
+   * on, so a field cannot start failing while it is being read; the server
+   * measures against its own and is the authority.
+   */
+  const schedulePast =
+    singleScheduledFor !== null &&
+    refuseScheduleTime(new Date(singleScheduledFor), openedAt) !== null;
+
+  /** A single-post request the API would accept — what the Generate button waits for. */
+  const singleReady = !scheduleIncomplete && !scheduleUnusable && !schedulePast;
 
   /**
    * A run is in flight and this tab is following it.
@@ -926,7 +985,7 @@ export function GeneratePostForm({
     // billed work, so a duplicate submission is not a cosmetic problem. A queued
     // topic run is part of the guard too, since `generating` goes false the
     // moment the 202 lands while the work is only starting.
-    if (channels.length === 0 || generating || topicRunning) return;
+    if (channels.length === 0 || generating || topicRunning || !singleReady) return;
 
     setGenerating(true);
     setError("");
@@ -937,7 +996,13 @@ export function GeneratePostForm({
       const res = await fetch(`/api/v1/companies/${slug}/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(sharedGenerationBody()),
+        body: JSON.stringify({
+          ...sharedGenerationBody(),
+          // Omitted when no time was picked, which leaves the unscheduled draft
+          // this form has always produced. Sent as an instant: the day and slot
+          // above are business-zone wall clock and are converted here, once.
+          ...(singleScheduledFor === null ? {} : { scheduledFor: singleScheduledFor }),
+        }),
       });
       // Read as text and parsed safely, never `res.json()`. A request that runs
       // past the platform's function cap is answered by the gateway, not by the
@@ -1374,6 +1439,58 @@ export function GeneratePostForm({
           </div>
         )}
 
+        {/* When the post goes out. Optional, and the only field here that is:
+            leaving it empty writes the unscheduled draft this form has always
+            written, and filling it in hands the post to exactly the publishing
+            sweep a bulk-scheduled post uses. A date and a slot rather than a
+            datetime-local, because the sweep runs every half hour and those are
+            the only times a post can actually be published at. */}
+        {mode === "single" && (
+          <div className="min-w-[220px]">
+            <label
+              htmlFor="generate-schedule-date"
+              className="text-fg-muted mb-1.5 block text-sm font-medium"
+            >
+              {tSchedule("publishTimeOptional")}
+            </label>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                id="generate-schedule-date"
+                type="date"
+                value={singleDay}
+                min={minDate}
+                onChange={(e) => setSingleDay(e.target.value)}
+                disabled={generating || topicRunning || noChannels}
+                aria-invalid={scheduleIncomplete || scheduleUnusable || schedulePast || undefined}
+                className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+              <TimeSlotSelect
+                value={singleTime}
+                onChange={setSingleTime}
+                disabled={generating || topicRunning || noChannels}
+                invalid={scheduleIncomplete || schedulePast}
+                aria-label={tSchedule("newTimeOfDay")}
+                className="px-3.5 py-2.5 text-sm"
+              />
+              {/* The way back to "no schedule". Without it a date input that has
+                  been filled in cannot reliably be emptied again. */}
+              {(singleDay !== "" || singleTime !== "") && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={generating || topicRunning}
+                  onClick={() => {
+                    setSingleDay("");
+                    setSingleTime("");
+                  }}
+                >
+                  {tCommon("clear")}
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+
         {mode === "single" ? (
           <Button
             variant="primary"
@@ -1381,7 +1498,7 @@ export function GeneratePostForm({
             // request: with several channels selected the POST returns in
             // milliseconds and the writing happens afterwards, in a worker.
             loading={generating || topicRunning}
-            disabled={noChannels || generating || topicRunning}
+            disabled={noChannels || generating || topicRunning || !singleReady}
             onClick={handleGenerate}
           >
             {generating || topicRunning ? t("generating") : t("generateDraft")}
@@ -1403,6 +1520,26 @@ export function GeneratePostForm({
           </Button>
         )}
       </div>
+
+      {/* What the schedule field is doing, or why it is not usable yet. Only one
+          shows at a time: a problem replaces the hint rather than sitting under
+          it, so there is never advice and a complaint about the same field. */}
+      {mode === "single" &&
+        (scheduleIncomplete ? (
+          <p className="text-status-danger-fg mt-3 text-xs">{tSchedule("pickBothParts")}</p>
+        ) : scheduleUnusable ? (
+          <p className="text-status-danger-fg mt-3 text-xs">{tSchedule("invalidDate")}</p>
+        ) : schedulePast ? (
+          <p className="text-status-danger-fg mt-3 text-xs">{tSchedule("timeInPast")}</p>
+        ) : singleScheduledFor !== null ? (
+          <p className="text-fg-faint mt-3 text-xs">
+            {tSchedule("slotHint", { minutes: SLOT_MINUTES })}{" "}
+            {tSchedule("timeZoneHint", { zone: APP_TIME_ZONE })}{" "}
+            {tSchedule("approvalStillRequired")}
+          </p>
+        ) : (
+          <p className="text-fg-faint mt-3 text-xs">{tSchedule("optionalHint")}</p>
+        ))}
 
       {mode === "multiple" && (
         <BulkGenerateFields

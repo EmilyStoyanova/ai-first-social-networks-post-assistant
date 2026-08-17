@@ -4,12 +4,25 @@ import { pastDueMessage } from "@/lib/scheduling/publish-window";
 import { refuseReschedule } from "@/lib/scheduling/reschedule-policy";
 
 /**
- * Giving a post a new publish time.
+ * Giving a post a publish time — its first, or a replacement for one.
  *
- * This is the way out of a missed slot. The publisher refuses to fire a manually
- * scheduled post long after its time (lib/scheduling/publish-window.ts), which
- * would leave such a post stranded forever if nothing could move it — so this
- * service exists to be that one thing, and it only ever moves a post FORWARD.
+ * Two jobs, deliberately one service. It is the way out of a missed slot: the
+ * publisher refuses to fire a manually scheduled post long after its time
+ * (lib/scheduling/publish-window.ts), which would leave such a post stranded
+ * forever if nothing could move it. And it is how an unscheduled draft gets a
+ * time at all, from the Schedule control on its card.
+ *
+ * They are the same write, so they are the same service — "set this post's
+ * publish time to this instant" is one operation whether or not the column
+ * already held something, and splitting it would give scheduling two entry
+ * points that could disagree about who may do it and to when. The only
+ * difference is what the audit entry's `from` reads.
+ *
+ * Either way the post comes out MANUALLY SCHEDULED, which is the load-bearing
+ * half: a time nobody chose may be brought forward by up to 48 hours, and one a
+ * person typed into a picker must not be. Scheduling does not touch `status` —
+ * a draft stays a draft, a pending post stays pending, and approval remains a
+ * separate decision that the sweep waits for.
  *
  * The rule itself lives in lib/scheduling/reschedule-policy.ts so the card can
  * apply the same one before offering the control; re-exported here because this
@@ -36,7 +49,7 @@ interface PostContext {
   status: string;
   scheduledFor: Date | null;
   lastError: string | null;
-  generationBatchId: string | null;
+  manuallyScheduled: boolean;
 }
 
 async function resolveContext(
@@ -51,7 +64,7 @@ async function resolveContext(
       status: true,
       scheduledFor: true,
       lastError: true,
-      generationBatchId: true,
+      manuallyScheduled: true,
     },
   });
   if (!post) return { ok: false, code: "NOT_FOUND" };
@@ -68,7 +81,7 @@ async function resolveContext(
 }
 
 /**
- * Moves a post's `scheduledFor` to a new instant in the future.
+ * Sets a post's `scheduledFor` to an instant in the future.
  *
  * `now` is injectable so the boundary can be tested without sleeping.
  */
@@ -94,6 +107,13 @@ export async function reschedulePost(
     where: { id: postId },
     data: {
       scheduledFor: when,
+      // A person just picked this time, so it is one the publisher must keep
+      // rather than an estimate it may bring forward. Written on every call, not
+      // only when the post had no time before: an automatic post whose estimate
+      // somebody deliberately overrode is now hand-scheduled too, and leaving
+      // the flag alone would let the sweep send it up to 48 hours early — the
+      // exact instruction the user was overriding.
+      manuallyScheduled: true,
       // Clears the publisher's "you missed this slot" note, and only that note:
       // a real delivery error belongs to the retry step and is not ours to erase.
       ...(previous !== null && ctx.post.lastError === pastDueMessage(previous)
@@ -109,10 +129,12 @@ export async function reschedulePost(
     entityType: "post",
     entityId: postId,
     metadata: {
+      // Null when the post had no time at all — this was its first schedule
+      // rather than a move, which is the one thing the entry cannot say twice.
       from: previous?.toISOString() ?? null,
       to: when.toISOString(),
       status: ctx.post.status,
-      generationBatchId: ctx.post.generationBatchId,
+      wasManuallyScheduled: ctx.post.manuallyScheduled,
     },
   });
 

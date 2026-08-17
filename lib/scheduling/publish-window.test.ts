@@ -17,14 +17,14 @@ const NOW = new Date("2026-08-20T07:00:00.000Z");
 function manual(scheduledFor: string | null): PublishCandidate {
   return {
     scheduledFor: scheduledFor === null ? null : new Date(scheduledFor),
-    generationBatchId: "batch-1",
+    manuallyScheduled: true,
   };
 }
 
 function automatic(scheduledFor: string | null): PublishCandidate {
   return {
     scheduledFor: scheduledFor === null ? null : new Date(scheduledFor),
-    generationBatchId: null,
+    manuallyScheduled: false,
   };
 }
 
@@ -195,25 +195,25 @@ describe("isManuallyScheduled", () => {
   const NOON = new Date("2026-08-12T09:00:00.000Z");
 
   it("is true for a bulk post with a time", () => {
-    assert.equal(isManuallyScheduled({ scheduledFor: NOON, generationBatchId: "batch-1" }), true);
+    assert.equal(isManuallyScheduled({ scheduledFor: NOON, manuallyScheduled: true }), true);
   });
 
   it("is false for a cron post, however precise its time looks", () => {
-    assert.equal(isManuallyScheduled({ scheduledFor: NOON, generationBatchId: null }), false);
+    assert.equal(isManuallyScheduled({ scheduledFor: NOON, manuallyScheduled: false }), false);
   });
 
   it("is false for a bulk post with no time — there is nothing to honour", () => {
-    assert.equal(isManuallyScheduled({ scheduledFor: null, generationBatchId: "batch-1" }), false);
+    assert.equal(isManuallyScheduled({ scheduledFor: null, manuallyScheduled: true }), false);
   });
 
   it("is false for an ordinary draft", () => {
-    assert.equal(isManuallyScheduled({ scheduledFor: null, generationBatchId: null }), false);
+    assert.equal(isManuallyScheduled({ scheduledFor: null, manuallyScheduled: false }), false);
   });
 
   it("does not depend on the clock — it is about who chose the time", () => {
     // Which is why approval can use it: whether a post is manually scheduled
     // cannot change just because its slot went by.
-    const post = { scheduledFor: NOON, generationBatchId: "batch-1" };
+    const post = { scheduledFor: NOON, manuallyScheduled: true };
     assert.equal(isManuallyScheduled(post), true);
     assert.equal(decidePublish(post, new Date("2026-08-20T09:00:00.000Z")), "past_due");
     assert.equal(isManuallyScheduled(post), true);
@@ -226,7 +226,7 @@ describe("blocksOnDemandPublish", () => {
   it("blocks a manual post whose time is still ahead", () => {
     assert.equal(
       blocksOnDemandPublish(
-        { scheduledFor: NOON, generationBatchId: "batch-1" },
+        { scheduledFor: NOON, manuallyScheduled: true },
         new Date("2026-08-12T08:48:00.000Z")
       ),
       true
@@ -236,7 +236,7 @@ describe("blocksOnDemandPublish", () => {
   it("blocks it one millisecond early", () => {
     assert.equal(
       blocksOnDemandPublish(
-        { scheduledFor: NOON, generationBatchId: "batch-1" },
+        { scheduledFor: NOON, manuallyScheduled: true },
         new Date(NOON.getTime() - 1)
       ),
       true
@@ -245,7 +245,7 @@ describe("blocksOnDemandPublish", () => {
 
   it("allows it exactly on time", () => {
     assert.equal(
-      blocksOnDemandPublish({ scheduledFor: NOON, generationBatchId: "batch-1" }, NOON),
+      blocksOnDemandPublish({ scheduledFor: NOON, manuallyScheduled: true }, NOON),
       false
     );
   });
@@ -254,28 +254,25 @@ describe("blocksOnDemandPublish", () => {
     // decidePublish says "past_due" here and the sweep parks it; a person must
     // still be able to send it, so this predicate must NOT follow that decision.
     const late = new Date("2026-08-14T09:00:00.000Z");
+    assert.equal(decidePublish({ scheduledFor: NOON, manuallyScheduled: true }, late), "past_due");
     assert.equal(
-      decidePublish({ scheduledFor: NOON, generationBatchId: "batch-1" }, late),
-      "past_due"
-    );
-    assert.equal(
-      blocksOnDemandPublish({ scheduledFor: NOON, generationBatchId: "batch-1" }, late),
+      blocksOnDemandPublish({ scheduledFor: NOON, manuallyScheduled: true }, late),
       false
     );
   });
 
   it("allows an unscheduled post, which is the ordinary publish-now case", () => {
     // decidePublish calls this "not_due" forever; on demand it is the norm.
-    assert.equal(decidePublish({ scheduledFor: null, generationBatchId: null }, NOON), "not_due");
+    assert.equal(decidePublish({ scheduledFor: null, manuallyScheduled: false }, NOON), "not_due");
     assert.equal(
-      blocksOnDemandPublish({ scheduledFor: null, generationBatchId: null }, NOON),
+      blocksOnDemandPublish({ scheduledFor: null, manuallyScheduled: false }, NOON),
       false
     );
   });
 
   it("allows an unscheduled post that came from a bulk run", () => {
     assert.equal(
-      blocksOnDemandPublish({ scheduledFor: null, generationBatchId: "batch-1" }, NOON),
+      blocksOnDemandPublish({ scheduledFor: null, manuallyScheduled: true }, NOON),
       false
     );
   });
@@ -287,7 +284,7 @@ describe("blocksOnDemandPublish", () => {
       new Date("2026-01-01T09:00:00.000Z"),
     ]) {
       assert.equal(
-        blocksOnDemandPublish({ scheduledFor: NOON, generationBatchId: null }, now),
+        blocksOnDemandPublish({ scheduledFor: NOON, manuallyScheduled: false }, now),
         false
       );
     }

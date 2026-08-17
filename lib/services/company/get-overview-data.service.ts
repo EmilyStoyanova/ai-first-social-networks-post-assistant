@@ -203,7 +203,7 @@ export async function getOverviewData(
         approvedById: true,
         publishedPostUrl: true,
         scheduledFor: true,
-        generationBatchId: true,
+        manuallyScheduled: true,
         contentGroupId: true,
         createdAt: true,
         mediaAsset: { select: { url: true } },
@@ -305,7 +305,7 @@ export async function getOverviewData(
       previousMediaUrl: null,
       origin: resolvePostOrigin(r, r.primaryFeedItem),
       scheduledFor: r.scheduledFor?.toISOString() ?? null,
-      manuallyScheduled: r.generationBatchId !== null,
+      manuallyScheduled: r.manuallyScheduled,
       // Carried through truthfully even though this list never groups: the
       // upcoming panel shows what is scheduled, and a topic's three channel
       // versions are three things going out, not one.

@@ -43,7 +43,7 @@ interface PublishableRow {
   mediaAssetId: string | null;
   mediaAsset: { url: string } | null;
   scheduledFor: Date | null;
-  generationBatchId: string | null;
+  manuallyScheduled: boolean;
   lastError: string | null;
 }
 
@@ -95,11 +95,11 @@ export function publishCandidateWhere(now: Date): Prisma.PostWhereInput {
     scheduledFor: { not: null, lte: new Date(now.getTime() + PUBLISH_LOOKAHEAD_MS) },
     OR: [
       // Automatic — unchanged: sendable at any age, up to the look-ahead.
-      { generationBatchId: null },
+      { manuallyScheduled: false },
       // Manual, still inside its grace window: sendable.
-      { generationBatchId: { not: null }, scheduledFor: { gte: graceStart } },
+      { manuallyScheduled: true, scheduledFor: { gte: graceStart } },
       // Manual, long past due, not yet parked: read so it can be parked once.
-      { generationBatchId: { not: null }, scheduledFor: { lt: graceStart }, lastError: null },
+      { manuallyScheduled: true, scheduledFor: { lt: graceStart }, lastError: null },
     ],
   };
 }
@@ -121,7 +121,7 @@ async function defaultLoadCandidates(companyId: string, now: Date): Promise<Publ
       mediaAssetId: true,
       mediaAsset: { select: { url: true } },
       scheduledFor: true,
-      generationBatchId: true,
+      manuallyScheduled: true,
       lastError: true,
     },
   });
@@ -157,7 +157,7 @@ async function defaultParkPastDue(
       automated: true,
       reason: "past_due",
       scheduledFor: post.scheduledFor?.toISOString() ?? null,
-      generationBatchId: post.generationBatchId,
+      manuallyScheduled: post.manuallyScheduled,
     },
   });
 }
