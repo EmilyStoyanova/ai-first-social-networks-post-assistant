@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { ingestContentSource } from "@/lib/services/company/ingest-content-source.service";
 import { enqueueTranslationAfterIngest } from "@/lib/services/company/enqueue-translation-after-ingest";
 import { enqueueExtractionAfterIngest } from "@/lib/services/company/enqueue-extraction-after-ingest";
+import { enqueueClassificationAfterIngest } from "@/lib/services/company/enqueue-classification-after-ingest";
 
 export async function POST(
   _req: Request,
@@ -53,6 +54,12 @@ export async function POST(
   // call and belongs to a worker, not to this request — see
   // run-pending-extractions.service.ts.
   await enqueueExtractionAfterIngest(result.extractionWorkCreated, { slug, sourceId });
+
+  // And the same again for the topic verdict every new article needs. This is the
+  // trigger that covers a source with translation switched OFF: such an ingest
+  // creates no translation work, so the translation tick — which is what
+  // normally hands over to classification — never runs for it.
+  await enqueueClassificationAfterIngest(result.classificationWorkCreated, { slug, sourceId });
 
   return NextResponse.json({ created: result.created, updated: result.updated });
 }

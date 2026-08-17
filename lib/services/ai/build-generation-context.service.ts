@@ -6,6 +6,14 @@ import {
   resolveItemPublicUrl,
 } from "@/lib/ai/source-types";
 import { resolveFeedItemContent } from "@/lib/ai/feed-item-translation";
+import {
+  countOffered,
+  describePrioritySelection,
+  emptyPriorityDiagnostic,
+  orderByPriority,
+  priorityTierWheres,
+  type PriorityDiagnostic,
+} from "@/lib/ai/candidate-priority";
 
 const VALID_CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const;
 type ValidChannel = (typeof VALID_CHANNELS)[number];
@@ -26,7 +34,18 @@ function extractSourceLinkPreference(config: unknown): boolean | undefined {
 }
 
 export type BuildGenerationContextResult =
-  | { success: true; context: GenerationContext; companyId: string }
+  | {
+      success: true;
+      context: GenerationContext;
+      companyId: string;
+      /**
+       * How priority shaped this window. Present only for automatic generation —
+       * the one path that orders by priority — and carried on the result rather
+       * than on the context because it explains how the context was chosen, not
+       * what it contains. Nothing downstream branches on it; it is logged.
+       */
+      priority?: PriorityDiagnostic;
+    }
   | {
       success: false;
       // NO_ACTIVE_PROVIDER is kept for backward compatibility with existing route handlers
@@ -96,7 +115,12 @@ export async function buildGenerationContextForCompany(
   });
   if (!companyRow) return { success: false, code: "NOT_FOUND" };
 
-  return loadContext(companyId, channel, companyRow, scope);
+  // The ONE automatic entry point (cron's weekly generation), and therefore the
+  // one place topic priority orders the window and REJECTED is withheld. Every
+  // user-facing caller goes through buildGenerationContext below and is
+  // deliberately untouched: a person who picks a source or an article has made a
+  // choice, and a stored verdict must not quietly overrule it.
+  return loadContext(companyId, channel, companyRow, scope, true);
 }
 
 export async function buildGenerationContext(
@@ -154,6 +178,103 @@ export async function buildGenerationContext(
   return loadContext(companyId, channel, companyRow, scope);
 }
 
+/** The candidate window's shape and order — one definition, both query paths. */
+const CANDIDATE_ORDER_BY = [
+  { publishedAt: { sort: "desc", nulls: "last" } },
+  { createdAt: "desc" },
+] as const;
+
+const CANDIDATE_TAKE = 5;
+
+const CANDIDATE_SELECT = {
+  id: true,
+  title: true,
+  content: true,
+  url: true,
+  publishedAt: true,
+  sourceImageUrl: true,
+  // v2-4 — translated text is preferred over the original only when the
+  // translation completed; see resolveFeedItemContent below.
+  translatedTitle: true,
+  translatedContent: true,
+  translationStatus: true,
+  // The product-page extraction result. Read here, with the row, so the prompt
+  // builder and aspect mining see the same authoritative text rather than each
+  // re-deriving it from the raw page.
+  extractedContent: true,
+  extractionStatus: true,
+  // The topic verdict — read only to ORDER this window and to explain the
+  // ordering afterwards. It is never an input to the prompt.
+  classification: true,
+  // `name` rides along on a join that already exists — it and `type` are frozen
+  // into the post's origin snapshot at generation time.
+  source: { select: { name: true, type: true, config: true } },
+} as const;
+
+type CandidateRow = Awaited<ReturnType<typeof fetchCandidates>>[number];
+
+function fetchCandidates(where: Record<string, unknown>, take: number) {
+  return prisma.feedItem.findMany({
+    where,
+    orderBy: [...CANDIDATE_ORDER_BY],
+    take,
+    select: CANDIDATE_SELECT,
+  });
+}
+
+/**
+ * The automatic window, drawn in priority order.
+ *
+ * One query per tier rather than a sort over a recency-limited page, and that is
+ * the correctness point: taking the newest five and THEN sorting would never see
+ * a HIGH article older than five newer MEDIUM ones. Each tier is asked for the
+ * full window, and the merge takes the first `take` in tier order — so HIGH is
+ * genuinely exhausted before MEDIUM is drawn on.
+ *
+ * REJECTED is excluded by construction: it is simply never one of the tiers
+ * queried. That is stronger than a `NOT` filter, which a later edit could weaken
+ * without noticing.
+ */
+async function fetchPrioritisedCandidates(
+  where: Record<string, unknown>,
+  take: number
+): Promise<CandidateRow[]> {
+  // The tier list and its composition rule live in candidate-priority.ts, so the
+  // "REJECTED is never queried" guarantee is one testable definition rather than
+  // three literals here. The unclassified tier is the backwards-compatibility
+  // one: for a company with no topics every row lands there and the order is
+  // exactly what it was before this feature existed.
+  const tiers = await Promise.all(
+    priorityTierWheres(where).map((tier) => fetchCandidates(tier.where, take))
+  );
+  return tiers.flat().slice(0, take);
+}
+
+/**
+ * Why no HIGH article was offered, when the company has some.
+ *
+ * Computed only in that case — if HIGH was offered there is nothing to explain —
+ * so a company generating from its top tier pays nothing for this.
+ */
+async function explainMissingHigh(
+  companyId: string,
+  scopedSourceId: string | null
+): Promise<PriorityDiagnostic["withheldHigh"]> {
+  const scoped = scopedSourceId ? { sourceId: scopedSourceId } : {};
+  const [used, disabled, sourceDisabled] = await Promise.all([
+    prisma.feedItem.count({
+      where: { companyId, classification: "HIGH", enabled: true, usedInPost: true, ...scoped },
+    }),
+    prisma.feedItem.count({
+      where: { companyId, classification: "HIGH", enabled: false, ...scoped },
+    }),
+    prisma.feedItem.count({
+      where: { companyId, classification: "HIGH", source: { enabled: false }, ...scoped },
+    }),
+  ]);
+  return { used, disabled, sourceDisabled };
+}
+
 async function loadContext(
   companyId: string,
   channel: ValidChannel,
@@ -163,7 +284,13 @@ async function loadContext(
     automationMode: string;
     defaultLang: string;
   },
-  scope: SourceScope = POOLED
+  scope: SourceScope = POOLED,
+  /**
+   * Automatic (cron) generation: order the window by topic priority and withhold
+   * REJECTED. False for every user-facing caller, which keeps manual generation
+   * byte-for-byte what it was.
+   */
+  automatic = false
 ): Promise<BuildGenerationContextResult> {
   // v2-8 — a company-content slot must produce a mission/brand post, so it gets
   // an empty article window AND no article sources. That combination is exactly
@@ -185,6 +312,41 @@ async function loadContext(
   // differ only in whether used items still count (see directContentSource).
   const scopedSourceId =
     scope.kind === "source" || scope.kind === "content_source" ? scope.sourceId : null;
+
+  // The eligibility filter, unchanged from before this feature: every rule that
+  // decides whether an article MAY be used lives here, and priority never adds to
+  // it or subtracts from it — it only orders what comes out.
+  const candidateWhere: Record<string, unknown> = {
+    companyId,
+    // Manual enable/disable. Authoritative over any verdict: a person who
+    // switched an article off has overruled the classifier, whatever it decided.
+    enabled: true,
+    // usedInPost:false — one-post-per-article. DROPPED for a direct content
+    // source: its stored extraction describes a page/prompt/event that does not
+    // stop existing once a post cites it, and ingestion writes only one row per
+    // such source, so keeping the filter would make the source selectable exactly
+    // once and dry forever after.
+    //
+    // Also dropped for a pinned item, for the opposite reason: it IS used — this
+    // topic's first channel claimed it — and the sibling channels of that same
+    // topic must still be able to see it.
+    ...(directContentSource || pinnedFeedItemId ? {} : { usedInPost: false }),
+    source: { enabled: true },
+    // One named item, and nothing else, for a sibling channel version.
+    ...(pinnedFeedItemId ? { id: pinnedFeedItemId } : {}),
+    // v2-8 — when a specific source's quota is due, the window is restricted to
+    // that source so a post can only ever consume the quota it was drawn against.
+    // Without this the pooled window could hand RSS B's article to RSS A's slot,
+    // silently reassigning the quota. A manual pick of either kind narrows the
+    // window the same way.
+    ...(scopedSourceId ? { sourceId: scopedSourceId } : {}),
+  };
+
+  // A pinned sibling is exempt from priority ordering entirely: the article is
+  // named, and re-ranking a window of one is meaningless. Withholding it because
+  // it is REJECTED would be worse — it would fragment a content group whose first
+  // channel is already written.
+  const prioritised = automatic && !pinnedFeedItemId;
 
   // ── Parallel data load ────────────────────────────────────────────────────
   const [brand, channelConfig, feedItems, enabledSource] = await Promise.allSettled([
@@ -212,60 +374,14 @@ async function loadContext(
       },
     }),
     // A company-content slot draws from no source at all — skip the query.
+    // Otherwise: one-post-per-article and every other eligibility rule live in
+    // `candidateWhere` above; automatic runs draw the same window in priority
+    // order (HIGH, then MEDIUM, then unclassified), manual runs exactly as before.
     companyContentOnly
       ? Promise.resolve([])
-      : prisma.feedItem.findMany({
-          // usedInPost:false — one-post-per-article (Phase 0). Already-consumed
-          // articles are excluded so each generation draws from a fresh source and
-          // the same article is never rewritten twice. Evergreen (prompt/calendar)
-          // items are never marked used, so they always remain in this window.
-          where: {
-            companyId,
-            enabled: true,
-            // usedInPost:false — one-post-per-article. DROPPED for a direct
-            // content source: its stored extraction describes a page/prompt/event
-            // that does not stop existing once a post cites it, and ingestion
-            // writes only one row per such source, so keeping the filter would
-            // make the source selectable exactly once and dry forever after.
-            //
-            // Also dropped for a pinned item, for the opposite reason: it IS
-            // used — this topic's first channel claimed it — and the sibling
-            // channels of that same topic must still be able to see it.
-            ...(directContentSource || pinnedFeedItemId ? {} : { usedInPost: false }),
-            source: { enabled: true },
-            // One named item, and nothing else, for a sibling channel version.
-            ...(pinnedFeedItemId ? { id: pinnedFeedItemId } : {}),
-            // v2-8 — when a specific source's quota is due, the window is restricted
-            // to that source so a post can only ever consume the quota it was drawn
-            // against. Without this the pooled window could hand RSS B's article to
-            // RSS A's slot, silently reassigning the quota. A manual pick of either
-            // kind narrows the window the same way.
-            ...(scopedSourceId ? { sourceId: scopedSourceId } : {}),
-          },
-          orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
-          take: 5,
-          select: {
-            id: true,
-            title: true,
-            content: true,
-            url: true,
-            publishedAt: true,
-            sourceImageUrl: true,
-            // v2-4 — translated text is preferred over the original only when the
-            // translation completed; see resolveFeedItemContent below.
-            translatedTitle: true,
-            translatedContent: true,
-            translationStatus: true,
-            // The product-page extraction result. Read here, with the row, so the
-            // prompt builder and aspect mining see the same authoritative text
-            // rather than each re-deriving it from the raw page.
-            extractedContent: true,
-            extractionStatus: true,
-            // `name` rides along on a join that already exists — it and `type`
-            // are frozen into the post's origin snapshot at generation time.
-            source: { select: { name: true, type: true, config: true } },
-          },
-        }),
+      : prioritised
+        ? fetchPrioritisedCandidates(candidateWhere, CANDIDATE_TAKE)
+        : fetchCandidates(candidateWhere, CANDIDATE_TAKE),
     // Does the company have an ARTICLE source (rss/product_page) configured at
     // all? Such a source with every article already used yields an empty
     // article window but must NOT fall back to a mission post — the caller skips
@@ -290,7 +406,31 @@ async function loadContext(
 
   const brandData = brand.status === "fulfilled" ? brand.value : null;
   const channelConfigData = channelConfig.status === "fulfilled" ? channelConfig.value : null;
-  const feedData = feedItems.status === "fulfilled" ? feedItems.value : [];
+  const fetched = feedItems.status === "fulfilled" ? feedItems.value : [];
+  // Ordering the merged tiers again is belt-and-braces: the tiered fetch already
+  // returns them in rank order. It costs nothing and it is what keeps the
+  // guarantee true if the query below is ever changed.
+  const feedData = prioritised ? orderByPriority(fetched) : fetched;
+
+  // Why this window looks the way it does. Only assembled for automatic runs —
+  // the one path that ordered anything — and the expensive half only when there
+  // is genuinely something to explain.
+  let priority: PriorityDiagnostic | undefined;
+  if (prioritised) {
+    priority = emptyPriorityDiagnostic();
+    priority.offered = countOffered(feedData);
+    if (priority.offered.high === 0) {
+      priority.withheldHigh = await explainMissingHigh(companyId, scopedSourceId);
+    }
+    console.info("[generation] candidate priority", {
+      companyId,
+      channel,
+      scope: scope.kind,
+      summary: describePrioritySelection(priority),
+      ...priority.offered,
+      withheldHigh: priority.withheldHigh,
+    });
+  }
   // On a query failure, err toward the mission-post path (false) rather than
   // wrongly skipping generation; feedData already reflects claimable articles.
   const hasArticleSources = enabledSource.status === "fulfilled" && enabledSource.value !== null;
@@ -360,5 +500,5 @@ async function loadContext(
     directContentSource,
   };
 
-  return { success: true, context, companyId };
+  return { success: true, context, companyId, priority };
 }

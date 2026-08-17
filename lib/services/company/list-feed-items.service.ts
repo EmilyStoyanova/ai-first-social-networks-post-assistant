@@ -1,5 +1,9 @@
 import { prisma } from "@/lib/db/client";
 import { resolveItemPublicUrl } from "@/lib/ai/source-types";
+import {
+  classificationFilterWhere,
+  type FeedItemClassificationFilter,
+} from "@/lib/posts/feed-item-classification-filter";
 
 export interface FeedItemRow {
   id: string;
@@ -25,10 +29,34 @@ export interface FeedItemRow {
   translationLanguage: string | null;
   /** Populated only for a failed translation; shown as an error summary. */
   translationError: string | null;
+  /** HIGH | MEDIUM | REJECTED | null — null is "no verdict", never "rejected". */
+  classification: string | null;
+  /** pending | classifying | completed | skipped | failed | null. */
+  classificationStatus: string | null;
+  /** BLACKLIST | OUT_OF_SCOPE — set only alongside a REJECTED classification. */
+  classificationRejectionReason: string | null;
+  /** The configured topics this article matched, in their stored spelling. */
+  classificationMatchedTopics: string[];
+  /** One capped sentence of evidence. Shown on demand, never in the row itself. */
+  classificationReason: string | null;
+}
+
+/**
+ * How many articles this source has in each filter bucket — over the WHOLE
+ * source, not the returned page. That is what lets the pills show honest counts
+ * while the list itself stays capped.
+ */
+export interface FeedItemClassificationCounts {
+  all: number;
+  high: number;
+  medium: number;
+  rejected: number;
+  unclassified: number;
 }
 
 export type ListFeedItemsResult =
-  { success: true; items: FeedItemRow[] } | { success: false; code: "NOT_FOUND" | "FORBIDDEN" };
+  | { success: true; items: FeedItemRow[]; counts: FeedItemClassificationCounts }
+  | { success: false; code: "NOT_FOUND" | "FORBIDDEN" };
 
 async function resolveCompanyAndSource(
   slug: string,
@@ -80,36 +108,88 @@ export async function hasEnabledFeedItems(companyId: string): Promise<boolean> {
   return item !== null;
 }
 
+/**
+ * Bucket counts over the whole source.
+ *
+ * One `groupBy` rather than five counts, and taken WITHOUT the active filter so
+ * every pill keeps showing its own total while one of them is selected — a
+ * filter bar whose other counts collapse to zero as soon as you use it is
+ * useless for deciding where to go next.
+ */
+async function classificationCounts(sourceId: string): Promise<FeedItemClassificationCounts> {
+  const groups = await prisma.feedItem.groupBy({
+    by: ["classification"],
+    where: { sourceId },
+    _count: { _all: true },
+  });
+
+  const counts: FeedItemClassificationCounts = {
+    all: 0,
+    high: 0,
+    medium: 0,
+    rejected: 0,
+    unclassified: 0,
+  };
+
+  for (const group of groups) {
+    const n = group._count._all;
+    counts.all += n;
+    if (group.classification === "HIGH") counts.high += n;
+    else if (group.classification === "MEDIUM") counts.medium += n;
+    else if (group.classification === "REJECTED") counts.rejected += n;
+    // Anything else — null, or a value written by a future version — is "no
+    // verdict" rather than silently uncounted.
+    else counts.unclassified += n;
+  }
+
+  return counts;
+}
+
 export async function listFeedItems(
   slug: string,
   sourceId: string,
   userId: string,
-  isGlobalAdmin: boolean
+  isGlobalAdmin: boolean,
+  /**
+   * Applied in the DATABASE, not over the returned page. See the filter module:
+   * the list is capped, so a client-side filter would answer a different
+   * question from the one the user asked.
+   */
+  filter: FeedItemClassificationFilter = "all"
 ): Promise<ListFeedItemsResult> {
   const ctx = await resolveCompanyAndSource(slug, sourceId, userId, isGlobalAdmin);
   if (!ctx.ok) return { success: false, code: ctx.code };
 
-  const rows = await prisma.feedItem.findMany({
-    where: { sourceId },
-    orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
-    take: ITEMS_LIMIT,
-    select: {
-      id: true,
-      sourceId: true,
-      title: true,
-      content: true,
-      url: true,
-      publishedAt: true,
-      enabled: true,
-      createdAt: true,
-      translationStatus: true,
-      translationLanguage: true,
-      translationError: true,
-    },
-  });
+  const [rows, counts] = await Promise.all([
+    prisma.feedItem.findMany({
+      where: { sourceId, ...classificationFilterWhere(filter) },
+      orderBy: [{ publishedAt: { sort: "desc", nulls: "last" } }, { createdAt: "desc" }],
+      take: ITEMS_LIMIT,
+      select: {
+        id: true,
+        sourceId: true,
+        title: true,
+        content: true,
+        url: true,
+        publishedAt: true,
+        enabled: true,
+        createdAt: true,
+        translationStatus: true,
+        translationLanguage: true,
+        translationError: true,
+        classification: true,
+        classificationStatus: true,
+        classificationRejectionReason: true,
+        classificationMatchedTopics: true,
+        classificationReason: true,
+      },
+    }),
+    classificationCounts(sourceId),
+  ]);
 
   return {
     success: true,
+    counts,
     items: rows.map((r) => ({
       id: r.id,
       sourceId: r.sourceId,
@@ -125,6 +205,11 @@ export async function listFeedItems(
       translationStatus: r.translationStatus,
       translationLanguage: r.translationLanguage,
       translationError: r.translationError,
+      classification: r.classification,
+      classificationStatus: r.classificationStatus,
+      classificationRejectionReason: r.classificationRejectionReason,
+      classificationMatchedTopics: r.classificationMatchedTopics,
+      classificationReason: r.classificationReason,
     })),
   };
 }

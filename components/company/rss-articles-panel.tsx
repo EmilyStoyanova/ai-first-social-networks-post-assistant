@@ -4,7 +4,16 @@ import { useState, useCallback } from "react";
 import { ExternalLink } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { Alert } from "@/components/ui/Alert";
-import type { FeedItemRow } from "@/lib/services/company/list-feed-items.service";
+import type {
+  FeedItemRow,
+  FeedItemClassificationCounts,
+} from "@/lib/services/company/list-feed-items.service";
+import {
+  FEED_ITEM_CLASSIFICATION_FILTERS,
+  classificationStateOf,
+  type FeedItemClassificationFilter,
+  type FeedItemClassificationState,
+} from "@/lib/posts/feed-item-classification-filter";
 import { formatDate as formatSharedDate } from "@/lib/i18n/format-date";
 
 interface Props {
@@ -64,6 +73,49 @@ function TranslationBadge({ item }: { item: FeedItemRow }) {
   );
 }
 
+/**
+ * The topic verdict badge.
+ *
+ * `failed` and `pending` have their own labels and are NEVER shown as rejected:
+ * "we could not ask" and "the company does not want this" are opposite claims,
+ * and conflating them would make an outage look like an editorial decision.
+ */
+const CLASSIFICATION_STYLES: Record<FeedItemClassificationState, string> = {
+  high: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+  medium: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+  rejected: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  pending: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+  failed: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
+  skipped: "bg-surface-subtle text-fg-faint",
+  unclassified: "bg-surface-subtle text-fg-faint",
+};
+
+function ClassificationBadge({ item }: { item: FeedItemRow }) {
+  const t = useTranslations("feedItems.classification");
+  const state = classificationStateOf(item);
+
+  // Nothing to say about a source the feature does not cover, or a row from
+  // before it existed — a badge there would be noise, not information.
+  if (state === "unclassified") return null;
+
+  const reason = item.classificationRejectionReason;
+  const label =
+    state === "rejected" && reason === "BLACKLIST"
+      ? t("rejectedBlacklist")
+      : state === "rejected" && reason === "OUT_OF_SCOPE"
+        ? t("rejectedOutOfScope")
+        : t(state);
+
+  return (
+    <span
+      className={`text-micro rounded px-1.5 py-0.5 font-medium ${CLASSIFICATION_STYLES[state]}`}
+      title={item.classificationReason ?? undefined}
+    >
+      {label}
+    </span>
+  );
+}
+
 interface ArticleRowProps {
   slug: string;
   sourceId: string;
@@ -74,8 +126,13 @@ interface ArticleRowProps {
 
 function ArticleRow({ slug, sourceId, item, canManage, onToggle }: ArticleRowProps) {
   const t = useTranslations("feedItems");
+  const tc = useTranslations("feedItems.classification");
   const [toggling, setToggling] = useState(false);
   const [error, setError] = useState("");
+  // The verdict's evidence is opened per row, never listed: a reason on every
+  // line would bury the titles the list exists to show.
+  const [showWhy, setShowWhy] = useState(false);
+  const hasWhy = item.classificationReason !== null || item.classificationMatchedTopics.length > 0;
 
   async function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     const next = e.target.checked;
@@ -160,6 +217,29 @@ function ArticleRow({ slug, sourceId, item, canManage, onToggle }: ArticleRowPro
           </p>
         )}
 
+        {/* Why this verdict — collapsed by default, so the list stays readable. */}
+        {hasWhy && (
+          <button
+            type="button"
+            onClick={() => setShowWhy((v) => !v)}
+            aria-expanded={showWhy}
+            className="text-fg-faint hover:text-fg mt-1 text-xs underline-offset-2 transition-colors hover:underline"
+          >
+            {showWhy ? tc("hideWhy") : tc("showWhy")}
+          </button>
+        )}
+        {showWhy && (
+          <div className="text-fg-muted mt-1 text-xs leading-relaxed">
+            {item.classificationMatchedTopics.length > 0 && (
+              <p>{tc("matchedTopics", { topics: item.classificationMatchedTopics.join(", ") })}</p>
+            )}
+            {item.classificationReason && <p className="mt-0.5">{item.classificationReason}</p>}
+            {classificationStateOf(item) === "failed" && item.classificationStatus === "failed" && (
+              <p className="mt-0.5">{tc("failedHint")}</p>
+            )}
+          </div>
+        )}
+
         {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
       </div>
 
@@ -174,6 +254,10 @@ function ArticleRow({ slug, sourceId, item, canManage, onToggle }: ArticleRowPro
         >
           {item.enabled ? t("enabled") : t("disabled")}
         </span>
+        {/* Independent of the toggle above, and shown alongside it on purpose:
+            a disabled HIGH article is a legitimate, visible state — the person
+            overruled the classifier, and both facts stay true. */}
+        <ClassificationBadge item={item} />
         <TranslationBadge item={item} />
       </div>
     </li>
@@ -182,37 +266,81 @@ function ArticleRow({ slug, sourceId, item, canManage, onToggle }: ArticleRowPro
 
 export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
   const t = useTranslations("feedItems");
+  const tc = useTranslations("feedItems.classification");
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<FeedItemRow[] | null>(null);
+  const [counts, setCounts] = useState<FeedItemClassificationCounts | null>(null);
+  const [filter, setFilter] = useState<FeedItemClassificationFilter>("all");
   const [loadError, setLoadError] = useState("");
+  const [reclassifying, setReclassifying] = useState(false);
+  const [reclassified, setReclassified] = useState<number | null>(null);
 
-  const load = useCallback(async () => {
-    if (items !== null) return; // already loaded
-    setLoading(true);
-    setLoadError("");
-    try {
-      const res = await fetch(`/api/v1/companies/${slug}/content-sources/${sourceId}/feed-items`);
-      if (!res.ok) throw new Error();
-      const json = (await res.json()) as { items: FeedItemRow[] };
-      setItems(json.items);
-    } catch {
-      setLoadError(t("loadError"));
-    } finally {
-      setLoading(false);
-    }
-  }, [slug, sourceId, items, t]);
+  /**
+   * Always refetches. The filter is applied by the SERVER over the whole source,
+   * so changing it is a new question and not a re-slice of what is in memory —
+   * see lib/posts/feed-item-classification-filter.ts.
+   */
+  const load = useCallback(
+    async (next: FeedItemClassificationFilter) => {
+      setLoading(true);
+      setLoadError("");
+      try {
+        const url = `/api/v1/companies/${slug}/content-sources/${sourceId}/feed-items?classification=${next}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error();
+        const json = (await res.json()) as {
+          items: FeedItemRow[];
+          counts: FeedItemClassificationCounts;
+        };
+        setItems(json.items);
+        setCounts(json.counts);
+      } catch {
+        setLoadError(t("loadError"));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [slug, sourceId, t]
+  );
 
   function handleOpen() {
     setOpen(true);
-    void load();
+    if (items === null) void load(filter);
+  }
+
+  function handleFilter(next: FeedItemClassificationFilter) {
+    setFilter(next);
+    void load(next);
   }
 
   function handleToggle(id: string, enabled: boolean) {
     setItems((prev) => prev?.map((it) => (it.id === id ? { ...it, enabled } : it)) ?? prev);
   }
 
-  const count = items?.length ?? 0;
+  /**
+   * Queues the EXISTING classification drain for this company — no LLM call
+   * happens in this request. The list is reloaded so a verdict that has already
+   * settled shows up; anything still queued appears on the next open.
+   */
+  async function handleReclassify() {
+    setReclassifying(true);
+    setReclassified(null);
+    setLoadError("");
+    try {
+      const res = await fetch(`/api/v1/companies/${slug}/reclassify`, { method: "POST" });
+      if (!res.ok) throw new Error();
+      const json = (await res.json()) as { data: { reopened: number } };
+      setReclassified(json.data.reopened);
+      await load(filter);
+    } catch {
+      setLoadError(tc("reclassifyError"));
+    } finally {
+      setReclassifying(false);
+    }
+  }
+
+  const count = counts?.all ?? items?.length ?? 0;
 
   return (
     <div className="border-border mt-4 border-t border-dashed pt-4">
@@ -237,8 +365,50 @@ export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
               {loadError}
             </Alert>
           )}
+          {/* Priority filter — server-side, so the counts are the source's
+              totals rather than the loaded page's. */}
+          {counts !== null && (
+            <div className="mb-3 flex flex-wrap items-center gap-1.5">
+              {FEED_ITEM_CLASSIFICATION_FILTERS.map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => handleFilter(key)}
+                  aria-pressed={filter === key}
+                  disabled={loading}
+                  className={`text-micro rounded-full px-2.5 py-1 font-medium transition-colors disabled:opacity-50 ${
+                    filter === key
+                      ? "bg-fg text-surface"
+                      : "bg-surface-subtle text-fg-muted hover:text-fg"
+                  }`}
+                >
+                  {tc(`filter.${key}`)} ({counts[key]})
+                </button>
+              ))}
+
+              {canManage && (
+                <button
+                  type="button"
+                  onClick={handleReclassify}
+                  disabled={reclassifying || loading}
+                  className="text-micro text-fg-muted hover:text-fg ml-auto font-medium underline-offset-2 transition-colors hover:underline disabled:opacity-50"
+                >
+                  {reclassifying ? tc("reclassifying") : tc("reclassify")}
+                </button>
+              )}
+            </div>
+          )}
+
+          {reclassified !== null && (
+            <Alert variant="success" className="mb-3">
+              {tc("reclassifyQueued", { count: reclassified })}
+            </Alert>
+          )}
+
           {!loading && items !== null && items.length === 0 && (
-            <p className="text-fg-faint text-xs">{t("noArticles")}</p>
+            <p className="text-fg-faint text-xs">
+              {filter === "all" ? t("noArticles") : tc("noneMatchFilter")}
+            </p>
           )}
           {!canManage && items !== null && items.length > 0 && (
             <p className="text-fg-faint mb-2 text-xs">{t("ownersOnly")}</p>

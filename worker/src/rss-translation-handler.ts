@@ -30,7 +30,11 @@ import {
   type TranslationCronSummary,
 } from "@/lib/services/cron/run-translation-cron.service";
 import { enqueueJob, type EnqueueJobResult } from "@/lib/services/queue/enqueue-job.service";
-import { RSS_TRANSLATION_JOB_TYPE } from "@/lib/queue/job-types";
+import {
+  RSS_TRANSLATION_JOB_TYPE,
+  RSS_CLASSIFICATION_JOB_TYPE,
+  RSS_CLASSIFICATION_DEDUPE_KEY,
+} from "@/lib/queue/job-types";
 
 export { RSS_TRANSLATION_JOB_TYPE };
 
@@ -104,9 +108,35 @@ export function toDiagnostics(summary: TranslationCronSummary): RssTranslationDi
  * (each with its own production defaults — the worker never reaches into translation
  * internals).
  */
+/**
+ * The classification hand-off seam.
+ *
+ * Classification rides this tick rather than a scheduled cron of its own — Vercel
+ * Hobby caps both the number of crons and their frequency — and this is the right
+ * tick for it on the merits, not only for the quota: a verdict is made from the
+ * TRANSLATED text, so an article is ready to be judged exactly when its
+ * translation has settled.
+ *
+ * Unlike the continuation above it DOES carry its dedupe key: it is a different
+ * job type, so there is no self-collision, and the key is what makes a manual
+ * ingest, a topic-settings save and this tick finishing together collapse into
+ * one drain instead of racing over the same articles.
+ */
+export type EnqueueClassificationAfterTranslation = () => Promise<EnqueueJobResult>;
+
+export function defaultEnqueueClassificationAfterTranslation(
+  enqueue: typeof enqueueJob = enqueueJob
+): Promise<EnqueueJobResult> {
+  return enqueue({
+    type: RSS_CLASSIFICATION_JOB_TYPE,
+    dedupeKey: RSS_CLASSIFICATION_DEDUPE_KEY,
+  });
+}
+
 export function createRssTranslationHandler(
   runTranslation: () => Promise<TranslationCronSummary> = () => runTranslationCron(),
-  enqueueContinuation: EnqueueTranslationContinuation = defaultEnqueueTranslationContinuation
+  enqueueContinuation: EnqueueTranslationContinuation = defaultEnqueueTranslationContinuation,
+  enqueueClassification: EnqueueClassificationAfterTranslation = defaultEnqueueClassificationAfterTranslation
 ): JobHandler {
   return async ({ job, logger }) => {
     logger.info("rss translation starting", { jobId: job.id, attempt: job.attempts });
@@ -140,6 +170,26 @@ export function createRssTranslationHandler(
         });
       } catch (err) {
         logger.error("rss translation continuation enqueue failed (ignored)", {
+          jobId: job.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } else {
+      // The translation backlog is drained, so every article that was going to
+      // change its text has changed it: hand off to classification. Guarded and
+      // swallowed for the same reason the continuation is — a successful
+      // translation run must never be retried because a downstream enqueue
+      // failed, and the next tick re-enqueues it anyway.
+      try {
+        const enqueue = await enqueueClassification();
+        logger.info("rss classification enqueued after translation", {
+          jobId: job.id,
+          enqueued: enqueue.enqueued,
+          deduplicated: enqueue.deduplicated,
+          classificationJobId: enqueue.jobId,
+        });
+      } catch (err) {
+        logger.error("rss classification enqueue failed (ignored)", {
           jobId: job.id,
           error: err instanceof Error ? err.message : String(err),
         });

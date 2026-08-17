@@ -1,5 +1,8 @@
 import { prisma } from "@/lib/db/client";
 import type { UpdateBrandGuidelinesInput } from "@/lib/validators/brand-guidelines.schema";
+import { resolveTopicPriorities, type TopicPriorities } from "@/lib/ai/topic-priorities";
+import { getTopicPriorities } from "./get-brand-guidelines.service";
+import { reclassifyAfterTopicChange } from "./reclassify-feed-items.service";
 
 export type BrandGuidelinesData = {
   id: string;
@@ -138,11 +141,29 @@ async function upsert(
 export interface UpdateBrandGuidelinesDeps {
   resolveAccess: typeof resolveBrandGuidelinesAccess;
   persist: (companyId: string, data: UpdateBrandGuidelinesInput) => Promise<BrandGuidelinesData>;
+  /**
+   * The topics as they stand BEFORE the save — the other half of "did they
+   * change?". Optional so callers that predate reclassification (and the tests
+   * that only exercise authorization) need not supply it.
+   */
+  readTopics?: (companyId: string) => Promise<TopicPriorities>;
+  /** Reopens stale verdicts when the topics moved. Never throws. */
+  reclassify?: (
+    companyId: string,
+    before: TopicPriorities,
+    after: TopicPriorities
+  ) => Promise<unknown>;
 }
 
+// The last two are wrapped rather than referenced directly: this module and
+// get-brand-guidelines.service.ts import from each other, and a deferred call
+// resolves the binding at call time rather than at module init, where one side
+// of a cycle is still undefined.
 const REAL_DEPS: UpdateBrandGuidelinesDeps = {
   resolveAccess: resolveBrandGuidelinesAccess,
   persist: upsert,
+  readTopics: (companyId) => getTopicPriorities(companyId),
+  reclassify: (companyId, before, after) => reclassifyAfterTopicChange(companyId, before, after),
 };
 
 export async function updateBrandGuidelines(
@@ -155,5 +176,19 @@ export async function updateBrandGuidelines(
   const access = await deps.resolveAccess(slug, userId, isGlobalAdmin);
   if (!access.ok) return { success: false, code: access.code };
 
-  return { success: true, brandGuidelines: await deps.persist(access.companyId, data) };
+  // Read BEFORE the write, or there is nothing to compare against.
+  const before = await deps.readTopics?.(access.companyId);
+
+  const brandGuidelines = await deps.persist(access.companyId, data);
+
+  // Stale verdicts are reopened only when the topics really moved — see
+  // topicPrioritiesChanged. Deliberately AFTER the save and never awaited for its
+  // value: this is background work, and a save must not fail because a queue was
+  // briefly unreachable (reclassifyAfterTopicChange swallows its own errors, and
+  // the translation tick re-enqueues the drain regardless).
+  if (before && deps.reclassify) {
+    await deps.reclassify(access.companyId, before, resolveTopicPriorities(brandGuidelines));
+  }
+
+  return { success: true, brandGuidelines };
 }

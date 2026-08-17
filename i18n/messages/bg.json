@@ -548,7 +548,34 @@
     "translationPending": "Чака превод",
     "translationFailed": "Неуспешен превод",
     "translationOriginal": "Оригинал",
-    "translationErrorSummary": "Преводът не успя: {error}. Ще опитаме пак автоматично."
+    "translationErrorSummary": "Преводът не успя: {error}. Ще опитаме пак автоматично.",
+    "classification": {
+      "high": "ТОП приоритет",
+      "medium": "Среден приоритет",
+      "rejected": "Отхвърлена",
+      "rejectedBlacklist": "Отхвърлена · тема за избягване",
+      "rejectedOutOfScope": "Отхвърлена · извън темите",
+      "pending": "Чака оценка",
+      "failed": "Неуспешна класификация",
+      "skipped": "Без класификация",
+      "unclassified": "Без класификация",
+      "showWhy": "Защо този приоритет?",
+      "hideWhy": "Скрий",
+      "matchedTopics": "Съвпадащи теми: {topics}",
+      "failedHint": "Класификаторът не отговори. Статията НЕ е отхвърлена — ще бъде опитана отново.",
+      "noneMatchFilter": "Няма статии с този приоритет.",
+      "reclassify": "Прекласифицирай статиите",
+      "reclassifying": "Добавяне…",
+      "reclassifyQueued": "{count} статии са добавени за прекласифициране.",
+      "reclassifyError": "Статиите не можаха да бъдат добавени за прекласифициране.",
+      "filter": {
+        "all": "Всички",
+        "high": "ТОП приоритет",
+        "medium": "Среден",
+        "rejected": "Отхвърлени",
+        "unclassified": "Без класификация"
+      }
+    }
   },
   "editPost": {
     "title": "Редактирай публикация",

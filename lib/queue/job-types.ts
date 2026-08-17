@@ -30,6 +30,28 @@ export const RSS_TRANSLATION_JOB_TYPE = "rss-translation";
 export const RSS_TRANSLATION_DEDUPE_KEY = "cron:rss-translation";
 
 /**
+ * Article classification drain: give every ingested RSS article a HIGH / MEDIUM /
+ * REJECTED verdict against its company's configured topic priorities.
+ *
+ * Queued for the same reason translation is — it is a per-article LLM call that
+ * no HTTP request may wait on — and it has no scheduled cron entry of its own.
+ * Vercel Hobby caps both the number of crons and their frequency, so this rides
+ * the existing translation tick: the translation handler enqueues it once its own
+ * backlog is drained, which is also exactly when the articles are ready to be
+ * judged (a verdict is made from the TRANSLATED text).
+ */
+export const RSS_CLASSIFICATION_JOB_TYPE = "rss-classification";
+
+/**
+ * Stable dedupe key for the classification drain. Same guarantee as the sweeps
+ * above: the partial unique index `jobs_dedupe_active_key` rejects a second
+ * enqueue while one drain is queued or running, so the translation tick, a manual
+ * ingest and a topic-settings save finishing together collapse into one run
+ * rather than racing over the same pending articles.
+ */
+export const RSS_CLASSIFICATION_DEDUPE_KEY = "cron:rss-classification";
+
+/**
  * Product-page extraction drain: turn scraped pages into the facts their
  * `extractionInstructions` asked for, across all companies.
  *

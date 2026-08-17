@@ -40,6 +40,13 @@ export interface ToggleFeedItemDb {
         translationStatus: true;
         translationLanguage: true;
         translationError: true;
+        // Read back unchanged — the toggle never writes them. Enabling or
+        // disabling is a HUMAN decision and is independent of the verdict.
+        classification: true;
+        classificationStatus: true;
+        classificationRejectionReason: true;
+        classificationMatchedTopics: true;
+        classificationReason: true;
         // Rides along on the row's own relation — no extra query. Needed only to
         // resolve `publicUrl` the same way listFeedItems does, so the toggled
         // row and the listed row describe the same link.
@@ -57,6 +64,11 @@ export interface ToggleFeedItemDb {
       translationStatus: string | null;
       translationLanguage: string | null;
       translationError: string | null;
+      classification: string | null;
+      classificationStatus: string | null;
+      classificationRejectionReason: string | null;
+      classificationMatchedTopics: string[];
+      classificationReason: string | null;
       source: { config: unknown };
     }>;
   };
@@ -110,6 +122,15 @@ export async function toggleFeedItemCore(
       translationStatus: true,
       translationLanguage: true,
       translationError: true,
+      // Read back unchanged. Enabling or disabling an article is a HUMAN
+      // decision and deliberately does not touch its verdict: the two are
+      // independent, and a person who re-enables a REJECTED article has
+      // overruled the classifier without rewriting what it said.
+      classification: true,
+      classificationStatus: true,
+      classificationRejectionReason: true,
+      classificationMatchedTopics: true,
+      classificationReason: true,
       source: { select: { config: true } },
     },
   });
@@ -129,6 +150,11 @@ export async function toggleFeedItemCore(
       translationStatus: row.translationStatus,
       translationLanguage: row.translationLanguage,
       translationError: row.translationError,
+      classification: row.classification,
+      classificationStatus: row.classificationStatus,
+      classificationRejectionReason: row.classificationRejectionReason,
+      classificationMatchedTopics: row.classificationMatchedTopics,
+      classificationReason: row.classificationReason,
     },
   };
 }

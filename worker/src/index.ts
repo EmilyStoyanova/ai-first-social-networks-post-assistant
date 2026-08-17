@@ -45,6 +45,10 @@ import { HandlerRegistry } from "./handler-registry";
 import { dummyHandler, DUMMY_JOB_TYPE } from "./dummy-handler";
 import { rssIngestionHandler, RSS_INGESTION_JOB_TYPE } from "./rss-ingestion-handler";
 import { rssTranslationHandler, RSS_TRANSLATION_JOB_TYPE } from "./rss-translation-handler";
+import {
+  rssClassificationHandler,
+  RSS_CLASSIFICATION_JOB_TYPE,
+} from "./rss-classification-handler";
 import { postGenerationHandler, POST_GENERATION_JOB_TYPE } from "./post-generation-handler";
 import { analyticsSyncHandler, ANALYTICS_SYNC_JOB_TYPE } from "./analytics-sync-handler";
 import { publishSweepHandler, PUBLISH_SWEEP_JOB_TYPE } from "./publish-sweep-handler";
@@ -87,6 +91,9 @@ async function main(): Promise<void> {
     .register(DUMMY_JOB_TYPE, dummyHandler)
     .register(RSS_INGESTION_JOB_TYPE, rssIngestionHandler)
     .register(RSS_TRANSLATION_JOB_TYPE, rssTranslationHandler)
+    // Gives every ingested article a HIGH/MEDIUM/REJECTED verdict against the
+    // company's configured topics, after translation and before generation.
+    .register(RSS_CLASSIFICATION_JOB_TYPE, rssClassificationHandler)
     .register(POST_GENERATION_JOB_TYPE, postGenerationHandler)
     .register(ANALYTICS_SYNC_JOB_TYPE, analyticsSyncHandler)
     .register(PUBLISH_SWEEP_JOB_TYPE, publishSweepHandler)

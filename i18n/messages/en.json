@@ -548,7 +548,34 @@
     "translationPending": "Translation pending",
     "translationFailed": "Translation failed",
     "translationOriginal": "Original",
-    "translationErrorSummary": "Translation failed: {error}. It will be retried automatically."
+    "translationErrorSummary": "Translation failed: {error}. It will be retried automatically.",
+    "classification": {
+      "high": "Top priority",
+      "medium": "Medium priority",
+      "rejected": "Rejected",
+      "rejectedBlacklist": "Rejected · blacklist",
+      "rejectedOutOfScope": "Rejected · out of scope",
+      "pending": "Awaiting review",
+      "failed": "Classification failed",
+      "skipped": "Not classified",
+      "unclassified": "Not classified",
+      "showWhy": "Why this priority?",
+      "hideWhy": "Hide",
+      "matchedTopics": "Matched topics: {topics}",
+      "failedHint": "The classifier could not be reached. This article has NOT been rejected — it will be retried.",
+      "noneMatchFilter": "No articles with this priority.",
+      "reclassify": "Reclassify articles",
+      "reclassifying": "Queueing…",
+      "reclassifyQueued": "{count} articles queued for reclassification.",
+      "reclassifyError": "The articles could not be queued for reclassification.",
+      "filter": {
+        "all": "All",
+        "high": "Top priority",
+        "medium": "Medium",
+        "rejected": "Rejected",
+        "unclassified": "Not classified"
+      }
+    }
   },
   "editPost": {
     "title": "Edit Post",

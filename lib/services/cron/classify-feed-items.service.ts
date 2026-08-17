@@ -73,16 +73,22 @@ const SELECT = {
  *     on text that is superseded minutes later. `null` passes because it means
  *     translation does not apply to this source at all.
  */
-function eligibleWhere(companyId: string, now: Date): Record<string, unknown> {
+export function classificationEligibleWhere(now: Date): Record<string, unknown> {
   return {
-    companyId,
-    usedInPost: false,
-    source: { enabled: true, type: "rss" },
-    OR: [
-      { translationStatus: null },
-      { translationStatus: { in: ["completed", "skipped", "failed"] } },
+    AND: [
+      {
+        usedInPost: false,
+        source: { enabled: true, type: "rss" },
+        // The translation gate as its own clause: two sibling `OR` keys cannot
+        // share one filter object, so this one and the eligibility one below are
+        // combined under AND rather than merged.
+        OR: [
+          { translationStatus: null },
+          { translationStatus: { in: ["completed", "skipped", "failed"] } },
+        ],
+      },
+      classificationSelectableWhere(now),
     ],
-    ...classificationSelectableWhere(now),
   };
 }
 
@@ -91,10 +97,7 @@ async function defaultFindCandidates(
   limit: number
 ): Promise<ClassifiableItem[]> {
   return prisma.feedItem.findMany({
-    // Two `OR`s cannot both live at the top level of one Prisma filter, so the
-    // translation gate and the classification-eligibility gate are combined under
-    // AND rather than merged.
-    where: { AND: [eligibleWhere(companyId, new Date())] },
+    where: { companyId, ...classificationEligibleWhere(new Date()) },
     orderBy: { createdAt: "asc" },
     take: limit,
     select: SELECT,
@@ -181,6 +184,3 @@ export async function classifyFeedItems(
     } else summary.skipped += 1;
   }
 }
-
-/** Exported so the cron orchestrator scopes its company selection identically. */
-export { eligibleWhere as classificationEligibleWhere };

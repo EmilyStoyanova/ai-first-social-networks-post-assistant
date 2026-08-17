@@ -11,6 +11,12 @@ import {
   type TranslationConfig,
 } from "@/lib/ai/feed-item-translation";
 import { computeExtractionHash, extractionInstructionsOf } from "@/lib/ai/product-page-extraction";
+import {
+  classificationFieldsForCreate,
+  classificationFieldsForUpdate,
+  isClassifiableSourceType,
+  type ClassifiableItemState,
+} from "@/lib/ai/feed-item-classification";
 import type { Prisma } from "@prisma/client";
 
 export type IngestContentSourceResult =
@@ -31,6 +37,12 @@ export type IngestContentSourceResult =
        * public API response.
        */
       extractionWorkCreated: number;
+      /**
+       * RSS items this run left needing a classification verdict. Drives the
+       * manual route's classification enqueue, exactly as the two fields above
+       * drive translation's and extraction's; NOT part of the public API response.
+       */
+      classificationWorkCreated: number;
     }
   | { success: false; code: "NOT_FOUND" | "FORBIDDEN" | "INGEST_FAILED"; message?: string };
 
@@ -172,17 +184,30 @@ async function upsertFeedItem(
    * instruction; null for every other item, which is what "no extraction" means.
    */
   extractionHash: string | null = null,
-  existingExtractions?: Map<string, ExistingExtraction>
+  existingExtractions?: Map<string, ExistingExtraction>,
+  /**
+   * Whether this source's items get a topic verdict at all (rss only). Ingestion
+   * never calls the classifier — it records only that there is a question, the
+   * same contract translation and extraction follow.
+   */
+  classifiable = false,
+  existingClassifications?: Map<string, ClassifiableItemState>
 ): Promise<{
   outcome: "created" | "updated";
   requiresTranslation: boolean;
   requiresExtraction: boolean;
+  requiresClassification: boolean;
 }> {
   // Same input the translation hash is computed from everywhere (title+content+target).
   const hash = computeTranslationHash(title, content, translation?.targetLanguage ?? "");
   if (existingUrls.has(url)) {
     const existing = existingTranslations.get(url);
     const existingExtraction = existingExtractions?.get(url);
+    const existingClassification = existingClassifications?.get(url);
+    const classificationFields = classificationFieldsForUpdate(
+      classifiable,
+      existingClassification
+    );
     await prisma.feedItem.update({
       where: { sourceId_url: { sourceId, url } },
       // title/content always carry the ORIGINAL article text — translation never
@@ -198,12 +223,16 @@ async function upsertFeedItem(
         ...(sourceImageUrl ? { sourceImageUrl } : {}),
         ...translationFieldsForUpdate(translation, hash, existing),
         ...extractionFieldsFor(extractionHash, existingExtraction),
+        ...classificationFields,
       },
     });
     return {
       outcome: "updated",
       requiresTranslation: requiresTranslationWork(translation, hash, false, existing),
       requiresExtraction: requiresExtractionWork(extractionHash, existingExtraction),
+      // A row already queued or in flight needs no new enqueue — the drain that
+      // owns it will get to it. Only a row this run newly opened does.
+      requiresClassification: classificationFields.classificationStatus === "pending",
     };
   } else {
     await prisma.feedItem.create({
@@ -217,6 +246,7 @@ async function upsertFeedItem(
         sourceImageUrl,
         ...translationFieldsForCreate(translation),
         ...extractionFieldsFor(extractionHash, undefined),
+        ...classificationFieldsForCreate(classifiable),
       },
     });
     existingUrls.add(url);
@@ -224,6 +254,7 @@ async function upsertFeedItem(
       outcome: "created",
       requiresTranslation: requiresTranslationWork(translation, hash, true, undefined),
       requiresExtraction: requiresExtractionWork(extractionHash, undefined),
+      requiresClassification: classifiable,
     };
   }
 }
@@ -262,9 +293,13 @@ export async function runSourceIngestion(
   updated: number;
   translationWorkCreated: number;
   extractionWorkCreated: number;
+  classificationWorkCreated: number;
 }> {
   const sourceId = source.id;
   const config = source.config as Record<string, string>;
+  // Article feeds only. A non-classifiable source keeps null classification
+  // fields, which is how "this feature does not apply here" is represented.
+  const classifiable = isClassifiableSourceType(source.type);
 
   // Translation target defaults to the company's content language (v2-4).
   const company = await prisma.company.findUnique({
@@ -287,6 +322,9 @@ export async function runSourceIngestion(
       translationAttemptCount: true,
       extractionHash: true,
       extractionStatus: true,
+      classificationStatus: true,
+      classificationHash: true,
+      classificationAttemptCount: true,
     },
   });
   const existingUrls = new Set(existingRows.map((r) => r.url));
@@ -306,6 +344,16 @@ export async function runSourceIngestion(
       { extractionHash: r.extractionHash, extractionStatus: r.extractionStatus },
     ])
   );
+  const existingClassifications = new Map<string, ClassifiableItemState>(
+    existingRows.map((r) => [
+      r.url,
+      {
+        classificationStatus: r.classificationStatus,
+        classificationHash: r.classificationHash,
+        classificationAttemptCount: r.classificationAttemptCount,
+      },
+    ])
+  );
 
   let created = 0;
   let updated = 0;
@@ -316,6 +364,9 @@ export async function runSourceIngestion(
   // instruction changed (or which has never been extracted) needs a model call,
   // and a re-scrape that produced identical input does not.
   let extractionWorkCreated = 0;
+  // RSS items this run newly opened for a verdict — the signal that drives the
+  // classification enqueue, exactly as the two counters above drive theirs.
+  let classificationWorkCreated = 0;
 
   if (source.type === "rss") {
     const items = await parseFeed(config.url);
@@ -340,7 +391,7 @@ export async function runSourceIngestion(
         feedImageUrl: item.imageUrl,
         contentImageUrl: extracted.contentImageUrl,
       });
-      const { outcome, requiresTranslation } = await upsertFeedItem(
+      const { outcome, requiresTranslation, requiresClassification } = await upsertFeedItem(
         sourceId,
         companyId,
         item.url,
@@ -350,11 +401,16 @@ export async function runSourceIngestion(
         existingUrls,
         translation,
         existingTranslations,
-        sourceImageUrl
+        sourceImageUrl,
+        null,
+        undefined,
+        classifiable,
+        existingClassifications
       );
       if (outcome === "created") created++;
       else updated++;
       if (requiresTranslation) translationWorkCreated++;
+      if (requiresClassification) classificationWorkCreated++;
     }
   } else if (source.type === "product_page") {
     // What the owner asked to be taken from this page, when they said anything.
@@ -437,7 +493,13 @@ export async function runSourceIngestion(
     data: { lastFetchedAt: new Date() },
   });
 
-  return { created, updated, translationWorkCreated, extractionWorkCreated };
+  return {
+    created,
+    updated,
+    translationWorkCreated,
+    extractionWorkCreated,
+    classificationWorkCreated,
+  };
 }
 
 export async function ingestContentSource(
@@ -468,9 +530,21 @@ export async function ingestContentSource(
   if (!source) return { success: false, code: "NOT_FOUND" };
 
   try {
-    const { created, updated, translationWorkCreated, extractionWorkCreated } =
-      await runSourceIngestion(source, companyId);
-    return { success: true, created, updated, translationWorkCreated, extractionWorkCreated };
+    const {
+      created,
+      updated,
+      translationWorkCreated,
+      extractionWorkCreated,
+      classificationWorkCreated,
+    } = await runSourceIngestion(source, companyId);
+    return {
+      success: true,
+      created,
+      updated,
+      translationWorkCreated,
+      extractionWorkCreated,
+      classificationWorkCreated,
+    };
   } catch (err) {
     return {
       success: false,

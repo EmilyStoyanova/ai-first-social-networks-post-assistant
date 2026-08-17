@@ -14,7 +14,7 @@ const NOW = new Date("2026-01-15T10:00:00Z");
  */
 function makeFeedItemRow(
   enabled: boolean,
-  overrides: { url?: string; config?: unknown } = {}
+  overrides: { url?: string; config?: unknown; classification?: string | null } = {}
 ): {
   id: string;
   sourceId: string;
@@ -27,6 +27,11 @@ function makeFeedItemRow(
   translationStatus: string | null;
   translationLanguage: string | null;
   translationError: string | null;
+  classification: string | null;
+  classificationStatus: string | null;
+  classificationRejectionReason: string | null;
+  classificationMatchedTopics: string[];
+  classificationReason: string | null;
   source: { config: unknown };
 } {
   return {
@@ -41,6 +46,13 @@ function makeFeedItemRow(
     translationStatus: null,
     translationLanguage: null,
     translationError: null,
+    // A REJECTED verdict on purpose: the toggle must read it back untouched, so
+    // re-enabling an article the classifier rejected never rewrites what it said.
+    classification: overrides.classification ?? "REJECTED",
+    classificationStatus: "completed",
+    classificationRejectionReason: "OUT_OF_SCOPE",
+    classificationMatchedTopics: [],
+    classificationReason: "Not about any configured topic.",
     source: { config: overrides.config ?? { url: "https://example.com/feed.xml" } },
   };
 }

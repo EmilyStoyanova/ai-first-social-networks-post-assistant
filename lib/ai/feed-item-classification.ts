@@ -31,7 +31,6 @@
 
 import { createHash } from "node:crypto";
 import {
-  TOPIC_GROUPS,
   normalizeTopic,
   topicKey,
   type TopicGroup,
