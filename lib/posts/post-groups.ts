@@ -23,11 +23,43 @@
  * card. So each ungrouped post becomes a group of one, and renders exactly as it
  * always has.
  *
+ * ── Why a group holds at most one version per channel ───────────────────────
+ *
+ * A group's versions ARE the card's channel selector, so the selector shows one
+ * entry per post — which is only the same thing as one entry per network while
+ * the two are in step. They can fall out of step: the grid adds generated posts
+ * to its list optimistically, and a topic run picked back up after a reload
+ * re-reports channels the server-rendered list already held. A second copy of
+ * each post then made a two-channel topic offer "Facebook, Facebook, Instagram,
+ * Instagram".
+ *
+ * The list-level cause is fixed where the list is held — the grid refuses a post
+ * it already has — but the invariant belongs here too, because it is a fact
+ * about the model rather than about one caller: one topic has one version per
+ * network. The database says the same thing from the other side, with uniqueness
+ * on (primaryFeedItemId, channel), so a further record for a channel the group
+ * already has is never a second version worth choosing between.
+ *
+ * Keyed by the channel IDENTIFIER, upper-cased, and never by the label a reader
+ * sees: the label is a display concern, it is translated in some surfaces, and
+ * two identifiers must not merge because their names happen to render alike.
+ *
  * Pure, and typed against the narrowest shape it needs, so it can be tested
  * without a database or a rendered component.
  */
 
 import { channelSortIndex } from "./channel-selection";
+
+/**
+ * A channel's identity for grouping.
+ *
+ * `PostItem.channel` arrives upper-cased and the wire spells it lower-case, so
+ * the case is normalised rather than trusted — the alternative is a group that
+ * offers "facebook" and "FACEBOOK" as two networks.
+ */
+function channelKey(channel: string): string {
+  return channel.toUpperCase();
+}
 
 /** The only fields grouping depends on — `PostItem` satisfies it structurally. */
 export interface GroupablePost {
@@ -47,7 +79,10 @@ export interface PostGroup<T extends GroupablePost> {
   key: string;
   /** Null for an ungrouped post — the card then behaves exactly as before. */
   contentGroupId: string | null;
-  /** The channel versions that actually exist, in canonical channel order. */
+  /**
+   * The channel versions that actually exist, in canonical channel order — at
+   * most one per channel, which is what makes this the card's selector.
+   */
   posts: T[];
 }
 
@@ -62,22 +97,34 @@ export interface PostGroup<T extends GroupablePost> {
  * Within a group the versions are ordered by channel rather than by creation, so
  * the dropdown reads Facebook, LinkedIn, Instagram, TikTok on every card
  * regardless of which channel the generator happened to write first.
+ *
+ * A channel is taken once per group — see the note above. The FIRST record for
+ * it wins, which under the caller's newest-first sort is the most recent one.
  */
 export function groupPostsByTopic<T extends GroupablePost>(posts: readonly T[]): PostGroup<T>[] {
   const groups: PostGroup<T>[] = [];
-  const byGroupId = new Map<string, PostGroup<T>>();
+  // The channel set rides alongside the group rather than being derived from
+  // `posts` on each hit: it is the thing being enforced, and re-scanning a list
+  // to ask what is already in it invites the two to disagree.
+  const byGroupId = new Map<string, { group: PostGroup<T>; channels: Set<string> }>();
 
   for (const post of posts) {
     if (post.contentGroupId === null) {
       // Its own card, keyed by the post itself. Two ungrouped posts are never
-      // siblings, however much else they have in common.
+      // siblings, however much else they have in common — including their
+      // channel, so nothing is collapsed here.
       groups.push({ key: `post:${post.id}`, contentGroupId: null, posts: [post] });
       continue;
     }
 
+    const channel = channelKey(post.channel);
     const existing = byGroupId.get(post.contentGroupId);
     if (existing) {
-      existing.posts.push(post);
+      // This network is already offered by the group. A second entry for it
+      // would be an option that says the same word twice.
+      if (existing.channels.has(channel)) continue;
+      existing.channels.add(channel);
+      existing.group.posts.push(post);
       continue;
     }
 
@@ -86,7 +133,7 @@ export function groupPostsByTopic<T extends GroupablePost>(posts: readonly T[]):
       contentGroupId: post.contentGroupId,
       posts: [post],
     };
-    byGroupId.set(post.contentGroupId, group);
+    byGroupId.set(post.contentGroupId, { group, channels: new Set([channel]) });
     groups.push(group);
   }
 
@@ -132,6 +179,9 @@ export function selectGroupPost<T extends GroupablePost>(
  * LinkedIn record, so LinkedIn is not offered — an option that selected nothing
  * would be a broken control, and the failure itself is reported by the batch
  * summary, which is where a failure belongs.
+ *
+ * One entry per network, because the group itself holds one version per channel
+ * (see the note at the top of this file).
  */
 export function groupChannelVersions<T extends GroupablePost>(
   group: PostGroup<T>

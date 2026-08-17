@@ -83,6 +83,59 @@ describe("groupPostsByTopic — grouped posts", () => {
     );
   });
 
+  it("offers each network once when a group holds more than one record for it", () => {
+    // The reported bug: a two-channel topic whose posts reached the grid twice
+    // (a resumed topic run re-reporting what the server had already rendered)
+    // offered "Facebook, Facebook, Instagram, Instagram".
+    const groups = groupPostsByTopic([
+      post("fb", "FACEBOOK", "g1"),
+      post("ig", "INSTAGRAM", "g1"),
+      post("fb", "FACEBOOK", "g1"),
+      post("ig", "INSTAGRAM", "g1"),
+    ]);
+
+    assert.equal(groups.length, 1);
+    assert.deepEqual(
+      groups[0].posts.map((p) => p.channel),
+      ["FACEBOOK", "INSTAGRAM"]
+    );
+  });
+
+  it("keeps the first record of a duplicated channel, so the selection still resolves", () => {
+    // Distinct ids, which is the case the id-level guard cannot catch. The
+    // survivor has to be a real post: the card selects by id.
+    const groups = groupPostsByTopic([
+      post("fb-newer", "FACEBOOK", "g1"),
+      post("fb-older", "FACEBOOK", "g1"),
+      post("ig", "INSTAGRAM", "g1"),
+    ]);
+
+    assert.deepEqual(
+      groups[0].posts.map((p) => p.id),
+      ["fb-newer", "ig"]
+    );
+    assert.equal(selectGroupPost(groups[0], "fb-newer").channel, "FACEBOOK");
+    assert.equal(selectGroupPost(groups[0], "ig").channel, "INSTAGRAM");
+  });
+
+  it("matches channels by identifier, not by how they are spelled", () => {
+    // The wire spells the channel lower-case; `PostItem` upper-cases it. Either
+    // way it is one network, and the label is never what is compared.
+    const groups = groupPostsByTopic([post("p1", "facebook", "g1"), post("p2", "FACEBOOK", "g1")]);
+
+    assert.equal(groups[0].posts.length, 1);
+  });
+
+  it("leaves a single-channel topic alone", () => {
+    const groups = groupPostsByTopic([post("p1", "FACEBOOK", "g1")]);
+
+    assert.equal(groups.length, 1);
+    assert.deepEqual(
+      groups[0].posts.map((p) => p.id),
+      ["p1"]
+    );
+  });
+
   it("keys a group by its content group id, distinguishably from a post id", () => {
     const groups = groupPostsByTopic([post("p1", "FACEBOOK", "shared"), post("shared", "TIKTOK")]);
 
@@ -174,6 +227,19 @@ describe("groupChannelVersions", () => {
     assert.deepEqual(groupChannelVersions(group), [
       { id: "p1", channel: "FACEBOOK" },
       { id: "p2", channel: "INSTAGRAM" },
+    ]);
+  });
+
+  it("offers each network once, whatever the group was built from", () => {
+    const group = groupPostsByTopic([
+      post("fb", "FACEBOOK", "g1"),
+      post("ig", "INSTAGRAM", "g1"),
+      post("fb", "FACEBOOK", "g1"),
+    ])[0];
+
+    assert.deepEqual(groupChannelVersions(group), [
+      { id: "fb", channel: "FACEBOOK" },
+      { id: "ig", channel: "INSTAGRAM" },
     ]);
   });
 

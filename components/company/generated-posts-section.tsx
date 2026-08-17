@@ -110,9 +110,30 @@ export function GeneratedPostsSection({
    * A topic finished. Prepended as a block, in the order the channels were
    * written, so the grouping below folds them into one card immediately —
    * before the router refresh that would eventually deliver them anyway.
+   *
+   * Posts the list already holds are dropped rather than prepended again. The
+   * caller cannot know what is here: a queued topic run is followed by a poll
+   * whose "already added" set lives inside one effect, so a run picked back up
+   * after a reload re-reports every channel it has committed — all of which the
+   * server had already rendered into this list. That handed the grid a second
+   * copy of each post, which the card read as a second version of the same
+   * network ("Facebook, Facebook, Instagram, Instagram") and the filter bar
+   * counted twice. The list is a set of records keyed by id, so it enforces that
+   * here rather than asking every caller to.
    */
   function handleGenerated(generated: PostItem[]) {
-    setPosts((prev) => [...generated, ...prev]);
+    setPosts((prev) => {
+      const known = new Set(prev.map((p) => p.id));
+      const fresh = generated.filter((p) => {
+        if (known.has(p.id)) return false;
+        // Added as we go, so a repeat WITHIN one batch is caught too.
+        known.add(p.id);
+        return true;
+      });
+      // Same array back when there is nothing new, so a poll that reports only
+      // familiar posts does not repaint the grid.
+      return fresh.length > 0 ? [...fresh, ...prev] : prev;
+    });
   }
 
   /**
