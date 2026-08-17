@@ -113,6 +113,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           },
           { status: 422 }
         );
+      case "CHANNEL_MISMATCH":
+        // 422: the profile exists and the caller may use it, but it is on a
+        // different social network than the post. Buffer was never called.
+        return NextResponse.json(
+          {
+            error: {
+              code: "CHANNEL_MISMATCH",
+              message: result.message ?? "That Buffer profile is on a different social network.",
+            },
+          },
+          { status: 422 }
+        );
       case "BUFFER_API_ERROR":
         return NextResponse.json(
           {

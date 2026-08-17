@@ -10,6 +10,8 @@ import {
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 import { checkBlockingConstraints, type PolicyViolation } from "@/lib/ai/channel-policy";
 import { blocksOnDemandPublish } from "@/lib/scheduling/publish-window";
+import { bufferServiceToChannel } from "@/lib/buffer/profile-channel";
+import { MOCK_BUFFER_PROFILES } from "@/lib/buffer/mock-profiles";
 import type { BufferPublishResult } from "@/lib/buffer/buffer-client";
 
 const MOCK_BUFFER_POST_ID = "mock-buffer-post";
@@ -48,6 +50,8 @@ export type PublishPostResult =
         | "NO_CONNECTION"
         | "TOKEN_EXPIRED"
         | "INVALID_PROFILE"
+        /** The chosen Buffer profile is on a different social network than the post. */
+        | "CHANNEL_MISMATCH"
         | "BUFFER_API_ERROR";
       message?: string;
     }
@@ -120,13 +124,80 @@ export interface PublishPostDb {
   };
 }
 
+/** A Buffer profile, as much of it as the channel guard needs. */
+export interface TargetProfile {
+  id: string;
+  name: string;
+  /** Buffer's own service string — "facebook", "instagram-business", … */
+  service: string;
+}
+
 /** The slice of BufferClient this service uses. */
 export interface BufferSender {
+  /** Read before publishing, to confirm the target profile's social network. */
+  getProfiles: () => Promise<TargetProfile[]>;
   publishUpdate: (
     profileIds: string[],
     text: string,
     options?: { mediaUrl?: string }
   ) => Promise<BufferPublishResult>;
+}
+
+/** Buffer's own failures, as this service's result codes. Rethrows anything else. */
+function bufferFailure(err: unknown): PublishPostResult {
+  if (err instanceof BufferTokenExpiredError) {
+    return { success: false, code: "TOKEN_EXPIRED", message: err.message };
+  }
+  if (err instanceof BufferInvalidProfileError) {
+    return { success: false, code: "INVALID_PROFILE", message: err.message };
+  }
+  if (err instanceof BufferApiError) {
+    return { success: false, code: "BUFFER_API_ERROR", message: err.message };
+  }
+  throw err;
+}
+
+/**
+ * Refuses a Buffer profile that is not on the post's own social network.
+ *
+ * The authority here is the SERVICE Buffer reports for the target profile, not
+ * this company's channel configuration — posts stored as `facebook` have been
+ * observed going out on Instagram profiles, and a check that reads our own
+ * column cannot see that. It is the same question `listBufferProfiles` answers
+ * for the selector, through the same map, so the server never refuses a profile
+ * the picker was willing to offer.
+ *
+ * Returns the failure to hand back, or null when the pairing is sound.
+ */
+function checkProfileChannel(
+  profiles: readonly TargetProfile[],
+  profileId: string,
+  channel: SocialChannel
+): PublishPostResult | null {
+  const target = profiles.find((p) => p.id === profileId);
+  if (!target) {
+    return {
+      success: false,
+      code: "INVALID_PROFILE",
+      message: "That Buffer profile is not connected to this account.",
+    };
+  }
+
+  const profileChannel = bufferServiceToChannel(target.service);
+  if (profileChannel !== channel) {
+    // An unrecognised service lands here too: it is not provably this post's
+    // network, and publishing to the wrong one cannot be undone.
+    return {
+      success: false,
+      code: "CHANNEL_MISMATCH",
+      message:
+        `This is a ${channel.toUpperCase()} post, but "${target.name}" is a ` +
+        `${(profileChannel ?? target.service).toUpperCase()} profile. ` +
+        `Choose a ${channel.toUpperCase()} profile instead.`,
+    };
+  }
+
+  return null;
 }
 
 export interface PublishPostDeps {
@@ -157,6 +228,10 @@ export interface PublishPostDeps {
  * It will NOT publish a manually scheduled post before its time — that is
  * `blocksOnDemandPublish`, and it returns NOT_DUE. Approving such a post is a
  * separate action (approvePost); the publishing sweep sends it once due.
+ *
+ * Nor will it publish to a profile on another social network — that is
+ * `checkProfileChannel`, and it returns CHANNEL_MISMATCH. The caller supplies
+ * `profileId`, so this is enforced here and not left to the selector.
  */
 export async function approveAndPublishPost(
   postId: string,
@@ -250,6 +325,12 @@ export async function approveAndPublishPost(
   let bufferResult: BufferPublishResult;
 
   if (process.env.AI_MOCK_MODE === "true") {
+    // Mock mode has no Buffer to ask, so the guard runs against the same fixed
+    // profiles the selector shows — the pairing is checked here too rather than
+    // only on the live path.
+    const mismatch = checkProfileChannel(MOCK_BUFFER_PROFILES, profileId, post.channel);
+    if (mismatch) return mismatch;
+
     bufferResult = { updateId: MOCK_BUFFER_POST_ID, status: "sent", publishedUrl: null };
   } else {
     let client: BufferSender;
@@ -262,21 +343,24 @@ export async function approveAndPublishPost(
       throw err;
     }
 
+    // The target profile must be on this post's own network. Asked before
+    // publishing, so a mismatched request costs nothing and writes nothing.
+    let profiles: TargetProfile[];
+    try {
+      profiles = await client.getProfiles();
+    } catch (err) {
+      return bufferFailure(err);
+    }
+
+    const mismatch = checkProfileChannel(profiles, profileId, post.channel);
+    if (mismatch) return mismatch;
+
     try {
       bufferResult = await client.publishUpdate([profileId], text, { mediaUrl });
     } catch (err) {
       // Buffer refused the post. No write has happened, so it stays exactly as
       // it was — still a draft or still pending — and remains retryable.
-      if (err instanceof BufferTokenExpiredError) {
-        return { success: false, code: "TOKEN_EXPIRED", message: err.message };
-      }
-      if (err instanceof BufferInvalidProfileError) {
-        return { success: false, code: "INVALID_PROFILE", message: err.message };
-      }
-      if (err instanceof BufferApiError) {
-        return { success: false, code: "BUFFER_API_ERROR", message: err.message };
-      }
-      throw err;
+      return bufferFailure(err);
     }
   }
 

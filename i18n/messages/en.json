@@ -46,6 +46,7 @@
     "LLM_PROVIDER_ERROR": "The AI provider returned an error. Please try again.",
     "INVALID_REQUEST": "Invalid request.",
     "INVALID_PROFILE": "Invalid Buffer profile.",
+    "CHANNEL_MISMATCH": "That Buffer profile belongs to a different social network. Pick a profile for this post's channel.",
     "INVALID_CREDENTIALS": "Invalid email or password.",
     "IMAGE_PROVIDER_ERROR": "Image generation failed. Please try again.",
     "FILE_TOO_LARGE": "The file is too large.",
@@ -613,7 +614,7 @@
     "publishPanel": {
       "title": "Publish to Buffer",
       "loadingProfiles": "Loading profiles…",
-      "noProfiles": "No Buffer profiles found. Connect a social account in your Buffer dashboard.",
+      "noProfiles": "No {channel} profile is connected in Buffer. Connect the account there, then sync your profiles.",
       "publishing": "Publishing…",
       "publish": "Publish"
     },

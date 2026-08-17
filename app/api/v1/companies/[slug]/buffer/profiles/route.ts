@@ -1,8 +1,12 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { auth } from "@/lib/auth";
 import { listBufferProfiles } from "@/lib/services/buffer/list-buffer-profiles.service";
 
-export async function GET(_req: Request, { params }: { params: Promise<{ slug: string }> }) {
+/** `?channel=FACEBOOK` — the network of the post being published, if narrowing. */
+const channelSchema = z.enum(["FACEBOOK", "LINKEDIN", "INSTAGRAM", "TIKTOK"]);
+
+export async function GET(req: Request, { params }: { params: Promise<{ slug: string }> }) {
   const session = await auth();
   if (!session) {
     return NextResponse.json(
@@ -13,7 +17,18 @@ export async function GET(_req: Request, { params }: { params: Promise<{ slug: s
 
   const { slug } = await params;
 
-  const result = await listBufferProfiles(slug, session.user.id, session.user.isGlobalAdmin);
+  const requested = new URL(req.url).searchParams.get("channel");
+  const channel = requested === null ? undefined : channelSchema.safeParse(requested.toUpperCase());
+  if (channel && !channel.success) {
+    return NextResponse.json(
+      { error: { code: "INVALID_CHANNEL", message: "Unknown channel" } },
+      { status: 422 }
+    );
+  }
+
+  const result = await listBufferProfiles(slug, session.user.id, session.user.isGlobalAdmin, {
+    channel: channel?.data,
+  });
 
   if (!result.success) {
     switch (result.code) {

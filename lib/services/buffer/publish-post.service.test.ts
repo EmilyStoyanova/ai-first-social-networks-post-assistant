@@ -2,7 +2,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { Prisma, SocialChannel } from "@prisma/client";
 import { approveAndPublishPost } from "./publish-post.service";
-import type { PublishPostDb, PublishPostDeps, BufferSender } from "./publish-post.service";
+import type {
+  PublishPostDb,
+  PublishPostDeps,
+  BufferSender,
+  TargetProfile,
+} from "./publish-post.service";
 import { BufferApiError, BufferNoConnectionError } from "@/lib/buffer/buffer-errors";
 import type { createAuditLog } from "@/lib/services/audit/audit-log.service";
 
@@ -61,6 +66,12 @@ function makeDeps(
     clientError?: Error;
     /** Pins the clock the due-check reads. */
     now?: Date;
+    /**
+     * What Buffer reports as connected. Defaults to ONE profile, on the post's
+     * own network — the correctly-paired case every test is about unless it says
+     * otherwise.
+     */
+    profiles?: TargetProfile[];
   } = {}
 ): Harness {
   const updates: Prisma.PostUncheckedUpdateInput[] = [];
@@ -81,7 +92,12 @@ function makeDeps(
     },
   };
 
+  const profiles: TargetProfile[] = options.profiles ?? [
+    { id: PROFILE_ID, name: "Target profile", service: post?.channel ?? "linkedin" },
+  ];
+
   const sender: BufferSender = {
+    getProfiles: async () => profiles,
     publishUpdate: async (profileIds, text, opts) => {
       if (options.bufferError) throw options.bufferError;
       sent.push({ profileIds, text, mediaUrl: opts?.mediaUrl });
@@ -317,6 +333,165 @@ describe("approveAndPublishPost — policy", () => {
     // Approval must not slip through on a post that cannot be published.
     assert.deepEqual(h.updates(), []);
     assert.deepEqual(h.sent(), []);
+  });
+});
+
+// ─── The target profile's social network ─────────────────────────────────────
+// A post may only go to a profile on its OWN network. The selector filters the
+// list it offers, but `profileId` arrives from the browser, so the refusal has
+// to live here — the API is reachable without the picker.
+
+const FB_PAGE: TargetProfile = { id: "fb-1", name: "Acme Page", service: "facebook" };
+const FB_PAGE_2: TargetProfile = { id: "fb-2", name: "Acme Support", service: "facebook" };
+const IG_ACCOUNT: TargetProfile = { id: "ig-1", name: "@acme", service: "instagram-business" };
+
+/** Instagram blocks a post with no image (v2-3), so its posts carry one here. */
+const IG_MEDIA = { mediaAssetId: "media-1", mediaAsset: { url: "https://img.test/a.png" } };
+
+describe("approveAndPublishPost — profile must match the post's channel", () => {
+  it("publishes a Facebook post to a Facebook profile", async () => {
+    const h = makeDeps(makePost({ channel: "facebook" as SocialChannel }), {
+      role: "owner",
+      profiles: [FB_PAGE, IG_ACCOUNT],
+    });
+
+    const result = await approveAndPublishPost(POST_ID, FB_PAGE.id, USER_ID, false, h.deps);
+
+    assert.equal(result.success, true);
+    assert.deepEqual(h.sent()[0].profileIds, [FB_PAGE.id]);
+  });
+
+  it("refuses a Facebook post aimed at an Instagram profile", async () => {
+    const h = makeDeps(makePost({ channel: "facebook" as SocialChannel }), {
+      role: "owner",
+      profiles: [FB_PAGE, IG_ACCOUNT],
+    });
+
+    const result = await approveAndPublishPost(POST_ID, IG_ACCOUNT.id, USER_ID, false, h.deps);
+
+    assert.equal(result.success, false);
+    assert.equal(result.success === false && result.code, "CHANNEL_MISMATCH");
+    // Buffer was never called and nothing was written, so the post is unharmed.
+    assert.deepEqual(h.sent(), []);
+    assert.deepEqual(h.updates(), []);
+    assert.deepEqual(h.audits(), []);
+  });
+
+  it("publishes an Instagram post to an Instagram profile", async () => {
+    const h = makeDeps(makePost({ channel: "instagram" as SocialChannel, ...IG_MEDIA }), {
+      role: "owner",
+      profiles: [FB_PAGE, IG_ACCOUNT],
+    });
+
+    const result = await approveAndPublishPost(POST_ID, IG_ACCOUNT.id, USER_ID, false, h.deps);
+
+    assert.equal(result.success, true);
+    assert.deepEqual(h.sent()[0].profileIds, [IG_ACCOUNT.id]);
+  });
+
+  it("refuses an Instagram post aimed at a Facebook profile", async () => {
+    const h = makeDeps(makePost({ channel: "instagram" as SocialChannel, ...IG_MEDIA }), {
+      role: "owner",
+      profiles: [FB_PAGE, IG_ACCOUNT],
+    });
+
+    const result = await approveAndPublishPost(POST_ID, FB_PAGE.id, USER_ID, false, h.deps);
+
+    assert.equal(result.success === false && result.code, "CHANNEL_MISMATCH");
+    assert.deepEqual(h.sent(), []);
+    assert.deepEqual(h.updates(), []);
+  });
+
+  it("names both networks and the profile, so the owner can see the mix-up", async () => {
+    const h = makeDeps(makePost({ channel: "facebook" as SocialChannel }), {
+      role: "owner",
+      profiles: [IG_ACCOUNT],
+    });
+
+    const result = await approveAndPublishPost(POST_ID, IG_ACCOUNT.id, USER_ID, false, h.deps);
+
+    const message = result.success === false ? (result.message ?? "") : "";
+    assert.match(message, /FACEBOOK/);
+    assert.match(message, /INSTAGRAM/);
+    assert.match(message, /@acme/);
+  });
+
+  it("lets either of two Facebook pages take the post", async () => {
+    // Several profiles on one network is the case the selector must offer in
+    // full; both must therefore be publishable.
+    for (const page of [FB_PAGE, FB_PAGE_2]) {
+      const h = makeDeps(makePost({ channel: "facebook" as SocialChannel }), {
+        role: "owner",
+        profiles: [FB_PAGE, FB_PAGE_2, IG_ACCOUNT],
+      });
+
+      const result = await approveAndPublishPost(POST_ID, page.id, USER_ID, false, h.deps);
+
+      assert.equal(result.success, true, `${page.name} should be publishable`);
+      assert.deepEqual(h.sent()[0].profileIds, [page.id]);
+    }
+  });
+
+  it("reads the account TYPE Buffer reports, not just the bare service name", async () => {
+    // instagram-business / instagram-creator are Instagram. Comparing Buffer's
+    // raw service string with Post.channel would reject a real account.
+    for (const service of ["instagram", "instagram-business", "instagram-creator"]) {
+      const h = makeDeps(makePost({ channel: "instagram" as SocialChannel, ...IG_MEDIA }), {
+        role: "owner",
+        profiles: [{ id: "ig-x", name: "@acme", service }],
+      });
+
+      const result = await approveAndPublishPost(POST_ID, "ig-x", USER_ID, false, h.deps);
+
+      assert.equal(result.success, true, `${service} should count as Instagram`);
+    }
+  });
+
+  it("refuses a network this app cannot place, rather than trying it", async () => {
+    const h = makeDeps(makePost({ channel: "facebook" as SocialChannel }), {
+      role: "owner",
+      profiles: [{ id: "other-1", name: "Acme", service: "mastodon" }],
+    });
+
+    const result = await approveAndPublishPost(POST_ID, "other-1", USER_ID, false, h.deps);
+
+    assert.equal(result.success === false && result.code, "CHANNEL_MISMATCH");
+    assert.deepEqual(h.sent(), []);
+  });
+
+  it("reports a profile Buffer does not know as INVALID_PROFILE", async () => {
+    const h = makeDeps(makePost({ channel: "facebook" as SocialChannel }), {
+      role: "owner",
+      profiles: [FB_PAGE],
+    });
+
+    const result = await approveAndPublishPost(POST_ID, "not-connected", USER_ID, false, h.deps);
+
+    assert.equal(result.success === false && result.code, "INVALID_PROFILE");
+    assert.deepEqual(h.sent(), []);
+    assert.deepEqual(h.updates(), []);
+  });
+
+  it("checks the schedule before the profile — a NOT_DUE post is refused as NOT_DUE", async () => {
+    // Ordering matters for the message the card shows: the timing is the more
+    // useful complaint, and it needs no Buffer call to make.
+    const h = makeDeps(
+      makePost({
+        channel: "facebook" as SocialChannel,
+        status: "pending_approval",
+        scheduledFor: new Date("2026-08-12T09:00:00.000Z"),
+        manuallyScheduled: true,
+      }),
+      {
+        role: "owner",
+        now: new Date("2026-08-12T08:48:00.000Z"),
+        profiles: [IG_ACCOUNT],
+      }
+    );
+
+    const result = await approveAndPublishPost(POST_ID, IG_ACCOUNT.id, USER_ID, false, h.deps);
+
+    assert.equal(result.success === false && result.code, "NOT_DUE");
   });
 });
 

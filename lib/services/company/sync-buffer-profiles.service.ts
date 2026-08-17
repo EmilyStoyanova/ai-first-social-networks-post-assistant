@@ -5,28 +5,7 @@ import {
   BufferApiError,
   BufferTokenExpiredError,
 } from "@/lib/buffer/buffer-errors";
-import type { SocialChannel } from "@prisma/client";
-
-// Buffer returns various service strings depending on account/profile type.
-// All known variants are mapped here; new ones can be added without other changes.
-const SERVICE_TO_CHANNEL: Record<string, SocialChannel> = {
-  // Facebook
-  facebook: "facebook",
-  "facebook-group": "facebook",
-  // Instagram (business / creator / personal)
-  instagram: "instagram",
-  "instagram-business": "instagram",
-  instagrambusiness: "instagram",
-  "instagram-creator": "instagram",
-  instagramcreator: "instagram",
-  // LinkedIn (personal / company page)
-  linkedin: "linkedin",
-  "linkedin-company": "linkedin",
-  linkedincompany: "linkedin",
-  "linkedin-page": "linkedin",
-  // TikTok
-  tiktok: "tiktok",
-};
+import { bufferServiceToChannel } from "@/lib/buffer/profile-channel";
 
 export interface SyncBufferProfilesStats {
   synced: number;
@@ -74,12 +53,11 @@ export async function syncBufferProfiles(companyId: string): Promise<SyncBufferP
   let synced = 0;
 
   for (const profile of rawProfiles) {
-    const serviceKey = profile.service.toLowerCase().replace(/\s+/g, "-");
-    const channel = SERVICE_TO_CHANNEL[serviceKey];
+    const channel = bufferServiceToChannel(profile.service);
 
     if (!channel) {
       console.log(
-        `[sync-profiles] SKIP id=${profile.id} name="${profile.name}" service="${profile.service}" (serviceKey="${serviceKey}" not in SERVICE_TO_CHANNEL)`
+        `[sync-profiles] SKIP id=${profile.id} name="${profile.name}" service="${profile.service}" (unknown service — see lib/buffer/profile-channel.ts)`
       );
       continue;
     }

@@ -38,6 +38,9 @@ export const API_ERROR_CODES = [
   "LLM_PROVIDER_ERROR",
   "INVALID_REQUEST",
   "INVALID_PROFILE",
+  // Publishing — the chosen Buffer profile is on a different social network
+  // than the post (a Facebook post aimed at an Instagram profile).
+  "CHANNEL_MISMATCH",
   "INVALID_CREDENTIALS",
   "IMAGE_PROVIDER_ERROR",
   "FILE_TOO_LARGE",

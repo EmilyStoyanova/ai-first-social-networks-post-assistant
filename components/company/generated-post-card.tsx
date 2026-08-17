@@ -479,7 +479,12 @@ function GeneratedPostCardBody({
     setPublishError("");
     setLoadingProfiles(true);
     try {
-      const res = await fetch(`/api/v1/companies/${slug}/buffer/profiles`);
+      // Only this post's own network. Publishing a Facebook post to an Instagram
+      // profile is not a choice worth offering, and approveAndPublishPost
+      // refuses the pairing regardless of what the browser sends.
+      const res = await fetch(
+        `/api/v1/companies/${slug}/buffer/profiles?channel=${encodeURIComponent(post.channel)}`
+      );
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
         throw new Error(apiError(json.error));
@@ -686,7 +691,9 @@ function GeneratedPostCardBody({
           {loadingProfiles ? (
             <p className="text-status-info-fg text-xs">{t("publishPanel.loadingProfiles")}</p>
           ) : profiles.length === 0 ? (
-            <p className="text-status-info-fg text-xs">{t("publishPanel.noProfiles")}</p>
+            <p className="text-status-info-fg text-xs">
+              {t("publishPanel.noProfiles", { channel: channelMeta.label })}
+            </p>
           ) : (
             <select
               value={selectedProfileId}
