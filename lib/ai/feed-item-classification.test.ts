@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import {
   MAX_CLASSIFICATION_ATTEMPTS,
   MAX_CLASSIFICATION_CONTENT_CHARS,
+  MAX_STORED_MATCHED_TOPICS,
   MAX_STORED_REASON_CHARS,
+  buildClassificationRepairPrompt,
+  buildClassificationSystemPrompt,
   classificationExcerpt,
   classificationFieldsForCreate,
   classificationFieldsForUpdate,
@@ -312,7 +315,9 @@ describe("parseClassificationResponse", () => {
     assert.match(out.feedback, /passing mention/);
   });
 
-  it("drops an invented topic rather than storing it as configuration", () => {
+  it("refuses an invented topic instead of quietly dropping it", () => {
+    // Dropping it would leave the VERDICT standing on a topic the company never
+    // configured, which is exactly how an unrelated article becomes HIGH.
     const out = parseClassificationResponse(
       reply({
         classification: "HIGH",
@@ -322,8 +327,9 @@ describe("parseClassificationResponse", () => {
       }),
       SCOPED
     );
-    assert.ok(out.status === "ok");
-    assert.deepEqual(out.matchedTopics, ["бои"]);
+    assert.equal(out.status, "invalid");
+    assert.ok(out.status === "invalid");
+    assert.match(out.problem, /нещо измислено/);
   });
 
   it("resolves a matched topic back to its stored spelling", () => {
@@ -384,5 +390,285 @@ describe("parseClassificationResponse", () => {
       SCOPED
     );
     assert.equal(out.status, "invalid");
+  });
+
+  it("caps stored matched topics without stopping the scan for invented ones", () => {
+    const many = resolveTopicPriorities({
+      topPriorityTopics: Array.from(
+        { length: MAX_STORED_MATCHED_TOPICS + 2 },
+        (_, i) => `тема ${i}`
+      ),
+    });
+    const all = Array.from({ length: MAX_STORED_MATCHED_TOPICS + 2 }, (_, i) => `тема ${i}`);
+
+    const capped = parseClassificationResponse(
+      reply({ classification: "HIGH", rejectionReason: null, matchedTopics: all, reason: "x" }),
+      many
+    );
+    assert.ok(capped.status === "ok");
+    assert.equal(capped.matchedTopics.length, MAX_STORED_MATCHED_TOPICS);
+
+    // The invented topic sits past the cap, so a scan that stopped at the cap
+    // would never see it.
+    const smuggled = parseClassificationResponse(
+      reply({
+        classification: "HIGH",
+        rejectionReason: null,
+        matchedTopics: [...all, "измислена"],
+        reason: "x",
+      }),
+      many
+    );
+    assert.equal(smuggled.status, "invalid");
+  });
+});
+
+// ─── Precision: a match must be direct, not merely same-industry ──────────────
+//
+// The regression these guard is real: for a company whose top priority topics are
+// бои / смесители и аксесоари за баня / бойлери, an article about free
+// fast-growing TREES came back HIGH — matched on "this is a home-and-garden
+// company" rather than on any configured topic.
+//
+// The semantic judgement itself belongs to the model, so what is asserted here is
+// the machinery around it: which replies may be STORED as a verdict, and that the
+// prompt states the rule the model has to follow. A verdict that rests on a topic
+// the company never configured can no longer be persisted, and a category label
+// standing in for a topic is exactly that case.
+
+const DOMESTICO: TopicPriorities = resolveTopicPriorities({
+  topPriorityTopics: ["бои", "смесители и аксесоари за баня", "бойлери"],
+  mediumPriorityTopics: ["вентилация"],
+  avoidedTopics: ["камини"],
+});
+
+describe("classification precision — direct match required", () => {
+  it("accepts a genuine paint article as HIGH", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "HIGH",
+        rejectionReason: null,
+        matchedTopics: ["бои"],
+        reason: "Как да изберем латекс за детската стая.",
+      }),
+      DOMESTICO
+    );
+    assert.ok(out.status === "ok");
+    assert.equal(out.classification, "HIGH");
+    assert.deepEqual(out.matchedTopics, ["бои"]);
+  });
+
+  it("accepts a genuine bathroom-tap article as HIGH", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "HIGH",
+        rejectionReason: null,
+        matchedTopics: ["смесители и аксесоари за баня"],
+        reason: "Монтаж на смесител за баня.",
+      }),
+      DOMESTICO
+    );
+    assert.ok(out.status === "ok");
+    assert.equal(out.classification, "HIGH");
+  });
+
+  it("accepts a genuine ventilation article as MEDIUM", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "MEDIUM",
+        rejectionReason: null,
+        matchedTopics: ["вентилация"],
+        reason: "Как работи вентилацията в банята.",
+      }),
+      DOMESTICO
+    );
+    assert.ok(out.status === "ok");
+    assert.equal(out.classification, "MEDIUM");
+    assert.deepEqual(out.matchedTopics, ["вентилация"]);
+  });
+
+  it("accepts the trees article as OUT_OF_SCOPE — the verdict it should have had", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "REJECTED",
+        rejectionReason: "OUT_OF_SCOPE",
+        matchedTopics: [],
+        reason: "Статия за бързорастящи дървета; нито една конфигурирана тема не е за дървета.",
+      }),
+      DOMESTICO
+    );
+    assert.ok(out.status === "ok");
+    assert.equal(out.classification, "REJECTED");
+    assert.equal(out.rejectionReason, "OUT_OF_SCOPE");
+    assert.deepEqual(out.matchedTopics, []);
+  });
+
+  it("refuses the trees article dressed up as HIGH on a broad category", () => {
+    // The observed failure, in the shape the parser can see it: the model reaches
+    // for a category name because no configured topic actually fits.
+    const out = parseClassificationResponse(
+      reply({
+        classification: "HIGH",
+        rejectionReason: null,
+        matchedTopics: ["дървета"],
+        reason: "Статия за бързорастящи дървета.",
+      }),
+      DOMESTICO
+    );
+    assert.equal(out.status, "invalid");
+    assert.ok(out.status === "invalid");
+    assert.match(out.feedback, /OUT_OF_SCOPE/);
+  });
+
+  it("refuses a generic home-improvement article matched on the industry", () => {
+    for (const category of ["дом и градина", "ремонт", "home improvement"]) {
+      const out = parseClassificationResponse(
+        reply({
+          classification: "HIGH",
+          rejectionReason: null,
+          matchedTopics: [category],
+          reason: "Десет идеи за обновяване на дома.",
+        }),
+        DOMESTICO
+      );
+      assert.equal(out.status, "invalid", `expected "${category}" to be refused`);
+    }
+  });
+
+  it("refuses broad-category similarity even when a real topic is cited too", () => {
+    // "бои" alone would pass; the invented category alongside it is enough to send
+    // the whole reply back, because it is evidence the match was made on the
+    // category rather than on the topic.
+    const out = parseClassificationResponse(
+      reply({
+        classification: "HIGH",
+        rejectionReason: null,
+        matchedTopics: ["бои", "градински продукти"],
+        reason: "x",
+      }),
+      DOMESTICO
+    );
+    assert.equal(out.status, "invalid");
+    assert.ok(out.status === "invalid");
+    assert.match(out.problem, /градински продукти/);
+  });
+
+  it("refuses an invented topic on an OUT_OF_SCOPE reply too", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "REJECTED",
+        rejectionReason: "OUT_OF_SCOPE",
+        matchedTopics: ["дървета"],
+        reason: "x",
+      }),
+      DOMESTICO
+    );
+    assert.equal(out.status, "invalid");
+    assert.ok(out.status === "invalid");
+    assert.match(out.feedback, /leave "matchedTopics" empty/);
+  });
+
+  it("refuses an invented topic on a BLACKLIST reply too", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "REJECTED",
+        rejectionReason: "BLACKLIST",
+        matchedTopics: ["отопление на дърва"],
+        reason: "x",
+      }),
+      DOMESTICO
+    );
+    assert.equal(out.status, "invalid");
+  });
+
+  it("refuses OUT_OF_SCOPE that still names a topic the company asked for", () => {
+    // Self-contradictory: either the article is about бои, or it is out of scope.
+    for (const topic of ["бои", "вентилация"]) {
+      const out = parseClassificationResponse(
+        reply({
+          classification: "REJECTED",
+          rejectionReason: "OUT_OF_SCOPE",
+          matchedTopics: [topic],
+          reason: "x",
+        }),
+        DOMESTICO
+      );
+      assert.equal(out.status, "invalid", `expected OUT_OF_SCOPE + "${topic}" to be refused`);
+    }
+  });
+
+  it("still allows OUT_OF_SCOPE to note an avoided topic it saw in passing", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "REJECTED",
+        rejectionReason: "OUT_OF_SCOPE",
+        matchedTopics: ["камини"],
+        reason: "x",
+      }),
+      DOMESTICO
+    );
+    assert.ok(out.status === "ok");
+    assert.equal(out.rejectionReason, "OUT_OF_SCOPE");
+  });
+
+  it("carries the invented-topic correction into the repair call", () => {
+    const bad = reply({
+      classification: "HIGH",
+      rejectionReason: null,
+      matchedTopics: ["дървета"],
+      reason: "x",
+    });
+    const out = parseClassificationResponse(bad, DOMESTICO);
+    assert.ok(out.status === "invalid");
+
+    const repair = buildClassificationRepairPrompt("<original>", bad, out.feedback);
+    assert.match(repair, /<original>/);
+    assert.match(repair, /дървета/);
+    assert.match(repair, /VERBATIM/);
+  });
+});
+
+describe("buildClassificationSystemPrompt — the strictness rule", () => {
+  const scoped = buildClassificationSystemPrompt("scoped");
+
+  it("says outright that industry relevance is not enough", () => {
+    assert.match(scoped, /Industry relevance is not enough/);
+    assert.match(scoped, /SUBSTANTIALLY about one of the configured topics/);
+  });
+
+  it("names the broad categories that must not count as a match", () => {
+    for (const category of ["home improvement", "construction", "garden", "DIY"]) {
+      assert.ok(scoped.includes(category), `expected the prompt to rule out "${category}"`);
+    }
+  });
+
+  it("gives contrastive examples, including the trees case", () => {
+    assert.match(scoped, /Worked examples/);
+    assert.match(scoped, /trees/i);
+    assert.match(scoped, /Industry proximity is not a match/);
+    // And keeps the positive one, so strictness does not collapse into keyword
+    // matching: latex still has to read as a paint.
+    assert.match(scoped, /latex/i);
+  });
+
+  it("makes OUT_OF_SCOPE the default when no topic clearly fits", () => {
+    assert.match(scoped, /DEFAULT answer/);
+    assert.match(scoped, /Being unsure/);
+  });
+
+  it("keeps the semantic rule — a topic still need not appear as a word", () => {
+    assert.match(scoped, /does not have to appear in the text/);
+    assert.match(scoped, /Judge the meaning, never the spelling/);
+  });
+
+  it("drops the OUT_OF_SCOPE examples in blacklist-only mode but keeps the rule", () => {
+    // Those examples all end in OUT_OF_SCOPE, which is not a verdict this mode
+    // may return — so they would teach the wrong answer. The strictness rule
+    // itself still applies, to the avoided list.
+    const blacklistOnly = buildClassificationSystemPrompt("blacklist_only");
+    assert.match(blacklistOnly, /Industry relevance is not enough/);
+    assert.ok(!blacklistOnly.includes("Worked examples"));
+    // OUT_OF_SCOPE survives only as the prohibition in the Verdicts section.
+    assert.match(blacklistOnly, /do NOT use "OUT_OF_SCOPE"/);
   });
 });

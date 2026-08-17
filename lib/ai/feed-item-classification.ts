@@ -443,12 +443,16 @@ function topicIndex(priorities: TopicPriorities): Map<string, { topic: string; t
  *
  * The consistency rules, all mode-aware:
  *   • REJECTED must carry a reason; HIGH and MEDIUM must not.
+ *   • Every cited topic must exist in the configuration. One that does not makes
+ *     the whole reply invalid — the verdict resting on an invented topic is the
+ *     failure, not just the topic string.
  *   • BLACKLIST must cite at least one configured avoided topic.
  *   • HIGH must cite at least one configured top-priority topic.
  *   • MEDIUM must cite at least one configured medium topic — EXCEPT in
  *     blacklist-only mode, where MEDIUM is the neutral "not blacklisted" answer
  *     and there are no medium topics to cite.
- *   • OUT_OF_SCOPE is unavailable in blacklist-only mode, for the same reason.
+ *   • OUT_OF_SCOPE must cite no wanted topic — that combination contradicts
+ *     itself — and is unavailable in blacklist-only mode.
  */
 export function parseClassificationResponse(
   raw: string | null | undefined,
@@ -527,33 +531,74 @@ export function parseClassificationResponse(
     );
   }
 
-  // Matched topics: resolved against the configuration, unknown ones dropped.
+  // Matched topics: resolved against the configuration. A topic that is not in
+  // the configuration is NOT quietly dropped — see the block below.
   const index = topicIndex(priorities);
   const seen = new Set<string>();
   const matched: Array<{ topic: string; tier: TopicGroup }> = [];
+  const invented: string[] = [];
   const rawMatched = Array.isArray(obj.matchedTopics) ? obj.matchedTopics : [];
   for (const entry of rawMatched) {
     const candidate = asString(entry);
     if (!candidate) continue;
     const hit = index.get(topicKey(candidate));
-    if (!hit || seen.has(hit.topic)) continue;
+    if (!hit) {
+      if (!invented.some((t) => topicKey(t) === topicKey(candidate))) invented.push(candidate);
+      continue;
+    }
+    if (seen.has(hit.topic)) continue;
     seen.add(hit.topic);
     matched.push(hit);
-    if (matched.length >= MAX_STORED_MATCHED_TOPICS) break;
+  }
+
+  /**
+   * An invented topic is the signature of the precision failure this whole
+   * strictness pass exists for: a model that cannot find a real match reaches for
+   * the nearest plausible-sounding label ("trees", "garden", "home improvement")
+   * and hands back a confident verdict built on it.
+   *
+   * Dropping it silently — which is what this used to do — kept the stored
+   * `matchedTopics` clean but let the VERDICT survive, so an article about trees
+   * could still land as HIGH on the strength of a topic the company never
+   * configured. Refusing the reply outright is what makes "never invent a topic"
+   * an enforced rule rather than a request in the prompt, and the repair call is
+   * told exactly which word was invented, which is what reliably fixes it.
+   */
+  if (invented.length > 0) {
+    return invalid(
+      `The reply cited ${invented.length} topic(s) that are not in the company's configuration: ${invented.join(", ")}.`,
+      `${JSON.stringify(invented[0])} is not one of the company's topics. Every entry in "matchedTopics" must be copied VERBATIM from the lists above — do not translate them, rephrase them, or name a broader category. If the article's main subject is not on any of those lists, do not reach for the closest one: answer "REJECTED" with "OUT_OF_SCOPE" and leave "matchedTopics" empty.`
+    );
   }
 
   const has = (tier: TopicGroup) => matched.some((m) => m.tier === tier);
 
+  /**
+   * A wanted topic cited alongside OUT_OF_SCOPE is a self-contradiction: the model
+   * has named a subject the company asked for and then said the article is about
+   * nothing the company asked for. One of the two is wrong, and only the model
+   * knows which — so it is asked again rather than having either half stored.
+   */
+  if (
+    rejectionReason === "OUT_OF_SCOPE" &&
+    (has("topPriorityTopics") || has("mediumPriorityTopics"))
+  ) {
+    return invalid(
+      "OUT_OF_SCOPE was returned while citing a topic the company asked for.",
+      'You answered "OUT_OF_SCOPE" but listed a wanted topic in "matchedTopics"; those contradict each other. If the article really is substantially about that topic, answer "HIGH" (top priority list) or "MEDIUM" (medium priority list). If it is only loosely related to it, remove the topic and leave "matchedTopics" empty.'
+    );
+  }
+
   if (classification === "HIGH" && !has("topPriorityTopics")) {
     return invalid(
       "HIGH was returned without citing a configured top priority topic.",
-      'Answer "HIGH" only when the article\'s main subject is one of the TOP PRIORITY topics, and list the exact topic(s) from that list in "matchedTopics", copied verbatim.'
+      'Answer "HIGH" only when the article is substantially about one of the TOP PRIORITY topics, and list the exact topic(s) from that list in "matchedTopics", copied verbatim. Belonging to the same industry or general subject area is not enough. If it matches nothing you were asked for, answer "REJECTED" with "OUT_OF_SCOPE".'
     );
   }
   if (classification === "MEDIUM" && mode !== "blacklist_only" && !has("mediumPriorityTopics")) {
     return invalid(
       "MEDIUM was returned without citing a configured medium priority topic.",
-      'Answer "MEDIUM" only when the article\'s main subject is one of the MEDIUM PRIORITY topics, and list the exact topic(s) from that list in "matchedTopics", copied verbatim. If it matches nothing you were asked for, answer "REJECTED" with "OUT_OF_SCOPE".'
+      'Answer "MEDIUM" only when the article is substantially about one of the MEDIUM PRIORITY topics, and list the exact topic(s) from that list in "matchedTopics", copied verbatim. Belonging to the same industry or general subject area is not enough. If it matches nothing you were asked for, answer "REJECTED" with "OUT_OF_SCOPE".'
     );
   }
   if (rejectionReason === "BLACKLIST" && !has("avoidedTopics")) {
@@ -575,7 +620,9 @@ export function parseClassificationResponse(
     status: "ok",
     classification,
     rejectionReason,
-    matchedTopics: matched.map((m) => m.topic),
+    // Capped here rather than while collecting, so that a reply listing more than
+    // the cap is still scanned to its end for invented topics.
+    matchedTopics: matched.slice(0, MAX_STORED_MATCHED_TOPICS).map((m) => m.topic),
     reason: reason.slice(0, MAX_STORED_REASON_CHARS),
   };
 }
@@ -597,10 +644,22 @@ export interface ClassificationPromptInput {
 /**
  * The system prompt — the rulebook.
  *
- * Two instructions here carry the feature. "Judge the MAIN subject" is what makes
- * an incidental mention harmless; "a topic need not appear as a word" is what
- * makes the match semantic instead of a keyword search that a model would happily
- * imitate if the prompt read like one.
+ * Three instructions carry the feature, and they pull against each other, which is
+ * why each is spelled out rather than left to the model's judgement:
+ *
+ *   • "Judge the MAIN subject" is what makes an incidental mention harmless.
+ *
+ *   • "A topic need not appear as a word" is what makes the match semantic instead
+ *     of a keyword search that a model would happily imitate if the prompt read
+ *     like one.
+ *
+ *   • "Industry relevance is not enough" is the counterweight to the previous one.
+ *     Left alone, a model handed a list of home-improvement topics will treat the
+ *     whole home-improvement field as matching it, and an article about free
+ *     fast-growing trees comes back as a top-priority match for a company that
+ *     sells paints and water heaters. The rule, the worked examples below, and the
+ *     verbatim-topic enforcement in `parseClassificationResponse` are three
+ *     statements of the same constraint at three different points.
  */
 export function buildClassificationSystemPrompt(mode: ClassificationMode): string {
   const parts: string[] = [
@@ -610,9 +669,26 @@ export function buildClassificationSystemPrompt(mode: ClassificationMode): strin
     "",
     "1. Work out what the article is MAINLY about — its primary subject, the thing a reader would say it is about. Ignore passing mentions, examples, and asides.",
     "2. Compare that main subject with the company's configured topics below.",
-    "3. A topic matches when the article's subject BELONGS to it. The topic word does not have to appear in the text: an article about choosing latex for a child's room is about paints, and an article about a heat pump is about air conditioning. Judge the meaning, never the spelling.",
-    "4. Never invent a topic. Every topic you cite must be copied verbatim from the lists below.",
+    "3. A topic matches when the article's main subject IS that topic, a synonym of it, a specific kind of it, or the direct choice, use, installation, repair or care of it. The topic word does not have to appear in the text: an article about choosing latex for a child's room is about paints, and an article about descaling a water heater is about water heaters. Judge the meaning, never the spelling.",
+    mode === "blacklist_only"
+      ? "4. Industry relevance is not enough. The article must be substantially about one of the configured topics — belonging to the same broad field, industry or general subject area is NOT a match."
+      : '4. Industry relevance is not enough. The article must be SUBSTANTIALLY about one of the configured topics. Sharing a broad field with them — home improvement, the household, construction, renovation, the garden, DIY, or simply being the sort of thing this company might sell — is NOT a match. If your reasoning is "this is related to the same industry" or "this company\'s customers would find it interesting", that is not a match: the answer is OUT_OF_SCOPE.',
+    "5. Never invent a topic. Every topic you cite must be copied verbatim from the lists below. If the article's subject is not on any list, say so instead of naming the nearest one — a near-miss is worse than an honest rejection.",
   ];
+
+  if (mode !== "blacklist_only") {
+    parts.push(
+      "",
+      "## Worked examples",
+      "",
+      "These use a DIFFERENT company's topics, for illustration only — never cite them.",
+      'Suppose the TOP PRIORITY list were: "paints", "water heaters".',
+      "",
+      '- "Which latex to choose for a nursery" → HIGH, matchedTopics ["paints"]. Latex IS a paint; the whole article is about choosing one.',
+      '- "Fast-growing trees you can get for free this spring" → REJECTED / OUT_OF_SCOPE, matchedTopics []. Trees belong to the same home-and-garden world, but no configured topic is about trees. Industry proximity is not a match.',
+      '- "Ten ideas to refresh your home this spring" → REJECTED / OUT_OF_SCOPE, matchedTopics []. A general home-improvement round-up is not substantially about paints or water heaters, even though it touches the same field.'
+    );
+  }
 
   parts.push(
     "",
@@ -625,10 +701,10 @@ export function buildClassificationSystemPrompt(mode: ClassificationMode): strin
           '- Do NOT use "HIGH", and do NOT use "OUT_OF_SCOPE": with no wanted topics configured, nothing can be out of scope.',
         ].join("\n")
       : [
-          '- "HIGH" — the article\'s main subject is one of the TOP PRIORITY topics.',
-          '- "MEDIUM" — the article\'s main subject is one of the MEDIUM PRIORITY topics, and no stronger rule applies.',
+          '- "HIGH" — the article is substantially about one of the TOP PRIORITY topics.',
+          '- "MEDIUM" — the article is substantially about one of the MEDIUM PRIORITY topics, and no stronger rule applies.',
           '- "REJECTED" with "BLACKLIST" — the article is MAINLY about one of the TOPICS TO AVOID.',
-          '- "REJECTED" with "OUT_OF_SCOPE" — the article is about none of the topics the company asked for.',
+          '- "REJECTED" with "OUT_OF_SCOPE" — the article is about none of the topics the company asked for. This is the DEFAULT answer: use it whenever you cannot point to a specific configured topic the article is substantially about. Being unsure is itself a reason to answer OUT_OF_SCOPE rather than to pick the closest topic.',
         ].join("\n"),
     "",
     "## When rules collide",
