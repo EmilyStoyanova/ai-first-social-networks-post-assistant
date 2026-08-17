@@ -357,7 +357,30 @@
     "forbiddenWords": "Forbidden Words",
     "forbiddenWordsHint": "(one per line)",
     "competitors": "Competitors",
-    "competitorsHint": "(one per line)"
+    "competitorsHint": "(one per line)",
+    "topicPriorities": {
+      "title": "Topic priorities",
+      "help": "Which subjects are worth a post. Used to rank the articles coming in from your RSS sources before anything is generated.",
+      "top": "Top priority topics",
+      "topHint": "(picked first)",
+      "topPlaceholder": "e.g. paints",
+      "medium": "Medium priority topics",
+      "mediumHint": "(used when there is no top priority article)",
+      "mediumPlaceholder": "e.g. ventilation",
+      "avoided": "Topics to avoid",
+      "avoidedHint": "(never used)",
+      "avoidedPlaceholder": "e.g. concrete",
+      "add": "Add",
+      "remove": "Remove “{topic}”",
+      "empty": "No topics yet.",
+      "errors": {
+        "empty": "A topic cannot be empty.",
+        "tooLong": "A topic can be at most {max} characters.",
+        "limitReached": "You can add at most {max} topics per group.",
+        "duplicate": "This topic has already been added.",
+        "conflict": "This topic is already under “{group}”. A topic belongs to one group only."
+      }
+    }
   },
   "members": {
     "title": "Members",

@@ -91,6 +91,38 @@ describe("i18n messages", () => {
     }
   });
 
+  it("names every label of the topic priorities section in both locales", () => {
+    // Rendered from a list, with the group's key as the stem — a missing
+    // `${key}Hint` or `${key}Placeholder` throws in place of the field.
+    const keys = [
+      "title",
+      "help",
+      "add",
+      "remove",
+      "empty",
+      ...["top", "medium", "avoided"].flatMap((group) => [
+        group,
+        `${group}Hint`,
+        `${group}Placeholder`,
+      ]),
+      ...["empty", "tooLong", "limitReached", "duplicate", "conflict"].map((e) => `errors.${e}`),
+    ];
+
+    for (const key of keys) {
+      for (const [locale, messages] of [
+        ["en", en],
+        ["bg", bg],
+      ] as const) {
+        const value = lookup(messages, `brandGuidelines.topicPriorities.${key}`);
+        assert.equal(
+          typeof value,
+          "string",
+          `brandGuidelines.topicPriorities.${key} missing from ${locale}`
+        );
+      }
+    }
+  });
+
   it("labels the calendar event's name field as the organizer", () => {
     // The shared `name` column holds the organiser for a calendar event, not the
     // event's own title — that is `contentSources.eventTitle`.

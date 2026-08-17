@@ -207,19 +207,25 @@ model CompanyMember {
 }
 
 model BrandGuidelines {
-  id                 String   @id @default(uuid())
-  companyId          String   @unique @map("company_id")
-  logoUrl            String?  @map("logo_url")
-  primaryColor       String?  @map("primary_color")
-  secondaryColor     String?  @map("secondary_color")
-  fontFamily         String?  @map("font_family")
-  toneOfVoice        String?  @map("tone_of_voice")
-  companyDescription String?  @map("company_description")
-  targetAudience     String?  @map("target_audience")
-  forbiddenWords     String[] @map("forbidden_words")
-  competitors        String[]
-  createdAt          DateTime @default(now()) @map("created_at")
-  updatedAt          DateTime @updatedAt @map("updated_at")
+  id                   String   @id @default(uuid())
+  companyId            String   @unique @map("company_id")
+  logoUrl              String?  @map("logo_url")
+  primaryColor         String?  @map("primary_color")
+  secondaryColor       String?  @map("secondary_color")
+  fontFamily           String?  @map("font_family")
+  toneOfVoice          String?  @map("tone_of_voice")
+  companyDescription   String?  @map("company_description")
+  targetAudience       String?  @map("target_audience")
+  forbiddenWords       String[] @map("forbidden_words")
+  competitors          String[]
+  // Topic priorities — which subjects are worth a post, in three ordered groups.
+  // Consumed as HIGH / MEDIUM / REJECTED via lib/ai/topic-priorities.ts. Empty
+  // in all three means "no rule configured", which every consumer must accept.
+  topPriorityTopics    String[] @map("top_priority_topics")
+  mediumPriorityTopics String[] @map("medium_priority_topics")
+  avoidedTopics        String[] @map("avoided_topics")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
@@ -413,6 +419,36 @@ model FeedItem {
   extractedAt            DateTime? @map("extracted_at")
   extractionAttemptCount Int       @default(0) @map("extraction_attempt_count")
 
+  // Topic classification. Written only for `rss` sources, and only once the
+  // company has configured topic priorities on BrandGuidelines. Same contract as
+  // translation and extraction above: `title`/`content` are never written here —
+  // a verdict is derived from them (via resolveFeedItemContent, so a completed
+  // translation is what gets judged) and stored alongside.
+  //
+  // `classification` NULL is "no verdict", never "rejected": it is what an
+  // unconfigured company, a pending item, and a failed classification all look
+  // like, and candidate selection must treat all three as eligible.
+  /// HIGH | MEDIUM | REJECTED
+  classification                String?   @map("classification")
+  /// BLACKLIST | OUT_OF_SCOPE — set only when classification is REJECTED.
+  classificationRejectionReason String?   @map("classification_rejection_reason")
+  /// The CONFIGURED topics the article matched, in their stored spelling.
+  classificationMatchedTopics   String[]  @map("classification_matched_topics")
+  /// One capped sentence of evidence — why this verdict, for a human reading back.
+  classificationReason          String?   @map("classification_reason")
+  /// pending | classifying | completed | skipped | failed
+  classificationStatus          String?   @map("classification_status")
+  /// sha256(sent text + topic-config fingerprint) — unchanged inputs skip the call.
+  classificationHash            String?   @map("classification_hash")
+  classificationError           String?   @map("classification_error")
+  classifiedAt                  DateTime? @map("classified_at")
+  classificationProvider        String?   @map("classification_provider")
+  classificationModel           String?   @map("classification_model")
+  classificationAttemptCount    Int       @default(0) @map("classification_attempt_count")
+  /// Set while a run holds an atomic claim (status = 'classifying'). An expired
+  /// lease means the worker died mid-call and the item is reclaimable.
+  classificationLeaseExpiresAt  DateTime? @map("classification_lease_expires_at")
+
   source ContentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   // A feed item backs at most one post PER CHANNEL — one topic, written once for
   // each social channel it was generated for. Enforced at the DB level by the
@@ -432,6 +468,10 @@ model FeedItem {
   @@index([translationStatus, translationLeaseExpiresAt])
   // Drives the product-page extraction drain: pending items, oldest first.
   @@index([extractionStatus, createdAt])
+  // Drives the classification drain: eligible items per company, oldest first.
+  @@index([classificationStatus, createdAt])
+  // Recovery scan: reclaim in-flight claims ('classifying') whose lease expired.
+  @@index([classificationStatus, classificationLeaseExpiresAt])
   @@map("feed_items")
 }
 

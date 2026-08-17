@@ -10,7 +10,16 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { ColorField } from "@/components/ui/ColorField";
 import { Select } from "@/components/ui/Select";
+import { TagInput } from "@/components/ui/TagInput";
 import { updateBrandGuidelinesSchema } from "@/lib/validators/brand-guidelines.schema";
+import {
+  MAX_TOPICS_PER_GROUP,
+  MAX_TOPIC_LENGTH,
+  checkTopicAddition,
+  normalizeTopic,
+  type TopicGroup,
+  type TopicGroups,
+} from "@/lib/ai/topic-priorities";
 import type { BrandGuidelinesData } from "@/lib/services/company/update-brand-guidelines.service";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -36,6 +45,9 @@ type FormValues = {
   targetAudience: string;
   forbiddenWords: string;
   competitors: string;
+  topPriorityTopics: string[];
+  mediumPriorityTopics: string[];
+  avoidedTopics: string[];
 };
 
 type FieldErrors = Partial<Record<keyof FormValues, string>>;
@@ -59,6 +71,9 @@ function toFormValues(
     targetAudience: data?.targetAudience ?? "",
     forbiddenWords: data?.forbiddenWords.join("\n") ?? "",
     competitors: data?.competitors.join("\n") ?? "",
+    topPriorityTopics: data?.topPriorityTopics ?? [],
+    mediumPriorityTopics: data?.mediumPriorityTopics ?? [],
+    avoidedTopics: data?.avoidedTopics ?? [],
   };
 }
 
@@ -81,6 +96,9 @@ function toApiPayload(values: FormValues) {
     targetAudience: values.targetAudience.trim() || undefined,
     forbiddenWords: splitLines(values.forbiddenWords),
     competitors: splitLines(values.competitors),
+    topPriorityTopics: values.topPriorityTopics,
+    mediumPriorityTopics: values.mediumPriorityTopics,
+    avoidedTopics: values.avoidedTopics,
   };
 }
 
@@ -109,6 +127,24 @@ function Label({ htmlFor, text }: { htmlFor: string; text: string }) {
   );
 }
 
+/**
+ * The three topic groups in the order they are ranked, paired with the stem of
+ * their i18n keys (`topicPriorities.top`, `.topHint`, `.topPlaceholder`, …).
+ * Rendering from one list keeps the displayed order and the priority order the
+ * same thing.
+ */
+const TOPIC_FIELDS: ReadonlyArray<{ group: TopicGroup; key: "top" | "medium" | "avoided" }> = [
+  { group: "topPriorityTopics", key: "top" },
+  { group: "mediumPriorityTopics", key: "medium" },
+  { group: "avoidedTopics", key: "avoided" },
+];
+
+const TOPIC_LABEL_KEY: Record<TopicGroup, "top" | "medium" | "avoided"> = {
+  topPriorityTopics: "top",
+  mediumPriorityTopics: "medium",
+  avoidedTopics: "avoided",
+};
+
 function FieldError({ id, message }: { id: string; message?: string }) {
   if (!message) return null;
   return (
@@ -129,6 +165,7 @@ export function BrandGuidelinesForm({
   isGlobalAdmin,
 }: Props) {
   const t = useTranslations("brandGuidelines");
+  const tTopics = useTranslations("brandGuidelines.topicPriorities");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
   const router = useRouter();
@@ -148,6 +185,47 @@ export function BrandGuidelinesForm({
     setValues((prev) => ({ ...prev, [field]: value }));
     if (fieldErrors[field]) setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
     if (status !== "idle") setStatus("idle");
+  }
+
+  function setTopics(group: TopicGroup, next: string[]) {
+    setValues((prev) => ({ ...prev, [group]: next }));
+    if (fieldErrors[group]) setFieldErrors((prev) => ({ ...prev, [group]: undefined }));
+    if (status !== "idle") setStatus("idle");
+  }
+
+  // All three lists as they stand right now — a topic is vetted against the
+  // whole configuration, not just the group being edited.
+  const topicGroups: TopicGroups = {
+    topPriorityTopics: values.topPriorityTopics,
+    mediumPriorityTopics: values.mediumPriorityTopics,
+    avoidedTopics: values.avoidedTopics,
+  };
+
+  /**
+   * The localized reason a topic may not join `group`, or null.
+   *
+   * The rules themselves live in `checkTopicAddition` — the same ones the server
+   * enforces on save. This only names them in the user's language.
+   */
+  function refuseTopic(group: TopicGroup) {
+    return (candidate: string): string | null => {
+      const result = checkTopicAddition(candidate, group, topicGroups);
+      if (result.ok) return null;
+      switch (result.reason) {
+        case "empty":
+          return tTopics("errors.empty");
+        case "too_long":
+          return tTopics("errors.tooLong", { max: MAX_TOPIC_LENGTH });
+        case "limit_reached":
+          return tTopics("errors.limitReached", { max: MAX_TOPICS_PER_GROUP });
+        case "duplicate":
+          return tTopics("errors.duplicate");
+        case "conflict":
+          return tTopics("errors.conflict", {
+            group: tTopics(TOPIC_LABEL_KEY[result.otherGroup]),
+          });
+      }
+    };
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -401,6 +479,37 @@ export function BrandGuidelinesForm({
               className={`${fieldCls(!!fieldErrors.competitors, disabled)} resize-none`}
             />
             <FieldError id="bg-competitors-error" message={fieldErrors.competitors} />
+          </div>
+        </div>
+
+        {/*
+          RSS / content topic priorities — a section of its own, separated by a
+          rule, because it configures which SOURCE ARTICLES are worth a post
+          rather than how a post is written.
+        */}
+        <div className="border-border mb-6 border-t pt-6">
+          <h3 className="text-fg text-sm font-semibold">{tTopics("title")}</h3>
+          <p className="text-small text-fg-muted mt-1 mb-5">{tTopics("help")}</p>
+
+          <div className="grid gap-x-6 gap-y-6 lg:grid-cols-3">
+            {TOPIC_FIELDS.map(({ group, key }) => (
+              <TagInput
+                key={group}
+                id={`bg-${group}`}
+                label={tTopics(key)}
+                hint={tTopics(`${key}Hint`)}
+                values={values[group]}
+                onChange={(next) => setTopics(group, next)}
+                placeholder={tTopics(`${key}Placeholder`)}
+                disabled={disabled}
+                error={fieldErrors[group]}
+                validate={refuseTopic(group)}
+                normalize={normalizeTopic}
+                addLabel={tTopics("add")}
+                removeLabel={(topic) => tTopics("remove", { topic })}
+                emptyText={tTopics("empty")}
+              />
+            ))}
           </div>
         </div>
 

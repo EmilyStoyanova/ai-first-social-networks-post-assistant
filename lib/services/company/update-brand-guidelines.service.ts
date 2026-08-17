@@ -13,6 +13,9 @@ export type BrandGuidelinesData = {
   targetAudience: string | null;
   forbiddenWords: string[];
   competitors: string[];
+  topPriorityTopics: string[];
+  mediumPriorityTopics: string[];
+  avoidedTopics: string[];
   createdAt: Date;
   updatedAt: Date;
 };
@@ -21,7 +24,7 @@ export type UpdateBrandGuidelinesResult =
   | { success: true; brandGuidelines: BrandGuidelinesData }
   | { success: false; code: "NOT_FOUND" | "FORBIDDEN" };
 
-const SELECT = {
+export const BRAND_GUIDELINES_SELECT = {
   id: true,
   companyId: true,
   logoUrl: true,
@@ -33,9 +36,45 @@ const SELECT = {
   targetAudience: true,
   forbiddenWords: true,
   competitors: true,
+  topPriorityTopics: true,
+  mediumPriorityTopics: true,
+  avoidedTopics: true,
   createdAt: true,
   updatedAt: true,
 } as const;
+
+/** Who may write, and to which company. */
+export type BrandGuidelinesAccess =
+  { ok: true; companyId: string } | { ok: false; code: "NOT_FOUND" | "FORBIDDEN" };
+
+/**
+ * Resolves the caller's right to edit a company's brand settings.
+ *
+ * A non-member gets NOT_FOUND rather than FORBIDDEN for the same reason
+ * everywhere else in this service layer: "you may not" would confirm the company
+ * exists. EDITORs are members, so they legitimately get FORBIDDEN.
+ */
+export async function resolveBrandGuidelinesAccess(
+  slug: string,
+  userId: string,
+  isGlobalAdmin: boolean
+): Promise<BrandGuidelinesAccess> {
+  if (isGlobalAdmin) {
+    const company = await prisma.company.findUnique({ where: { slug }, select: { id: true } });
+    return company ? { ok: true, companyId: company.id } : { ok: false, code: "NOT_FOUND" };
+  }
+
+  const membership = await prisma.companyMember.findFirst({
+    where: { userId, company: { slug } },
+    select: { role: true, company: { select: { id: true } } },
+  });
+
+  if (!membership) return { ok: false, code: "NOT_FOUND" };
+  // EDITORs are read-only for brand guidelines.
+  if (membership.role !== "owner") return { ok: false, code: "FORBIDDEN" };
+
+  return { ok: true, companyId: membership.company.id };
+}
 
 async function upsert(
   companyId: string,
@@ -66,6 +105,9 @@ async function upsert(
         targetAudience: data.targetAudience,
         forbiddenWords: data.forbiddenWords ?? [],
         competitors: data.competitors ?? [],
+        topPriorityTopics: data.topPriorityTopics ?? [],
+        mediumPriorityTopics: data.mediumPriorityTopics ?? [],
+        avoidedTopics: data.avoidedTopics ?? [],
       },
       update: {
         logoUrl: data.logoUrl,
@@ -77,38 +119,41 @@ async function upsert(
         targetAudience: data.targetAudience,
         forbiddenWords: data.forbiddenWords,
         competitors: data.competitors,
+        // undefined leaves the stored list alone — an omitted group is "not
+        // edited", never "cleared".
+        topPriorityTopics: data.topPriorityTopics,
+        mediumPriorityTopics: data.mediumPriorityTopics,
+        avoidedTopics: data.avoidedTopics,
       },
-      select: SELECT,
+      select: BRAND_GUIDELINES_SELECT,
     });
   });
 }
+
+/**
+ * The two halves of a save, injectable so the orchestration below — which
+ * authorization outcome persists, and with what — can be unit-tested without a
+ * database. Defaults are the real implementations.
+ */
+export interface UpdateBrandGuidelinesDeps {
+  resolveAccess: typeof resolveBrandGuidelinesAccess;
+  persist: (companyId: string, data: UpdateBrandGuidelinesInput) => Promise<BrandGuidelinesData>;
+}
+
+const REAL_DEPS: UpdateBrandGuidelinesDeps = {
+  resolveAccess: resolveBrandGuidelinesAccess,
+  persist: upsert,
+};
 
 export async function updateBrandGuidelines(
   slug: string,
   userId: string,
   isGlobalAdmin: boolean,
-  data: UpdateBrandGuidelinesInput
+  data: UpdateBrandGuidelinesInput,
+  deps: UpdateBrandGuidelinesDeps = REAL_DEPS
 ): Promise<UpdateBrandGuidelinesResult> {
-  if (isGlobalAdmin) {
-    const company = await prisma.company.findUnique({
-      where: { slug },
-      select: { id: true },
-    });
-    if (!company) return { success: false, code: "NOT_FOUND" };
-    return { success: true, brandGuidelines: await upsert(company.id, data) };
-  }
+  const access = await deps.resolveAccess(slug, userId, isGlobalAdmin);
+  if (!access.ok) return { success: false, code: access.code };
 
-  // Regular users: find membership — returning null for both "not found" and
-  // "not a member" avoids leaking whether the company exists.
-  const membership = await prisma.companyMember.findFirst({
-    where: { userId, company: { slug } },
-    select: { role: true, company: { select: { id: true } } },
-  });
-
-  if (!membership) return { success: false, code: "NOT_FOUND" };
-
-  // EDITORs are read-only for brand guidelines.
-  if (membership.role !== "owner") return { success: false, code: "FORBIDDEN" };
-
-  return { success: true, brandGuidelines: await upsert(membership.company.id, data) };
+  return { success: true, brandGuidelines: await deps.persist(access.companyId, data) };
 }
