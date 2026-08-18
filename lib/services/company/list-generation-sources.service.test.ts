@@ -24,6 +24,8 @@ interface ItemSeed {
   sourceId: string;
   enabled: boolean;
   usedInPost: boolean;
+  /** Absent = never classified, which is a tier generation draws from. */
+  classification?: string | null;
 }
 
 function makeDb(sources: SourceSeed[], items: ItemSeed[] = []): GenerationSourcesDb {
@@ -42,7 +44,11 @@ function makeDb(sources: SourceSeed[], items: ItemSeed[] = []): GenerationSource
           (i) =>
             where.sourceId.in.includes(i.sourceId) &&
             i.enabled === where.enabled &&
-            (where.usedInPost === undefined || i.usedInPost === where.usedInPost)
+            (where.usedInPost === undefined || i.usedInPost === where.usedInPost) &&
+            // The classification gate, interpreted as Prisma would: an OR of
+            // plain equalities, with `null` matching an unclassified row.
+            (where.OR === undefined ||
+              where.OR.some((branch) => branch.classification === (i.classification ?? null)))
         );
         // distinct: ["sourceId"]
         return [...new Set(matching.map((i) => i.sourceId))].map((sourceId) => ({ sourceId }));
@@ -112,6 +118,58 @@ describe("listGenerationSourcesCore", () => {
     assert.ok(result.success);
     assert.equal(result.sources[0].available, false);
     assert.equal(result.sources[0].unavailableReason, "no_articles");
+  });
+
+  it("treats an RSS source whose only articles are REJECTED as having none", async () => {
+    // Generation never draws a REJECTED article, so offering the source here
+    // would produce a dropdown entry that looks fine and then fails with
+    // SELECTED_SOURCE_UNAVAILABLE the moment it is picked.
+    const db = makeDb(
+      [rss("src-1", "Tech Weekly")],
+      [{ sourceId: "src-1", enabled: true, usedInPost: false, classification: "REJECTED" }]
+    );
+
+    const result = await listGenerationSourcesCore("acme", "u-1", false, db);
+
+    assert.ok(result.success);
+    assert.equal(result.sources[0].available, false);
+    assert.equal(result.sources[0].unavailableReason, "no_articles");
+  });
+
+  it("keeps an RSS source selectable when a REJECTED article sits beside a usable one", async () => {
+    const db = makeDb(
+      [rss("src-1", "Tech Weekly")],
+      [
+        { sourceId: "src-1", enabled: true, usedInPost: false, classification: "REJECTED" },
+        { sourceId: "src-1", enabled: true, usedInPost: false, classification: "MEDIUM" },
+      ]
+    );
+
+    const result = await listGenerationSourcesCore("acme", "u-1", false, db);
+
+    assert.ok(result.success);
+    assert.equal(result.sources[0].available, true);
+  });
+
+  it("counts HIGH, MEDIUM and unclassified articles alike towards availability", async () => {
+    // Availability asks whether the source can back a post at all — the ORDER
+    // the tiers are drawn in is the window's business, not the dropdown's. A
+    // missing verdict must never read as a rejection here either.
+    for (const classification of ["HIGH", "MEDIUM", null, undefined]) {
+      const db = makeDb(
+        [rss("src-1", "Tech Weekly")],
+        [{ sourceId: "src-1", enabled: true, usedInPost: false, classification }]
+      );
+
+      const result = await listGenerationSourcesCore("acme", "u-1", false, db);
+
+      assert.ok(result.success);
+      assert.equal(
+        result.sources[0].available,
+        true,
+        `an article classified ${String(classification)} should make its source selectable`
+      );
+    }
   });
 
   it("omits disabled sources entirely", async () => {

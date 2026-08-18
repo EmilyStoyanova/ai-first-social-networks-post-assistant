@@ -2,9 +2,11 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   CANDIDATE_TIERS,
+  GENERATION_CANDIDATE_CLASSIFICATIONS,
   PRIORITY_TIER_FILTERS,
   countOffered,
   describePrioritySelection,
+  eligibleClassificationWhere,
   emptyPriorityDiagnostic,
   orderByPriority,
   priorityTierWheres,
@@ -59,6 +61,56 @@ describe("PRIORITY_TIER_FILTERS", () => {
     assert.deepEqual(
       [...CANDIDATE_TIERS],
       PRIORITY_TIER_FILTERS.map((t) => t.tier)
+    );
+  });
+});
+
+describe("GENERATION_CANDIDATE_CLASSIFICATIONS", () => {
+  it("is derived from the tiers rather than restated", () => {
+    assert.deepEqual([...GENERATION_CANDIDATE_CLASSIFICATIONS], ["HIGH", "MEDIUM", null]);
+  });
+
+  it("does not include REJECTED", () => {
+    assert.equal(GENERATION_CANDIDATE_CLASSIFICATIONS.includes("REJECTED"), false);
+  });
+});
+
+describe("eligibleClassificationWhere", () => {
+  // The yes/no form of the same rule, used where a caller asks whether a
+  // population contains anything generation could draw (the manual source
+  // dropdown) rather than drawing an ordered window from it.
+  it("names the tiers rather than negating REJECTED", () => {
+    assert.deepEqual(eligibleClassificationWhere(), {
+      OR: [{ classification: "HIGH" }, { classification: "MEDIUM" }, { classification: null }],
+    });
+  });
+
+  it("gives NULL its own branch — an `in` list would never match it", () => {
+    // bug-1318: Prisma's `in` matches values and never NULL, so expressing this
+    // as `{ in: ["HIGH","MEDIUM", null] }` would silently drop every
+    // un-drained article and report healthy feeds as dry.
+    const branches = eligibleClassificationWhere().OR;
+    assert.ok(branches.some((b) => b.classification === null));
+    for (const branch of branches) {
+      assert.equal(
+        typeof branch.classification === "object" && branch.classification !== null,
+        false,
+        "each branch must be a plain equality, never a filter object"
+      );
+    }
+  });
+
+  it("stays in step with the tiers the window queries", () => {
+    assert.deepEqual(
+      eligibleClassificationWhere().OR.map((b) => b.classification),
+      PRIORITY_TIER_FILTERS.map((t) => t.where.classification)
+    );
+  });
+
+  it("cannot admit REJECTED", () => {
+    assert.equal(
+      eligibleClassificationWhere().OR.some((b) => b.classification === "REJECTED"),
+      false
     );
   });
 });

@@ -1,11 +1,14 @@
 import { prisma } from "@/lib/db/client";
 import type { ContentSourceType } from "@prisma/client";
+import { eligibleClassificationWhere } from "@/lib/ai/candidate-priority";
 
 /**
  * Why a listed source cannot currently be picked.
  *
- *   • no_articles — an RSS feed whose every article is already used. The feed
- *                   itself is fine; it simply has nothing new.
+ *   • no_articles — an RSS feed with no article left that generation could draw:
+ *                   every one is already used, switched off, or REJECTED by the
+ *                   company's own topic rules. The feed itself is fine; it simply
+ *                   has nothing worth writing about.
  *   • no_content  — a non-RSS source (product page / prompt / calendar) that has
  *                   never been extracted, or whose extraction is disabled.
  *
@@ -64,8 +67,14 @@ export interface GenerationSourcesDb {
   feedItem: {
     findMany: (args: {
       // `usedInPost` is present only for the RSS window — the non-RSS window
-      // deliberately omits it (see below).
-      where: { sourceId: { in: string[] }; enabled: true; usedInPost?: false };
+      // deliberately omits it (see below). The `OR` is the classification
+      // eligibility fragment, which both windows carry.
+      where: {
+        sourceId: { in: string[] };
+        enabled: true;
+        usedInPost?: false;
+        OR?: Array<{ classification: string | null }>;
+      };
       select: { sourceId: true };
       distinct: ["sourceId"];
     }) => Promise<Array<{ sourceId: string }>>;
@@ -84,6 +93,10 @@ export interface GenerationSourcesDb {
  *   • anything — needs any stored extraction at all. A product page, prompt, or
  *     else       calendar event is read directly and consumed by nothing, so a
  *                post already written from it leaves it just as available.
+ *
+ * Both additionally need an item generation would actually draw — i.e. one whose
+ * classification is a tier the candidate window queries. REJECTED does not count
+ * towards availability, in either window.
  *
  * Both predicates match the window the generation context builds for that kind
  * exactly — otherwise the dropdown would offer a source generation then refuses.
@@ -125,10 +138,23 @@ export async function listGenerationSourcesCore(
   const rssIds = rows.filter((r) => r.type === "rss").map((r) => r.id);
   const directIds = rows.filter((r) => r.type !== "rss").map((r) => r.id);
 
+  // The classification gate, on BOTH windows because generation applies it to
+  // both. A REJECTED article cannot back a post, so a feed holding nothing else
+  // is dry — offering it here would produce a dropdown entry that looks fine and
+  // then fails with SELECTED_SOURCE_UNAVAILABLE the moment it is picked. Today
+  // only RSS items are ever classified, so the direct window's copy is a no-op;
+  // it is there so the two can never fall out of step if that changes.
+  const classificationGate = eligibleClassificationWhere();
+
   const [withArticles, withContent] = await Promise.all([
     rssIds.length > 0
       ? db.feedItem.findMany({
-          where: { sourceId: { in: rssIds }, enabled: true, usedInPost: false },
+          where: {
+            sourceId: { in: rssIds },
+            enabled: true,
+            usedInPost: false,
+            ...classificationGate,
+          },
           select: { sourceId: true },
           distinct: ["sourceId"],
         })
@@ -137,7 +163,7 @@ export async function listGenerationSourcesCore(
     // item already cited by a post still makes its source selectable.
     directIds.length > 0
       ? db.feedItem.findMany({
-          where: { sourceId: { in: directIds }, enabled: true },
+          where: { sourceId: { in: directIds }, enabled: true, ...classificationGate },
           select: { sourceId: true },
           distinct: ["sourceId"],
         })

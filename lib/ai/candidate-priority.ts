@@ -16,9 +16,16 @@
  *
  *   • **A missing verdict is not a rejection.** `null` covers an unconfigured
  *     company, an article still queued, and one whose classification failed. All
- *     three stay eligible, ranked after MEDIUM. Only an explicit REJECTED is
- *     withheld from automatic generation, and only there — a person who names an
- *     article manually still gets it.
+ *     three stay eligible, ranked after MEDIUM.
+ *
+ * REJECTED is the exception to both: it is not ordered last, it is not offered at
+ * all. That holds for EVERY generation path — cron, bulk, the manual form and the
+ * prompt preview alike. There was once a carve-out for user-driven runs, on the
+ * reasoning that a person who picks a source has made a choice; it was removed
+ * deliberately. The choice a person makes is which SOURCE to draw from, and the
+ * company's own topic rules are what decide which of that source's articles are
+ * worth writing about — so honouring the verdict is honouring the choice, not
+ * overruling it. There is no flag here to turn any of this off.
  */
 
 import type { Classification } from "./feed-item-classification";
@@ -42,19 +49,16 @@ export function tierOf(classification: string | null | undefined): CandidateTier
   return "unclassified";
 }
 
-/** The classification values automatic generation may draw from. */
-export const AUTOMATIC_CANDIDATE_CLASSIFICATIONS: Array<Classification | null> = [
-  "HIGH",
-  "MEDIUM",
-  null,
-];
-
 /**
- * The tiers an automatic run queries, in the order it queries them.
+ * The tiers a generation queries, in the order it queries them.
  *
  * REJECTED is absent, and its absence IS the exclusion — there is no `NOT`
  * filter anywhere that a later edit could weaken without noticing. Exported so
  * that claim is a test rather than a comment.
+ *
+ * This is the ONE definition. The classification list and the eligibility
+ * fragment below are both derived from it, so a fifth verdict or a reordering can
+ * only ever be written once.
  */
 export const PRIORITY_TIER_FILTERS: ReadonlyArray<{
   tier: CandidateTier;
@@ -66,6 +70,29 @@ export const PRIORITY_TIER_FILTERS: ReadonlyArray<{
   // eligible, all ranked last.
   { tier: "unclassified", where: { classification: null } },
 ];
+
+/** The classification values any generation may draw from. Derived, never typed twice. */
+export const GENERATION_CANDIDATE_CLASSIFICATIONS: ReadonlyArray<Classification | null> =
+  PRIORITY_TIER_FILTERS.map((t) => t.where.classification);
+
+/**
+ * "Any tier generation may draw from", as one `where` fragment — for the callers
+ * that ask a yes/no question about the same population rather than drawing an
+ * ordered window from it (today: the manual source dropdown's availability
+ * check).
+ *
+ * Written as an OR of equalities, one per tier, rather than as
+ * `{ not: "REJECTED" }` or `{ in: [...] }`. Both of those are traps on a nullable
+ * column — Prisma's `in` never matches NULL, so the unclassified tier would
+ * silently vanish and every un-drained article would read as unavailable. An
+ * explicit `null` branch cannot go wrong that way. It is also the same shape as
+ * the tiered fetch: REJECTED is excluded by not being named, not by a negation.
+ */
+export function eligibleClassificationWhere(): {
+  OR: Array<{ classification: Classification | null }>;
+} {
+  return { OR: PRIORITY_TIER_FILTERS.map(({ where }) => ({ ...where })) };
+}
 
 /**
  * Composes each tier onto the caller's eligibility filter.
@@ -83,8 +110,8 @@ export function priorityTierWheres(
 }
 
 /**
- * Why automatic generation ended up where it did — the answer to "why a MEDIUM
- * article when HIGH ones exist?".
+ * Why a generation ended up where it did — the answer to "why a MEDIUM article
+ * when HIGH ones exist?".
  *
  * Counted from rows the pipeline has already looked at, so it costs one extra
  * `groupBy` per generation rather than a second candidate query. Deliberately

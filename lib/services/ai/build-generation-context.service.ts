@@ -39,10 +39,12 @@ export type BuildGenerationContextResult =
       context: GenerationContext;
       companyId: string;
       /**
-       * How priority shaped this window. Present only for automatic generation —
-       * the one path that orders by priority — and carried on the result rather
-       * than on the context because it explains how the context was chosen, not
-       * what it contains. Nothing downstream branches on it; it is logged.
+       * How priority shaped this window. Carried on the result rather than on the
+       * context because it explains how the context was chosen, not what it
+       * contains. Nothing downstream branches on it; it is logged.
+       *
+       * Absent only for a window that drew from no articles at all (a
+       * company-content slot), where there is nothing for it to describe.
        */
       priority?: PriorityDiagnostic;
     }
@@ -98,6 +100,11 @@ const POOLED: SourceScope = { kind: "pooled" };
  * System-level context builder — no RBAC. Used by the cron dispatcher, where
  * there is no acting user; user-facing callers go through
  * buildGenerationContext below.
+ *
+ * The two differ ONLY in how they establish the company and whether a user is
+ * allowed to ask. Both hand off to the same `loadContext`, which is what makes
+ * the candidate rules — eligibility, priority order, the REJECTED exclusion —
+ * impossible to have in one flow and not the other.
  */
 export async function buildGenerationContextForCompany(
   companyId: string,
@@ -115,12 +122,7 @@ export async function buildGenerationContextForCompany(
   });
   if (!companyRow) return { success: false, code: "NOT_FOUND" };
 
-  // The ONE automatic entry point (cron's weekly generation), and therefore the
-  // one place topic priority orders the window and REJECTED is withheld. Every
-  // user-facing caller goes through buildGenerationContext below and is
-  // deliberately untouched: a person who picks a source or an article has made a
-  // choice, and a stored verdict must not quietly overrule it.
-  return loadContext(companyId, channel, companyRow, scope, true);
+  return loadContext(companyId, channel, companyRow, scope);
 }
 
 export async function buildGenerationContext(
@@ -211,8 +213,6 @@ const CANDIDATE_SELECT = {
   source: { select: { name: true, type: true, config: true } },
 } as const;
 
-type CandidateRow = Awaited<ReturnType<typeof fetchCandidates>>[number];
-
 function fetchCandidates(where: Record<string, unknown>, take: number) {
   return prisma.feedItem.findMany({
     where,
@@ -223,31 +223,110 @@ function fetchCandidates(where: Record<string, unknown>, take: number) {
 }
 
 /**
- * The automatic window, drawn in priority order.
+ * How the tiered window reads its rows. Injectable so the tier composition and
+ * the merge can be exercised against actual rows in a test — a `where` asserted
+ * by SHAPE proves nothing about which articles come back.
+ */
+export type CandidateFinder<T> = (where: Record<string, unknown>, take: number) => Promise<T[]>;
+
+/**
+ * THE candidate window. Every generation in the product — cron, bulk, the manual
+ * form, the prompt preview — gets its articles from this one function, and there
+ * is no parameter that makes it behave differently for any of them.
  *
  * One query per tier rather than a sort over a recency-limited page, and that is
  * the correctness point: taking the newest five and THEN sorting would never see
  * a HIGH article older than five newer MEDIUM ones. Each tier is asked for the
  * full window, and the merge takes the first `take` in tier order — so HIGH is
- * genuinely exhausted before MEDIUM is drawn on.
+ * genuinely exhausted before MEDIUM is drawn on, and MEDIUM before unclassified.
  *
  * REJECTED is excluded by construction: it is simply never one of the tiers
  * queried. That is stronger than a `NOT` filter, which a later edit could weaken
  * without noticing.
+ *
+ * The final `orderByPriority` is belt-and-braces — the tiers already arrive in
+ * rank order — and costs nothing. It is what keeps the guarantee true if the
+ * merge above is ever changed.
  */
-async function fetchPrioritisedCandidates(
+export async function fetchGenerationCandidates<T extends { classification?: string | null }>(
   where: Record<string, unknown>,
-  take: number
-): Promise<CandidateRow[]> {
+  take: number,
+  find: CandidateFinder<T>
+): Promise<T[]> {
   // The tier list and its composition rule live in candidate-priority.ts, so the
   // "REJECTED is never queried" guarantee is one testable definition rather than
   // three literals here. The unclassified tier is the backwards-compatibility
   // one: for a company with no topics every row lands there and the order is
   // exactly what it was before this feature existed.
-  const tiers = await Promise.all(
-    priorityTierWheres(where).map((tier) => fetchCandidates(tier.where, take))
-  );
-  return tiers.flat().slice(0, take);
+  const tiers = await Promise.all(priorityTierWheres(where).map((tier) => find(tier.where, take)));
+  return orderByPriority(tiers.flat().slice(0, take));
+}
+
+/**
+ * The eligibility filter — every rule that decides whether an article MAY be
+ * used, for a given scope. Priority never adds to it or subtracts from it; it
+ * only orders what comes out.
+ *
+ * Exported alongside the fetch so a test can compose the two exactly as
+ * `loadContext` does, per scope, instead of trusting that they match.
+ */
+export function candidateWhereFor(companyId: string, scope: SourceScope): Record<string, unknown> {
+  // A manually picked non-RSS source is read DIRECTLY from its stored extraction:
+  // the window drops the one-post-per-article filter and generation reserves
+  // nothing (see planDirectContentSource).
+  const directContentSource = scope.kind === "content_source";
+
+  // A sibling channel's window: one named item, already consumed by this topic's
+  // first channel, so the `usedInPost` filter must not apply to it either.
+  const pinnedFeedItemId = scope.kind === "feed_item" ? scope.feedItemId : null;
+
+  // Both single-source scopes restrict the window to their one source; they
+  // differ only in whether used items still count (see directContentSource).
+  const scopedSourceId =
+    scope.kind === "source" || scope.kind === "content_source" ? scope.sourceId : null;
+
+  return {
+    companyId,
+    // Manual enable/disable. Authoritative over any verdict: a person who
+    // switched an article off has overruled the classifier, whatever it decided.
+    enabled: true,
+    // usedInPost:false — one-post-per-article. DROPPED for a direct content
+    // source: its stored extraction describes a page/prompt/event that does not
+    // stop existing once a post cites it, and ingestion writes only one row per
+    // such source, so keeping the filter would make the source selectable exactly
+    // once and dry forever after.
+    //
+    // Also dropped for a pinned item, for the opposite reason: it IS used — this
+    // topic's first channel claimed it — and the sibling channels of that same
+    // topic must still be able to see it.
+    ...(directContentSource || pinnedFeedItemId ? {} : { usedInPost: false }),
+    source: { enabled: true },
+    // One named item, and nothing else, for a sibling channel version. Note this
+    // narrows the window; it does not exempt it. A pinned item still has to be a
+    // tier the fetch queries, so a REJECTED article cannot re-enter generation
+    // through the content-group door.
+    ...(pinnedFeedItemId ? { id: pinnedFeedItemId } : {}),
+    // v2-8 — when a specific source's quota is due, the window is restricted to
+    // that source so a post can only ever consume the quota it was drawn against.
+    // Without this the pooled window could hand RSS B's article to RSS A's slot,
+    // silently reassigning the quota. A manual pick of either kind narrows the
+    // window the same way.
+    ...(scopedSourceId ? { sourceId: scopedSourceId } : {}),
+  };
+}
+
+/**
+ * Whether "why was no HIGH article offered?" is even a question worth the three
+ * counts it costs.
+ *
+ * Only the two scopes that draw an OPEN window from articles can answer it. A
+ * pinned sibling names its one item outright, a direct content source reads a
+ * page rather than a feed, and a company-content slot has no articles at all —
+ * for those, a withheld-HIGH tally would be a number about a population the run
+ * never consulted.
+ */
+function explainsWithheldHigh(scope: SourceScope): boolean {
+  return scope.kind === "pooled" || scope.kind === "source";
 }
 
 /**
@@ -284,13 +363,7 @@ async function loadContext(
     automationMode: string;
     defaultLang: string;
   },
-  scope: SourceScope = POOLED,
-  /**
-   * Automatic (cron) generation: order the window by topic priority and withhold
-   * REJECTED. False for every user-facing caller, which keeps manual generation
-   * byte-for-byte what it was.
-   */
-  automatic = false
+  scope: SourceScope = POOLED
 ): Promise<BuildGenerationContextResult> {
   // v2-8 — a company-content slot must produce a mission/brand post, so it gets
   // an empty article window AND no article sources. That combination is exactly
@@ -299,54 +372,14 @@ async function loadContext(
   const companyContentOnly = scope.kind === "company_content";
 
   // A manually picked non-RSS source is read DIRECTLY from its stored
-  // extraction: the window drops the one-post-per-article filter and generation
-  // reserves nothing (see planDirectContentSource). Flagged on the context so
-  // the single fact travels with the data it describes.
+  // extraction; generation reserves nothing (see planDirectContentSource).
+  // Flagged on the context so the single fact travels with the data it describes.
   const directContentSource = scope.kind === "content_source";
 
-  // A sibling channel's window: one named item, already consumed by this topic's
-  // first channel, so the `usedInPost` filter must not apply to it either.
-  const pinnedFeedItemId = scope.kind === "feed_item" ? scope.feedItemId : null;
-
-  // Both single-source scopes restrict the window to their one source; they
-  // differ only in whether used items still count (see directContentSource).
   const scopedSourceId =
     scope.kind === "source" || scope.kind === "content_source" ? scope.sourceId : null;
 
-  // The eligibility filter, unchanged from before this feature: every rule that
-  // decides whether an article MAY be used lives here, and priority never adds to
-  // it or subtracts from it — it only orders what comes out.
-  const candidateWhere: Record<string, unknown> = {
-    companyId,
-    // Manual enable/disable. Authoritative over any verdict: a person who
-    // switched an article off has overruled the classifier, whatever it decided.
-    enabled: true,
-    // usedInPost:false — one-post-per-article. DROPPED for a direct content
-    // source: its stored extraction describes a page/prompt/event that does not
-    // stop existing once a post cites it, and ingestion writes only one row per
-    // such source, so keeping the filter would make the source selectable exactly
-    // once and dry forever after.
-    //
-    // Also dropped for a pinned item, for the opposite reason: it IS used — this
-    // topic's first channel claimed it — and the sibling channels of that same
-    // topic must still be able to see it.
-    ...(directContentSource || pinnedFeedItemId ? {} : { usedInPost: false }),
-    source: { enabled: true },
-    // One named item, and nothing else, for a sibling channel version.
-    ...(pinnedFeedItemId ? { id: pinnedFeedItemId } : {}),
-    // v2-8 — when a specific source's quota is due, the window is restricted to
-    // that source so a post can only ever consume the quota it was drawn against.
-    // Without this the pooled window could hand RSS B's article to RSS A's slot,
-    // silently reassigning the quota. A manual pick of either kind narrows the
-    // window the same way.
-    ...(scopedSourceId ? { sourceId: scopedSourceId } : {}),
-  };
-
-  // A pinned sibling is exempt from priority ordering entirely: the article is
-  // named, and re-ranking a window of one is meaningless. Withholding it because
-  // it is REJECTED would be worse — it would fragment a content group whose first
-  // channel is already written.
-  const prioritised = automatic && !pinnedFeedItemId;
+  const candidateWhere = candidateWhereFor(companyId, scope);
 
   // ── Parallel data load ────────────────────────────────────────────────────
   const [brand, channelConfig, feedItems, enabledSource] = await Promise.allSettled([
@@ -375,13 +408,12 @@ async function loadContext(
     }),
     // A company-content slot draws from no source at all — skip the query.
     // Otherwise: one-post-per-article and every other eligibility rule live in
-    // `candidateWhere` above; automatic runs draw the same window in priority
-    // order (HIGH, then MEDIUM, then unclassified), manual runs exactly as before.
+    // `candidateWhere` above, and the window is drawn in priority order (HIGH,
+    // then MEDIUM, then unclassified) with REJECTED never queried. No branch
+    // here on who asked — that is the point.
     companyContentOnly
       ? Promise.resolve([])
-      : prioritised
-        ? fetchPrioritisedCandidates(candidateWhere, CANDIDATE_TAKE)
-        : fetchCandidates(candidateWhere, CANDIDATE_TAKE),
+      : fetchGenerationCandidates(candidateWhere, CANDIDATE_TAKE, fetchCandidates),
     // Does the company have an ARTICLE source (rss/product_page) configured at
     // all? Such a source with every article already used yields an empty
     // article window but must NOT fall back to a mission post — the caller skips
@@ -406,20 +438,17 @@ async function loadContext(
 
   const brandData = brand.status === "fulfilled" ? brand.value : null;
   const channelConfigData = channelConfig.status === "fulfilled" ? channelConfig.value : null;
-  const fetched = feedItems.status === "fulfilled" ? feedItems.value : [];
-  // Ordering the merged tiers again is belt-and-braces: the tiered fetch already
-  // returns them in rank order. It costs nothing and it is what keeps the
-  // guarantee true if the query below is ever changed.
-  const feedData = prioritised ? orderByPriority(fetched) : fetched;
+  const feedData = feedItems.status === "fulfilled" ? feedItems.value : [];
 
-  // Why this window looks the way it does. Only assembled for automatic runs —
-  // the one path that ordered anything — and the expensive half only when there
-  // is genuinely something to explain.
+  // Why this window looks the way it does — assembled for every run that drew
+  // from articles at all, so a manual generation is as explicable as a cron one.
+  // The counts are free (the rows are already in hand); the expensive half is
+  // taken only when there is genuinely something to explain.
   let priority: PriorityDiagnostic | undefined;
-  if (prioritised) {
+  if (!companyContentOnly) {
     priority = emptyPriorityDiagnostic();
     priority.offered = countOffered(feedData);
-    if (priority.offered.high === 0) {
+    if (priority.offered.high === 0 && explainsWithheldHigh(scope)) {
       priority.withheldHigh = await explainMissingHigh(companyId, scopedSourceId);
     }
     console.info("[generation] candidate priority", {
