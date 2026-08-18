@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db/client";
 import { resolveItemPublicUrl } from "@/lib/ai/source-types";
+import { summarizeClassificationError } from "@/lib/posts/feed-item-classification-filter";
 import type { FeedItemRow } from "./list-feed-items.service";
 
 export type ToggleFeedItemResult =
@@ -47,6 +48,10 @@ export interface ToggleFeedItemDb {
         classificationRejectionReason: true;
         classificationMatchedTopics: true;
         classificationReason: true;
+        classificationError: true;
+        // Never written here either — a person including or excluding an article
+        // does not un-consume it.
+        usedInPost: true;
         // Rides along on the row's own relation — no extra query. Needed only to
         // resolve `publicUrl` the same way listFeedItems does, so the toggled
         // row and the listed row describe the same link.
@@ -69,6 +74,8 @@ export interface ToggleFeedItemDb {
       classificationRejectionReason: string | null;
       classificationMatchedTopics: string[];
       classificationReason: string | null;
+      classificationError: string | null;
+      usedInPost: boolean;
       source: { config: unknown };
     }>;
   };
@@ -131,6 +138,8 @@ export async function toggleFeedItemCore(
       classificationRejectionReason: true,
       classificationMatchedTopics: true,
       classificationReason: true,
+      classificationError: true,
+      usedInPost: true,
       source: { select: { config: true } },
     },
   });
@@ -155,6 +164,10 @@ export async function toggleFeedItemCore(
       classificationRejectionReason: row.classificationRejectionReason,
       classificationMatchedTopics: row.classificationMatchedTopics,
       classificationReason: row.classificationReason,
+      // Summarised exactly as listFeedItems does, so a row does not change shape
+      // when it is toggled.
+      classificationError: summarizeClassificationError(row.classificationError),
+      usedInPost: row.usedInPost,
     },
   };
 }

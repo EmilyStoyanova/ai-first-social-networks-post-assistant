@@ -1,7 +1,9 @@
 import { prisma } from "@/lib/db/client";
 import { resolveItemPublicUrl } from "@/lib/ai/source-types";
 import {
+  classificationBucketOf,
   classificationFilterWhere,
+  summarizeClassificationError,
   type FeedItemClassificationFilter,
 } from "@/lib/posts/feed-item-classification-filter";
 
@@ -39,6 +41,14 @@ export interface FeedItemRow {
   classificationMatchedTopics: string[];
   /** One capped sentence of evidence. Shown on demand, never in the row itself. */
   classificationReason: string | null;
+  /** Why the last attempt broke. Only ever set alongside a `failed` status. */
+  classificationError: string | null;
+  /**
+   * Whether a post has already been written from this article. Drives the "already
+   * used" badge: such a row is never reclassified, so its `classificationStatus`
+   * is frozen history and must not be read out as a queue position.
+   */
+  usedInPost: boolean;
 }
 
 /**
@@ -51,6 +61,11 @@ export interface FeedItemClassificationCounts {
   high: number;
   medium: number;
   rejected: number;
+  /** Queued or in flight, and still eligible — a verdict really is coming. */
+  pending: number;
+  /** The classifier could not be reached or could not be trusted. NOT rejected. */
+  failed: number;
+  /** No verdict and none coming: consumed, settled without one, or never asked. */
   unclassified: number;
 }
 
@@ -108,41 +123,71 @@ export async function hasEnabledFeedItems(companyId: string): Promise<boolean> {
   return item !== null;
 }
 
-/**
- * Bucket counts over the whole source.
- *
- * One `groupBy` rather than five counts, and taken WITHOUT the active filter so
- * every pill keeps showing its own total while one of them is selected — a
- * filter bar whose other counts collapse to zero as soon as you use it is
- * useless for deciding where to go next.
- */
-async function classificationCounts(sourceId: string): Promise<FeedItemClassificationCounts> {
-  const groups = await prisma.feedItem.groupBy({
-    by: ["classification"],
-    where: { sourceId },
-    _count: { _all: true },
-  });
+/** One `groupBy` row: a distinct combination and how many articles share it. */
+export interface ClassificationCountGroup {
+  classification: string | null;
+  classificationStatus: string | null;
+  usedInPost: boolean;
+  count: number;
+}
 
+/**
+ * Turn the grouped rows into pill counts. Pure, and exported so the arithmetic is
+ * testable without a database.
+ *
+ * Every group goes through `classificationBucketOf` — the SAME function the badge
+ * on the row uses — so a pill and the rows it reveals can never disagree about
+ * what an article is. A bucket the vocabulary does not know cannot occur: the
+ * function is total over the state union.
+ */
+export function tallyClassificationCounts(
+  groups: readonly ClassificationCountGroup[]
+): FeedItemClassificationCounts {
   const counts: FeedItemClassificationCounts = {
     all: 0,
     high: 0,
     medium: 0,
     rejected: 0,
+    pending: 0,
+    failed: 0,
     unclassified: 0,
   };
 
   for (const group of groups) {
-    const n = group._count._all;
-    counts.all += n;
-    if (group.classification === "HIGH") counts.high += n;
-    else if (group.classification === "MEDIUM") counts.medium += n;
-    else if (group.classification === "REJECTED") counts.rejected += n;
-    // Anything else — null, or a value written by a future version — is "no
-    // verdict" rather than silently uncounted.
-    else counts.unclassified += n;
+    counts.all += group.count;
+    counts[classificationBucketOf(group)] += group.count;
   }
 
   return counts;
+}
+
+/**
+ * Bucket counts over the whole source.
+ *
+ * One `groupBy` rather than six counts, and taken WITHOUT the active filter so
+ * every pill keeps showing its own total while one of them is selected — a
+ * filter bar whose other counts collapse to zero as soon as you use it is
+ * useless for deciding where to go next.
+ *
+ * Grouped by three columns instead of one because that is the smallest key that
+ * separates the no-verdict cases from each other. The cardinality stays tiny —
+ * 4 verdicts × 6 statuses × 2 — so this is still one cheap aggregate, not a scan.
+ */
+async function classificationCounts(sourceId: string): Promise<FeedItemClassificationCounts> {
+  const groups = await prisma.feedItem.groupBy({
+    by: ["classification", "classificationStatus", "usedInPost"],
+    where: { sourceId },
+    _count: { _all: true },
+  });
+
+  return tallyClassificationCounts(
+    groups.map((g) => ({
+      classification: g.classification,
+      classificationStatus: g.classificationStatus,
+      usedInPost: g.usedInPost,
+      count: g._count._all,
+    }))
+  );
 }
 
 export async function listFeedItems(
@@ -182,6 +227,8 @@ export async function listFeedItems(
         classificationRejectionReason: true,
         classificationMatchedTopics: true,
         classificationReason: true,
+        classificationError: true,
+        usedInPost: true,
       },
     }),
     classificationCounts(sourceId),
@@ -210,6 +257,10 @@ export async function listFeedItems(
       classificationRejectionReason: r.classificationRejectionReason,
       classificationMatchedTopics: r.classificationMatchedTopics,
       classificationReason: r.classificationReason,
+      // Summarised here rather than in the browser so a provider's raw response
+      // body never reaches the client at all.
+      classificationError: summarizeClassificationError(r.classificationError),
+      usedInPost: r.usedInPost,
     })),
   };
 }

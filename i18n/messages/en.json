@@ -557,13 +557,16 @@
       "rejectedOutOfScope": "Rejected · out of scope",
       "pending": "Awaiting review",
       "failed": "Classification failed",
+      "used": "Already used",
+      "usedHint": "A post has already been written from this article, so it is no longer classified.",
       "skipped": "Not classified",
       "unclassified": "Not classified",
       "showWhy": "Why this priority?",
       "hideWhy": "Hide",
       "matchedTopics": "Matched topics: {topics}",
+      "failedError": "Last error: {error}",
       "failedHint": "The classifier could not be reached. This article has NOT been rejected — it will be retried.",
-      "noneMatchFilter": "No articles with this priority.",
+      "noneMatchFilter": "No articles match this filter.",
       "reclassify": "Reclassify articles",
       "reclassifying": "Queueing…",
       "reclassifyQueued": "{count} articles queued for reclassification.",
@@ -573,6 +576,8 @@
         "high": "Top priority",
         "medium": "Medium",
         "rejected": "Rejected",
+        "pending": "Awaiting review",
+        "failed": "Failed",
         "unclassified": "Not classified"
       }
     }

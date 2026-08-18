@@ -29,14 +29,25 @@ import { resolveBrandGuidelinesAccess } from "./update-brand-guidelines.service"
  *     made under the configuration in force at the time, and rewriting it would
  *     make the post's own record disagree with itself.
  *   • an enabled RSS source — the only kind that carries a verdict at all.
- *   • a SETTLED status — `completed`, `skipped` or `failed`. `pending` is already
- *     queued and `classifying` is in flight behind a live lease; touching either
- *     would either be a no-op or would yank an item out from under a running
- *     drain. Both are picked up by the drain regardless.
+ *   • a SETTLED status — `completed`, `skipped` or `failed` — OR no status at all.
+ *     `pending` is already queued and `classifying` is in flight behind a live
+ *     lease; touching either would either be a no-op or would yank an item out
+ *     from under a running drain. Both are picked up by the drain regardless.
  *
- * `classificationStatus: null` is deliberately excluded too: it means the feature
- * does not apply to this row (a non-RSS source, or a row from before the column
- * existed), and ingestion is what opens those.
+ * `classificationStatus: null` on an ENABLED RSS SOURCE is the one that has to be
+ * included, and it is the whole reason this list is not just the settled three.
+ * The classification columns were added nullable and unbackfilled
+ * (20260817140000_add_feed_item_classification), so every article ingested before
+ * that migration reads as `null` — not "the feature does not apply", simply "never
+ * asked". Such a row is invisible to the drain too (`classificationSelectableWhere`
+ * selects pending/failed/expired-classifying only), so the ONLY thing that ever
+ * opened it was a re-ingest of its own URL — which can only happen while the
+ * article is still inside the feed's window. An article that has since scrolled out
+ * of the feed was therefore unreachable by every path in the system: permanently
+ * "Unclassified", and the Reclassify button could not touch it.
+ *
+ * A non-RSS row is still left alone — that is what `source.type` above is for, and
+ * it is the real expression of "the feature does not apply here".
  */
 const RECLASSIFIABLE_STATUSES = ["completed", "skipped", "failed"] as const;
 
@@ -49,7 +60,12 @@ export function reclassifiableWhere(companyId: string): Record<string, unknown> 
     companyId,
     usedInPost: false,
     source: { enabled: true, type: "rss" },
-    classificationStatus: { in: [...RECLASSIFIABLE_STATUSES] },
+    // An OR rather than `in: [..., null]`: Prisma's `in` matches values, never
+    // NULL, so a null status has to be named as its own alternative.
+    OR: [
+      { classificationStatus: { in: [...RECLASSIFIABLE_STATUSES] } },
+      { classificationStatus: null },
+    ],
   };
 }
 
@@ -66,18 +82,27 @@ export interface ReclassifyDeps {
   enqueue?: () => Promise<EnqueueJobResult>;
 }
 
+/**
+ * What a reopen WRITES, exported for the same reason the predicate above is: the
+ * attempt reset is load-bearing and invisible.
+ *
+ * Without `classificationAttemptCount: 0` a row that spent its three attempts
+ * against the old configuration would come back `pending` and then be refused by
+ * the drain's own `attemptCount < MAX` filter — reopened on paper, unreachable in
+ * fact. The verdict columns are deliberately NOT cleared: the old answer stays
+ * visible in the UI until a new one replaces it.
+ */
+export const RECLASSIFY_REOPEN_DATA = {
+  classificationStatus: "pending",
+  classificationAttemptCount: 0,
+  classificationError: null,
+  classificationLeaseExpiresAt: null,
+} as const;
+
 async function defaultReopen(companyId: string): Promise<number> {
   const result = await prisma.feedItem.updateMany({
     where: reclassifiableWhere(companyId),
-    data: {
-      classificationStatus: "pending",
-      // A fresh question deserves a fresh budget — otherwise an item that
-      // exhausted its retries against the old configuration could never be
-      // judged against the new one.
-      classificationAttemptCount: 0,
-      classificationError: null,
-      classificationLeaseExpiresAt: null,
-    },
+    data: { ...RECLASSIFY_REOPEN_DATA },
   });
   return result.count;
 }

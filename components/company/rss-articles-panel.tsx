@@ -11,6 +11,7 @@ import type {
 import {
   FEED_ITEM_CLASSIFICATION_FILTERS,
   classificationStateOf,
+  isDiagnosticFilter,
   type FeedItemClassificationFilter,
   type FeedItemClassificationState,
 } from "@/lib/posts/feed-item-classification-filter";
@@ -79,6 +80,11 @@ function TranslationBadge({ item }: { item: FeedItemRow }) {
  * `failed` and `pending` have their own labels and are NEVER shown as rejected:
  * "we could not ask" and "the company does not want this" are opposite claims,
  * and conflating them would make an outage look like an editorial decision.
+ *
+ * `used` is here for the mirror-image reason. A consumed article is never
+ * reclassified, so a status of `pending` frozen on the day it was written from
+ * would otherwise render as "awaiting review" for the rest of time — a queue
+ * position in a queue it has left.
  */
 const CLASSIFICATION_STYLES: Record<FeedItemClassificationState, string> = {
   high: "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
@@ -86,6 +92,7 @@ const CLASSIFICATION_STYLES: Record<FeedItemClassificationState, string> = {
   rejected: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
   pending: "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   failed: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
+  used: "bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400",
   skipped: "bg-surface-subtle text-fg-faint",
   unclassified: "bg-surface-subtle text-fg-faint",
 };
@@ -106,10 +113,14 @@ function ClassificationBadge({ item }: { item: FeedItemRow }) {
         ? t("rejectedOutOfScope")
         : t(state);
 
+  // A used article's tooltip explains the absence of a verdict; every other
+  // state's explains the verdict itself.
+  const title = state === "used" ? t("usedHint") : (item.classificationReason ?? undefined);
+
   return (
     <span
       className={`text-micro rounded px-1.5 py-0.5 font-medium ${CLASSIFICATION_STYLES[state]}`}
-      title={item.classificationReason ?? undefined}
+      title={title}
     >
       {label}
     </span>
@@ -132,7 +143,14 @@ function ArticleRow({ slug, sourceId, item, canManage, onToggle }: ArticleRowPro
   // The verdict's evidence is opened per row, never listed: a reason on every
   // line would bury the titles the list exists to show.
   const [showWhy, setShowWhy] = useState(false);
-  const hasWhy = item.classificationReason !== null || item.classificationMatchedTopics.length > 0;
+  const state = classificationStateOf(item);
+  // A failure has no reason and no matched topics, so without its error there
+  // would be nothing behind the toggle — and that is exactly the row an owner
+  // most wants to open.
+  const hasWhy =
+    item.classificationReason !== null ||
+    item.classificationMatchedTopics.length > 0 ||
+    (state === "failed" && item.classificationError !== null);
 
   async function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     const next = e.target.checked;
@@ -234,8 +252,13 @@ function ArticleRow({ slug, sourceId, item, canManage, onToggle }: ArticleRowPro
               <p>{tc("matchedTopics", { topics: item.classificationMatchedTopics.join(", ") })}</p>
             )}
             {item.classificationReason && <p className="mt-0.5">{item.classificationReason}</p>}
-            {classificationStateOf(item) === "failed" && item.classificationStatus === "failed" && (
-              <p className="mt-0.5">{tc("failedHint")}</p>
+            {state === "failed" && (
+              <>
+                {item.classificationError && (
+                  <p className="mt-0.5">{tc("failedError", { error: item.classificationError })}</p>
+                )}
+                <p className="mt-0.5">{tc("failedHint")}</p>
+              </>
             )}
           </div>
         )}
@@ -369,7 +392,9 @@ export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
               totals rather than the loaded page's. */}
           {counts !== null && (
             <div className="mb-3 flex flex-wrap items-center gap-1.5">
-              {FEED_ITEM_CLASSIFICATION_FILTERS.map((key) => (
+              {FEED_ITEM_CLASSIFICATION_FILTERS.filter(
+                (key) => !isDiagnosticFilter(key) || counts[key] > 0 || filter === key
+              ).map((key) => (
                 <button
                   key={key}
                   type="button"

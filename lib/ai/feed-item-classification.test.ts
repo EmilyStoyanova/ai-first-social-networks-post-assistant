@@ -160,6 +160,29 @@ describe("classificationSelectableWhere", () => {
   it("stops selecting an item once its attempt budget is spent", () => {
     assert.deepEqual(where.classificationAttemptCount, { lt: MAX_CLASSIFICATION_ATTEMPTS });
   });
+
+  /**
+   * REGRESSION — the boundary that produced the permanently "Unclassified" rows.
+   *
+   * A row with NO status is deliberately not drained: the classification columns
+   * shipped nullable and unbackfilled, so matching null here would silently spend
+   * a model call on every legacy article of every company at once, without anyone
+   * asking. Reopening those is `reclassifiableWhere`'s job — an explicit,
+   * per-company, operator-triggered action.
+   *
+   * The two predicates are only safe as a pair: whatever this one refuses to
+   * drain, that one must be able to reopen. Before the fix neither covered a null
+   * status, and such a row was unreachable by every path in the system.
+   */
+  it("never drains a row that has no classification status at all", () => {
+    const statuses = where.OR as Array<Record<string, unknown>>;
+    const matchesNull = statuses.some((s) => s.classificationStatus === null);
+    assert.equal(matchesNull, false);
+    for (const s of statuses) {
+      const list = (s.classificationStatus as { in?: unknown[] } | null)?.in;
+      if (Array.isArray(list)) assert.equal(list.includes(null), false);
+    }
+  });
 });
 
 describe("classificationFieldsForCreate / ForUpdate", () => {

@@ -14,7 +14,13 @@ const NOW = new Date("2026-01-15T10:00:00Z");
  */
 function makeFeedItemRow(
   enabled: boolean,
-  overrides: { url?: string; config?: unknown; classification?: string | null } = {}
+  overrides: {
+    url?: string;
+    config?: unknown;
+    classification?: string | null;
+    classificationError?: string | null;
+    usedInPost?: boolean;
+  } = {}
 ): {
   id: string;
   sourceId: string;
@@ -32,6 +38,8 @@ function makeFeedItemRow(
   classificationRejectionReason: string | null;
   classificationMatchedTopics: string[];
   classificationReason: string | null;
+  classificationError: string | null;
+  usedInPost: boolean;
   source: { config: unknown };
 } {
   return {
@@ -53,6 +61,8 @@ function makeFeedItemRow(
     classificationRejectionReason: "OUT_OF_SCOPE",
     classificationMatchedTopics: [],
     classificationReason: "Not about any configured topic.",
+    classificationError: overrides.classificationError ?? null,
+    usedInPost: overrides.usedInPost ?? false,
     source: { config: overrides.config ?? { url: "https://example.com/feed.xml" } },
   };
 }
@@ -62,7 +72,12 @@ function makeDb(opts: {
   membership?: { companyId: string; role: string } | null;
   feedItem?: { id: string } | null;
   updatedEnabled?: boolean;
-  row?: { url?: string; config?: unknown };
+  row?: {
+    url?: string;
+    config?: unknown;
+    classificationError?: string | null;
+    usedInPost?: boolean;
+  };
 }): ToggleFeedItemDb {
   const updatedEnabled = opts.updatedEnabled ?? true;
   return {
