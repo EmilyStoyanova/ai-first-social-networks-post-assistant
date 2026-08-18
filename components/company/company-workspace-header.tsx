@@ -3,6 +3,7 @@ import Link from "next/link";
 import { getTranslations } from "next-intl/server";
 import {
   Activity,
+  CalendarDays,
   FileText,
   Image as ImageIcon,
   LayoutGrid,
@@ -38,12 +39,17 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
   // chip on Posts shows the same count.
   const pendingApprovals = await countPendingApprovals(company.id);
 
-  // Six tabs (§9.1). Team is not one of them — it is rare-touch configuration
-  // reached through the Settings sub-navigation, which Phase 4b built to hold
-  // it. Approvals is no longer one either: Phase 4c folded the queue into a
-  // Posts filter, so approving happens where the posts already are. Its count
-  // badge came with it, because the pull signal was the tab's real job and
-  // Principle 4 still needs somewhere to put it.
+  // Team is not a tab — it is rare-touch configuration reached through the
+  // Settings sub-navigation, which Phase 4b built to hold it. Approvals is not
+  // one either: Phase 4c folded the queue into a Posts filter, so approving
+  // happens where the posts already are. Its count badge came with it, because
+  // the pull signal was the tab's real job and Principle 4 still needs
+  // somewhere to put it.
+  //
+  // Channels is the seventh, and it is a place rather than a filter: Posts is
+  // the whole company's output as a grid, Channels is one network at a time,
+  // laid out on a calendar. Its own sub-navigation (Posts / Calendar /
+  // Analytics) is why it cannot be a control on the Posts tab.
   const tabs: WorkspaceTab[] = [
     { key: "overview", label: t("tabs.overview"), href: `/companies/${slug}`, icon: LayoutGrid },
     {
@@ -53,6 +59,12 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
       icon: FileText,
       count: pendingApprovals,
       countLabel: t("pendingApprovalsLabel", { count: pendingApprovals }),
+    },
+    {
+      key: "channels",
+      label: t("tabs.channels"),
+      href: `/companies/${slug}/channels`,
+      icon: CalendarDays,
     },
     { key: "media", label: t("tabs.media"), href: `/companies/${slug}/media`, icon: ImageIcon },
     { key: "sources", label: t("tabs.sources"), href: `/companies/${slug}/sources`, icon: Rss },

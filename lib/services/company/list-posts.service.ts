@@ -42,6 +42,17 @@ export interface PostItem {
    * as one.
    */
   manuallyScheduled: boolean;
+  /**
+   * When the post actually reached Buffer — stamped by `markPostSent` alongside
+   * the `sent_to_buffer` status. Null for everything that has not gone out.
+   *
+   * Distinct from `scheduledFor`, which is when a post is DUE: a post published
+   * on demand from its card has a `publishedAt` and no `scheduledFor` at all,
+   * and one sent by the sweep is published a few minutes after the time it was
+   * scheduled for. The calendar draws a post at whichever of the two is real —
+   * see lib/calendar/calendar-entries.ts.
+   */
+  publishedAt: string | null;
   /** Where the post was written from — a content source, or Brand Setup. */
   origin: PostOriginView;
   /**
@@ -65,7 +76,15 @@ export interface PostItem {
 export type ListPostsResult =
   { success: true; posts: PostItem[] } | { success: false; code: "NOT_FOUND" };
 
-const SELECT = {
+/**
+ * The columns a `PostItem` is built from.
+ *
+ * Exported so the calendar's windowed read (list-calendar-posts.service.ts)
+ * produces the SAME shape from the same columns — the calendar hands its posts
+ * straight to `GeneratedPostCard`, which would break on anything narrower, and
+ * two hand-maintained selects would drift the first time a column was added.
+ */
+export const POST_ITEM_SELECT = {
   id: true,
   companyId: true,
   channel: true,
@@ -79,6 +98,7 @@ const SELECT = {
   approvedById: true,
   publishedPostUrl: true,
   scheduledFor: true,
+  publishedAt: true,
   manuallyScheduled: true,
   contentGroupId: true,
   createdAt: true,
@@ -123,7 +143,8 @@ export function resolveSourceImageUrl(
   return primaryFeedItem.sourceImageUrl;
 }
 
-function toItem(r: {
+/** A row as `POST_ITEM_SELECT` returns it. */
+export interface PostItemRow {
   id: string;
   companyId: string;
   channel: string;
@@ -150,10 +171,14 @@ function toItem(r: {
     source: { name: string; type: string };
   } | null;
   scheduledFor: Date | null;
+  publishedAt: Date | null;
   manuallyScheduled: boolean;
   contentGroupId: string | null;
   createdAt: Date;
-}): PostItem {
+}
+
+/** One row as the client sees it. Exported for the same reason the select is. */
+export function toPostItem(r: PostItemRow): PostItem {
   const sourceImageUrl = resolveSourceImageUrl(r.primaryFeedItem);
   return {
     id: r.id,
@@ -177,6 +202,7 @@ function toItem(r: {
     previousMediaUrl: r.previousMediaAsset?.url ?? null,
     origin: resolvePostOrigin(r, r.primaryFeedItem),
     scheduledFor: r.scheduledFor?.toISOString() ?? null,
+    publishedAt: r.publishedAt?.toISOString() ?? null,
     manuallyScheduled: r.manuallyScheduled,
     contentGroupId: r.contentGroupId,
     createdAt: r.createdAt.toISOString(),
@@ -210,8 +236,8 @@ export async function listPosts(
       ...(statusFilter ? { status: statusFilter as never } : {}),
     },
     orderBy: { createdAt: "desc" },
-    select: SELECT,
+    select: POST_ITEM_SELECT,
   });
 
-  return { success: true, posts: rows.map(toItem) };
+  return { success: true, posts: rows.map(toPostItem) };
 }

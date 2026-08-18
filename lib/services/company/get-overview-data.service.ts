@@ -305,6 +305,9 @@ export async function getOverviewData(
       previousMediaUrl: null,
       origin: resolvePostOrigin(r, r.primaryFeedItem),
       scheduledFor: r.scheduledFor?.toISOString() ?? null,
+      // Always null here: this list is `pending_approval` + `approved` only, and
+      // neither has reached Buffer, so neither can carry a publish instant.
+      publishedAt: null,
       manuallyScheduled: r.manuallyScheduled,
       // Carried through truthfully even though this list never groups: the
       // upcoming panel shows what is scheduled, and a topic's three channel

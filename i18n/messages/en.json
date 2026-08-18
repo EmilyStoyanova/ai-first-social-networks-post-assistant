@@ -224,7 +224,8 @@
       "sources": "Sources",
       "team": "Team",
       "settings": "Brand Setup",
-      "activity": "Activity"
+      "activity": "Activity",
+      "channels": "Channels"
     },
     "pendingApprovalsLabel": "{count, plural, one {# post awaiting approval} other {# posts awaiting approval}}",
     "setupHint": "Start here — fill in your brand identity, then connect Buffer and configure your channels. The AI uses this information when generating posts.",
@@ -1082,5 +1083,51 @@
     },
     "savingAndSyncing": "Saving and syncing…",
     "syncFailedAfterSave": "The key was saved, but metrics could not be synced yet. The next automatic refresh will try again."
+  },
+  "planner": {
+    "title": "Channels",
+    "tabs": {
+      "posts": "Posts",
+      "calendar": "Calendar",
+      "analytics": "Analytics"
+    },
+    "scope": {
+      "label": "Channel",
+      "all": "All Channels"
+    },
+    "noChannels": {
+      "title": "No channels connected yet",
+      "description": "Connect Buffer and enable a channel in Brand Setup to start planning posts here."
+    },
+    "posts": {
+      "emptyTitle": "No posts for this channel",
+      "emptyDesc": "Posts generated for this channel show up here.",
+      "noMatchesTitle": "No posts with this status",
+      "noMatchesDesc": "Select All posts to see the rest."
+    },
+    "calendar": {
+      "previous": "Previous",
+      "next": "Next",
+      "today": "Today",
+      "periodLabel": "Shown period",
+      "viewLabel": "Calendar view",
+      "week": "Week",
+      "month": "Month",
+      "filterLabel": "Filter by status",
+      "filters": {
+        "all": "All posts",
+        "drafts": "Drafts",
+        "scheduled": "Scheduled",
+        "published": "Published"
+      },
+      "emptyTitle": "Nothing planned for this period",
+      "emptyDesc": "Posts appear on the day they are scheduled for, or the day they went out.",
+      "moreOnDay": "{count, plural, one {# more} other {# more}}",
+      "postDetail": "Post details",
+      "timeZoneNote": "All times are in {zone}."
+    },
+    "analytics": {
+      "comingSoon": "Analytics will be available soon."
+    }
   }
 }
