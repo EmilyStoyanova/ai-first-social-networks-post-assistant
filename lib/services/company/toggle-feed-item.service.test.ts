@@ -38,6 +38,8 @@ function makeFeedItemRow(
   classificationRejectionReason: string | null;
   classificationMatchedTopics: string[];
   classificationReason: string | null;
+  classificationMainSubject: string | null;
+  classificationPrimaryTopic: string | null;
   classificationError: string | null;
   usedInPost: boolean;
   source: { config: unknown };
@@ -61,6 +63,8 @@ function makeFeedItemRow(
     classificationRejectionReason: "OUT_OF_SCOPE",
     classificationMatchedTopics: [],
     classificationReason: "Not about any configured topic.",
+    classificationMainSubject: "Бързорастящи дървета.",
+    classificationPrimaryTopic: null,
     classificationError: overrides.classificationError ?? null,
     usedInPost: overrides.usedInPost ?? false,
     source: { config: overrides.config ?? { url: "https://example.com/feed.xml" } },

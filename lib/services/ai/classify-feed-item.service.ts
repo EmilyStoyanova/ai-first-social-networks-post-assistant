@@ -9,6 +9,7 @@ import {
   classifyInput,
   ClassificationParseError,
   computeClassificationHash,
+  hasCompanyContext,
   parseClassificationResponse,
   CLASSIFICATION_ATTEMPT_TIMEOUT_MS,
   CLASSIFICATION_ITEM_TIMEOUT_MS,
@@ -18,9 +19,9 @@ import {
   MAX_CLASSIFICATION_OUTPUT_TOKENS,
   MAX_CLASSIFICATION_REPAIR_ATTEMPTS,
   type ClassifiableText,
+  type ClassificationContext,
   type ClassificationOutcome,
 } from "@/lib/ai/feed-item-classification";
-import type { TopicPriorities } from "@/lib/ai/topic-priorities";
 import { resolveLlmSelection } from "./resolve-llm-selection.service";
 import {
   buildSupportedProvider,
@@ -177,12 +178,13 @@ async function defaultResolveProvider(): Promise<
 
 export async function classifyFeedItem(
   item: ClassifiableItem,
-  priorities: TopicPriorities,
+  context: ClassificationContext,
   deps: ClassifyFeedItemDeps = {}
 ): Promise<ClassifyFeedItemOutcome> {
   const db = deps.db ?? prisma;
   const now = deps.now ?? (() => new Date());
   const resolveProvider = deps.resolveProvider ?? defaultResolveProvider;
+  const { priorities } = context;
 
   // The single resolver every other step reads through: a completed translation
   // is what gets judged, so a Bulgarian topic list is compared against Bulgarian
@@ -206,7 +208,11 @@ export async function classifyFeedItem(
         classificationRejectionReason: null,
         classificationMatchedTopics: [],
         classificationReason: null,
-        classificationHash: computeClassificationHash(text, priorities),
+        // Cleared with the rest of the verdict: a settled non-answer has no
+        // subject and no deciding topic, and a stale one read as if it did.
+        classificationMainSubject: null,
+        classificationPrimaryTopic: null,
+        classificationHash: computeClassificationHash(text, context),
         classificationError: null,
         classifiedAt: now(),
         classificationLeaseExpiresAt: null,
@@ -226,7 +232,11 @@ export async function classifyFeedItem(
         classificationRejectionReason: null,
         classificationMatchedTopics: [],
         classificationReason: null,
-        classificationHash: computeClassificationHash(text, priorities),
+        // Cleared with the rest of the verdict: a settled non-answer has no
+        // subject and no deciding topic, and a stale one read as if it did.
+        classificationMainSubject: null,
+        classificationPrimaryTopic: null,
+        classificationHash: computeClassificationHash(text, context),
         classificationError: "The article has no readable title or body to classify.",
         classifiedAt: now(),
         classificationLeaseExpiresAt: null,
@@ -235,7 +245,7 @@ export async function classifyFeedItem(
     return { status: "skipped", reason: "no_content" };
   }
 
-  const hash = computeClassificationHash(text, priorities);
+  const hash = computeClassificationHash(text, context);
 
   // Neither the article nor the configuration has changed since the stored
   // verdict. Settle the row back to `completed` WITHOUT a model call — this is
@@ -291,7 +301,7 @@ export async function classifyFeedItem(
   if (claim.count === 0) return { status: "skipped", reason: "claimed" };
 
   const systemPrompt = buildClassificationSystemPrompt(mode);
-  const userPrompt = buildClassificationUserPrompt({ text, priorities, inputKind });
+  const userPrompt = buildClassificationUserPrompt({ text, context, inputKind });
 
   // Diagnostics carry sizes and counts, never the article body or the topic lists.
   const diag = {
@@ -301,6 +311,9 @@ export async function classifyFeedItem(
     inputKind,
     usedTranslation: resolved.usedTranslation,
     bodyLength: (text.body ?? "").length,
+    // Whether the prompt carried brand copy — never the copy itself. Enough to
+    // tell "this company's verdicts were made blind" from "they were not".
+    withCompanyContext: hasCompanyContext(context),
     attempt,
   };
   const startedAtMs = now().getTime();
@@ -374,6 +387,8 @@ export async function classifyFeedItem(
         classificationRejectionReason: outcome.rejectionReason,
         classificationMatchedTopics: outcome.matchedTopics,
         classificationReason: outcome.reason,
+        classificationMainSubject: outcome.mainSubject,
+        classificationPrimaryTopic: outcome.primaryTopic,
         classificationStatus: "completed",
         classificationHash: hash,
         classificationError: null,
@@ -390,6 +405,9 @@ export async function classifyFeedItem(
       elapsedMs: now().getTime() - startedAtMs,
       classification: outcome.classification,
       rejectionReason: outcome.rejectionReason,
+      // The topic the verdict rests on, which is the one thing worth reading in
+      // this line when a HIGH looks wrong. The article's own text stays out.
+      primaryTopic: outcome.primaryTopic,
       matchedCount: outcome.matchedTopics.length,
       modelCalls: calls,
       provider: provider.provider,

@@ -41,6 +41,16 @@ export interface FeedItemRow {
   classificationMatchedTopics: string[];
   /** One capped sentence of evidence. Shown on demand, never in the row itself. */
   classificationReason: string | null;
+  /**
+   * What the classifier judged the article to be about, in its own words. Null for
+   * a row classified before the field existed, and for every settled non-answer.
+   */
+  classificationMainSubject: string | null;
+  /**
+   * The single configured topic the verdict rests on. Null for OUT_OF_SCOPE. Shown
+   * beside the subject so an operator can see WHICH topic produced a HIGH.
+   */
+  classificationPrimaryTopic: string | null;
   /** Why the last attempt broke. Only ever set alongside a `failed` status. */
   classificationError: string | null;
   /**
@@ -227,6 +237,8 @@ export async function listFeedItems(
         classificationRejectionReason: true,
         classificationMatchedTopics: true,
         classificationReason: true,
+        classificationMainSubject: true,
+        classificationPrimaryTopic: true,
         classificationError: true,
         usedInPost: true,
       },
@@ -257,6 +269,8 @@ export async function listFeedItems(
       classificationRejectionReason: r.classificationRejectionReason,
       classificationMatchedTopics: r.classificationMatchedTopics,
       classificationReason: r.classificationReason,
+      classificationMainSubject: r.classificationMainSubject,
+      classificationPrimaryTopic: r.classificationPrimaryTopic,
       // Summarised here rather than in the browser so a provider's raw response
       // body never reaches the client at all.
       classificationError: summarizeClassificationError(r.classificationError),

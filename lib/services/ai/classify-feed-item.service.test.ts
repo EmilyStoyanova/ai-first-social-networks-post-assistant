@@ -5,17 +5,39 @@ import {
   type ClassifiableItem,
   type ClassifyFeedItemDeps,
 } from "./classify-feed-item.service";
-import { computeClassificationHash } from "@/lib/ai/feed-item-classification";
-import { resolveTopicPriorities, type TopicPriorities } from "@/lib/ai/topic-priorities";
+import {
+  computeClassificationHash,
+  type ClassificationContext,
+} from "@/lib/ai/feed-item-classification";
+import { resolveTopicPriorities } from "@/lib/ai/topic-priorities";
 
 const NOW = new Date("2026-08-17T12:00:00Z");
 
-const SCOPED: TopicPriorities = resolveTopicPriorities({
-  topPriorityTopics: ["бои"],
-  mediumPriorityTopics: ["вентилация"],
-  avoidedTopics: ["камини"],
-});
-const NONE: TopicPriorities = resolveTopicPriorities(null);
+/** Topics only, no brand copy — the neutral context most of these tests want. */
+const SCOPED: ClassificationContext = {
+  priorities: resolveTopicPriorities({
+    topPriorityTopics: ["бои"],
+    mediumPriorityTopics: ["вентилация"],
+    avoidedTopics: ["камини"],
+  }),
+  companyDescription: null,
+  targetAudience: null,
+};
+const NONE: ClassificationContext = {
+  priorities: resolveTopicPriorities(null),
+  companyDescription: null,
+  targetAudience: null,
+};
+
+const DESCRIPTION = "Доместико продава бои, бойлери и смесители за банята.";
+const AUDIENCE = "Собственици на жилища, които ремонтират сами.";
+
+/** The same topics, with the brand copy filled in. */
+const SCOPED_WITH_CONTEXT: ClassificationContext = {
+  ...SCOPED,
+  companyDescription: DESCRIPTION,
+  targetAudience: AUDIENCE,
+};
 
 function item(overrides: Partial<ClassifiableItem> = {}): ClassifiableItem {
   return {
@@ -93,6 +115,8 @@ function makeDeps(opts: {
 }
 
 const okReply = JSON.stringify({
+  mainSubject: "Избор на латекс за стени.",
+  primaryTopic: "бои",
   classification: "HIGH",
   rejectionReason: null,
   matchedTopics: ["бои"],
@@ -299,5 +323,122 @@ describe("classifyFeedItem — a successful run", () => {
 
     assert.match(rec.prompts[0], /Български текст за бои/);
     assert.equal(rec.prompts[0].includes("English body."), false);
+  });
+});
+
+// ─── Company context ──────────────────────────────────────────────────────────
+
+describe("classifyFeedItem — company context", () => {
+  it("puts the brand copy in the prompt, ahead of the topics", async () => {
+    const { deps, rec } = makeDeps({ replies: [okReply] });
+    await classifyFeedItem(item(), SCOPED_WITH_CONTEXT, deps);
+
+    const prompt = rec.prompts[0];
+    assert.ok(prompt.includes(DESCRIPTION));
+    assert.ok(prompt.includes(AUDIENCE));
+    assert.ok(prompt.indexOf("## The company") < prompt.indexOf("## The company's topics"));
+  });
+
+  it("sends no company section when the brand copy is blank", async () => {
+    const { deps, rec } = makeDeps({ replies: [okReply] });
+    await classifyFeedItem(item(), SCOPED, deps);
+
+    assert.ok(!rec.prompts[0].includes("## The company\n"));
+  });
+
+  /**
+   * The two halves of the backwards-compatibility contract, from the caller's
+   * side: adding brand copy makes a stored verdict stale, and NOT having any
+   * leaves the hash exactly where it was.
+   */
+  it("changes the stored hash when the brand copy changes", async () => {
+    const { deps, rec } = makeDeps({ replies: [okReply] });
+    await classifyFeedItem(item(), SCOPED_WITH_CONTEXT, deps);
+    const withCopy = rec.updateManys[1].data.classificationHash;
+
+    const second = makeDeps({ replies: [okReply] });
+    await classifyFeedItem(item(), SCOPED, second.deps);
+    const withoutCopy = second.rec.updateManys[1].data.classificationHash;
+
+    assert.notEqual(withCopy, withoutCopy);
+  });
+
+  it("settles as unchanged against a hash computed without brand copy", async () => {
+    // A company that has never written a description must not have every stored
+    // verdict invalidated by this feature shipping.
+    const text = { title: "Как да изберем латекс", body: "Дълъг текст за боядисване на стени." };
+    const { deps, rec } = makeDeps({ replies: [okReply] });
+    const out = await classifyFeedItem(
+      item({
+        classificationHash: computeClassificationHash(text, SCOPED),
+        classificationStatus: "completed",
+      }),
+      SCOPED,
+      deps
+    );
+
+    assert.deepEqual(out, { status: "skipped", reason: "unchanged" });
+    assert.equal(rec.prompts.length, 0, "no model call for an unchanged item");
+  });
+});
+
+describe("classifyFeedItem — the diagnostic columns", () => {
+  it("stores the main subject and the deciding topic alongside the verdict", async () => {
+    const { deps, rec } = makeDeps({ replies: [okReply] });
+    const out = await classifyFeedItem(item(), SCOPED, deps);
+
+    assert.equal(out.status, "classified");
+    const write = rec.updateManys[1].data;
+    assert.equal(write.classification, "HIGH");
+    assert.equal(write.classificationMainSubject, "Избор на латекс за стени.");
+    assert.equal(write.classificationPrimaryTopic, "бои");
+  });
+
+  it("clears them on a settled non-answer, so no stale subject survives", async () => {
+    const { deps, rec } = makeDeps({});
+    await classifyFeedItem(item(), NONE, deps);
+
+    assert.equal(rec.updates[0].data.classificationMainSubject, null);
+    assert.equal(rec.updates[0].data.classificationPrimaryTopic, null);
+  });
+
+  it("leaves them untouched on a failure — a failure is not a verdict", async () => {
+    const { deps, rec } = makeDeps({ throwOnGenerate: new Error("connection reset") });
+    await classifyFeedItem(item(), SCOPED, deps);
+
+    const write = rec.updateManys[1].data;
+    assert.equal(write.classificationStatus, "failed");
+    assert.ok(!("classificationMainSubject" in write));
+    assert.ok(!("classificationPrimaryTopic" in write));
+  });
+
+  it("repairs a reply whose primary topic contradicts its label", async () => {
+    // Mainly about ventilation, returned as HIGH. The repair call is told exactly
+    // that, and the corrected reply is what gets stored.
+    const promoted = JSON.stringify({
+      mainSubject: "Монтаж на вентилатор за таван.",
+      primaryTopic: "вентилация",
+      classification: "HIGH",
+      rejectionReason: null,
+      matchedTopics: ["вентилация", "бои"],
+      reason: "x",
+    });
+    const corrected = JSON.stringify({
+      mainSubject: "Монтаж на вентилатор за таван.",
+      primaryTopic: "вентилация",
+      classification: "MEDIUM",
+      rejectionReason: null,
+      matchedTopics: ["вентилация", "бои"],
+      reason: "x",
+    });
+
+    const { deps, rec } = makeDeps({ replies: [promoted, corrected] });
+    const out = await classifyFeedItem(item(), SCOPED, deps);
+
+    assert.equal(out.status, "classified");
+    assert.equal(rec.prompts.length, 2, "the bad reply must be repaired, not stored");
+    assert.match(rec.prompts[1], /MAINLY about/);
+    assert.equal(rec.updateManys[1].data.classification, "MEDIUM");
+    assert.equal(rec.updateManys[1].data.classificationPrimaryTopic, "вентилация");
   });
 });

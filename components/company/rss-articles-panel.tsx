@@ -149,6 +149,8 @@ function ArticleRow({ slug, sourceId, item, canManage, onToggle }: ArticleRowPro
   // most wants to open.
   const hasWhy =
     item.classificationReason !== null ||
+    item.classificationMainSubject !== null ||
+    item.classificationPrimaryTopic !== null ||
     item.classificationMatchedTopics.length > 0 ||
     (state === "failed" && item.classificationError !== null);
 
@@ -248,8 +250,21 @@ function ArticleRow({ slug, sourceId, item, canManage, onToggle }: ArticleRowPro
         )}
         {showWhy && (
           <div className="text-fg-muted mt-1 text-xs leading-relaxed">
+            {/* Subject first, then the topic the verdict rests on. Read together
+                they say whether a wrong call misread the article or misapplied
+                the topics — two different fixes, and the reason both are here. */}
+            {item.classificationMainSubject && (
+              <p>{tc("mainSubject", { subject: item.classificationMainSubject })}</p>
+            )}
+            {item.classificationPrimaryTopic && (
+              <p className="mt-0.5">
+                {tc("primaryTopic", { topic: item.classificationPrimaryTopic })}
+              </p>
+            )}
             {item.classificationMatchedTopics.length > 0 && (
-              <p>{tc("matchedTopics", { topics: item.classificationMatchedTopics.join(", ") })}</p>
+              <p className="mt-0.5">
+                {tc("matchedTopics", { topics: item.classificationMatchedTopics.join(", ") })}
+              </p>
             )}
             {item.classificationReason && <p className="mt-0.5">{item.classificationReason}</p>}
             {state === "failed" && (

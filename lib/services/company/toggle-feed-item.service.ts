@@ -48,6 +48,8 @@ export interface ToggleFeedItemDb {
         classificationRejectionReason: true;
         classificationMatchedTopics: true;
         classificationReason: true;
+        classificationMainSubject: true;
+        classificationPrimaryTopic: true;
         classificationError: true;
         // Never written here either — a person including or excluding an article
         // does not un-consume it.
@@ -74,6 +76,8 @@ export interface ToggleFeedItemDb {
       classificationRejectionReason: string | null;
       classificationMatchedTopics: string[];
       classificationReason: string | null;
+      classificationMainSubject: string | null;
+      classificationPrimaryTopic: string | null;
       classificationError: string | null;
       usedInPost: boolean;
       source: { config: unknown };
@@ -138,6 +142,8 @@ export async function toggleFeedItemCore(
       classificationRejectionReason: true,
       classificationMatchedTopics: true,
       classificationReason: true,
+      classificationMainSubject: true,
+      classificationPrimaryTopic: true,
       classificationError: true,
       usedInPost: true,
       source: { select: { config: true } },
@@ -164,6 +170,8 @@ export async function toggleFeedItemCore(
       classificationRejectionReason: row.classificationRejectionReason,
       classificationMatchedTopics: row.classificationMatchedTopics,
       classificationReason: row.classificationReason,
+      classificationMainSubject: row.classificationMainSubject,
+      classificationPrimaryTopic: row.classificationPrimaryTopic,
       // Summarised exactly as listFeedItems does, so a row does not change shape
       // when it is toggled.
       classificationError: summarizeClassificationError(row.classificationError),

@@ -564,6 +564,8 @@
       "showWhy": "Защо този приоритет?",
       "hideWhy": "Скрий",
       "matchedTopics": "Съвпадащи теми: {topics}",
+      "mainSubject": "Статията е за: {subject}",
+      "primaryTopic": "Решаваща тема: {topic}",
       "failedError": "Последна грешка: {error}",
       "failedHint": "Класификаторът не отговори. Статията НЕ е отхвърлена — ще бъде опитана отново.",
       "noneMatchFilter": "Няма статии за този филтър.",

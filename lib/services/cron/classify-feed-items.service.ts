@@ -4,9 +4,9 @@ import {
   CLASSIFICATION_BATCH_SIZE,
   CLASSIFICATION_ITEM_TIMEOUT_MS,
   MIN_CLASSIFICATION_ITEM_BUDGET_MS,
+  type ClassificationContext,
 } from "@/lib/ai/feed-item-classification";
 import { resolveTopicPriorities, hasTopicPriorities } from "@/lib/ai/topic-priorities";
-import type { TopicPriorities } from "@/lib/ai/topic-priorities";
 import {
   classifyFeedItem,
   type ClassifiableItem,
@@ -39,7 +39,7 @@ export interface ClassifyFeedItemsSummary {
 
 export interface ClassifyFeedItemsDeps {
   findCandidates?: (companyId: string, limit: number) => Promise<ClassifiableItem[]>;
-  loadPriorities?: (companyId: string) => Promise<TopicPriorities>;
+  loadContext?: (companyId: string) => Promise<ClassificationContext>;
   classify?: typeof classifyFeedItem;
 }
 
@@ -104,12 +104,32 @@ async function defaultFindCandidates(
   });
 }
 
-async function defaultLoadPriorities(companyId: string): Promise<TopicPriorities> {
+/**
+ * Everything the run judges articles against, in ONE query: the topic lists and
+ * the two lines of brand copy that say what those topics mean for this business.
+ *
+ * Read once per run, not per item — the configuration cannot change mid-batch, and
+ * a per-item read would multiply the cheapest part of the step by fifteen.
+ */
+async function defaultLoadContext(companyId: string): Promise<ClassificationContext> {
   const brand = await prisma.brandGuidelines.findUnique({
     where: { companyId },
-    select: { topPriorityTopics: true, mediumPriorityTopics: true, avoidedTopics: true },
+    select: {
+      topPriorityTopics: true,
+      mediumPriorityTopics: true,
+      avoidedTopics: true,
+      companyDescription: true,
+      targetAudience: true,
+    },
   });
-  return resolveTopicPriorities(brand);
+  return {
+    priorities: resolveTopicPriorities(brand),
+    // A company with no brand row at all reads as no context, which is the
+    // neutral case: the prompt and the hash are exactly what they were before
+    // company context existed.
+    companyDescription: brand?.companyDescription ?? null,
+    targetAudience: brand?.targetAudience ?? null,
+  };
 }
 
 export interface ClassifyFeedItemsOptions {
@@ -131,7 +151,7 @@ export async function classifyFeedItems(
 ): Promise<ClassifyFeedItemsSummary> {
   const limit = opts.limit ?? CLASSIFICATION_BATCH_SIZE;
   const findCandidates = deps.findCandidates ?? defaultFindCandidates;
-  const loadPriorities = deps.loadPriorities ?? defaultLoadPriorities;
+  const loadContext = deps.loadContext ?? defaultLoadContext;
   const classify = deps.classify ?? classifyFeedItem;
 
   const summary: ClassifyFeedItemsSummary = { scanned: 0, classified: 0, failed: 0, skipped: 0 };
@@ -139,8 +159,10 @@ export async function classifyFeedItems(
   const candidates = await findCandidates(opts.companyId, limit);
   if (candidates.length === 0) return summary;
 
-  const priorities = await loadPriorities(opts.companyId);
-  const configured = hasTopicPriorities(priorities);
+  const context = await loadContext(opts.companyId);
+  // Still decided by the TOPICS alone. Brand copy is not a rule — a company that
+  // has written a description but configured no topics has configured nothing.
+  const configured = hasTopicPriorities(context.priorities);
 
   for (const item of candidates) {
     if (opts.shouldStop?.()) break;
@@ -160,7 +182,7 @@ export async function classifyFeedItems(
     }
 
     summary.scanned += 1;
-    tally(await classify(item, priorities));
+    tally(await classify(item, context));
   }
 
   return summary;
@@ -168,7 +190,7 @@ export async function classifyFeedItems(
   function run(item: ClassifiableItem, remaining: number | undefined) {
     return classify(
       item,
-      priorities,
+      context,
       remaining === undefined
         ? undefined
         : { itemTimeoutMs: Math.min(CLASSIFICATION_ITEM_TIMEOUT_MS, remaining) }

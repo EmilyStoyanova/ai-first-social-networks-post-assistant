@@ -3,20 +3,25 @@ import assert from "node:assert/strict";
 import {
   MAX_CLASSIFICATION_ATTEMPTS,
   MAX_CLASSIFICATION_CONTENT_CHARS,
+  MAX_COMPANY_CONTEXT_CHARS,
   MAX_STORED_MATCHED_TOPICS,
   MAX_STORED_REASON_CHARS,
   buildClassificationRepairPrompt,
   buildClassificationSystemPrompt,
+  buildClassificationUserPrompt,
   classificationExcerpt,
   classificationFieldsForCreate,
   classificationFieldsForUpdate,
   classificationMode,
   classificationSelectableWhere,
   classifyInput,
+  companyContextFingerprint,
   computeClassificationHash,
+  hasCompanyContext,
   isClassifiableSourceType,
   parseClassificationResponse,
   topicsFingerprint,
+  type ClassificationContext,
 } from "./feed-item-classification";
 import { resolveTopicPriorities, type TopicPriorities } from "./topic-priorities";
 
@@ -29,7 +34,36 @@ const SCOPED: TopicPriorities = resolveTopicPriorities({
 const BLACKLIST_ONLY: TopicPriorities = resolveTopicPriorities({ avoidedTopics: ["камини"] });
 const NONE: TopicPriorities = resolveTopicPriorities(null);
 
-const reply = (obj: unknown) => JSON.stringify(obj);
+/**
+ * A context with NO company copy — the neutral default, and the shape every test
+ * that is not about company context should use.
+ */
+const ctx = (
+  priorities: TopicPriorities,
+  company: { description?: string | null; audience?: string | null } = {}
+): ClassificationContext => ({
+  priorities,
+  companyDescription: company.description ?? null,
+  targetAudience: company.audience ?? null,
+});
+
+/**
+ * A model reply.
+ *
+ * `mainSubject` and `primaryTopic` are filled in with values that AGREE with the
+ * rest of the object — the first matched topic, or null for OUT_OF_SCOPE — so a
+ * test about (say) the rejection reason does not have to restate them. Pass either
+ * explicitly, including null, to test it directly: the spread puts the caller last.
+ */
+const reply = (obj: Record<string, unknown>) =>
+  JSON.stringify({
+    mainSubject: "Какво разглежда статията.",
+    primaryTopic:
+      obj.rejectionReason === "OUT_OF_SCOPE"
+        ? null
+        : ((obj.matchedTopics as string[] | undefined)?.[0] ?? null),
+    ...obj,
+  });
 
 describe("isClassifiableSourceType", () => {
   it("covers article feeds only", () => {
@@ -102,13 +136,16 @@ describe("computeClassificationHash", () => {
   const text = { title: "Латекс за детска стая", body: "Как да изберем." };
 
   it("is stable for the same text and configuration — the idempotency contract", () => {
-    assert.equal(computeClassificationHash(text, SCOPED), computeClassificationHash(text, SCOPED));
+    assert.equal(
+      computeClassificationHash(text, ctx(SCOPED)),
+      computeClassificationHash(text, ctx(SCOPED))
+    );
   });
 
   it("changes when the article text changes", () => {
     assert.notEqual(
-      computeClassificationHash(text, SCOPED),
-      computeClassificationHash({ ...text, body: "Друг текст." }, SCOPED)
+      computeClassificationHash(text, ctx(SCOPED)),
+      computeClassificationHash({ ...text, body: "Друг текст." }, ctx(SCOPED))
     );
   });
 
@@ -118,14 +155,17 @@ describe("computeClassificationHash", () => {
       mediumPriorityTopics: ["вентилация"],
       avoidedTopics: ["камини", "маси"],
     });
-    assert.notEqual(computeClassificationHash(text, SCOPED), computeClassificationHash(text, more));
+    assert.notEqual(
+      computeClassificationHash(text, ctx(SCOPED)),
+      computeClassificationHash(text, ctx(more))
+    );
   });
 
   it("ignores text beyond the cap — what is not sent cannot change the answer", () => {
     const body = "b".repeat(MAX_CLASSIFICATION_CONTENT_CHARS);
     assert.equal(
-      computeClassificationHash({ title: "t", body }, SCOPED),
-      computeClassificationHash({ title: "t", body: body + "ignored tail" }, SCOPED)
+      computeClassificationHash({ title: "t", body }, ctx(SCOPED)),
+      computeClassificationHash({ title: "t", body: body + "ignored tail" }, ctx(SCOPED))
     );
   });
 });
@@ -693,5 +733,461 @@ describe("buildClassificationSystemPrompt — the strictness rule", () => {
     assert.ok(!blacklistOnly.includes("Worked examples"));
     // OUT_OF_SCOPE survives only as the prohibition in the Verdicts section.
     assert.match(blacklistOnly, /do NOT use "OUT_OF_SCOPE"/);
+  });
+});
+
+// ─── The company context ──────────────────────────────────────────────────────
+//
+// The point of the context is to say what a bare topic word MEANS for this
+// business, so "бои" is not read as whatever the article happens to suggest. The
+// point of these tests is that it does nothing else — above all, that an empty
+// context is exactly as if the feature did not exist.
+
+const DESCRIPTION = "Доместико продава бои, бойлери и смесители за банята.";
+const AUDIENCE = "Собственици на жилища в България, които ремонтират сами.";
+
+describe("company context — the empty case is untouched", () => {
+  it("has no context when both fields are blank, missing, or whitespace", () => {
+    for (const company of [{}, { description: null, audience: null }, { description: "   " }]) {
+      assert.equal(hasCompanyContext(ctx(SCOPED, company)), false);
+    }
+  });
+
+  it("fingerprints to the empty string, so the hash is what it always was", () => {
+    assert.equal(companyContextFingerprint(ctx(SCOPED)), "");
+    assert.equal(companyContextFingerprint(ctx(SCOPED, { description: "  " })), "");
+  });
+
+  /**
+   * THE backwards-compatibility test. A company that has never written brand copy
+   * must keep the exact hash it had before this feature shipped — otherwise every
+   * stored verdict silently becomes stale and the next reopen re-spends a model
+   * call on all of them.
+   */
+  it("leaves the hash identical to a topics-only hash", () => {
+    const text = { title: "Латекс за детска стая", body: "Как да изберем." };
+    assert.equal(
+      computeClassificationHash(text, ctx(SCOPED)),
+      computeClassificationHash(text, ctx(SCOPED, { description: "", audience: "   " }))
+    );
+  });
+
+  it("omits the section from the prompt entirely", () => {
+    const prompt = buildClassificationUserPrompt({
+      text: { title: "t", body: "b" },
+      context: ctx(SCOPED),
+      inputKind: "full",
+    });
+    assert.ok(!prompt.includes("## The company\n"));
+    assert.ok(prompt.startsWith("## The company's topics"));
+  });
+
+  it("still applies the primaryTopic rules — they do not depend on the context", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "HIGH",
+        rejectionReason: null,
+        primaryTopic: "вентилация",
+        matchedTopics: ["вентилация", "бои"],
+        reason: "x",
+      }),
+      SCOPED
+    );
+    assert.equal(out.status, "invalid");
+  });
+});
+
+describe("company context — when it is configured", () => {
+  const full = ctx(SCOPED, { description: DESCRIPTION, audience: AUDIENCE });
+
+  it("is reported present and changes the hash", () => {
+    assert.equal(hasCompanyContext(full), true);
+    const text = { title: "t", body: "b" };
+    assert.notEqual(
+      computeClassificationHash(text, ctx(SCOPED)),
+      computeClassificationHash(text, full)
+    );
+  });
+
+  it("distinguishes the two fields — swapping them is a different context", () => {
+    const swapped = ctx(SCOPED, { description: AUDIENCE, audience: DESCRIPTION });
+    assert.notEqual(companyContextFingerprint(full), companyContextFingerprint(swapped));
+  });
+
+  it("renders both fields into the prompt, before the topics", () => {
+    const prompt = buildClassificationUserPrompt({
+      text: { title: "t", body: "b" },
+      context: full,
+      inputKind: "full",
+    });
+    assert.match(prompt, /## The company/);
+    assert.ok(prompt.includes(DESCRIPTION));
+    assert.ok(prompt.includes(`Audience: ${AUDIENCE}`));
+    assert.ok(prompt.indexOf("## The company") < prompt.indexOf("## The company's topics"));
+  });
+
+  it("renders only the field that has content", () => {
+    const prompt = buildClassificationUserPrompt({
+      text: { title: "t", body: "b" },
+      context: ctx(SCOPED, { description: DESCRIPTION }),
+      inputKind: "full",
+    });
+    assert.ok(prompt.includes(DESCRIPTION));
+    assert.ok(!prompt.includes("Audience:"));
+  });
+
+  /**
+   * The constraint that makes the whole section safe. Brand copy is written to
+   * sell the business, and a model handed one will read it as a licence to accept
+   * anything adjacent unless it is told — in as many words — that the copy is not
+   * a topic list. Asserted verbatim, because it is the sentence doing the work.
+   */
+  it("carries the sentence that stops the context from widening the scope", () => {
+    const prompt = buildClassificationUserPrompt({
+      text: { title: "t", body: "b" },
+      context: full,
+      inputKind: "full",
+    });
+    assert.ok(
+      prompt.includes(
+        "Company context only explains what the configured topics mean for this business. It MUST NOT create new eligible topics. If the article matches none of the configured topics, return OUT_OF_SCOPE even if it is generally relevant to the company's industry."
+      )
+    );
+  });
+
+  it("caps each field, so a pasted brochure cannot become a second topic list", () => {
+    const long = "я".repeat(MAX_COMPANY_CONTEXT_CHARS + 500);
+    const prompt = buildClassificationUserPrompt({
+      text: { title: "t", body: "b" },
+      context: ctx(SCOPED, { description: long, audience: long }),
+      inputKind: "full",
+    });
+    assert.ok(!prompt.includes("я".repeat(MAX_COMPANY_CONTEXT_CHARS + 1)));
+    assert.ok(prompt.includes("я".repeat(MAX_COMPANY_CONTEXT_CHARS)));
+  });
+
+  it("ignores text beyond the cap in the hash too", () => {
+    const text = { title: "t", body: "b" };
+    const at = "я".repeat(MAX_COMPANY_CONTEXT_CHARS);
+    assert.equal(
+      computeClassificationHash(text, ctx(SCOPED, { description: at })),
+      computeClassificationHash(text, ctx(SCOPED, { description: at + " и още текст" }))
+    );
+  });
+});
+
+// ─── primaryTopic: the topic that decides the verdict ─────────────────────────
+//
+// The regression these guard: HIGH and MEDIUM were separable only by "does the
+// reply cite ANY topic of that tier", which an article mainly about a medium
+// topic satisfies the moment it mentions a top-priority one in passing. Naming
+// the single dominant topic makes the tier check exact.
+//
+// As in the precision block above, what is asserted is which replies may be
+// STORED. The semantic judgement itself is the model's, and is checked by hand.
+
+describe("primaryTopic — the tier of the dominant topic decides", () => {
+  const cases: Array<{ name: string; body: Record<string, unknown>; expect: "ok" | "invalid" }> = [
+    {
+      name: "a direct paint article is HIGH",
+      body: {
+        classification: "HIGH",
+        rejectionReason: null,
+        primaryTopic: "бои",
+        matchedTopics: ["бои"],
+        reason: "Лакове и импрегнатори за дърво.",
+      },
+      expect: "ok",
+    },
+    {
+      name: "a direct boiler article is HIGH",
+      body: {
+        classification: "HIGH",
+        rejectionReason: null,
+        primaryTopic: "бойлери",
+        matchedTopics: ["бойлери"],
+        reason: "Как да обезкамените бойлер.",
+      },
+      expect: "ok",
+    },
+    {
+      name: "a ventilation article is MEDIUM",
+      body: {
+        classification: "MEDIUM",
+        rejectionReason: null,
+        primaryTopic: "вентилация",
+        matchedTopics: ["вентилация"],
+        reason: "Вентилатор за таван.",
+      },
+      expect: "ok",
+    },
+    {
+      name: "trees are OUT_OF_SCOPE with no primary topic",
+      body: {
+        classification: "REJECTED",
+        rejectionReason: "OUT_OF_SCOPE",
+        primaryTopic: null,
+        matchedTopics: [],
+        reason: "Бързорастящи дървета безплатно.",
+      },
+      expect: "ok",
+    },
+    {
+      name: "household smells are OUT_OF_SCOPE",
+      body: {
+        classification: "REJECTED",
+        rejectionReason: "OUT_OF_SCOPE",
+        primaryTopic: null,
+        matchedTopics: [],
+        reason: "Как да премахнем миризмата в дома.",
+      },
+      expect: "ok",
+    },
+    {
+      name: "generators are OUT_OF_SCOPE when no configured topic covers them",
+      body: {
+        classification: "REJECTED",
+        rejectionReason: "OUT_OF_SCOPE",
+        primaryTopic: null,
+        matchedTopics: [],
+        reason: "Генератори за ток при спиране на тока.",
+      },
+      expect: "ok",
+    },
+    {
+      // THE regression. Mainly about ventilation, mentions paint in passing —
+      // the old has("topPriorityTopics") test accepted this as HIGH.
+      name: "a MEDIUM article that also mentions a TOP topic cannot be HIGH",
+      body: {
+        classification: "HIGH",
+        rejectionReason: null,
+        primaryTopic: "вентилация",
+        matchedTopics: ["вентилация", "бои"],
+        reason: "Монтаж на вентилатор, и с какво да боядисаме рамката после.",
+      },
+      expect: "invalid",
+    },
+    {
+      name: "the same article is accepted as MEDIUM, still citing both topics",
+      body: {
+        classification: "MEDIUM",
+        rejectionReason: null,
+        primaryTopic: "вентилация",
+        matchedTopics: ["вентилация", "бои"],
+        reason: "Монтаж на вентилатор, и с какво да боядисаме рамката после.",
+      },
+      expect: "ok",
+    },
+    {
+      name: "MEDIUM cannot rest on a TOP topic either — the mirror case",
+      body: {
+        classification: "MEDIUM",
+        rejectionReason: null,
+        primaryTopic: "бои",
+        matchedTopics: ["бои"],
+        reason: "x",
+      },
+      expect: "invalid",
+    },
+    {
+      name: "an invented primary topic is refused",
+      body: {
+        classification: "HIGH",
+        rejectionReason: null,
+        primaryTopic: "дом и градина",
+        matchedTopics: ["бои"],
+        reason: "x",
+      },
+      expect: "invalid",
+    },
+    {
+      name: "a primary topic missing from matchedTopics is refused",
+      body: {
+        classification: "HIGH",
+        rejectionReason: null,
+        primaryTopic: "бои",
+        matchedTopics: ["бойлери"],
+        reason: "x",
+      },
+      expect: "invalid",
+    },
+    {
+      name: "OUT_OF_SCOPE with a primary topic contradicts itself",
+      body: {
+        classification: "REJECTED",
+        rejectionReason: "OUT_OF_SCOPE",
+        primaryTopic: "бои",
+        matchedTopics: ["бои"],
+        reason: "x",
+      },
+      expect: "invalid",
+    },
+    {
+      name: "HIGH with no primary topic at all is refused",
+      body: {
+        classification: "HIGH",
+        rejectionReason: null,
+        primaryTopic: null,
+        matchedTopics: ["бои"],
+        reason: "x",
+      },
+      expect: "invalid",
+    },
+    {
+      name: "BLACKLIST rests on an avoided topic",
+      body: {
+        classification: "REJECTED",
+        rejectionReason: "BLACKLIST",
+        primaryTopic: "камини",
+        matchedTopics: ["камини"],
+        reason: "Статия за камини.",
+      },
+      expect: "ok",
+    },
+    {
+      name: "BLACKLIST cannot rest on a wanted topic",
+      body: {
+        classification: "REJECTED",
+        rejectionReason: "BLACKLIST",
+        primaryTopic: "бои",
+        matchedTopics: ["бои", "камини"],
+        reason: "x",
+      },
+      expect: "invalid",
+    },
+  ];
+
+  for (const c of cases) {
+    it(c.name, () => {
+      const out = parseClassificationResponse(reply(c.body), SCOPED);
+      assert.equal(out.status, c.expect, `${c.name}: got ${JSON.stringify(out)}`);
+    });
+  }
+
+  it("stores the primary topic in the company's spelling, not the model's", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "HIGH",
+        rejectionReason: null,
+        primaryTopic: "БОИ",
+        matchedTopics: ["БОИ"],
+        reason: "x",
+      }),
+      SCOPED
+    );
+    assert.ok(out.status === "ok");
+    assert.equal(out.primaryTopic, "бои");
+  });
+
+  it("names the invented primary topic in the repair feedback", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "HIGH",
+        rejectionReason: null,
+        primaryTopic: "градински продукти",
+        matchedTopics: ["бои"],
+        reason: "x",
+      }),
+      SCOPED
+    );
+    assert.ok(out.status === "invalid");
+    assert.match(out.problem, /градински продукти/);
+    assert.match(out.feedback, /VERBATIM/);
+  });
+
+  it("requires a null primary topic for the neutral MEDIUM in blacklist-only mode", () => {
+    const bare = parseClassificationResponse(
+      reply({
+        classification: "MEDIUM",
+        rejectionReason: null,
+        primaryTopic: null,
+        matchedTopics: [],
+        reason: "x",
+      }),
+      BLACKLIST_ONLY
+    );
+    assert.equal(bare.status, "ok");
+
+    const cited = parseClassificationResponse(
+      reply({
+        classification: "MEDIUM",
+        rejectionReason: null,
+        primaryTopic: "камини",
+        matchedTopics: ["камини"],
+        reason: "x",
+      }),
+      BLACKLIST_ONLY
+    );
+    assert.equal(cited.status, "invalid");
+  });
+});
+
+describe("mainSubject — what the article is about", () => {
+  it("is required: a verdict that cannot name the subject did not read the article", () => {
+    const out = parseClassificationResponse(
+      JSON.stringify({
+        primaryTopic: "бои",
+        classification: "HIGH",
+        rejectionReason: null,
+        matchedTopics: ["бои"],
+        reason: "x",
+      }),
+      SCOPED
+    );
+    assert.equal(out.status, "invalid");
+    assert.ok(out.status === "invalid");
+    assert.match(out.feedback, /mainSubject/);
+  });
+
+  it("is capped like the reason", () => {
+    const out = parseClassificationResponse(
+      reply({
+        mainSubject: "я".repeat(MAX_STORED_REASON_CHARS + 200),
+        classification: "HIGH",
+        rejectionReason: null,
+        primaryTopic: "бои",
+        matchedTopics: ["бои"],
+        reason: "x",
+      }),
+      SCOPED
+    );
+    assert.ok(out.status === "ok");
+    assert.equal(out.mainSubject.length, MAX_STORED_REASON_CHARS);
+  });
+
+  it("is asked for as a description, never as reasoning", () => {
+    // A model told to "explain your thinking" writes an argument here, and the
+    // field stops being usable as a diagnostic — the whole reason it exists.
+    const prompt = buildClassificationSystemPrompt("scoped");
+    assert.match(prompt, /short, factual description of the subject itself/);
+    assert.match(prompt, /not an argument for your verdict/);
+  });
+});
+
+describe("buildClassificationSystemPrompt — HIGH vs MEDIUM", () => {
+  const scoped = buildClassificationSystemPrompt("scoped");
+
+  it("states that a passing mention never promotes an article", () => {
+    assert.match(scoped, /A passing mention never promotes it/);
+    assert.match(scoped, /stays MEDIUM even when it also mentions a TOP PRIORITY topic/);
+  });
+
+  it("makes the single dominant topic the deciding one", () => {
+    assert.match(scoped, /which SINGLE configured topic the article is mainly about/);
+    assert.match(scoped, /the list it belongs to decides the verdict/);
+  });
+
+  it("keeps BLACKLIST as a main-subject-only override", () => {
+    assert.match(scoped, /ONLY when an avoided topic is itself a main subject/);
+  });
+
+  it("shows the demotion case among the worked examples", () => {
+    assert.match(scoped, /must not raise this to HIGH/);
+  });
+
+  it("asks for a null primaryTopic in blacklist-only mode, where nothing is wanted", () => {
+    const blacklistOnly = buildClassificationSystemPrompt("blacklist_only");
+    assert.match(blacklistOnly, /"primaryTopic": null/);
+    assert.ok(!blacklistOnly.includes("SINGLE configured topic"));
   });
 });

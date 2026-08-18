@@ -564,6 +564,8 @@
       "showWhy": "Why this priority?",
       "hideWhy": "Hide",
       "matchedTopics": "Matched topics: {topics}",
+      "mainSubject": "The article is about: {subject}",
+      "primaryTopic": "Decided on the topic: {topic}",
       "failedError": "Last error: {error}",
       "failedHint": "The classifier could not be reached. This article has NOT been rejected — it will be retried.",
       "noneMatchFilter": "No articles match this filter.",

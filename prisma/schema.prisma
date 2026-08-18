@@ -436,9 +436,19 @@ model FeedItem {
   classificationMatchedTopics   String[]  @map("classification_matched_topics")
   /// One capped sentence of evidence — why this verdict, for a human reading back.
   classificationReason          String?   @map("classification_reason")
+  /// What the classifier judged the article to be ABOUT, in its own words — a fact
+  /// about the article, not an argument for the verdict. Diagnostic: when a verdict
+  /// looks wrong this says whether the article was misread or the topics misapplied.
+  classificationMainSubject     String?   @map("classification_main_subject")
+  /// The SINGLE configured topic the verdict rests on, in its stored spelling.
+  /// NULL for OUT_OF_SCOPE, and for rows classified before this column existed.
+  /// This is what decides HIGH vs MEDIUM — see lib/ai/feed-item-classification.ts.
+  classificationPrimaryTopic    String?   @map("classification_primary_topic")
   /// pending | classifying | completed | skipped | failed
   classificationStatus          String?   @map("classification_status")
-  /// sha256(sent text + topic-config fingerprint) — unchanged inputs skip the call.
+  /// sha256(sent text + topic-config fingerprint + company-context fingerprint) —
+  /// unchanged inputs skip the call. The company-context part contributes nothing
+  /// when the brand copy is blank, so pre-existing hashes still verify.
   classificationHash            String?   @map("classification_hash")
   classificationError           String?   @map("classification_error")
   classifiedAt                  DateTime? @map("classified_at")
