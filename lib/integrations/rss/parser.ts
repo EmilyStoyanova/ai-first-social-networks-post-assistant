@@ -71,21 +71,37 @@ function decodeEntities(input: string): string {
   });
 }
 
+/**
+ * The text of an item's `<tag>`, unwrapping CDATA when the feed uses it.
+ *
+ * The element is matched ONCE and its CDATA sections are then collected from the
+ * inner text, rather than requiring `<tag><![CDATA[` to be adjacent. That adjacency
+ * is what ArchDaily's feed breaks — it pretty-prints every field as
+ *
+ *     <title>
+ *       <![CDATA[Modernism on the Watch: Preserving the ... Stadium in India]]>
+ *     </title>
+ *
+ * and the newline meant the CDATA form never matched. The plain fallback then ran
+ * `replace(/<[^>]+>/g, "")` over `<![CDATA[…]]>`, which contains no `>` until its own
+ * terminator and so was consumed WHOLE as if it were a single tag — deleting the title
+ * and storing the article as `(untitled)`. Collecting sections also handles an element
+ * that carries more than one, which is concatenated rather than truncated to the first.
+ *
+ * Markup inside a CDATA section is deliberately preserved, exactly as it always was for
+ * the adjacent form: a feed's `<description>` is routinely an HTML excerpt, and callers
+ * (translation input sanitising, article extraction) already strip tags themselves.
+ */
 function extractText(xml: string, tag: string): string | null {
-  const cdata = xml.match(
-    new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]>\\s*<\\/${tag}>`, "i")
-  );
-  if (cdata) {
-    const text = cdata[1].trim();
-    return text ? decodeEntities(text) : null;
-  }
+  const element = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  if (!element) return null;
+  const inner = element[1];
 
-  const plain = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"));
-  if (plain) {
-    const text = plain[1].replace(/<[^>]+>/g, "").trim();
-    return text ? decodeEntities(text) : null;
-  }
-  return null;
+  const sections = [...inner.matchAll(/<!\[CDATA\[([\s\S]*?)\]\]>/g)].map((m) => m[1]);
+  const text =
+    sections.length > 0 ? sections.join("").trim() : inner.replace(/<[^>]+>/g, "").trim();
+
+  return text ? decodeEntities(text) : null;
 }
 
 /**

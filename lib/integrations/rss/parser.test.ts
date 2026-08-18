@@ -98,6 +98,76 @@ describe("parseFeedXml — RSS 2.0", () => {
   });
 });
 
+describe("parseFeedXml — pretty-printed CDATA (ArchDaily)", () => {
+  /**
+   * ArchDaily's real feed indents every CDATA section onto its own line. The extractor used to
+   * require `<title><![CDATA[` to be adjacent, so the newline sent it down the plain-text
+   * branch — where `replace(/<[^>]+>/g, "")` consumed the whole `<![CDATA[…]]>` span as if it
+   * were one tag (it holds no `>` until its terminator) and deleted the title outright. Every
+   * such article was stored as `(untitled)`.
+   */
+  const archDailyItem = `
+    <item>
+      <title>
+        <![CDATA[Modernism on the Watch: Preserving the Sardar Vallabhbhai Patel Stadium in India]]>
+      </title>
+      <link>https://www.archdaily.com/1183078/modernism-on-the-watch</link>
+      <pubDate>Mon, 17 Aug 2026 07:30:00 +0000</pubDate>
+      <description>
+        <![CDATA[<p>In the heart of Ahmedabad's Navrangpura district sits the stadium.</p>]]>
+      </description>
+    </item>`;
+
+  it("reads a title whose CDATA sits on its own line", () => {
+    const items = parseFeedXml(rssFeed(archDailyItem));
+
+    assert.equal(items.length, 1);
+    assert.equal(
+      items[0].title,
+      "Modernism on the Watch: Preserving the Sardar Vallabhbhai Patel Stadium in India"
+    );
+  });
+
+  it("reads a description whose CDATA sits on its own line", () => {
+    const items = parseFeedXml(rssFeed(archDailyItem));
+
+    assert.ok(items[0].summary?.includes("Navrangpura district"));
+    // The CDATA terminator must not leak into the stored text.
+    assert.ok(!items[0].summary?.includes("]]"));
+  });
+
+  it("never yields a null title for a feed that supplies one", () => {
+    const items = parseFeedXml(rssFeed(archDailyItem + archDailyItem.replace("1183078", "9")));
+    assert.equal(
+      items.filter((i) => i.title === null).length,
+      0,
+      "a pretty-printed CDATA title must not become (untitled)"
+    );
+  });
+
+  it("keeps the adjacent CDATA form working", () => {
+    const items = parseFeedXml(
+      rssFeed(`
+      <item>
+        <title><![CDATA[Adjacent form]]></title>
+        <link>https://example.com/adjacent</link>
+      </item>`)
+    );
+    assert.equal(items[0].title, "Adjacent form");
+  });
+
+  it("concatenates an element carrying more than one CDATA section", () => {
+    const items = parseFeedXml(
+      rssFeed(`
+      <item>
+        <title><![CDATA[First half ]]><![CDATA[second half]]></title>
+        <link>https://example.com/split</link>
+      </item>`)
+    );
+    assert.equal(items[0].title, "First half second half");
+  });
+});
+
 describe("parseFeedXml — HTML entity decoding", () => {
   it("decodes numeric and named entities in titles", () => {
     const xml = rssFeed(`

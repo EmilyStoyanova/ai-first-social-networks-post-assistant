@@ -4,7 +4,10 @@ import {
   MAX_TRANSLATION_ATTEMPTS,
   MAX_TRANSLATION_CONTENT_CHARS,
   MIN_REPAIRED_CONTENT_CHARS,
+  MIN_TRANSLATION_CONTENT_CHARS,
   MIN_TRANSLATION_ITEM_BUDGET_MS,
+  sanitiseTranslationContent,
+  shrinkTranslationContentBudget,
   TRANSLATION_TITLE_JSON_SCHEMA,
   assessBulgarian,
   buildTranslationPrompts,
@@ -321,11 +324,15 @@ describe("parseTranslationResponse", () => {
     );
   });
 
-  it("does not turn a trailing-comma truncation into valid output", () => {
-    assert.throws(
-      () => parseTranslationResponse('{"title":"x","content":"y",'),
-      TranslationParseError
-    );
+  it("salvages a cut after a trailing comma, keeping both completed values", () => {
+    // The comma promised a THIRD member the schema does not even allow; both values before it
+    // are whole. Dropping an unfulfilled promise invents nothing, so the reply is kept rather
+    // than thrown away — previously this failed as invalid_json and cost the item a retry.
+    const r = parseTranslationResponse('{"title":"Заглавие","content":"Съдържание",');
+    assert.equal(r.translatedTitle, "Заглавие");
+    assert.equal(r.translatedContent, "Съдържание");
+    assert.ok(r.repairs.includes("dropped_partial_member"));
+    assert.ok(r.repairs.includes("closed_object"));
   });
 
   it("ignores braces inside translated text when locating the object", () => {
@@ -866,12 +873,14 @@ describe("parseTranslationResponse — JSON salvage", () => {
   });
 
   it("does not accept a corrupted reply as a translation", () => {
-    // Salvage never invents structure: a cut between a comma and the next key, prose with no
-    // object at all, and a fragment of a value all still fail.
+    // Salvage never invents structure: prose with no object at all, a half-written KEY (which
+    // must be dropped, not closed into a member the model never wrote), and a value the model
+    // barely started all still fail. What salvage may do is keep values that are COMPLETE —
+    // see the trailing-comma case above.
     for (const raw of [
-      '{"title":"x","content":"y",',
       "I'm afraid I can't do that.",
       '{"title":"x","con',
+      '{"title":"x","content":',
     ]) {
       assert.throws(() => parseTranslationResponse(raw), TranslationParseError, raw);
     }
@@ -982,5 +991,364 @@ describe("MIN_TRANSLATION_ITEM_BUDGET_MS", () => {
   it("is a real floor, well under one item's own cap", () => {
     assert.ok(MIN_TRANSLATION_ITEM_BUDGET_MS > 0);
     assert.ok(MIN_TRANSLATION_ITEM_BUDGET_MS < TRANSLATION_ITEM_TIMEOUT_MS);
+  });
+});
+
+// ─── Translation-input sanitising ─────────────────────────────────────────────
+
+/**
+ * The real Readability output of the ArchDaily article in the production logs, reproduced
+ * verbatim: a video-player timestamp, a subscriber label glued to the caption, a CC photo
+ * credit running straight into the publication date, the article itself, then the trailer —
+ * gallery navigation, the cite block (which carries a raw `"` and a bare `<URL>`), the ISSN,
+ * the Chinese language-switcher string, and a newsletter modal.
+ */
+const ARCHDAILY_EXTRACT = [
+  "5:40",
+  "",
+  "    5:40",
+  "",
+  "Subscriber AccessSardar Patel Stadium (Navrangpura Stadium), Ahmedabad. Image © Carlo " +
+    "Fumarola via Wikipedia under license CC BY-SA 3.0Published on August 17, 2026In the heart " +
+    "of Ahmedabad's Navrangpura district in India sits the Sardar Vallabhbhai Patel Stadium. " +
+    "More than just a cricket ground, the stadium stands as one of India's earliest experiments " +
+    "in modernist public architecture. Built in the decades following the country's " +
+    "independence, the structure has not only become an engineering landmark, but also a major " +
+    "public space within Ahmedabad's urban fabric. + 2",
+  "To understand this project better, it helps to look at India during the early years after " +
+    "independence in 1947. Under Prime Minister Jawaharlal Nehru, the nation set out to " +
+    "modernize rapidly by industrializing its cities and founding new academic and civic " +
+    "institutions, most famously the city of Chandigarh.",
+  "",
+  "",
+  "Image gallerySee allShow lessAbout this authorAuthor",
+  'Cite: Moises Carrasco.  "Modernism on the Watch: Preserving the Sardar Vallabhbhai Patel ' +
+    'Stadium in India"  17 Aug 2026. ArchDaily.  Accessed . ' +
+    "<https://www.archdaily.com/1183078/modernism-on-the-watch> ISSN 0719-8884" +
+    "想阅读文章的中文版本吗?守望现代主义：印度萨达尔·瓦拉巴伊·帕特尔体育场的保护是否",
+  "",
+  "Did you know?You'll now receive updates based on what you follow! Personalize your stream " +
+    "and start following your favorite authors, offices and users.",
+].join("\n");
+
+describe("sanitiseTranslationContent — ArchDaily", () => {
+  const clean = sanitiseTranslationContent(ARCHDAILY_EXTRACT)!;
+
+  it("removes the trailer: gallery navigation, the cite block and the newsletter modal", () => {
+    assert.ok(!clean.includes("Image gallery"));
+    assert.ok(!clean.includes("About this author"));
+    assert.ok(!clean.includes("Cite:"));
+    assert.ok(!clean.includes("ISSN"));
+    assert.ok(!clean.includes("Did you know"));
+  });
+
+  it("removes the Chinese language-switcher text that produced the Chinese replies", () => {
+    // This is the ORIGIN of the "Chinese instead of Bulgarian" failures: the model was
+    // echoing its own input. No CJK survives sanitising.
+    assert.ok(
+      !/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(clean),
+      `expected no CJK, got: ${clean.slice(-160)}`
+    );
+  });
+
+  it("removes the cite block's raw quote and bare URL — the invalid_json characters", () => {
+    assert.ok(!clean.includes('"Modernism on the Watch'));
+    assert.ok(!clean.includes("<https://"));
+  });
+
+  it("removes inline boilerplate even when it is glued to the next word", () => {
+    // Readability emits "Subscriber AccessSardar" and "CC BY-SA 3.0Published on …", so neither
+    // label has a word boundary in front of it — the reason both patterns are boundary-free.
+    assert.ok(!clean.includes("Subscriber Access"));
+    assert.ok(!clean.includes("Published on August"));
+    assert.ok(!clean.includes("under license"));
+    assert.ok(!/\b5:40\b/.test(clean), "the video-player timestamp is not article text");
+    assert.ok(!/\+ 2\b/.test(clean), "the gallery counter is not article text");
+  });
+
+  it("keeps the article itself intact", () => {
+    assert.ok(clean.includes("In the heart of Ahmedabad's Navrangpura district"));
+    assert.ok(clean.includes("earliest experiments in modernist public architecture"));
+    assert.ok(clean.includes("most famously the city of Chandigarh."));
+  });
+
+  it("cuts the body substantially — noise was roughly a third of the page", () => {
+    assert.ok(
+      clean.length < ARCHDAILY_EXTRACT.length * 0.8,
+      `expected a real reduction, got ${ARCHDAILY_EXTRACT.length} → ${clean.length}`
+    );
+    // …but not so much that the article is gone.
+    assert.ok(clean.length > 700, `expected the article to survive, got ${clean.length}`);
+  });
+});
+
+describe("sanitiseTranslationContent — guards", () => {
+  const ARTICLE =
+    "The company announced a new service for small businesses across the country today. " +
+    "It will be available from next month in every major city, and the price is unchanged. " +
+    "Analysts expect the rollout to take about six weeks from the first announcement. ";
+
+  it("passes null through", () => {
+    assert.equal(sanitiseTranslationContent(null), null);
+  });
+
+  it("ignores a trailer marker that would take most of the article", () => {
+    // A marker near the very top is far likelier to be a false positive than a real trailer,
+    // so the cut is abandoned rather than reducing the article to a sentence.
+    const body = `Did you know? ${ARTICLE.repeat(3)}`;
+    const clean = sanitiseTranslationContent(body)!;
+    assert.ok(clean.includes("Analysts expect the rollout"), "the article must survive");
+    assert.ok(clean.length > body.length * 0.8);
+  });
+
+  it("leaves a genuinely Chinese article alone", () => {
+    // Above the incidental-CJK density this is an East-Asian source, not an English page
+    // carrying a switcher string. Gutting its CJK would delete the article.
+    const chinese = "这是一篇关于建筑保护的文章。".repeat(20);
+    assert.equal(sanitiseTranslationContent(chinese), chinese);
+  });
+
+  it("returns the original when the passes would leave too little to translate", () => {
+    const mostlyTrailer = "Cite: Someone. ArchDaily. Accessed . ISSN 0719-8884";
+    assert.equal(sanitiseTranslationContent(mostlyTrailer), mostlyTrailer);
+  });
+
+  it("strips HTML markup, which a feed <description> routinely carries", () => {
+    const html = `<p>${ARTICLE}</p><a href="https://x.example/tag">tag</a>`;
+    const clean = sanitiseTranslationContent(html)!;
+    assert.ok(!clean.includes("<p>"));
+    assert.ok(!clean.includes("href"));
+    assert.ok(clean.includes("The company announced a new service"));
+  });
+
+  it("collapses control characters and runaway whitespace", () => {
+    // Control characters are built rather than typed so this source file stays plain ASCII.
+    const ctrl = String.fromCharCode(0, 7, 31);
+    const messy = `${ARTICLE} ${ctrl}\n\n\n\n\n${ARTICLE}\t\t\tend of it.`;
+    const clean = sanitiseTranslationContent(messy)!;
+
+    const hasControl = [...clean].some((c) => {
+      const code = c.codePointAt(0)!;
+      return (code < 0x20 && c !== "\n") || code === 0x7f;
+    });
+    assert.ok(!hasControl, "raw control characters are illegal inside a JSON string");
+    assert.ok(!/\n{3,}/.test(clean), "runs of blank lines are collapsed");
+    assert.ok(!/ {2,}/.test(clean), "runs of spaces are collapsed");
+    assert.ok(clean.includes("end of it."), "the text itself survives");
+  });
+
+  it("leaves ordinary prose untouched", () => {
+    const clean = sanitiseTranslationContent(ARTICLE.repeat(2))!;
+    assert.ok(clean.startsWith("The company announced"));
+    assert.ok(clean.includes("Analysts expect the rollout"));
+  });
+});
+
+// ─── Shrinking retry budget ───────────────────────────────────────────────────
+
+describe("shrinkTranslationContentBudget", () => {
+  it("halves the budget so a retry is a materially smaller request", () => {
+    assert.equal(shrinkTranslationContentBudget(MAX_TRANSLATION_CONTENT_CHARS), 1500);
+    assert.equal(shrinkTranslationContentBudget(1500), 800);
+  });
+
+  it("never shrinks below the floor — a smaller excerpt is not an article", () => {
+    assert.equal(
+      shrinkTranslationContentBudget(MIN_TRANSLATION_CONTENT_CHARS),
+      MIN_TRANSLATION_CONTENT_CHARS
+    );
+    assert.equal(shrinkTranslationContentBudget(10), MIN_TRANSLATION_CONTENT_CHARS);
+  });
+});
+
+// ─── Derived Bulgarian title for (untitled) articles ──────────────────────────
+
+describe("buildTranslationPrompts — untitled article with a body", () => {
+  const BODY =
+    "In the heart of Ahmedabad's Navrangpura district in India sits the Sardar Vallabhbhai " +
+    "Patel Stadium, one of the country's earliest experiments in modernist public architecture. " +
+    "The World Monuments Fund placed it on its Watch list in 2020. ".repeat(3);
+
+  it("asks the model to write a Bulgarian title instead of accepting an empty one", () => {
+    const p = buildTranslationPrompts(null, BODY, "bg");
+    assert.equal(p.mode, "full", "there is a body, so this is not a title-only item");
+    assert.equal(p.derivedTitle, true);
+    assert.match(p.systemPrompt, /has no title of its own/);
+    assert.match(p.systemPrompt, /Write a short Bulgarian title/);
+    assert.ok(
+      !p.systemPrompt.includes('use an empty string "" for "title"'),
+      "the instruction that produced null titles must be gone for this case"
+    );
+  });
+
+  it("forbids inventing anything the body does not already say", () => {
+    const p = buildTranslationPrompts(null, BODY, "bg");
+    assert.match(p.systemPrompt, /invent nothing/);
+    assert.match(p.systemPrompt, /at most 90 characters/);
+  });
+
+  it("leaves an article that HAS a title exactly as before", () => {
+    const p = buildTranslationPrompts("A real headline", BODY, "bg");
+    assert.equal(p.derivedTitle, false);
+    assert.match(p.systemPrompt, /use an empty string "" for "title"/);
+    assert.ok(!p.systemPrompt.includes("has no title of its own"));
+  });
+
+  it("still treats a bodyless untitled item as title-only, not as a derivation", () => {
+    const p = buildTranslationPrompts("Only a headline", null, "bg");
+    assert.equal(p.mode, "title_only");
+    assert.equal(p.derivedTitle, false);
+  });
+});
+
+describe("buildTranslationPrompts — sanitising and the content budget", () => {
+  it("sends the sanitised body, not the raw page", () => {
+    const p = buildTranslationPrompts("T", ARCHDAILY_EXTRACT, "bg");
+    assert.ok(!p.userPrompt.includes("Cite:"));
+    assert.ok(!p.userPrompt.includes("Did you know"));
+    assert.ok(p.userPrompt.includes("In the heart of Ahmedabad's Navrangpura district"));
+    assert.ok(p.contentChars < ARCHDAILY_EXTRACT.length);
+  });
+
+  it("honours a smaller maxContentChars, which is what a truncation retry passes", () => {
+    const long = "Дълга статия за нещо важно и интересно. ".repeat(200);
+    const full = buildTranslationPrompts("T", long, "bg");
+    const small = buildTranslationPrompts("T", long, "bg", { maxContentChars: 900 });
+    // The cap backs up to the last word boundary before appending " […]", so the exact length
+    // lands just under the ceiling rather than on it.
+    assert.ok(full.contentChars <= MAX_TRANSLATION_CONTENT_CHARS + 4);
+    assert.ok(full.contentChars > MAX_TRANSLATION_CONTENT_CHARS - 50);
+    assert.ok(small.contentChars < full.contentChars);
+    assert.ok(small.contentChars <= 904);
+    assert.ok(small.userPrompt.length < full.userPrompt.length);
+  });
+
+  it("tells the model not to copy foreign-script words through", () => {
+    const p = buildTranslationPrompts("T", "Some article body here.", "bg");
+    assert.match(p.systemPrompt, /Chinese, Japanese, Korean/);
+  });
+
+  it("names the JSON escaping rule the malformed replies broke", () => {
+    const p = buildTranslationPrompts("T", "Some article body here.", "bg");
+    assert.match(p.systemPrompt, /escape every double quote/);
+    assert.match(p.systemPrompt, /Never put a raw newline or an unescaped quote/);
+  });
+});
+
+// ─── Truncation-shaped salvage + the truncated flag ───────────────────────────
+
+/** The reason and truncated flag a rejected reply carries, or null when it was accepted. */
+function rejection(
+  raw: string,
+  targetLang?: string,
+  mode?: "full" | "title_only"
+): { reason: string; truncated: boolean } | null {
+  try {
+    parseTranslationResponse(raw, targetLang, mode ? { mode } : {});
+    return null;
+  } catch (err) {
+    assert.ok(err instanceof TranslationParseError, `expected a parse error for ${raw}`);
+    return { reason: err.reason, truncated: err.truncated };
+  }
+}
+
+describe("parseTranslationResponse — truncation shapes", () => {
+  const BG_BODY = "Компанията обяви новата услуга за малкия бизнес в страната. ".repeat(6);
+
+  it("drops a half-written key rather than inventing a member for it", () => {
+    // Closing `"cont` as a VALUE would fabricate a member the model never wrote.
+    const r = rejection('{"title":"Заглавие","cont');
+    assert.deepEqual(r, { reason: "schema_validation", truncated: true });
+  });
+
+  it("drops a key whose value never arrived", () => {
+    const r = rejection('{"title":"Заглавие","content":');
+    assert.deepEqual(r, { reason: "schema_validation", truncated: true });
+  });
+
+  it("flags a fragment cut off mid-value as truncated", () => {
+    const r = rejection('{"title":"Заглавие","content":"Частичен превод, който бе отря');
+    assert.deepEqual(r, { reason: "invalid_json", truncated: true });
+  });
+
+  it("flags a title cut off mid-string as truncated, in title-only mode", () => {
+    const r = rejection('{"title":"Модернизмът под набл', "bg", "title_only");
+    assert.deepEqual(r, { reason: "invalid_json", truncated: true });
+  });
+
+  it("does NOT flag a wrong-language reply as truncated — shrinking would not fix it", () => {
+    const english =
+      '{"title":"Modernism on the Watch","content":"The company announced today that the new ' +
+      'service will be available next month across every major city in the country."}';
+    const r = rejection(english, "bg");
+    assert.deepEqual(r, { reason: "wrong_language", truncated: false });
+  });
+
+  it("does NOT flag prose with no JSON at all as truncated", () => {
+    const r = rejection("I'm afraid I can't do that.");
+    assert.equal(r!.truncated, false);
+  });
+
+  it("still salvages a long body cut mid-sentence, and marks it truncated only if rejected", () => {
+    // Long enough to clear MIN_REPAIRED_CONTENT_CHARS, so it is ACCEPTED as an excerpt.
+    const r = parseTranslationResponse(`{"title":"Заглавие","content":"${BG_BODY}недовърш`, "bg");
+    assert.ok(r.translatedContent!.length > MIN_REPAIRED_CONTENT_CHARS);
+    assert.ok(r.repairs.includes("closed_string"));
+    assert.match(r.translatedContent!, /\[…\]$/);
+  });
+});
+
+// ─── Language drift the old census could not see ──────────────────────────────
+
+describe("assessBulgarian — non-Latin drift", () => {
+  it("rejects an all-Chinese reply that the Latin/Cyrillic-only census let through", () => {
+    // Previously this scored totalLetters ≈ 0, fell under MIN_LETTERS_FOR_SCRIPT_CHECK, skipped
+    // the script test and was stored as a completed Bulgarian translation.
+    const chinese =
+      "想阅读文章的中文版本吗守望现代主义印度萨达尔瓦拉巴伊帕特尔体育场的保护是否值得关注这是一个非常重要的问题";
+    const a = assessBulgarian(chinese);
+    assert.equal(a.verdict, "not_cyrillic");
+    assert.equal(a.cyrillicLetters, 0);
+    assert.ok(
+      a.otherLetters >= 40,
+      `expected the Han letters to be counted, got ${a.otherLetters}`
+    );
+  });
+
+  it("rejects a short untranslated English title that was too short to judge before", () => {
+    // A title-only reply is judged on the title alone and almost never reaches
+    // MIN_LETTERS_FOR_SCRIPT_CHECK — so an untouched English headline used to pass silently.
+    const a = assessBulgarian("Modernism on the Watch");
+    assert.equal(a.verdict, "not_cyrillic");
+    assert.equal(a.cyrillicLetters, 0);
+  });
+
+  it("rejects an untranslated English title through the parser too", () => {
+    const r = rejection('{"title":"Modernism on the Watch"}', "bg", "title_only");
+    assert.deepEqual(r, { reason: "wrong_language", truncated: false });
+  });
+
+  it("still accepts a short Bulgarian title — valid Bulgarian is not collateral", () => {
+    assert.equal(assessBulgarian("Модернизмът под наблюдение").verdict, "bulgarian");
+    assert.equal(assessBulgarian("Нов RTX 5090 GPU").verdict, "bulgarian");
+    assert.equal(assessBulgarian("Пет нови сгради в София").verdict, "bulgarian");
+  });
+
+  it("still accepts a full Bulgarian article carrying Latin brand names", () => {
+    const bg =
+      "Модернизмът под наблюдение: опазването на стадион „Сардар Валабхай Пател“ в Индия. " +
+      "World Monuments Fund го включи в списъка си през 2020 година, а сградата остава " +
+      "важно обществено пространство в Ахмедабад.";
+    const a = assessBulgarian(bg);
+    assert.equal(a.verdict, "bulgarian");
+    assert.equal(a.otherLetters, 0);
+  });
+
+  it("is not fooled by a mostly-Latin reply with a token of Cyrillic", () => {
+    const a = assessBulgarian(
+      "Модернизъм. The company announced today that the new service will be available next " +
+        "month across every major city, and the price remains unchanged for existing customers."
+    );
+    assert.equal(a.verdict, "not_cyrillic");
   });
 });

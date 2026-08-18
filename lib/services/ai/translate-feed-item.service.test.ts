@@ -1106,6 +1106,181 @@ describe("translateFeedItem — in-request retries", () => {
   });
 });
 
+// ─── Shrinking retry after a truncated reply ──────────────────────────────────
+
+/**
+ * A long, clean English article — the shape of the ArchDaily bodies that truncated in
+ * production. Comfortably over MAX_TRANSLATION_CONTENT_CHARS so the first try is capped at the
+ * ceiling and a shrink is visible as a shorter prompt.
+ */
+const LONG_ARTICLE =
+  "In the heart of Ahmedabad's Navrangpura district in India sits the Sardar Vallabhbhai " +
+  "Patel Stadium, one of the country's earliest experiments in modernist public architecture. ";
+
+/** The reply shape the logs showed: a body cut off mid-string, so the JSON never closes. */
+const TRUNCATED_RESPONSE = `{"title":"Заглавие","content":"Частичен превод`;
+
+/** The body characters the request actually carried, read back off the prompt. */
+function bodyCharsOf(request: LlmRequest): number {
+  const marker = "\nContent: ";
+  const at = request.userPrompt.indexOf(marker);
+  assert.ok(at !== -1, "expected a Content: section in the prompt");
+  const rest = request.userPrompt.slice(at + marker.length);
+  // A retry appends the correction after a "---" separator; the body ends there.
+  const sep = rest.indexOf("\n\n---\n");
+  return (sep === -1 ? rest : rest.slice(0, sep)).length;
+}
+
+describe("translateFeedItem — truncation shrinks the next try", () => {
+  it("rebuilds the request with a smaller body after a cut-off reply", async () => {
+    const db = makeDb();
+    const p = scriptedProvider([TRUNCATED_RESPONSE, GOOD_RESPONSE]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem({ content: LONG_ARTICLE.repeat(40) }),
+        "bg",
+        makeDeps(db, p.generate)
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "translated");
+    assert.equal(p.requests.length, 2);
+
+    const first = bodyCharsOf(p.requests[0]);
+    const second = bodyCharsOf(p.requests[1]);
+    assert.ok(
+      second < first,
+      `the retry must ask for less than the try that could not finish (${first} → ${second})`
+    );
+    // Halved, so the retry is a materially easier request rather than the same roll again.
+    assert.ok(second <= first / 2 + 10, `expected roughly half of ${first}, got ${second}`);
+  });
+
+  it("does NOT shrink after a defect that a smaller article would not fix", async () => {
+    const db = makeDb();
+    // Wrong language: the model answered in English. Shortening the article changes nothing
+    // about that, so the retry must keep the body it had and rely on the correction + sampling.
+    const english =
+      '{"title":"Modernism on the Watch","content":"The company announced today that the new ' +
+      'service will be available next month across every major city in the country."}';
+    const p = scriptedProvider([english, GOOD_RESPONSE]);
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem({ content: LONG_ARTICLE.repeat(40) }),
+        "bg",
+        makeDeps(db, p.generate)
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(p.requests.length, 2);
+    assert.equal(
+      bodyCharsOf(p.requests[1]),
+      bodyCharsOf(p.requests[0]),
+      "a wrong_language retry must not lose article text"
+    );
+    const rejected = cap.warns.find((a) => a[0] === "[rss-translation] unusable model response");
+    assert.equal((rejected![1] as Record<string, unknown>).reason, "wrong_language");
+    assert.equal((rejected![1] as Record<string, unknown>).truncated, false);
+  });
+
+  it("keeps shrinking across tries and still stops at exactly 3 model calls", async () => {
+    const db = makeDb();
+    const p = scriptedProvider([TRUNCATED_RESPONSE]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem({ content: LONG_ARTICLE.repeat(40) }),
+        "bg",
+        makeDeps(db, p.generate)
+      );
+    } finally {
+      cap.stop();
+    }
+
+    // The retry BUDGET is untouched by the shrinking: 1 initial call + MAX_TRANSLATION_RETRIES.
+    assert.equal(p.requests.length, 3);
+    assert.equal(MAX_TRANSLATION_RETRIES + 1, 3, "the in-request budget is exactly 3 calls");
+    assert.equal(outcome.status, "failed");
+
+    const bodies = p.requests.map(bodyCharsOf);
+    assert.ok(
+      bodies[1] < bodies[0] && bodies[2] < bodies[1],
+      `each truncation must shrink the next request, got ${JSON.stringify(bodies)}`
+    );
+    // One cross-run attempt, counted at claim time, however many in-request tries were spent.
+    assert.equal(db.updates.filter((u) => "translationAttemptCount" in u).length, 1);
+    assert.equal(db.currentStatus, "failed");
+  });
+
+  it("leaves sampling and the cross-run backoff exactly as they were", async () => {
+    const db = makeDb();
+    const p = scriptedProvider([TRUNCATED_RESPONSE]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem({ content: LONG_ARTICLE.repeat(40) }),
+        "bg",
+        makeDeps(db, p.generate)
+      );
+    } finally {
+      cap.stop();
+    }
+
+    // Sampling ladder: deterministic first, then distinct temperatures and a climbing penalty.
+    const temps = p.requests.map((r) => r.temperature);
+    assert.equal(temps[0], 0);
+    assert.equal(new Set(temps).size, temps.length, JSON.stringify(temps));
+    const penalties = p.requests.map((r) => r.repeatPenalty as number);
+    assert.ok(
+      penalties.every((v, i) => i === 0 || v > penalties[i - 1]),
+      JSON.stringify(penalties)
+    );
+    // Structured output stays constrained on the shrunken retries too.
+    assert.ok(p.requests.every((r) => r.format !== undefined));
+
+    // Backoff: the first failed attempt is still scheduled 5 minutes out.
+    assert.equal(outcome.status, "failed");
+    if (outcome.status === "failed") {
+      assert.equal(outcome.nextRetryAt.getTime() - NOW.getTime(), 5 * 60 * 1000);
+    }
+  });
+
+  it("reports the shrink so an operator can see why the retry differed", async () => {
+    const db = makeDb();
+    const p = scriptedProvider([TRUNCATED_RESPONSE, GOOD_RESPONSE]);
+    const cap = captureConsole();
+    try {
+      await translateFeedItem(
+        makeItem({ content: LONG_ARTICLE.repeat(40) }),
+        "bg",
+        makeDeps(db, p.generate)
+      );
+    } finally {
+      cap.stop();
+    }
+
+    const shrink = cap.infos.find(
+      (a) => a[0] === "[rss-translation] shrinking article for the next try"
+    );
+    assert.ok(shrink, "expected a log line naming the smaller budget");
+    const fields = shrink![1] as Record<string, unknown>;
+    assert.equal(fields.contentBudget, 1500);
+    assert.ok((fields.translatedBodyChars as number) <= 1504);
+
+    const rejected = cap.warns.find((a) => a[0] === "[rss-translation] unusable model response");
+    assert.equal((rejected![1] as Record<string, unknown>).truncated, true);
+  });
+});
+
 // ─── Per-item timeout ─────────────────────────────────────────────────────────
 
 /** A call that never settles — the hang the per-item budget exists to cut loose. */

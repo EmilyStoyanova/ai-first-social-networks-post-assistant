@@ -11,10 +11,13 @@ import {
   isRetriableParseFailure,
   parseTranslationResponse,
   samplingForTry,
+  shrinkTranslationContentBudget,
   TranslationParseError,
   MAX_TRANSLATION_ATTEMPTS,
+  MAX_TRANSLATION_CONTENT_CHARS,
   MAX_TRANSLATION_OUTPUT_TOKENS,
   MAX_TRANSLATION_RETRIES,
+  MIN_TRANSLATION_CONTENT_CHARS,
   TRANSLATION_ATTEMPT_TIMEOUT_MS,
   TRANSLATION_ITEM_TIMEOUT_MS,
 } from "@/lib/ai/feed-item-translation";
@@ -290,11 +293,8 @@ export async function translateFeedItem(
     return { status: "skipped", reason: "claimed" };
   }
 
-  const { systemPrompt, userPrompt, mode, schema } = buildTranslationPrompts(
-    item.title,
-    item.content,
-    targetLang
-  );
+  const { systemPrompt, userPrompt, mode, schema, contentChars, derivedTitle } =
+    buildTranslationPrompts(item.title, item.content, targetLang);
 
   // Per-translation diagnostics. The article BODY is never logged — only its length —
   // so a request that hangs or times out can be tied to an exact feed item (id, title,
@@ -305,6 +305,13 @@ export async function translateFeedItem(
     sourceUrl: item.url,
     promptLength: systemPrompt.length + userPrompt.length,
     articleTextLength: item.content?.length ?? 0,
+    // Body characters actually sent, AFTER boilerplate/credit/language-switcher removal and
+    // capping. Compared against articleTextLength it shows how much of a page was noise —
+    // the ArchDaily articles in the logs were roughly half.
+    translatedBodyChars: contentChars,
+    // The article had no title of its own, so the model was asked to derive one from the body
+    // rather than return "" — the `(untitled)` rows.
+    ...(derivedTitle ? { derivedTitle: true } : {}),
     // "title_only" says, in one field, that this item had no article body — the reply
     // contract, the stored result and the retry budget all follow from it.
     mode,
@@ -336,6 +343,14 @@ export async function translateFeedItem(
      * correction rather than a re-roll (see buildTranslationRetryPrompt).
      */
     let currentUserPrompt = userPrompt;
+    /**
+     * The request a correction is appended TO. Normally the original, but a truncation replaces
+     * it with a shorter-bodied rebuild, so every later try inherits the smaller article rather
+     * than reverting to the one that could not be finished.
+     */
+    let baseUserPrompt = userPrompt;
+    /** Body budget in force. Halved (down to a floor) each time a reply is cut off. */
+    let contentBudget = MAX_TRANSLATION_CONTENT_CHARS;
 
     // In-request regeneration loop. A bad reply from the self-hosted model (invalid JSON, a
     // decoding loop, drifted language) is usually transient, and a fresh sample seconds later
@@ -407,6 +422,9 @@ export async function translateFeedItem(
           of: maxTries,
           reason,
           willRetry,
+          // Separates "the model wrote something wrong" from "the model never finished" — the
+          // two are both invalid_json in the logs but only one is fixed by asking for less.
+          truncated: parseError?.truncated ?? false,
           ...(parseError?.repetition
             ? {
                 repetitionKind: parseError.repetition.kind,
@@ -422,11 +440,31 @@ export async function translateFeedItem(
         });
         // Retries exhausted (or a reason regeneration cannot fix) — record the failure.
         if (!willRetry) throw parseErr;
+
+        // A cut-off reply means the request was too big to finish, so re-asking for the same
+        // article would truncate again — the exact three-truncations-then-failed pattern in the
+        // logs. Rebuild the request around a smaller body first; the correction is then appended
+        // to THAT, and every later try inherits it. Only the size changes: the number of tries
+        // (maxTries) and the cross-run attempt/backoff schedule are untouched.
+        if (parseError?.truncated && contentBudget > MIN_TRANSLATION_CONTENT_CHARS) {
+          contentBudget = shrinkTranslationContentBudget(contentBudget);
+          const shorter = buildTranslationPrompts(item.title, item.content, targetLang, {
+            maxContentChars: contentBudget,
+          });
+          baseUserPrompt = shorter.userPrompt;
+          console.info("[rss-translation] shrinking article for the next try", {
+            feedItemId: item.id,
+            try: tries,
+            contentBudget,
+            translatedBodyChars: shorter.contentChars,
+          });
+        }
+
         // Name the defect in the next request. Without this the retry differs only in its
         // sampling, and a model that answered in prose (or in Macedonian) has been given no
         // reason to answer differently.
         if (parseError) {
-          currentUserPrompt = buildTranslationRetryPrompt(userPrompt, {
+          currentUserPrompt = buildTranslationRetryPrompt(baseUserPrompt, {
             reason: parseError.reason,
             feedback: parseError.feedback,
           });

@@ -426,6 +426,186 @@ export function detectRepetition(text: string): RepetitionFinding | null {
   return null;
 }
 
+// ─── Translation-input sanitising ─────────────────────────────────────────────
+
+/**
+ * Markers that begin a page's TRAILER — everything a publisher appends after the article
+ * itself. Matching one cuts the body from that point on, which is both safer and far more
+ * effective than filtering trailer lines individually: the trailer is a contiguous block,
+ * and it arrives as one run-on line as often as it arrives as many.
+ *
+ * Taken from the real extracted text of the ArchDaily articles in the logs, whose Readability
+ * output ends:
+ *
+ *     … most famously the city of Chandigarh.
+ *     Image gallerySee allShow lessAbout this authorAuthor
+ *     Cite: Moises Carrasco.  "Modernism on the Watch: …"  17 Aug 2026. ArchDaily.  Accessed .
+ *     <https://www.archdaily.com/1183078/…> ISSN 0719-8884想阅读文章的中文版本吗?守望现代主义：…
+ *     Did you know?You'll now receive updates based on what you follow! …
+ *
+ * That block is ~45 % of the extracted text, carries a raw double quote and a bare URL (both
+ * of which the model then has to escape inside its JSON), and ends in the Chinese
+ * language-switcher string that is the actual origin of the "Chinese instead of Bulgarian"
+ * replies. None of it is the article.
+ */
+const TRAILER_MARKERS: readonly RegExp[] = [
+  /\bImage gallery(?:See all)?/i,
+  /\bAbout this (?:author|office)\b/i,
+  /\bCite:\s/i,
+  /\bISSN\s+\d/i,
+  /\bDid you know\?/i,
+  /\bSave this (?:picture|article)\b/i,
+  // The "read this in Chinese/Portuguese/Spanish?" switcher, in the languages ArchDaily emits.
+  /想阅读文章的中文版本吗/,
+  /\bTradução\b|\b¿Quieres leer/i,
+];
+
+/**
+ * Inline boilerplate that appears WITHIN the article text rather than after it, so it cannot
+ * be handled by the trailer cut. Each is anchored tightly enough that ordinary prose cannot
+ * match it — a bare "Share" or "Author" is deliberately absent, being far too common.
+ */
+const INLINE_NOISE: readonly RegExp[] = [
+  // No trailing \b: Readability glues these labels straight onto the next word, exactly as in
+  // "Subscriber AccessSardar Patel Stadium", where a word boundary never occurs.
+  /Subscriber Access/gi,
+  // Also boundary-free, and for the same reason: the credit line before it ends in a digit
+  // ("… CC BY-SA 3.0Published on August 17, 2026"), so \b never matches ahead of the "P".
+  /Published on \w+ \d{1,2}, \d{4}/g,
+  // "Image © Carlo Fumarola via Wikipedia under license CC BY-SA 3.0" — a photo credit. The
+  // licence code runs to the next real word rather than to the next lower-case letter: without
+  // that lookahead the run of capitals swallowed the "P" of the "Published on …" that follows
+  // it, leaving "ublished on August 17, 2026" behind and defeating the pattern below.
+  /\bImage\s+©[^\n]{0,200}?under licen[cs]e\s+[A-Z][A-Z0-9\-.\s]*?(?=[A-Z][a-z]|\n|$)/g,
+  /\b(?:Photograph|Image|Photo)\s+(?:©|courtesy of)\s+[^\n]{0,120}?(?=\.\s|\n|$)/g,
+  /\bText description provided by the architects\.?/gi,
+  /\b(?:See all|Show less)\b/g,
+  // A media player's timestamp ("5:40"), which Readability lifts out of the video widget.
+  /(?:^|\s)\d{1,2}:\d{2}(?=\s|$)/g,
+  // The gallery counter Readability leaves behind after the lede image ("+ 2").
+  /(?:^|\s)\+\s?\d{1,3}(?=\s|$)/g,
+];
+
+/** CJK (Han, Hiragana, Katakana, Hangul) — the scripts a language switcher drops into a page. */
+const CJK_LETTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+const CJK_LETTER_GLOBAL = new RegExp(CJK_LETTER.source, "gu");
+
+/**
+ * A trailer cut may not take more than this share of the body. The markers are strong, but a
+ * false positive near the top of an article would otherwise silently reduce it to a sentence;
+ * requiring most of the text to survive means a bad match is ignored rather than destructive.
+ */
+const MIN_TRAILER_CUT_KEEP_RATIO = 0.35;
+/** Below this the survivors are not an article, so the cut is abandoned and the body kept. */
+const MIN_SANITISED_CHARS = 200;
+/**
+ * Above this share of CJK the page IS an East-Asian article, not an English one carrying a
+ * language-switcher string. Dropping its CJK would delete the article, so sanitising leaves
+ * CJK alone at that density and lets the normal pipeline handle it.
+ */
+const MAX_INCIDENTAL_CJK_RATIO = 0.2;
+
+/** Strips HTML tags — a feed `<description>` is routinely an HTML excerpt (see parser.ts). */
+function stripMarkup(text: string): string {
+  return text.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]+>/g, " ");
+}
+
+/** Removes the language-switcher sentences a publisher renders in another script. */
+function dropCjkSegments(text: string): string {
+  const cjkCount = (text.match(CJK_LETTER_GLOBAL) ?? []).length;
+  if (cjkCount === 0) return text;
+  const letters = (text.match(/\p{L}/gu) ?? []).length;
+  if (letters > 0 && cjkCount / letters > MAX_INCIDENTAL_CJK_RATIO) return text;
+
+  // Split on line breaks AND sentence-ish boundaries, because the switcher is usually glued
+  // to the end of a line ("… ISSN 0719-8884想阅读文章的中文版本吗?…") rather than on its own.
+  return text
+    .split(/(\n+)/u)
+    .map((segment) =>
+      CJK_LETTER.test(segment)
+        ? segment
+            .split(/(?<=[.!?。？！])/u)
+            .filter((sentence) => !CJK_LETTER.test(sentence))
+            .join("")
+        : segment
+    )
+    .join("");
+}
+
+/** Collapses control characters and runaway whitespace into plain, JSON-safe prose. */
+function normaliseWhitespace(text: string): string {
+  return (
+    text
+      // Control characters other than newline/tab — invisible in the prompt, illegal raw in JSON.
+      .replace(/[ --]/gu, " ")
+      .replace(/\t/g, " ")
+      .replace(/\r\n?/g, "\n")
+      .replace(/[^\S\n]{2,}/gu, " ")
+      .split("\n")
+      .map((line) => line.trim())
+      // A line of pure punctuation or digits is a widget's leftovers, never a sentence.
+      .filter((line) => line === "" || /\p{L}/u.test(line))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  );
+}
+
+/**
+ * Removes the parts of an extracted article that are the PAGE rather than the article, before
+ * any of it is sent to the translator.
+ *
+ * Three production failures share this single cause, which is why the fix is here rather than
+ * in the model contract:
+ *
+ *   • wrong_language — the trailer ends in a Chinese language-switcher string, so Chinese was
+ *     in the INPUT; the model echoing it back was never a model defect. Credits and cite blocks
+ *     are also almost entirely Latin proper nouns and URLs, which drag a faithful translation's
+ *     Cyrillic share toward the {@link MIN_CYRILLIC_SHARE} floor.
+ *   • truncated JSON — noise was ~45 % of the observed ArchDaily bodies, so it consumed ~45 %
+ *     of both the input cap and the output budget. Removing it shortens the reply the model has
+ *     to fit, which is the only lever that helps while the attempt timeout is the binding
+ *     constraint.
+ *   • invalid_json — the cite block carries a raw `"` and a bare `<URL>`, exactly the characters
+ *     a model most often fails to escape inside a JSON string.
+ *
+ * Every pass is conservative and reversible in effect: the trailer cut is abandoned unless most
+ * of the body survives it, CJK removal is skipped when the article genuinely is East-Asian, and
+ * a sanitised body that comes out too short is discarded in favour of the original. Sanitising
+ * never touches the STORED article — `content` remains immutable source data; this shapes only
+ * what the prompt carries.
+ */
+export function sanitiseTranslationContent(content: string | null): string | null {
+  if (content === null) return null;
+
+  const original = content;
+  let text = normaliseWhitespace(stripMarkup(content));
+
+  let earliest = -1;
+  for (const marker of TRAILER_MARKERS) {
+    const at = text.search(marker);
+    if (at !== -1 && (earliest === -1 || at < earliest)) earliest = at;
+  }
+  if (earliest !== -1) {
+    const kept = text.slice(0, earliest);
+    // Ignore a marker that would take most of the article — see MIN_TRAILER_CUT_KEEP_RATIO.
+    if (
+      kept.trim().length >= Math.max(MIN_SANITISED_CHARS, text.length * MIN_TRAILER_CUT_KEEP_RATIO)
+    ) {
+      text = kept;
+    }
+  }
+
+  text = dropCjkSegments(text);
+  for (const noise of INLINE_NOISE) text = text.replace(noise, " ");
+  text = normaliseWhitespace(text);
+
+  // Sanitising is an improvement, never a loss: if the passes leave too little to translate,
+  // the untouched body is the better input and the model can cope with the noise.
+  if (text.length < MIN_SANITISED_CHARS) return original;
+  return text;
+}
+
 /**
  * Caps the article body for translation, preserving a coherent leading slice. Bodies at
  * or under the cap are returned unchanged; longer bodies are cut at the cap (backed up to
@@ -441,6 +621,30 @@ export function capTranslationContent(
   const lastSpace = slice.lastIndexOf(" ");
   const body = lastSpace > max * 0.8 ? slice.slice(0, lastSpace) : slice;
   return `${body.trimEnd()} […]`;
+}
+
+/**
+ * Floor for the shrinking retry below — a body cut smaller than this is no longer an
+ * article worth translating, so the retry stops shrinking and simply re-rolls.
+ */
+export const MIN_TRANSLATION_CONTENT_CHARS = 800;
+
+/**
+ * The body budget for the NEXT try after a reply was cut off mid-JSON.
+ *
+ * A truncation means the model was asked for more output than it could finish inside its
+ * generation ceiling. Retrying with the SAME body therefore asks for the same oversized reply
+ * a second and third time, which is precisely the "retries happen correctly, but some items
+ * still fail after all attempts" pattern in the logs: three calls, three truncations, one
+ * failed item. Halving the body halves the reply the model has to complete, so a later try is
+ * a materially easier request rather than another roll of the same dice.
+ *
+ * This changes only the SIZE of a retry, never how many there are: the in-request budget is
+ * still 1 + {@link MAX_TRANSLATION_RETRIES} calls and the cross-run schedule
+ * ({@link MAX_TRANSLATION_ATTEMPTS}, {@link computeTranslationBackoff}) is untouched.
+ */
+export function shrinkTranslationContentBudget(current: number): number {
+  return Math.max(MIN_TRANSLATION_CONTENT_CHARS, Math.floor(current / 2));
 }
 
 /**
@@ -503,6 +707,17 @@ function languageName(code: string): string {
 const NON_BULGARIAN_CYRILLIC = /[ђјљњћџѓѕќыэёЂЈЉЊЋЏЃЅЌЫЭЁ]/gu;
 const CYRILLIC_LETTER = /\p{Script=Cyrillic}/gu;
 const LATIN_LETTER = /\p{Script=Latin}/gu;
+/**
+ * EVERY letter, in any script — the denominator of the script share.
+ *
+ * Previously the denominator was Latin + Cyrillic only, which left a hole the logs walked
+ * straight into: a reply written in Chinese has almost no Latin AND almost no Cyrillic, so it
+ * scored `totalLetters ≈ 0`, fell under {@link MIN_LETTERS_FOR_SCRIPT_CHECK}, skipped the
+ * script test entirely and was accepted as Bulgarian. Counting all letters means any script
+ * the model drifts into — Han, Greek, Arabic — dilutes the Cyrillic share exactly as Latin
+ * always did, so no such reply can pass. This only ever makes the check stricter.
+ */
+const ANY_LETTER = /\p{L}/gu;
 
 /**
  * Share of Cyrillic letters (of all letters) below which a reply is not a Bulgarian
@@ -514,6 +729,19 @@ const LATIN_LETTER = /\p{Script=Latin}/gu;
 export const MIN_CYRILLIC_SHARE = 0.4;
 /** Below this many letters the script share is noise (a headline, a one-line body). */
 export const MIN_LETTERS_FOR_SCRIPT_CHECK = 40;
+/**
+ * Letters above which a reply carrying NO Cyrillic at all is untranslated, however short.
+ *
+ * The share test needs {@link MIN_LETTERS_FOR_SCRIPT_CHECK} letters before it will judge
+ * anything, and a title is almost never that long — so a title-only translation that came back
+ * as the untouched English headline ("Modernism on the Watch") measured 21 letters, skipped the
+ * test, and was stored as a completed Bulgarian translation. That is the one case where the
+ * evidence is unambiguous at any length: a genuine Bulgarian title always contains Cyrillic, so
+ * zero Cyrillic beside a dozen foreign letters is not a short translation, it is no translation.
+ * Kept at 12 so a title that is legitimately nothing but a Latin brand name or model number is
+ * still too short to condemn.
+ */
+export const MIN_LETTERS_FOR_ZERO_CYRILLIC = 12;
 /**
  * Distinct WORDS carrying a foreign letter that mark the text as written in another language.
  *
@@ -545,6 +773,12 @@ export interface BulgarianAssessment {
   verdict: "bulgarian" | "foreign_cyrillic" | "not_cyrillic";
   cyrillicLetters: number;
   latinLetters: number;
+  /**
+   * Letters in neither script — Han, Kana, Hangul, Greek, Arabic. Non-zero means the reply
+   * drifted into a third script entirely, the all-Chinese case; reported so that shows in logs
+   * rather than hiding inside the share.
+   */
+  otherLetters: number;
   /** Occurrences of letters absent from the Bulgarian alphabet. */
   foreignCyrillic: number;
   /** Distinct words carrying at least one of them — see MAX_FOREIGN_BEARING_WORDS. */
@@ -606,10 +840,14 @@ export function assessBulgarian(text: string): BulgarianAssessment {
   const foreignRatio =
     cyrillicLetters === 0 ? 0 : Math.round((foreignCyrillic / cyrillicLetters) * 10_000) / 10_000;
 
-  const totalLetters = cyrillicLetters + latinLetters;
+  // Every script counts toward the denominator — see ANY_LETTER. A reply in Han or Greek
+  // dilutes the Cyrillic share exactly as Latin does, instead of vanishing from the census.
+  const totalLetters = countMatches(text, ANY_LETTER);
+  const otherLetters = Math.max(totalLetters - cyrillicLetters - latinLetters, 0);
   const base = {
     cyrillicLetters,
     latinLetters,
+    otherLetters,
     foreignCyrillic,
     foreignWords,
     distinctForeign,
@@ -620,6 +858,12 @@ export function assessBulgarian(text: string): BulgarianAssessment {
     totalLetters >= MIN_LETTERS_FOR_SCRIPT_CHECK &&
     cyrillicLetters / totalLetters < MIN_CYRILLIC_SHARE
   ) {
+    return { verdict: "not_cyrillic", ...base };
+  }
+
+  // Too short for the share test, but carrying no Cyrillic whatsoever — an untranslated
+  // headline. See MIN_LETTERS_FOR_ZERO_CYRILLIC for why this is safe at that length.
+  if (cyrillicLetters === 0 && totalLetters >= MIN_LETTERS_FOR_ZERO_CYRILLIC) {
     return { verdict: "not_cyrillic", ...base };
   }
 
@@ -641,22 +885,46 @@ export interface TranslationPrompts {
   mode: TranslationReplyMode;
   /** The Ollama `format` schema matching `mode`. */
   schema: typeof TRANSLATION_JSON_SCHEMA | typeof TRANSLATION_TITLE_JSON_SCHEMA;
+  /** Body characters actually sent, after sanitising and capping — logged for diagnostics. */
+  contentChars: number;
+  /** True when the source had no title and the model was asked to derive one from the body. */
+  derivedTitle: boolean;
+}
+
+export interface BuildTranslationPromptsOptions {
+  /**
+   * Body-character budget for THIS build. Defaults to {@link MAX_TRANSLATION_CONTENT_CHARS};
+   * a retry that follows a truncation passes a smaller one (see
+   * {@link shrinkTranslationContentBudget}) so the same oversized reply is not requested again.
+   */
+  maxContentChars?: number;
 }
 
 /** The JSON-discipline lines, shared by both modes so they cannot drift apart. */
 const JSON_DISCIPLINE = [
   "Output nothing before or after the JSON — no reasoning, no <think> block, no commentary, no summaries, no code fences.",
   "Make sure the JSON is complete and ends with its closing brace.",
+  // The observed invalid_json replies broke on characters lifted straight out of the article's
+  // own cite block — a raw double quote and a bare <URL>. Naming the escape rule is cheaper
+  // than salvaging the result.
+  'Inside the JSON strings, escape every double quote as \\" and every line break as \\n. Never put a raw newline or an unescaped quote inside a string.',
 ];
 
 export function buildTranslationPrompts(
   title: string | null,
   content: string | null,
-  targetLang: string
+  targetLang: string,
+  options: BuildTranslationPromptsOptions = {}
 ): TranslationPrompts {
+  // Sanitising happens BEFORE classification and capping, so a body that is nothing but
+  // navigation and credits is judged on what would actually be translated, and the cap spends
+  // its budget on article text rather than on a cite block. See sanitiseTranslationContent.
+  const cleanContent = sanitiseTranslationContent(content);
   const mode: TranslationReplyMode =
-    classifyTranslationInput(title, content) === "full" ? "full" : "title_only";
+    classifyTranslationInput(title, cleanContent) === "full" ? "full" : "title_only";
   const language = languageName(targetLang);
+  // A "full" item whose article has no title of its own — the `(untitled)` rows in the logs.
+  const derivedTitle = mode === "full" && isBlank(title);
 
   const lines =
     mode === "full"
@@ -672,7 +940,10 @@ export function buildTranslationPrompts(
   if (isBulgarianTarget(targetLang)) {
     lines.push(
       "Translate ONLY into natural, fluent Bulgarian, written in Bulgarian Cyrillic.",
-      "Do NOT use Serbian, Macedonian, Russian, or any mixed-language words, letters, or spelling."
+      "Do NOT use Serbian, Macedonian, Russian, or any mixed-language words, letters, or spelling.",
+      // The extracted page can still carry a stray language-switcher phrase past sanitising.
+      // Saying so explicitly stops it being copied through as if it were article text.
+      "If the text contains words in Chinese, Japanese, Korean or any other language, do NOT copy them — translate their meaning into Bulgarian or leave them out."
     );
   }
 
@@ -680,7 +951,13 @@ export function buildTranslationPrompts(
     lines.push(
       'Respond with ONLY a single, complete JSON object of exactly this shape: {"title": "...", "content": "..."}',
       ...JSON_DISCIPLINE,
-      'If the article has no title, use an empty string "" for "title".'
+      derivedTitle
+        ? // Previously this said to return an empty string, which is why every bodyless-titled
+          // ArchDaily article completed with no translated title at all. The article body is
+          // right there and is the honest source of a headline, so one is asked for — bounded,
+          // and explicitly forbidden from adding anything the body does not say.
+          `This article has no title of its own. Write a short ${language} title (at most 90 characters) taken from the article's opening — state only what the body already says, and invent nothing.`
+        : 'If the article has no title, use an empty string "" for "title".'
     );
   } else {
     lines.push(
@@ -693,7 +970,10 @@ export function buildTranslationPrompts(
   }
 
   const systemPrompt = lines.join("\n");
-  const cappedContent = capTranslationContent(content);
+  const cappedContent = capTranslationContent(
+    cleanContent,
+    options.maxContentChars ?? MAX_TRANSLATION_CONTENT_CHARS
+  );
   const userPrompt =
     mode === "full"
       ? [`Title: ${title ?? ""}`, `Content: ${cappedContent ?? ""}`].join("\n")
@@ -704,6 +984,8 @@ export function buildTranslationPrompts(
     userPrompt,
     mode,
     schema: mode === "full" ? TRANSLATION_JSON_SCHEMA : TRANSLATION_TITLE_JSON_SCHEMA,
+    contentChars: cappedContent?.length ?? 0,
+    derivedTitle,
   };
 }
 
@@ -767,16 +1049,24 @@ export class TranslationParseError extends Error {
   readonly feedback: string;
   /** Present only for `repetition`: the looping unit and its repeat count, for logging. */
   readonly repetition?: RepetitionFinding;
+  /**
+   * True when the reply was CUT OFF rather than malformed — the model ran out of generation
+   * budget mid-object. The retry reads this to rebuild the prompt with a smaller body (see
+   * {@link shrinkTranslationContentBudget}); every other defect keeps the body it had, because
+   * shortening the article does not make a model stop answering in Macedonian.
+   */
+  readonly truncated: boolean;
   constructor(
     message: string,
     reason: TranslationParseFailure = "invalid_json",
-    options: { feedback?: string; repetition?: RepetitionFinding } = {}
+    options: { feedback?: string; repetition?: RepetitionFinding; truncated?: boolean } = {}
   ) {
     super(message);
     this.name = "TranslationParseError";
     this.reason = reason;
     this.feedback = options.feedback ?? DEFAULT_FEEDBACK[reason];
     this.repetition = options.repetition;
+    this.truncated = options.truncated ?? false;
   }
 }
 
@@ -813,7 +1103,29 @@ export type JsonRepair =
   | "trimmed_prose"
   | "escaped_control_chars"
   | "closed_string"
-  | "closed_object";
+  | "closed_object"
+  /** A cut landed inside a KEY, so the half-written member was dropped rather than closed. */
+  | "dropped_partial_key"
+  /** A cut landed after a comma or a `"key":` with no value — the dangling tail was removed. */
+  | "dropped_partial_member";
+
+/**
+ * The repairs that mean the reply was CUT OFF rather than merely untidy.
+ *
+ * Stripping a `<think>` block or a code fence says the model packaged its answer badly;
+ * these say it never finished it, which is a different problem with a different remedy —
+ * the retry shrinks the body instead of only re-rolling. See {@link TranslationParseError}.
+ */
+const CUT_REPAIRS: readonly JsonRepair[] = [
+  "closed_string",
+  "closed_object",
+  "dropped_partial_key",
+  "dropped_partial_member",
+];
+
+function indicatesTruncation(repairs: readonly JsonRepair[]): boolean {
+  return repairs.some((r) => CUT_REPAIRS.includes(r));
+}
 
 /**
  * Salvaged content shorter than this is not a translation, it is a fragment.
@@ -869,18 +1181,74 @@ function firstBalancedObject(text: string, start: number): string | null {
 }
 
 /**
+ * Drops a dangling tail that cannot become a complete member, so the object can be closed.
+ *
+ * Two shapes, both of them a cut landing in the gap BETWEEN values rather than inside one:
+ *
+ *   • `{"title":"Заглавие",`          — a comma promising a member that never arrived;
+ *   • `{"title":"Заглавие","content":` — a key and colon with no value behind them.
+ *
+ * Both were previously left as-is, producing `{"title":"Заглавие",}` — still invalid, so the
+ * whole reply was rejected as `invalid_json` and a title the model had finished perfectly well
+ * was thrown away with it. Removing the promise instead keeps everything the model DID
+ * complete, and the field checks downstream still decide whether that is enough: a `full`
+ * translation missing its body is rejected exactly as before, just as `schema_validation`
+ * (accurate) rather than `invalid_json` (misleading). Nothing is invented — this only ever
+ * deletes an unfulfilled promise.
+ */
+function trimDanglingMember(text: string): { text: string; dropped: boolean } {
+  let out = text;
+  let dropped = false;
+
+  for (;;) {
+    const trimmed = out.replace(/\s+$/u, "");
+    if (trimmed.endsWith(",")) {
+      out = trimmed.slice(0, -1);
+      dropped = true;
+      continue;
+    }
+    if (trimmed.endsWith(":")) {
+      // Walk back over the key string this colon belongs to, honouring escapes.
+      const beforeColon = trimmed.slice(0, -1).replace(/\s+$/u, "");
+      if (!beforeColon.endsWith('"')) return { text: out, dropped };
+      let i = beforeColon.length - 2;
+      while (i >= 0) {
+        if (beforeColon[i] === '"') {
+          let backslashes = 0;
+          let j = i - 1;
+          while (j >= 0 && beforeColon[j] === "\\") {
+            backslashes += 1;
+            j -= 1;
+          }
+          if (backslashes % 2 === 0) break;
+        }
+        i -= 1;
+      }
+      if (i < 0) return { text: out, dropped };
+      out = beforeColon.slice(0, i);
+      dropped = true;
+      continue;
+    }
+    return { text: out, dropped };
+  }
+}
+
+/**
  * Repairs an object the model stopped emitting part-way through.
  *
- * Three defects, all observed on the self-hosted worker, all of them the model running out
- * of output budget rather than misunderstanding the contract:
+ * The defects, all observed on the self-hosted worker, all of them the model running out of
+ * output budget rather than misunderstanding the contract:
  *
  *   • a raw newline/tab inside a string value — legal prose, illegal JSON;
  *   • a value cut off mid-string, so the string never closes;
+ *   • a KEY cut off mid-string, where closing it would fabricate a member;
+ *   • a cut between members (`…",` or `…"content":`) — see {@link trimDanglingMember};
  *   • one or more closing braces missing at the very end.
  *
- * Everything else is left to fail. In particular a cut that lands between a comma and the
- * next key produces `{"a":"b",}`, which is repaired to nothing and still rejected — there is
- * no half-written value to keep there, so "repairing" it would only invent structure.
+ * The key case is why the string-close tracks POSITION. Closing `{"title":"X","cont` as though
+ * `"cont` were a value produces `{"title":"X","cont […]"}`, which parses but invents a member
+ * the model never wrote; dropping it keeps the object honest and leaves the field checks to
+ * reject what is genuinely missing.
  */
 function repairTruncatedJson(candidate: string): { text: string; repairs: JsonRepair[] } {
   const repairs: JsonRepair[] = [];
@@ -889,6 +1257,12 @@ function repairTruncatedJson(candidate: string): { text: string; repairs: JsonRe
   let escaped = false;
   let depth = 0;
   let escapedControl = false;
+  /** Index in `out` of the quote that opened the string currently being read. */
+  let stringStart = -1;
+  /** Whether that string is a KEY (it followed `{` or `,`) rather than a value (followed `:`). */
+  let stringIsKey = false;
+  /** Last structural character seen outside a string — what decides key vs. value. */
+  let lastStructural = "";
 
   for (const ch of candidate) {
     if (inString) {
@@ -916,22 +1290,43 @@ function repairTruncatedJson(candidate: string): { text: string; repairs: JsonRe
       out += ch;
       continue;
     }
-    if (ch === '"') inString = true;
-    else if (ch === "{") depth += 1;
-    else if (ch === "}") depth -= 1;
+    if (ch === '"') {
+      inString = true;
+      stringStart = out.length;
+      stringIsKey = lastStructural === "{" || lastStructural === ",";
+    } else if (ch === "{") {
+      depth += 1;
+      lastStructural = ch;
+    } else if (ch === "}") {
+      depth -= 1;
+      lastStructural = ch;
+    } else if (ch === "," || ch === ":") {
+      lastStructural = ch;
+    }
     out += ch;
   }
 
   if (escapedControl) repairs.push("escaped_control_chars");
 
   if (inString) {
-    // A dangling backslash would become an invalid escape once the quote is added.
-    if (escaped) out = out.slice(0, -1);
-    // Drop the final, almost certainly half-written word and mark the cut with the same
-    // marker capTranslationContent uses, so a shortened translation reads as an excerpt.
-    out = `${out.replace(/\s+\S*$/u, "")} […]"`;
-    repairs.push("closed_string");
+    if (stringIsKey) {
+      // A half-written key names nothing — drop it rather than inventing a member for it.
+      out = out.slice(0, stringStart);
+      repairs.push("dropped_partial_key");
+    } else {
+      // A dangling backslash would become an invalid escape once the quote is added.
+      if (escaped) out = out.slice(0, -1);
+      // Drop the final, almost certainly half-written word and mark the cut with the same
+      // marker capTranslationContent uses, so a shortened translation reads as an excerpt.
+      out = `${out.replace(/\s+\S*$/u, "")} […]"`;
+      repairs.push("closed_string");
+    }
   }
+
+  const trimmed = trimDanglingMember(out);
+  out = trimmed.text;
+  if (trimmed.dropped) repairs.push("dropped_partial_member");
+
   if (depth > 0) {
     out += "}".repeat(depth);
     repairs.push("closed_object");
@@ -1037,7 +1432,11 @@ export function parseTranslationResponse(
     try {
       parsed = JSON.parse(salvaged.text);
     } catch {
-      throw new TranslationParseError("Translation response was not valid JSON.", "invalid_json");
+      throw new TranslationParseError("Translation response was not valid JSON.", "invalid_json", {
+        // Salvage saw a cut but still could not make it parse — the reply was truncated
+        // somewhere the repair passes do not reach, so the retry should ask for less.
+        truncated: indicatesTruncation(repairs),
+      });
     }
   }
 
@@ -1078,7 +1477,8 @@ export function parseTranslationResponse(
       // A title is a line long; one cut mid-way is a fragment, never an excerpt worth keeping.
       throw new TranslationParseError(
         "Translation response was cut off inside the title.",
-        "invalid_json"
+        "invalid_json",
+        { truncated: true }
       );
     }
     assertBulgarianEnough(normalisedTitle, targetLang);
@@ -1094,7 +1494,10 @@ export function parseTranslationResponse(
   if (!("content" in record) || typeof record.content !== "string") {
     throw new TranslationParseError(
       'Translation response is missing "content".',
-      "schema_validation"
+      "schema_validation",
+      // Salvage dropped a half-written `"content"` key or a dangling comma, so the body was
+      // not missing by choice — the model was cut off before it wrote one.
+      { truncated: indicatesTruncation(repairs) }
     );
   }
   const content = record.content;
@@ -1106,10 +1509,13 @@ export function parseTranslationResponse(
   }
   if (repairs.includes("closed_string") && content.trim().length < MIN_REPAIRED_CONTENT_CHARS) {
     // Salvage produced a fragment rather than a translation — reject it as the malformed
-    // reply it is, instead of storing two words as a completed translation.
+    // reply it is, instead of storing two words as a completed translation. This is the
+    // "cut off after very short content" line in the logs: the reply stopped almost as soon
+    // as it started, so the next try asks for a smaller article rather than the same one.
     throw new TranslationParseError(
       `Translation response was cut off after ${content.trim().length} characters.`,
-      "invalid_json"
+      "invalid_json",
+      { truncated: true }
     );
   }
 
@@ -1149,8 +1555,12 @@ function assertBulgarianEnough(text: string, targetLang?: string): void {
   if (a.verdict === "bulgarian") return;
 
   if (a.verdict === "not_cyrillic") {
+    const totalLetters = a.cyrillicLetters + a.latinLetters + a.otherLetters;
+    // `otherLetters` is called out separately: "0 of 120 letters are Cyrillic" reads the same
+    // for an untranslated English reply and an all-Chinese one, and those are different bugs.
+    const drift = a.otherLetters > 0 ? `, ${a.otherLetters} in another script entirely` : "";
     throw new TranslationParseError(
-      `Translation is not Bulgarian — only ${a.cyrillicLetters} of ${a.cyrillicLetters + a.latinLetters} letters are Cyrillic (the source appears untranslated).`,
+      `Translation is not Bulgarian — only ${a.cyrillicLetters} of ${totalLetters} letters are Cyrillic${drift} (the source appears untranslated).`,
       "wrong_language"
     );
   }
