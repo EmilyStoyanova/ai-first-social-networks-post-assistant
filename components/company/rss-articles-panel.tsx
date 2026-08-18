@@ -342,16 +342,20 @@ export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
   }
 
   /**
-   * Queues the EXISTING classification drain for this company — no LLM call
-   * happens in this request. The list is reloaded so a verdict that has already
-   * settled shows up; anything still queued appears on the next open.
+   * Queues the EXISTING classification drain — no LLM call happens in this
+   * request. Scoped to THIS source, which is the source the button sits inside:
+   * the number it reports back has to be checkable against the list below it.
+   * The list is reloaded so a verdict that has already settled shows up;
+   * anything still queued appears on the next open.
    */
   async function handleReclassify() {
     setReclassifying(true);
     setReclassified(null);
     setLoadError("");
     try {
-      const res = await fetch(`/api/v1/companies/${slug}/reclassify`, { method: "POST" });
+      const res = await fetch(`/api/v1/companies/${slug}/content-sources/${sourceId}/reclassify`, {
+        method: "POST",
+      });
       if (!res.ok) throw new Error();
       const json = (await res.json()) as { data: { reopened: number } };
       setReclassified(json.data.reopened);
@@ -424,9 +428,14 @@ export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
             </div>
           )}
 
+          {/* Both messages name THIS source, because the action did. "0 queued"
+              on its own reads like a failure, when it usually means the source
+              was already up to date. */}
           {reclassified !== null && (
             <Alert variant="success" className="mb-3">
-              {tc("reclassifyQueued", { count: reclassified })}
+              {reclassified === 0
+                ? tc("reclassifyQueuedNone")
+                : tc("reclassifyQueued", { count: reclassified })}
             </Alert>
           )}
 

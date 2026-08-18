@@ -10,9 +10,10 @@ import { resolveBrandGuidelinesAccess } from "./update-brand-guidelines.service"
  *
  * Three callers converge here (a Brand Settings save, the manual "Reclassify
  * articles" button, and the ingest follow-up), and they differ only in what they
- * pass. Centralised rather than duplicated because the eligibility rule is the
- * part that must never drift: get it wrong in one caller and either consumed
- * history is rewritten or a company's queue silently never reopens.
+ * pass — the button names ONE source, the settings save names none and so means
+ * the whole company. Centralised rather than duplicated because the eligibility
+ * rule is the part that must never drift: get it wrong in one caller and either
+ * consumed history is rewritten or a company's queue silently never reopens.
  *
  * Nothing here calls a model. It flips rows back to `pending` and enqueues the
  * existing drain — the same job type, the same dedupe key, the same worker
@@ -54,10 +55,21 @@ const RECLASSIFIABLE_STATUSES = ["completed", "skipped", "failed"] as const;
 /**
  * The eligibility predicate, exported so the rule above is a test rather than a
  * comment — it is the one part of this file that must never drift.
+ *
+ * `sourceId` NARROWS the same rule; it never relaxes it. Passing one is what the
+ * per-source button does: the button is drawn inside one source's card, so
+ * reopening that company's other feeds would act far outside what was clicked.
+ * `companyId` stays in the predicate alongside it — the caller has already
+ * checked the source belongs to the company, and keeping both means a mistake
+ * there still cannot reach another tenant's rows.
  */
-export function reclassifiableWhere(companyId: string): Record<string, unknown> {
+export function reclassifiableWhere(
+  companyId: string,
+  sourceId: string | null = null
+): Record<string, unknown> {
   return {
     companyId,
+    ...(sourceId === null ? {} : { sourceId }),
     usedInPost: false,
     source: { enabled: true, type: "rss" },
     // An OR rather than `in: [..., null]`: Prisma's `in` matches values, never
@@ -77,8 +89,8 @@ export interface ReclassifyResult {
 }
 
 export interface ReclassifyDeps {
-  /** Flips eligible rows to pending; returns how many. */
-  reopen?: (companyId: string) => Promise<number>;
+  /** Flips eligible rows to pending; returns how many. `sourceId` null = whole company. */
+  reopen?: (companyId: string, sourceId: string | null) => Promise<number>;
   enqueue?: () => Promise<EnqueueJobResult>;
 }
 
@@ -99,9 +111,9 @@ export const RECLASSIFY_REOPEN_DATA = {
   classificationLeaseExpiresAt: null,
 } as const;
 
-async function defaultReopen(companyId: string): Promise<number> {
+async function defaultReopen(companyId: string, sourceId: string | null): Promise<number> {
   const result = await prisma.feedItem.updateMany({
-    where: reclassifiableWhere(companyId),
+    where: reclassifiableWhere(companyId, sourceId),
     data: { ...RECLASSIFY_REOPEN_DATA },
   });
   return result.count;
@@ -131,15 +143,21 @@ function defaultEnqueue(): Promise<EnqueueJobResult> {
  * NO model call: the drain recomputes `classificationHash`, finds it unchanged, and
  * settles the row straight back to `completed`. That is what lets this be triggered
  * bluntly without auditing exactly which topic moved.
+ *
+ * `sourceId` scopes WHICH rows are reopened and nothing else. The drain that
+ * follows is deliberately still the shared one: reopening is the targeted act,
+ * draining is a sweep over whatever is pending, and giving one source its own job
+ * type would be a second classification pipeline for no gain.
  */
 export async function reclassifyCompanyFeedItems(
   companyId: string,
-  deps: ReclassifyDeps = {}
+  deps: ReclassifyDeps = {},
+  sourceId: string | null = null
 ): Promise<ReclassifyResult> {
   const reopen = deps.reopen ?? defaultReopen;
   const enqueue = deps.enqueue ?? defaultEnqueue;
 
-  const reopened = await reopen(companyId);
+  const reopened = await reopen(companyId, sourceId);
   if (reopened === 0) return { reopened: 0, enqueued: null };
 
   return { reopened, enqueued: await enqueue() };
@@ -151,10 +169,35 @@ export type RequestReclassificationResult =
 
 export interface RequestReclassificationDeps extends ReclassifyDeps {
   resolveAccess?: typeof resolveBrandGuidelinesAccess;
+  /** True iff this source exists AND belongs to that company. */
+  sourceBelongsToCompany?: (companyId: string, sourceId: string) => Promise<boolean>;
 }
 
 /**
- * The manual "Reclassify articles" action.
+ * Does the requested source exist under the requested company?
+ *
+ * A source from another company is NOT_FOUND, not FORBIDDEN — for the same reason
+ * a non-member is: "you may not touch that source" confirms the source exists,
+ * and an id from a URL is guessable in a way a slug behind a login is not.
+ */
+async function defaultSourceBelongsToCompany(
+  companyId: string,
+  sourceId: string
+): Promise<boolean> {
+  const source = await prisma.contentSource.findFirst({
+    where: { id: sourceId, companyId },
+    select: { id: true },
+  });
+  return source !== null;
+}
+
+/**
+ * The manual "Reclassify articles" action, scoped to ONE source.
+ *
+ * Scoped because the button is drawn inside a single source's card. A control
+ * that quietly acts on every other feed the company owns is not the control the
+ * person pressed, and the count it reported back could not be checked against the
+ * list it sat above.
  *
  * Same authorization as editing the topics themselves — owners and global admins
  * — because it is the same setting being applied, and a non-member gets NOT_FOUND
@@ -167,23 +210,35 @@ export interface RequestReclassificationDeps extends ReclassifyDeps {
  * nothing really changed — the drain recomputes the hash, finds it unchanged, and
  * settles each row without a model call.
  *
+ * A non-RSS or disabled source needs no special case here: `reclassifiableWhere`
+ * already excludes it, so the action reopens nothing and honestly reports zero.
+ *
  * It enqueues the existing drain and returns; no LLM call happens in the request.
  */
 export async function requestReclassification(
   slug: string,
+  sourceId: string,
   userId: string,
   isGlobalAdmin: boolean,
   deps: RequestReclassificationDeps = {}
 ): Promise<RequestReclassificationResult> {
   const resolveAccess = deps.resolveAccess ?? resolveBrandGuidelinesAccess;
+  const belongs = deps.sourceBelongsToCompany ?? defaultSourceBelongsToCompany;
 
   const access = await resolveAccess(slug, userId, isGlobalAdmin);
   if (!access.ok) return { success: false, code: access.code };
 
-  const result = await reclassifyCompanyFeedItems(access.companyId, deps);
+  // Checked before anything is written: an unowned source must leave every row
+  // in the database exactly as it was.
+  if (!(await belongs(access.companyId, sourceId))) {
+    return { success: false, code: "NOT_FOUND" };
+  }
+
+  const result = await reclassifyCompanyFeedItems(access.companyId, deps, sourceId);
 
   console.info("[classification] manual reclassification requested", {
     companyId: access.companyId,
+    sourceId,
     reopened: result.reopened,
     enqueued: result.enqueued?.enqueued ?? false,
     deduplicated: result.enqueued?.deduplicated ?? false,
