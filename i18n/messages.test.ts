@@ -123,6 +123,97 @@ describe("i18n messages", () => {
     }
   });
 
+  it("names every part of the channel analytics dashboard in both locales", () => {
+    // Every one of these is asked for by name at render time, several from a
+    // list (`period.${option}`, `sources.avg`), and next-intl throws in place of
+    // the element rather than falling back. The period keys start with a digit,
+    // which is exactly the sort of key a hand edit gets wrong.
+    const keys = [
+      "period.label",
+      ...["7d", "30d", "3m", "1y"].map((p) => `period.${p}`),
+      "timeZoneNote",
+      ...[
+        "publishedPosts",
+        "avgEngagementRate",
+        "notReported",
+        "fromPosts",
+        "awaitingMetrics",
+        "allChannelsNote",
+      ].map((k) => `kpi.${k}`),
+      ...[
+        "title",
+        "description",
+        "metricLabel",
+        "imageLabel",
+        "note",
+        "emptyTitle",
+        "emptyDescription",
+      ].map((k) => `chart.${k}`),
+      ...["title", "description", "rankedBy", "emptyTitle", "emptyDescription"].map(
+        (k) => `topPosts.${k}`
+      ),
+      ...[
+        "title",
+        "description",
+        "source",
+        "posts",
+        "avg",
+        "reportedBy",
+        "companyContent",
+        "averageNote",
+      ].map((k) => `sources.${k}`),
+      ...["title", "ownerDescription", "ownerAction", "editorDescription"].map(
+        (k) => `notConfigured.${k}`
+      ),
+      ...["title", "description"].map((k) => `noPosts.${k}`),
+    ];
+
+    for (const key of keys) {
+      for (const [locale, messages] of [
+        ["en", en],
+        ["bg", bg],
+      ] as const) {
+        const value = lookup(messages, `planner.analytics.${key}`);
+        assert.equal(typeof value, "string", `planner.analytics.${key} missing from ${locale}`);
+        assert.ok(
+          (value as string).trim().length > 0,
+          `planner.analytics.${key} is blank in ${locale}`
+        );
+      }
+    }
+  });
+
+  it("labels every metric the analytics dashboard can display", () => {
+    // The KPI cards, the chart switcher and the top-post rows all label a metric
+    // by its own key, so a metric the normalizer can store must have a name in
+    // both locales — `follows` was the one that did not.
+    const metrics = [
+      "reactions",
+      "comments",
+      "shares",
+      "impressions",
+      "clicks",
+      "reach",
+      "views",
+      "saves",
+      "follows",
+      "engagementRate",
+    ];
+
+    for (const metric of metrics) {
+      for (const [locale, messages] of [
+        ["en", en],
+        ["bg", bg],
+      ] as const) {
+        assert.equal(
+          typeof lookup(messages, `analytics.${metric}`),
+          "string",
+          `analytics.${metric} missing from ${locale}`
+        );
+      }
+    }
+  });
+
   it("labels the calendar event's name field as the organizer", () => {
     // The shared `name` column holds the organiser for a calendar event, not the
     // event's own title — that is `contentSources.eventTitle`.

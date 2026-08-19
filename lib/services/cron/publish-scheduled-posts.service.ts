@@ -11,7 +11,8 @@ import {
 } from "@/lib/scheduling/publish-window";
 import {
   MOCK_BUFFER_POST_ID,
-  loadBufferProfileMap,
+  loadPublishTargets,
+  type PublishTargets,
   markPostFailed,
   markPostSent,
   sendPostToBuffer,
@@ -225,8 +226,12 @@ async function deliverToBuffer(
   }
 
   let client: Awaited<ReturnType<typeof getBufferClient>>;
+  let targets: PublishTargets;
   try {
     client = await getBufferClient(companyId);
+    // Inside the same try: resolving the targets reads Buffer's profile list, so
+    // it fails the same two ways acquiring the client does.
+    targets = await loadPublishTargets(companyId, client);
   } catch (err) {
     if (err instanceof BufferNoConnectionError) {
       summary.skipped = posts.length;
@@ -241,10 +246,8 @@ async function deliverToBuffer(
     throw err;
   }
 
-  const profileMap = await loadBufferProfileMap(companyId);
-
   for (const post of posts) {
-    const profileId = profileMap.get(post.channel);
+    const profileId = targets.profileMap.get(post.channel);
     if (!profileId) {
       const message = `No Buffer profile configured for channel ${post.channel}. Set one in the channel settings.`;
       await markPostFailed(companyId, post.id, message, { incrementRetry: false });
@@ -253,7 +256,7 @@ async function deliverToBuffer(
       continue;
     }
 
-    const outcome = await sendPostToBuffer(client, post, profileId);
+    const outcome = await sendPostToBuffer(client, post, profileId, targets.profiles);
 
     if (outcome.ok) {
       await markPostSent(

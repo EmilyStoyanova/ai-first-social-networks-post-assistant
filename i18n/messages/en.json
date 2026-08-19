@@ -1082,7 +1082,8 @@
       "RATE_LIMITED": "Buffer is rate limiting requests. The next automatic refresh will try again."
     },
     "savingAndSyncing": "Saving and syncing…",
-    "syncFailedAfterSave": "The key was saved, but metrics could not be synced yet. The next automatic refresh will try again."
+    "syncFailedAfterSave": "The key was saved, but metrics could not be synced yet. The next automatic refresh will try again.",
+    "follows": "follows"
   },
   "planner": {
     "title": "Channels",
@@ -1127,7 +1128,58 @@
       "timeZoneNote": "All times are in {zone}."
     },
     "analytics": {
-      "comingSoon": "Analytics will be available soon."
+      "period": {
+        "label": "Period",
+        "7d": "7 days",
+        "30d": "30 days",
+        "3m": "3 months",
+        "1y": "1 year"
+      },
+      "timeZoneNote": "Days are counted in {zone}.",
+      "kpi": {
+        "publishedPosts": "Published posts",
+        "avgEngagementRate": "Avg. engagement rate",
+        "notReported": "Not reported by this network",
+        "fromPosts": "From {reported} of {total} posts",
+        "awaitingMetrics": "{count, plural, one {# post is still waiting for its first sync} other {# posts are still waiting for their first sync}}",
+        "allChannelsNote": "Across all channels only reactions, comments and shares are shown. Reach, impressions, clicks and engagement rate are measured differently on each network, so a combined total would not mean anything. Pick a channel to see them."
+      },
+      "chart": {
+        "title": "Performance over time",
+        "description": "Daily engagement of the posts published in this period.",
+        "metricLabel": "Metric",
+        "imageLabel": "Daily {metric} over the selected period",
+        "note": "Buffer reports lifetime totals, so daily figures are the difference between two readings. Days with no reading are left blank rather than shown as zero.",
+        "emptyTitle": "Not enough history yet",
+        "emptyDescription": "A daily figure needs a post to be read twice. Statistics refresh once a day, so the chart fills in over the coming days."
+      },
+      "topPosts": {
+        "title": "Top posts",
+        "description": "The posts that drew the most engagement in this period.",
+        "rankedBy": "Ranked by reactions, comments and shares combined — the only figures that mean the same thing on every network. Posts without statistics yet are not listed.",
+        "emptyTitle": "No statistics yet",
+        "emptyDescription": "None of the posts in this period have been read by the daily sync yet. They will appear once they have."
+      },
+      "sources": {
+        "title": "Performance by source",
+        "description": "How the content of each source performs, on average per post.",
+        "source": "Source",
+        "posts": "Posts",
+        "avg": "Avg. {metric}",
+        "reportedBy": "from {reported} posts",
+        "companyContent": "Company content",
+        "averageNote": "Averages count only the posts that actually reported the metric — a post the network did not measure is left out of the calculation rather than counted as zero."
+      },
+      "notConfigured": {
+        "title": "Analytics are not set up",
+        "ownerDescription": "Add a Buffer Personal API Key to read engagement statistics for the posts you publish.",
+        "ownerAction": "Set up analytics",
+        "editorDescription": "This company has no analytics key yet. An owner can add one from the Buffer settings."
+      },
+      "noPosts": {
+        "title": "Nothing published in this period",
+        "description": "Choose a longer period, or another channel, to see statistics."
+      }
     }
   }
 }

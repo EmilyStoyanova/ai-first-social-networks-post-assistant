@@ -43,6 +43,8 @@ interface FakePost {
 class FakeStore implements MetricsSyncStore {
   readonly posts: FakePost[];
   readonly reads: string[] = [];
+  /** Every outcome as recorded, so a test can assert what would be persisted. */
+  readonly outcomes: RecordOutcomeInput[] = [];
   keyValidAt: Date | null = null;
 
   constructor(posts: FakePost[]) {
@@ -74,6 +76,7 @@ class FakeStore implements MetricsSyncStore {
 
   async recordOutcome(input: RecordOutcomeInput): Promise<void> {
     this.reads.push(input.postId);
+    this.outcomes.push(input);
     const post = this.posts.find((p) => p.id === input.postId);
     // Every outcome stamps collectedAt — including failures. That is what stops a
     // post that always errors from being handed to every run forever.
@@ -391,4 +394,70 @@ describe("observationColumns — a failed read keeps the previous statistics", (
       assert.deepEqual(columns, {});
     });
   }
+});
+
+/**
+ * Buffer's `channelService` is the authoritative network for a metric row, and
+ * `Post.channel` is not consulted at all.
+ *
+ * That is now doubly true: the publish guard (lib/buffer/profile-channel.ts)
+ * stops the two from diverging on NEW posts, but one already-published post
+ * disagrees (care-tech, 2026-08-14) and the analytics side must keep attributing
+ * it to where Buffer says it went. The store contract is the enforcement — a
+ * `SyncablePost` carries only `id` and `bufferUpdateId`, so there is no channel
+ * here to be tempted by. These pin that it stays that way.
+ */
+describe("syncPostMetrics — Buffer's channelService is authoritative", () => {
+  const today = new Date("2026-08-06T09:00:00");
+
+  function clientReporting(channelService: string): BufferAnalyticsClient {
+    return {
+      getPostMetrics: async (bufferPostId: string) => ({
+        status: "ok" as const,
+        bufferPostId,
+        channelService,
+        metrics: [{ type: "reactions", name: "Reactions", value: 5, unit: "count" }],
+        metricsUpdatedAt: null,
+      }),
+    } as unknown as BufferAnalyticsClient;
+  }
+
+  it("records the network Buffer names, whatever the post is stored as", async () => {
+    const store = new FakeStore(posts(1, null));
+
+    await syncPostMetrics({
+      companyId: COMPANY,
+      limit: 1,
+      store,
+      client: clientReporting("instagram"),
+      now: today,
+    });
+
+    assert.equal(store.outcomes.length, 1);
+    assert.equal(store.outcomes[0].channelService, "instagram");
+  });
+
+  it("keeps Buffer's own vocabulary rather than mapping it to a SocialChannel", async () => {
+    // post_metrics.channel_service is deliberately a plain string: normalising it
+    // here would throw away the account type, and `normalizeChannel` in the read
+    // model is where the display grouping belongs.
+    const store = new FakeStore(posts(1, null));
+
+    await syncPostMetrics({
+      companyId: COMPANY,
+      limit: 1,
+      store,
+      client: clientReporting("instagram-business"),
+      now: today,
+    });
+
+    assert.equal(store.outcomes[0].channelService, "instagram-business");
+  });
+
+  it("gives the sync no access to Post.channel in the first place", () => {
+    // Structural, not behavioural: SyncablePost is {id, bufferUpdateId}. If a
+    // channel ever appears on it, this is the test that should have to change.
+    const syncable: SyncablePost = { id: "post-1", bufferUpdateId: "buffer-1" };
+    assert.deepEqual(Object.keys(syncable).sort(), ["bufferUpdateId", "id"]);
+  });
 });

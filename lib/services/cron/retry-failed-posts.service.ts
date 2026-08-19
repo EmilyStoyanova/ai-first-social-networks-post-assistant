@@ -3,7 +3,8 @@ import { getBufferClient } from "@/lib/buffer/buffer-provider";
 import { BufferNoConnectionError, BufferTokenExpiredError } from "@/lib/buffer/buffer-errors";
 import {
   MOCK_BUFFER_POST_ID,
-  loadBufferProfileMap,
+  loadPublishTargets,
+  type PublishTargets,
   markPostFailed,
   markPostSent,
   sendPostToBuffer,
@@ -72,8 +73,12 @@ export async function retryFailedPosts(companyId: string): Promise<RetryFailedSu
   }
 
   let client: Awaited<ReturnType<typeof getBufferClient>>;
+  let targets: PublishTargets;
   try {
     client = await getBufferClient(companyId);
+    // Inside the same try: resolving the targets reads Buffer's profile list, so
+    // it fails the same two ways acquiring the client does.
+    targets = await loadPublishTargets(companyId, client);
   } catch (err) {
     if (err instanceof BufferNoConnectionError) {
       summary.skipped = due.length;
@@ -88,10 +93,8 @@ export async function retryFailedPosts(companyId: string): Promise<RetryFailedSu
     throw err;
   }
 
-  const profileMap = await loadBufferProfileMap(companyId);
-
   for (const post of due) {
-    const profileId = profileMap.get(post.channel);
+    const profileId = targets.profileMap.get(post.channel);
     if (!profileId) {
       summary.retried++;
       summary.stillFailing++;
@@ -104,7 +107,7 @@ export async function retryFailedPosts(companyId: string): Promise<RetryFailedSu
       continue;
     }
 
-    const outcome = await sendPostToBuffer(client, post, profileId);
+    const outcome = await sendPostToBuffer(client, post, profileId, targets.profiles);
     summary.retried++;
 
     if (outcome.ok) {

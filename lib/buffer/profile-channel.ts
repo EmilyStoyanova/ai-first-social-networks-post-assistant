@@ -57,3 +57,62 @@ export function filterProfilesByChannel<T extends { channel: string }>(
   const target = channel.toLowerCase();
   return profiles.filter((p) => p.channel.toLowerCase() === target);
 }
+
+/** As much of a Buffer profile as the channel guard needs to judge it. */
+export interface ProfileChannelCandidate {
+  id: string;
+  name: string;
+  /** Buffer's own service string — "facebook", "instagram-business", … */
+  service: string;
+}
+
+export type ProfileChannelCheck =
+  | { ok: true }
+  | {
+      ok: false;
+      /** UNKNOWN_PROFILE = Buffer does not list it; CHANNEL_MISMATCH = wrong network. */
+      code: "UNKNOWN_PROFILE" | "CHANNEL_MISMATCH";
+      message: string;
+    };
+
+/**
+ * Whether `profileId` may carry a post on `channel`.
+ *
+ * The authority is the SERVICE Buffer reports for the target profile, never this
+ * company's own `ChannelConfig.channel` — a post stored as `instagram` has been
+ * observed going out on a Facebook page (care-tech, 2026-08-14), and a check
+ * that reads our own column cannot see that. This is the ONE implementation of
+ * the question, shared by the manual publish action and the cron sender, so the
+ * two can never answer it differently.
+ *
+ * An unrecognised service is refused: it is not provably the post's network, and
+ * publishing to the wrong one cannot be undone.
+ */
+export function checkProfileChannel(
+  profiles: readonly ProfileChannelCandidate[],
+  profileId: string,
+  channel: string
+): ProfileChannelCheck {
+  const target = profiles.find((p) => p.id === profileId);
+  if (!target) {
+    return {
+      ok: false,
+      code: "UNKNOWN_PROFILE",
+      message: "That Buffer profile is not connected to this account.",
+    };
+  }
+
+  const profileChannel = bufferServiceToChannel(target.service);
+  if (profileChannel !== channel.toLowerCase()) {
+    return {
+      ok: false,
+      code: "CHANNEL_MISMATCH",
+      message:
+        `This is a ${channel.toUpperCase()} post, but "${target.name}" is a ` +
+        `${(profileChannel ?? target.service).toUpperCase()} profile. ` +
+        `Choose a ${channel.toUpperCase()} profile instead.`,
+    };
+  }
+
+  return { ok: true };
+}

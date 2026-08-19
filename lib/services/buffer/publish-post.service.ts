@@ -10,7 +10,7 @@ import {
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 import { checkBlockingConstraints, type PolicyViolation } from "@/lib/ai/channel-policy";
 import { blocksOnDemandPublish } from "@/lib/scheduling/publish-window";
-import { bufferServiceToChannel } from "@/lib/buffer/profile-channel";
+import { checkProfileChannel } from "@/lib/buffer/profile-channel";
 import { MOCK_BUFFER_PROFILES } from "@/lib/buffer/mock-profiles";
 import type { BufferPublishResult } from "@/lib/buffer/buffer-client";
 
@@ -158,46 +158,30 @@ function bufferFailure(err: unknown): PublishPostResult {
 }
 
 /**
- * Refuses a Buffer profile that is not on the post's own social network.
+ * Refuses a Buffer profile that is not on the post's own social network, as this
+ * service's result type.
  *
- * The authority here is the SERVICE Buffer reports for the target profile, not
- * this company's channel configuration — posts stored as `facebook` have been
- * observed going out on Instagram profiles, and a check that reads our own
- * column cannot see that. It is the same question `listBufferProfiles` answers
- * for the selector, through the same map, so the server never refuses a profile
- * the picker was willing to offer.
+ * The judgement itself lives in `lib/buffer/profile-channel.ts` and is shared
+ * with the cron sender, so a pairing the sweep would refuse is refused here too.
+ * It is also the same question `listBufferProfiles` answers for the selector,
+ * through the same map, so the server never refuses a profile the picker was
+ * willing to offer.
  *
  * Returns the failure to hand back, or null when the pairing is sound.
  */
-function checkProfileChannel(
+function profileChannelFailure(
   profiles: readonly TargetProfile[],
   profileId: string,
   channel: SocialChannel
 ): PublishPostResult | null {
-  const target = profiles.find((p) => p.id === profileId);
-  if (!target) {
-    return {
-      success: false,
-      code: "INVALID_PROFILE",
-      message: "That Buffer profile is not connected to this account.",
-    };
-  }
+  const check = checkProfileChannel(profiles, profileId, channel);
+  if (check.ok) return null;
 
-  const profileChannel = bufferServiceToChannel(target.service);
-  if (profileChannel !== channel) {
-    // An unrecognised service lands here too: it is not provably this post's
-    // network, and publishing to the wrong one cannot be undone.
-    return {
-      success: false,
-      code: "CHANNEL_MISMATCH",
-      message:
-        `This is a ${channel.toUpperCase()} post, but "${target.name}" is a ` +
-        `${(profileChannel ?? target.service).toUpperCase()} profile. ` +
-        `Choose a ${channel.toUpperCase()} profile instead.`,
-    };
-  }
-
-  return null;
+  return {
+    success: false,
+    code: check.code === "UNKNOWN_PROFILE" ? "INVALID_PROFILE" : "CHANNEL_MISMATCH",
+    message: check.message,
+  };
 }
 
 export interface PublishPostDeps {
@@ -330,7 +314,7 @@ export async function approveAndPublishPost(
     // Mock mode has no Buffer to ask, so the guard runs against the same fixed
     // profiles the selector shows — the pairing is checked here too rather than
     // only on the live path.
-    const mismatch = checkProfileChannel(MOCK_BUFFER_PROFILES, profileId, post.channel);
+    const mismatch = profileChannelFailure(MOCK_BUFFER_PROFILES, profileId, post.channel);
     if (mismatch) return mismatch;
 
     bufferResult = { updateId: MOCK_BUFFER_POST_ID, status: "sent", publishedUrl: null };
@@ -354,7 +338,7 @@ export async function approveAndPublishPost(
       return bufferFailure(err);
     }
 
-    const mismatch = checkProfileChannel(profiles, profileId, post.channel);
+    const mismatch = profileChannelFailure(profiles, profileId, post.channel);
     if (mismatch) return mismatch;
 
     try {
