@@ -12,6 +12,7 @@ import {
 import { LlmProviderError, LlmRateLimitError, LlmResponseParseError } from "@/lib/ai/errors";
 import {
   generateWithRetry,
+  MAX_GENERATION_ATTEMPTS,
   type GenerationLoopResult,
   type SemanticGate,
 } from "@/lib/ai/generate-with-retry";
@@ -61,6 +62,20 @@ import {
   resolvePostOrigin,
   type PostOriginView,
 } from "@/lib/posts/post-origin";
+import { GenerationTracer } from "@/lib/generation-trace/tracer";
+import {
+  deriveTrigger,
+  recordAttemptSteps,
+  recordFeedItemArtifactSteps,
+  recordImageStep,
+  type PostGenerationTraceOrigin,
+} from "@/lib/generation-trace/post-generation-steps";
+import {
+  loadCandidateFacts,
+  loadFeedItemArtifacts,
+} from "@/lib/generation-trace/feed-item-artifacts";
+import { excerpt } from "@/lib/generation-trace/redact";
+import { observeProvider } from "@/lib/generation-trace/observed-provider";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -321,6 +336,18 @@ export interface GenerateDraftPostDeps {
    * DB default is configured — the caller then falls back to the env-var provider.
    */
   loadDefaultLlmConfig?: () => Promise<{ id: string; provider: LlmProvider } | null>;
+  /**
+   * The generation trace recorder. Injected in tests so the steps a run produced
+   * can be read back without a database; production starts its own.
+   *
+   * Observation only — nothing in this file branches on it, and every one of its
+   * methods swallows its own failures. See lib/generation-trace/tracer.ts.
+   */
+  tracer?: GenerationTracer;
+  /** Article translation/classification/extraction state, for the trace. Injected in tests. */
+  loadFeedItemArtifacts?: typeof loadFeedItemArtifacts;
+  /** Candidate eligibility/priority, for the trace. Injected in tests. */
+  loadCandidateFacts?: typeof loadCandidateFacts;
 }
 
 // ─── Service ───────────────────────────────────────────────────────────────────
@@ -418,6 +445,15 @@ export interface GeneratePostOptions {
    * instead of three.
    */
   sharedTopic?: SharedTopicConstraint;
+  /**
+   * What the caller knows about this generation that the options above cannot
+   * express — chiefly WHO asked (a bulk run and a cron run look alike from in
+   * here) and how the article window was chosen.
+   *
+   * Purely descriptive: nothing in the pipeline reads it, and omitting it costs
+   * only detail in the trace, never behaviour.
+   */
+  trace?: PostGenerationTraceOrigin;
 }
 
 export async function generateDraftPost(
@@ -443,6 +479,8 @@ export async function generateDraftPost(
     | "pinnedFeedItemId"
     | "sharedTopic"
     | "contentSourceId"
+    // Descriptive only — who asked and through which job. Forwarded to the trace.
+    | "trace"
   > & {
     /**
      * The form's "Content source" choice, as it came off the wire. Omitted =
@@ -565,6 +603,16 @@ export async function generateDraftPost(
     // not a pick (the topic chose), so the group's quota attribution has to
     // travel with the instruction rather than be re-derived from it.
     contentSourceId: isPickedSource(selection) ? selection.sourceId : options.contentSourceId,
+    // Everything the trace can only learn HERE: which source the form picked and
+    // how the article window was ordered. The trigger is left to the caller, or
+    // derived — a group id already means "manual multi-channel", a batch id
+    // "bulk", a schedule id "cron" (see deriveTrigger).
+    trace: {
+      trigger: options.trace?.trigger,
+      jobId: options.trace?.jobId,
+      priority: contextResult.priority,
+      contentSourceRef: ref,
+    },
   });
 
   // The guard above found something to write from, but a concurrent run claimed
@@ -583,6 +631,25 @@ export async function generateDraftPost(
   return result;
 }
 
+/**
+ * What each source decision means, in the words a reader of the trace needs.
+ *
+ * The plan itself is one word (`generate`, `skip`, `pinned`, …) and the timeline
+ * shows it, but "why is this post about THAT article" is the question being
+ * asked — so the sentence lives beside the word rather than in someone's head.
+ */
+const SELECTION_REASON: Record<FeedItemPlan["action"], string> = {
+  generate: "An unused article was available and was claimed for this post.",
+  pinned: "Written from the article this content group's first channel already claimed.",
+  evergreen:
+    "No claimable article was available, but a reusable prompt/calendar item was — it is never consumed.",
+  direct:
+    "A specific non-RSS source was picked, so its stored extraction was read directly and nothing was claimed.",
+  mission:
+    "The company has no article source for this window, so the post was written from brand knowledge alone.",
+  skip: "Article sources exist but every eligible article was already used (or raced away), and no evergreen item was available.",
+};
+
 /** Why a picked source could not back a post, phrased for the kind picked. */
 function unavailableMessage(selection: ManualContentSourceSelection): string {
   return selection.kind === "content_source"
@@ -594,12 +661,75 @@ function unavailableMessage(selection: ManualContentSourceSelection): string {
  * Generation core shared by the user flow above and the cron dispatcher.
  * Access control must already have happened; this function only generates,
  * runs the quality guards, and persists the post.
+ *
+ * ── The trace wrapper ───────────────────────────────────────────────────────
+ *
+ * Every generation in the product reaches this function — the manual form, a
+ * multi-channel topic, a bulk batch and the weekly cron all end up here — so it
+ * is the one place a trace can be opened and closed for all of them, rather than
+ * five places that must be kept in step.
+ *
+ * The wrapper exists purely so `flush()` happens in a `finally`. The body below
+ * has a dozen early returns (no articles left, provider misconfigured, rate
+ * limited, not unique enough, too long with its URL) and every one of them is a
+ * run somebody will want to read — "why did this produce nothing" being the
+ * commonest question a trace is opened for. A flush per return would be a dozen
+ * chances to forget one.
  */
 export async function generatePostFromContext(
   context: GenerationContext,
   companyId: string,
   options: GeneratePostOptions = {},
   deps: GenerateDraftPostDeps = {}
+): Promise<GenerateDraftPostResult> {
+  const tracer =
+    deps.tracer ??
+    GenerationTracer.start({
+      kind: "post_generation",
+      trigger: options.trace?.trigger ?? deriveTrigger(options),
+      companyId,
+      channel: context.channel.channel,
+      language: options.contentLanguage ?? context.channel.postingLanguage,
+      userId: options.generatedById ?? null,
+      contentGroupId: options.contentGroupId ?? null,
+      generationBatchId: options.generationBatchId ?? null,
+      scheduleId: options.scheduleId ?? null,
+      jobId: options.trace?.jobId ?? null,
+      options: {
+        contentLanguage: options.contentLanguage ?? null,
+        initialStatus: options.initialStatus ?? "draft",
+        scheduledFor: options.scheduledFor ?? null,
+        includeSourceLinkOverride: options.includeSourceLinkOverride ?? null,
+        autoGenerateImageOverride: options.autoGenerateImageOverride ?? null,
+        llmConfigId: options.llmConfigId ?? null,
+        preferredLlmConfigId: options.preferredLlmConfigId ?? null,
+        contentSourceId: options.contentSourceId ?? null,
+        pinnedFeedItemId: options.pinnedFeedItemId ?? null,
+        sharedTopic: options.sharedTopic ?? null,
+        contentSource: options.trace?.contentSourceRef ?? null,
+      },
+    });
+
+  try {
+    const result = await runGeneration(context, companyId, options, deps, tracer);
+    if (!result.success) tracer.fail(result.code, result.message ?? null);
+    return result;
+  } catch (err) {
+    // A throw out of here is a genuine fault (the database being unreachable),
+    // not one of the classified failures above. Recorded and re-thrown unchanged.
+    tracer.fail("UNEXPECTED_ERROR", err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    await tracer.flush();
+  }
+}
+
+async function runGeneration(
+  context: GenerationContext,
+  companyId: string,
+  options: GeneratePostOptions,
+  deps: GenerateDraftPostDeps,
+  tracer: GenerationTracer
 ): Promise<GenerateDraftPostResult> {
   /**
    * Whether the time this post is being given is a person's promise.
@@ -620,8 +750,52 @@ export async function generatePostFromContext(
   const autoSourceImage = deps.autoSourceImage ?? autoApplySourceImage;
   const recordCalibration = deps.recordCalibration ?? recordSemanticCalibration;
   const runGenerationLoop = deps.generateWithRetry ?? generateWithRetry;
+  /**
+   * The trace's own extra reads — candidate eligibility and the article's
+   * translation/classification state.
+   *
+   * Gated on the tracer being armed, and that is not merely an optimisation. A
+   * disabled tracer writes nothing, so these two queries would buy exactly
+   * nothing while still costing two round trips per generation — and, where
+   * there is no database at all (a unit test injecting fake deps, an
+   * environment with no DATABASE_URL), costing a connection timeout instead.
+   * Tracing that is switched off must cost zero.
+   */
+  const readArtifacts =
+    deps.loadFeedItemArtifacts ?? (tracer.enabled ? loadFeedItemArtifacts : null);
+  const readCandidateFacts =
+    deps.loadCandidateFacts ?? (tracer.enabled ? loadCandidateFacts : null);
   const { contentLanguage, generatedById, scheduleId, scheduledFor } = options;
   const initialStatus = options.initialStatus ?? "draft";
+
+  // ── Trace: the request ────────────────────────────────────────────────────
+  // First step of every run, and the only one that is always present: who asked,
+  // for what, and with which options. Written before anything can fail, so even a
+  // run that dies at provider resolution has a readable head.
+  tracer.step({
+    type: "request",
+    label: "Generation requested",
+    input: {
+      companyId,
+      channel: context.channel.channel,
+      contentLanguage: contentLanguage ?? null,
+      resolvedPostingLanguage: context.channel.postingLanguage,
+      requestedBy: generatedById ?? null,
+      automated: generatedById === undefined,
+      initialStatus,
+      scheduledFor: scheduledFor ?? null,
+      manuallyScheduled,
+    },
+    metadata: {
+      contentGroupId: options.contentGroupId ?? null,
+      generationBatchId: options.generationBatchId ?? null,
+      scheduleId: scheduleId ?? null,
+      jobId: options.trace?.jobId ?? null,
+      pinnedFeedItemId: options.pinnedFeedItemId ?? null,
+      sharedTopic: options.sharedTopic ?? null,
+      contentSource: options.trace?.contentSourceRef ?? null,
+    },
+  });
 
   // ── Fetch recent posts before generation ──────────────────────────────────
   // Used both as prompt context (avoid repetition) and for duplicate detection
@@ -718,6 +892,7 @@ export async function generatePostFromContext(
   // Provenance reflects the resolved provider; the model comes from env (code).
   const llmProviderStr = selection.providerLabel;
   let llmModelStr = selection.model;
+  tracer.setLlm(llmProviderStr, llmModelStr);
 
   let provider: ILlmProvider;
   if (isMock) {
@@ -727,6 +902,7 @@ export async function generatePostFromContext(
       const built = buildSupportedProvider(selection.provider);
       provider = built.instance;
       llmModelStr = built.model;
+      tracer.setLlm(llmProviderStr, llmModelStr);
     } catch (err) {
       // The provider was active but its env config is now absent/incomplete. This
       // is a hard error — an explicit/preferred provider is never silently swapped.
@@ -768,6 +944,56 @@ export async function generatePostFromContext(
           hasEvergreenItems,
           db
         );
+  // ── Trace: which article, out of which window, and why ────────────────────
+  // Recorded for the skip path too — "nothing was left to write from" is a real
+  // answer, and the candidate tally is exactly what makes it checkable.
+  const candidateFacts = (await readCandidateFacts?.(context.feedItems.map((f) => f.id))) ?? [];
+  const factsById = new Map(candidateFacts.map((f) => [f.id, f]));
+  tracer.step({
+    type: "selection",
+    label: `Source selection — ${plan.action}`,
+    status: plan.action === "skip" ? "failed" : "success",
+    input: {
+      // The window as it was offered, in the order priority put it. Text is
+      // deliberately excluded — the chosen article's is in the source step, and
+      // the rest were never sent anywhere.
+      candidates: context.feedItems.map((item) => ({
+        feedItemId: item.id,
+        title: item.title,
+        url: item.publicUrl ?? item.url,
+        sourceType: item.sourceType ?? null,
+        sourceName: item.sourceName ?? null,
+        publishedAt: item.publishedAt,
+        consumable: item.consumable !== false,
+        classification: factsById.get(item.id)?.classification ?? null,
+        primaryTopic: factsById.get(item.id)?.primaryTopic ?? null,
+        classificationReason: factsById.get(item.id)?.reason ?? null,
+        alreadyUsed: factsById.get(item.id)?.usedInPost ?? null,
+        enabled: factsById.get(item.id)?.enabled ?? null,
+      })),
+    },
+    output: {
+      decision: plan.action,
+      // Named only by the two plans that name one. `direct` and `evergreen`
+      // resolve their item a few lines below (resolvePrimarySelection), and the
+      // source step records THAT — the authoritative answer for every plan.
+      claimedFeedItemId: "feedItemId" in plan ? plan.feedItemId : null,
+      reason: SELECTION_REASON[plan.action],
+    },
+    metadata: {
+      candidateCount: context.feedItems.length,
+      articleCandidateCount: articleCandidateIds.length,
+      hasEvergreenItems,
+      hasArticleSources: context.hasArticleSources,
+      directContentSource: context.directContentSource === true,
+      pinnedFeedItemId: options.pinnedFeedItemId ?? null,
+      // How the window was ordered and what it withheld — the diagnostic
+      // buildGenerationContext already produces (HIGH/MEDIUM/unclassified counts
+      // and, when no HIGH was offered, why not).
+      priority: options.trace?.priority ?? null,
+    },
+  });
+
   if (plan.action === "skip") {
     // Article sources are configured but every eligible article is already used
     // (or a concurrent run claimed the last candidate) and no evergreen item is
@@ -814,6 +1040,48 @@ export async function generatePostFromContext(
     if (ownedClaimId) await releaseFeedItem(ownedClaimId, db);
   };
 
+  // ── Trace: the source, and what it had already been through ───────────────
+  // Only written when there IS a source. A mission/brand post has none, and a
+  // trace that showed an empty "Source" row for it would be inventing a stage
+  // that never ran — the same reason a manually entered prompt gets no
+  // translation step below.
+  if (primary.item) {
+    const item = primary.item;
+    tracer.step({
+      type: "source",
+      label: `${item.sourceType ?? "source"} — ${item.sourceName ?? "unnamed"}`,
+      output: {
+        feedItemId: item.id,
+        sourceType: item.sourceType ?? null,
+        sourceName: item.sourceName ?? null,
+        title: item.title,
+        url: item.url,
+        publicUrl: item.publicUrl ?? null,
+        publishedAt: item.publishedAt,
+        sourceImageUrl: item.sourceImageUrl ?? null,
+        // The text as generation resolved it — already the translation when one
+        // completed, already the extraction for an instructed product page. This
+        // is the content the prompt was built from, so it is stored here in full
+        // rather than as a pointer at a row that can be re-translated later.
+        content: item.content,
+      },
+      metadata: {
+        contentChars: item.content?.length ?? 0,
+        usedTranslation: item.usedTranslation === true,
+        consumable: item.consumable !== false,
+        claimedByThisRun: ownedClaimId !== null,
+        pinnedByContentGroup: options.pinnedFeedItemId !== undefined,
+        extractionStatus: item.extractionStatus ?? null,
+        sourceLinkPreference: item.sourceLinkPreference ?? null,
+      },
+    });
+
+    // Translation / classification / extraction. Each is a REFERENCE to the run
+    // that performed it plus the verdict as it stood now — see
+    // lib/generation-trace/feed-item-artifacts.ts for why it is not a copy.
+    recordFeedItemArtifactSteps(tracer, item, (await readArtifacts?.(item.id)) ?? null);
+  }
+
   // ── Aspect mining ─────────────────────────────────────────────────────────
   // Errors are caught inside resolveGenerationAspect — generation always continues.
   const {
@@ -831,7 +1099,32 @@ export async function generatePostFromContext(
       // post does not link to.
       primary: primary.item,
       snapshots,
-      provider,
+      // The OBSERVED provider, so aspect mining's own LLM call — its exact
+      // prompt and its exact reply — reaches the trace without the miner (two
+      // modules deep, and shared with the prompt preview) learning that tracing
+      // exists. The generation loop below gets the bare instance; it reports its
+      // attempts itself, with far more context.
+      provider: observeProvider(provider, (call) => {
+        tracer.step({
+          type: "llm_call",
+          label: "Aspect mining",
+          status: call.error ? "failed" : "success",
+          startedAt: call.startedAt,
+          completedAt: call.completedAt,
+          durationMs: call.durationMs,
+          input: { systemPrompt: call.systemPrompt, userPrompt: call.userPrompt },
+          metadata: { request: call.request, providerPayload: call.responseRaw ?? null },
+          error: call.error ? `${call.error.name}: ${call.error.message}` : undefined,
+        });
+        if (call.responseText !== null) {
+          tracer.step({
+            type: "raw_response",
+            label: "Aspect mining",
+            output: { text: call.responseText },
+            metadata: { chars: call.responseText.length },
+          });
+        }
+      }),
     })
   );
 
@@ -852,6 +1145,76 @@ export async function generatePostFromContext(
       sharedTopic: options.sharedTopic,
     }
   );
+
+  // ── Trace: everything the prompt was built FROM ───────────────────────────
+  // The single most important step in the trace, and the reason the whole table
+  // exists: brand guidelines, channel settings, the article window and the
+  // diversity levers are all live configuration that will be edited, and this is
+  // the copy that says what they were AT THIS MOMENT. Nothing here is re-read
+  // later — a trace that resolved these through relations would silently rewrite
+  // the history of every post whenever somebody changed the tone of voice.
+  tracer.step({
+    type: "context",
+    label: "Generation context",
+    output: {
+      company: context.company,
+      brandGuidelines: context.brand,
+      channelSettings: context.channel,
+      language: {
+        requested: contentLanguage ?? null,
+        channelPosting: context.channel.postingLanguage,
+        companyDefault: context.company.defaultLang,
+      },
+      // The full window, with the resolved text. The primary is repeated from
+      // the source step on purpose: the prompt saw all of these, and which of
+      // them is background is part of what a reader is checking.
+      sourceContent: context.feedItems.map((item) => ({
+        feedItemId: item.id,
+        isPrimary: item.id === primary.item?.id,
+        title: item.title,
+        url: item.publicUrl ?? item.url,
+        contentExcerpt: excerpt(item.content, 1200),
+        contentChars: item.content?.length ?? 0,
+        usedTranslation: item.usedTranslation === true,
+      })),
+      // What the model was shown of its own recent output, and what it was told
+      // not to repeat.
+      recentPosts: recentRows10.slice(0, 5).map((r) => ({
+        postId: r.id,
+        textExcerpt: excerpt(r.content, 400),
+        imagePrompt: r.imagePrompt ?? null,
+      })),
+      topicMemory,
+      // Empty for a sibling channel — it was ORDERED to repeat the topic, so the
+      // avoid-list is deliberately withheld from both the prompt and the judge.
+      topicMemoryAppliedToJudge: loopTopicMemory,
+      sharedTopic: options.sharedTopic ?? null,
+      // The levers this generation opened with. A retry may change all three;
+      // each attempt records the ones it actually used.
+      contentAngle: initialAngle,
+      contentPattern: initialPattern
+        ? {
+            hookType: initialPattern.hookType,
+            structure: initialPattern.structure,
+            ctaType: initialPattern.ctaType,
+          }
+        : null,
+      selectedAspect: initialAspect ?? null,
+    },
+    metadata: {
+      recentPostsConsidered: recentRows.length,
+      topicMemorySize: topicMemory.length,
+      recentAngles,
+      recentPatterns,
+      aspectPoolSize: aspectPool.length,
+      aspectExtractionRound: extractionRound,
+      aspectFingerprint,
+      llmProvider: llmProviderStr,
+      llmModel: llmModelStr,
+      llmConfigId: resolvedLlmConfigId,
+      mockMode: isMock,
+    },
+  });
 
   // ── Semantic duplicate gate (Phase 1.4) ───────────────────────────────────
   // Embeds each candidate's coreMessage and compares it (cosine) against the
@@ -885,7 +1248,13 @@ export async function generatePostFromContext(
           aspectPool,
           aspectUsedIds: usedAspectIds,
         },
-        semanticGate
+        semanticGate,
+        // Left at its default — the trace must observe the loop, never resize it.
+        MAX_GENERATION_ATTEMPTS,
+        // Every attempt, including the ones the loop discards. This is what makes
+        // failed attempts — their prompts, their replies and the gate that turned
+        // them down — survive a run that only returns its last candidate.
+        (record) => recordAttemptSteps(tracer, record)
       )
     );
   } catch (err) {
@@ -948,6 +1317,22 @@ export async function generatePostFromContext(
     console.warn(
       `[generation] Aborted after ${attempts} attempts → code=CANNOT_GENERATE_UNIQUE_POST reason=${reason} (post not saved).`
     );
+    // The abort itself, as its own step. Every attempt is already on the record
+    // above; this says which gate had the last word, and that the article was
+    // handed back to the pool rather than consumed by a post that never existed.
+    tracer.step({
+      type: "validation",
+      label: "Uniqueness abort — post NOT saved",
+      status: "failed",
+      output: {
+        reason,
+        attempts,
+        jaccardFlagged: duplicateResult.flagged,
+        semanticDecision: semanticResult.decision,
+        topicRepeated,
+        claimReleased: ownedClaimId !== null,
+      },
+    });
     return {
       success: false,
       code: "CANNOT_GENERATE_UNIQUE_POST",
@@ -960,6 +1345,22 @@ export async function generatePostFromContext(
   const safetyResult = checkContentSafety({
     text: parsed.text,
     brandForbiddenWords: context.brand?.forbiddenWords ?? [],
+  });
+
+  // Not a gate — it flags rather than blocks — so it is recorded as a passing
+  // step with the flag in its output, never as a failure.
+  tracer.step({
+    type: "validation",
+    label: "Content safety / forbidden words",
+    output: {
+      passed: !safetyResult.flagged,
+      flagged: safetyResult.flagged,
+      matchedTerms: safetyResult.matchedTerms,
+    },
+    metadata: {
+      forbiddenWordsChecked: context.brand?.forbiddenWords ?? [],
+      note: "A flag holds the post at auto-approval; it never blocks generation.",
+    },
   });
 
   // Log (calibration) the fail-open skip and the gray zone; never block.
@@ -1008,6 +1409,16 @@ export async function generatePostFromContext(
   });
   if (!sourceLinkResult.ok) {
     await releaseClaimedFeedItem();
+    tracer.step({
+      type: "validation",
+      label: "Channel length limit with source URL",
+      status: "failed",
+      output: {
+        passed: false,
+        textChars: parsed.text.length,
+        maxTextLength: context.channel.maxTextLength,
+      },
+    });
     return {
       success: false,
       code: "POST_TOO_LONG_WITH_URL",
@@ -1165,6 +1576,49 @@ export async function generatePostFromContext(
     },
   });
 
+  // ── Trace: the row that was written ───────────────────────────────────────
+  // Recorded here rather than at the end so a post whose image work later fails
+  // still has a persistence step saying it exists. `setPost` is what links the
+  // whole run to the post — everything before this point had no id to link to.
+  tracer.setPost(post.id);
+  tracer.step({
+    type: "persistence",
+    label: "Post saved",
+    output: {
+      postId: post.id,
+      status: post.status,
+      channel: post.channel,
+      content: post.content,
+      hashtags: post.hashtags,
+      imagePrompt: post.imagePrompt,
+      notes: post.notes,
+      coreMessage: parsed.coreMessage,
+      topic: parsed.topic ?? null,
+      scheduledFor: scheduledFor ?? null,
+      manuallyScheduled,
+      createdAt: post.createdAt,
+    },
+    metadata: {
+      primaryFeedItemId: claimedFeedItemId,
+      contentSourceId: options.contentSourceId ?? null,
+      contentGroupId: options.contentGroupId ?? null,
+      generationBatchId: options.generationBatchId ?? null,
+      scheduleId: scheduleId ?? null,
+      origin: originSnapshot,
+      // The appended URL and the decision that produced it — text and link are
+      // auditably the same article.
+      sourceUrl,
+      sourceTitle,
+      includeSourceLink,
+      includeSourceLinkLevel,
+      safetyFlagged: safetyResult.flagged,
+      attempts,
+      llmProvider: llmProviderStr,
+      llmModel: llmModelStr,
+      llmConfigId: resolvedLlmConfigId,
+    },
+  });
+
   await auditLog({
     companyId,
     userId: generatedById,
@@ -1232,6 +1686,7 @@ export async function generatePostFromContext(
   // response can carry it. A post whose image failed simply reports mediaUrl
   // null and can still be illustrated manually.
   let mediaUrl: string | null = null;
+  const imageEnabled = options.autoGenerateImageOverride ?? context.channel.autoGenerateImage;
   try {
     // Image generation (provider + upload) — timed into the `image` phase.
     const outcome = await recordPhase("image", () =>
@@ -1240,16 +1695,45 @@ export async function generatePostFromContext(
         companyId,
         // The manual form override wins when present; cron never sends one, so
         // scheduled generation still reads the channel setting.
-        enabled: options.autoGenerateImageOverride ?? context.channel.autoGenerateImage,
+        enabled: imageEnabled,
         generatedById,
+        // The exact positive and negative prompts, the provider, the model and
+        // the dimensions — none of which the outcome below carries.
+        recordImage: (record) => recordImageStep(tracer, "AI image generation", record),
       })
     );
     if (outcome.status === "generated") mediaUrl = outcome.media.url;
+    // A skip is a real decision worth showing ("this channel does not generate
+    // images", "the model asked for no illustration"), and it is the ONLY thing
+    // the pipeline reports when no provider call was made — so there is no
+    // recordImage record to carry it.
+    if (outcome.status === "skipped") {
+      tracer.skipped("image", `AI image not generated — ${outcome.reason}`, {
+        channelAutoGenerateImage: context.channel.autoGenerateImage,
+        manualOverride: options.autoGenerateImageOverride ?? null,
+        imagePrompt: post.imagePrompt,
+      });
+    }
+    if (outcome.status === "failed") {
+      tracer.step({
+        type: "image",
+        label: "AI image generation failed",
+        status: "failed",
+        metadata: { code: outcome.code },
+        error: outcome.message ?? outcome.code,
+      });
+    }
   } catch (err) {
     console.error(
       `[auto-image] Post ${post.id} auto image generation failed (non-fatal):`,
       err instanceof Error ? err.message : err
     );
+    tracer.step({
+      type: "image",
+      label: "AI image generation failed",
+      status: "failed",
+      error: err,
+    });
   }
 
   // ── The article's own image takes the lead ────────────────────────────────
@@ -1282,11 +1766,40 @@ export async function generatePostFromContext(
         autoSourceImage({ postId: post.id, companyId, generatedById })
       );
       if (outcome.status === "applied") mediaUrl = outcome.media.url;
+      // The article-vs-generated decision, in one step. The AI image is not
+      // replaced but DISPLACED — kept, still linked, one click away — which is
+      // exactly the sort of thing a reader of the trace is trying to establish.
+      tracer.step({
+        type: "image",
+        label:
+          outcome.status === "applied"
+            ? "Article image imported — it leads over the AI image"
+            : `Article image not used — ${outcome.status === "skipped" ? outcome.reason : outcome.code}`,
+        status:
+          outcome.status === "applied"
+            ? "success"
+            : outcome.status === "skipped"
+              ? "skipped"
+              : "failed",
+        input: { candidateSourceImageUrl: primary.item.sourceImageUrl ?? null },
+        output: outcome.status === "applied" ? outcome.media : null,
+        metadata: {
+          displacedMediaAssetId: outcome.status === "applied" ? outcome.previousMediaId : null,
+          feedItemId: primary.item.id,
+        },
+        error: outcome.status === "failed" ? (outcome.message ?? outcome.code) : undefined,
+      });
     } catch (err) {
       console.error(
         `[source-image] Post ${post.id} article image import failed (non-fatal):`,
         err instanceof Error ? err.message : err
       );
+      tracer.step({
+        type: "image",
+        label: "Article image import failed",
+        status: "failed",
+        error: err,
+      });
     }
   }
 

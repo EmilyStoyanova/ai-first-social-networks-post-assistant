@@ -9,7 +9,7 @@ interface Props {
   onClose: () => void;
   title: string;
   children: ReactNode;
-  maxWidth?: "sm" | "md" | "lg" | "xl";
+  maxWidth?: "sm" | "md" | "lg" | "xl" | "3xl" | "5xl";
 }
 
 const MAX_WIDTH_CLASS: Record<string, string> = {
@@ -17,6 +17,11 @@ const MAX_WIDTH_CLASS: Record<string, string> = {
   md: "max-w-md",
   lg: "max-w-lg",
   xl: "max-w-xl",
+  "3xl": "max-w-3xl",
+  // For content that is genuinely wide rather than merely long — a prompt or a
+  // raw model reply wrapped at 36rem is unreadable, and reading them is the
+  // entire point of the generation trace.
+  "5xl": "max-w-5xl",
 };
 
 export function Modal({ open, onClose, title, children, maxWidth = "lg" }: Props) {

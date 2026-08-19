@@ -27,6 +27,7 @@ import {
   buildSupportedProvider,
   ProviderNotAvailableError,
 } from "@/lib/ai/llm/supported-providers";
+import { GenerationTracer } from "@/lib/generation-trace/tracer";
 
 /**
  * Translates one feed item into the source's target language (v2-4).
@@ -72,6 +73,12 @@ export type TranslateFeedItemOutcome =
 /** The FeedItem fields translation reads. */
 export interface TranslatableItem {
   id: string;
+  /**
+   * Which company this article belongs to. Read only so the trace run can be
+   * filed under it — nothing in translation branches on it, and it is optional
+   * so a caller assembled before tracing existed stays valid.
+   */
+  companyId?: string;
   title: string | null;
   content: string | null;
   /** The article's own URL — logged for diagnostics so a hang/timeout is traceable. */
@@ -109,6 +116,11 @@ export interface TranslateFeedItemDeps {
   attemptTimeoutMs?: number;
   /** Wall-clock cap for the whole item, across all in-request retries. */
   itemTimeoutMs?: number;
+  /**
+   * The trace recorder for this translation. Injected in tests; production
+   * starts its own run. Observation only — nothing here branches on it.
+   */
+  tracer?: GenerationTracer;
 }
 
 /** One model call (or one item) exceeded its wall-clock budget. */
@@ -296,6 +308,47 @@ export async function translateFeedItem(
   const { systemPrompt, userPrompt, mode, schema, contentChars, derivedTitle } =
     buildTranslationPrompts(item.title, item.content, targetLang);
 
+  // ── Trace ─────────────────────────────────────────────────────────────────
+  // Started only HERE, after the claim, because everything above returns without
+  // calling a model — and a run recorded for "nothing to do" would sit in front
+  // of the real translation as the most recent one, which is what a post's trace
+  // links to. A run therefore exists if and only if a model was asked something.
+  const tracer =
+    deps.tracer ??
+    GenerationTracer.start({
+      kind: "translation",
+      trigger: "system",
+      companyId: item.companyId ?? null,
+      feedItemId: item.id,
+      language: targetLang,
+      options: { targetLang, mode, attempt, maxAttempts: MAX_TRANSLATION_ATTEMPTS },
+    });
+  // Set explicitly rather than only through the init above, so an injected
+  // tracer (tests, and any future caller that owns the run) is filed under the
+  // same company and model as one this function started itself.
+  tracer.setCompany(item.companyId);
+  tracer.setLanguage(targetLang);
+  tracer.setLlm(resolved.provider, resolved.model);
+  tracer.step({
+    type: "request",
+    label: `Translate article to ${targetLang}`,
+    input: { feedItemId: item.id, url: item.url, targetLang, mode, attempt },
+    metadata: { inputKind, derivedTitle, contentHash: hash },
+  });
+  tracer.step({
+    type: "source",
+    label: "Original article",
+    output: { title: item.title, content: item.content, url: item.url },
+    metadata: {
+      titleChars: item.title?.length ?? 0,
+      contentChars: item.content?.length ?? 0,
+      // How much of the page survived boilerplate/credit removal and capping —
+      // compared against contentChars it says how much was noise.
+      bodyCharsSent: contentChars,
+      truncatedForPrompt: (item.content?.length ?? 0) > contentChars,
+    },
+  });
+
   // Per-translation diagnostics. The article BODY is never logged — only its length —
   // so a request that hangs or times out can be tied to an exact feed item (id, title,
   // source URL) and correlated with prompt/article size, without dumping content.
@@ -380,6 +433,21 @@ export async function translateFeedItem(
         budgetMs,
       });
 
+      tracer.step({
+        type: "prompt",
+        label: tries > 1 ? `Try ${tries} — corrected prompt` : `Try ${tries}`,
+        attempt: tries,
+        input: { systemPrompt, userPrompt: currentUserPrompt },
+        metadata: {
+          temperature,
+          repeatPenalty,
+          contentBudget,
+          schema,
+          isRetryPrompt: tries > 1,
+        },
+      });
+
+      const callStartedAt = new Date();
       const response = await withTimeout(
         resolved.instance.generate({
           systemPrompt,
@@ -399,6 +467,25 @@ export async function translateFeedItem(
         "attempt"
       );
 
+      tracer.step({
+        type: "llm_call",
+        label: `Try ${tries} of ${maxTries}`,
+        attempt: tries,
+        startedAt: callStartedAt,
+        completedAt: new Date(),
+        input: {
+          request: { temperature, repeatPenalty, maxTokens: MAX_TRANSLATION_OUTPUT_TOKENS },
+        },
+        metadata: { providerPayload: response.raw ?? null, budgetMs },
+      });
+      tracer.step({
+        type: "raw_response",
+        label: `Try ${tries}`,
+        attempt: tries,
+        output: { text: response.text },
+        metadata: { chars: response.text?.length ?? 0 },
+      });
+
       try {
         const parsedReply = parseTranslationResponse(response.text, targetLang, { mode });
         translatedTitle = parsedReply.translatedTitle;
@@ -406,6 +493,14 @@ export async function translateFeedItem(
         usedRepair = parsedReply.usedRepair;
         repairs = parsedReply.repairs;
         lastResponseRaw = response.raw;
+        tracer.setAttempts(tries);
+        tracer.step({
+          type: "parsed_result",
+          label: `Try ${tries} accepted`,
+          attempt: tries,
+          output: { translatedTitle, translatedContent },
+          metadata: { usedRepair, repairs },
+        });
         break;
       } catch (parseErr) {
         // The transport succeeded (HTTP 200) but the reply was rejected. Log the SHAPE of the
@@ -437,6 +532,22 @@ export async function translateFeedItem(
           responseFirst200: text.slice(0, 200),
           responseLast200: text.length > 200 ? text.slice(-200) : "",
           error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+        });
+        tracer.setAttempts(tries);
+        tracer.step({
+          type: "retry",
+          label: willRetry
+            ? `Try ${tries} rejected — regenerating`
+            : `Try ${tries} rejected — giving up`,
+          attempt: tries,
+          status: "failed",
+          output: {
+            reason,
+            willRetry,
+            truncated: parseError?.truncated ?? false,
+            repetition: parseError?.repetition ?? null,
+          },
+          error: parseErr,
         });
         // Retries exhausted (or a reason regeneration cannot fix) — record the failure.
         if (!willRetry) throw parseErr;
@@ -493,6 +604,19 @@ export async function translateFeedItem(
       },
     });
 
+    tracer.step({
+      type: "persistence",
+      label: "Translation stored",
+      output: { translatedTitle, translatedContent, targetLang },
+      metadata: {
+        provider: resolved.provider,
+        model: resolved.model,
+        mode,
+        tries,
+        translationHash: hash,
+      },
+    });
+
     console.info("[rss-translation] item translated", {
       ...diag,
       elapsedMs: now().getTime() - startedAtMs,
@@ -520,6 +644,14 @@ export async function translateFeedItem(
     return { status: "translated", provider: resolved.provider, model: resolved.model, mode };
   } catch (err) {
     const error = err instanceof Error ? err.message : "Unknown translation error.";
+    tracer.fail(
+      err instanceof TranslationTimeoutError
+        ? "TRANSLATION_TIMEOUT"
+        : err instanceof TranslationParseError
+          ? `TRANSLATION_${err.reason.toUpperCase()}`
+          : "TRANSLATION_TRANSPORT_ERROR",
+      error
+    );
     const nextRetryAt = computeTranslationBackoff(attempt, now());
 
     // Names the exact feed item that failed (e.g. a >300s text-worker timeout) with how
@@ -567,5 +699,10 @@ export async function translateFeedItem(
     }
 
     return { status: "failed", error, nextRetryAt };
+  } finally {
+    // In a `finally` so a run that timed out, threw, or was superseded is on the
+    // record just as fully as one that succeeded — those are the ones somebody
+    // is trying to explain.
+    await tracer.flush();
   }
 }

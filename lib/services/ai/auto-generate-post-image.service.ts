@@ -4,6 +4,7 @@ import {
   type GeneratePostImageResult,
   type MediaDTO,
 } from "./generate-post-image.service";
+import type { ImageGenerationRecorder } from "@/lib/generation-trace/image-record";
 
 /**
  * Automatic image generation for a freshly created post.
@@ -41,6 +42,11 @@ export interface AutoGenerateImageInput {
   enabled: boolean;
   /** The acting user. Undefined for cron/system generation. */
   generatedById?: string;
+  /**
+   * Told what was drawn and from which prompt, when the caller is tracing.
+   * Observation only — see lib/generation-trace/image-record.ts.
+   */
+  recordImage?: ImageGenerationRecorder;
 }
 
 /** Narrow DB surface — real Prisma satisfies it; tests inject a fake. */
@@ -113,10 +119,13 @@ export async function autoGeneratePostImage(
 
   let result: GeneratePostImageResult;
   try {
-    result = await generateImage(input.postId, {
-      kind: "system",
-      attributeToUserId,
-    });
+    result = await generateImage(
+      input.postId,
+      { kind: "system", attributeToUserId },
+      undefined,
+      undefined,
+      input.recordImage
+    );
   } catch (err) {
     // The pipeline maps provider failures to a result code and only throws on
     // genuinely unexpected errors. Swallow those too: an image must never take

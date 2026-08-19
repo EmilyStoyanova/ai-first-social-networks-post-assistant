@@ -1,10 +1,16 @@
 import type { MediaSource, SocialChannel } from "@prisma/client";
 import { prisma } from "@/lib/db/client";
-import { getImageProvider } from "@/lib/ai/image/image-provider-factory";
+import { describeImageProvider, getImageProvider } from "@/lib/ai/image/image-provider-factory";
 import { buildImagePrompt } from "@/lib/ai/image/image-prompt-builder";
 import { ImageProviderError } from "@/lib/ai/image/image-provider-errors";
 import type { IImageProvider } from "@/lib/ai/image/image-provider";
 import type { ImageStyle } from "@/lib/ai/image/image-style";
+import type {
+  ImageGenerationRecord,
+  ImageGenerationRecorder,
+} from "@/lib/generation-trace/image-record";
+import { GenerationTracer } from "@/lib/generation-trace/tracer";
+import { recordImageStep } from "@/lib/generation-trace/post-generation-steps";
 
 export interface MediaDTO {
   id: string;
@@ -90,6 +96,15 @@ export interface GeneratePostImageDb {
 export interface GeneratePostImageDeps {
   db: GeneratePostImageDb;
   getProvider: () => IImageProvider;
+  /**
+   * Told what was drawn, and from which prompt. Optional and observation-only —
+   * the outcome type carries a `MediaDTO`, which says an image exists but not
+   * what was ASKED for, and the assembled prompt, the negative prompt and the
+   * dimensions are decided here and were previously unrecoverable afterwards.
+   */
+  recordImage?: ImageGenerationRecorder;
+  /** Provider/model by name, for the record above. Injected in tests. */
+  describeProvider?: () => { provider: string; model: string | null };
 }
 
 // ─── Core logic ───────────────────────────────────────────────────────────────
@@ -145,18 +160,48 @@ export async function generatePostImageCore(
     imageStyle,
   });
 
+  const { width, height } = channelDimensions(post.channel);
+  const described = (deps.describeProvider ?? describeImageProvider)();
+  const startedAt = new Date();
+
+  /** Reports one image generation, successful or not. Never throws. */
+  const record = (outcome: Pick<ImageGenerationRecord, "result" | "error">): void => {
+    if (!deps.recordImage) return;
+    try {
+      const completedAt = new Date();
+      deps.recordImage({
+        basePrompt,
+        prompt,
+        negativePrompt: negativePrompt ?? null,
+        provider: described.provider,
+        model: described.model,
+        style: imageStyle ?? null,
+        width,
+        height,
+        startedAt,
+        completedAt,
+        durationMs: completedAt.getTime() - startedAt.getTime(),
+        ...outcome,
+      });
+    } catch (err) {
+      console.error(
+        "[generation-trace] Image recorder threw (image generation continues):",
+        err instanceof Error ? err.message : err
+      );
+    }
+  };
+
   let provider: IImageProvider;
   try {
     provider = getProvider();
   } catch (err) {
     if (err instanceof ImageProviderError) {
       logImageProviderFailure(err);
+      record({ error: { code: "IMAGE_PROVIDER_ERROR", message: err.message } });
       return { success: false, code: "IMAGE_PROVIDER_ERROR", message: err.message };
     }
     throw err;
   }
-
-  const { width, height } = channelDimensions(post.channel);
 
   let generated: Awaited<ReturnType<typeof provider.generate>>;
   try {
@@ -164,6 +209,7 @@ export async function generatePostImageCore(
   } catch (err) {
     if (err instanceof ImageProviderError) {
       logImageProviderFailure(err);
+      record({ error: { code: "IMAGE_PROVIDER_ERROR", message: err.message } });
       return { success: false, code: "IMAGE_PROVIDER_ERROR", message: err.message };
     }
     throw err;
@@ -189,6 +235,16 @@ export async function generatePostImageCore(
     data: { mediaAssetId: asset.id },
   });
 
+  record({
+    result: {
+      url: generated.url,
+      width: generated.width,
+      height: generated.height,
+      providerAssetId: generated.providerAssetId,
+      mediaAssetId: asset.id,
+    },
+  });
+
   return {
     success: true,
     media: {
@@ -207,18 +263,29 @@ export async function generatePostImageForActor(
   postId: string,
   actor: ImageGenerationActor,
   imageStyle?: ImageStyle,
-  promptOverride?: string
+  promptOverride?: string,
+  /** Optional trace sink. Absent on the manual button, present during generation. */
+  recordImage?: ImageGenerationRecorder
 ): Promise<GeneratePostImageResult> {
   return generatePostImageCore(
     postId,
     actor,
     imageStyle,
-    { db: prisma, getProvider: getImageProvider },
+    { db: prisma, getProvider: getImageProvider, recordImage },
     promptOverride
   );
 }
 
-/** The manual path: a user clicked "Generate image". */
+/**
+ * The manual path: a user clicked "Generate image".
+ *
+ * Traced as a run of its OWN — kind `image`, linked to the same post — rather
+ * than being folded into the generation that wrote the post. It is a separate AI
+ * operation, taken later, by a different person, possibly several times, and
+ * possibly with a hand-edited prompt. This is precisely the case the data model
+ * is a list of runs per post for: a single blob on Post could only ever hold the
+ * last one.
+ */
 export async function generatePostImage(
   postId: string,
   userId: string,
@@ -226,12 +293,34 @@ export async function generatePostImage(
   imageStyle?: ImageStyle,
   promptOverride?: string
 ): Promise<GeneratePostImageResult> {
-  return generatePostImageForActor(
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: { companyId: true, channel: true },
+  });
+
+  const tracer = GenerationTracer.start({
+    kind: "image",
+    trigger: "manual",
     postId,
-    { kind: "user", userId, isGlobalAdmin },
-    imageStyle,
-    promptOverride
-  );
+    companyId: post?.companyId ?? null,
+    channel: post?.channel ?? null,
+    userId,
+    options: { imageStyle: imageStyle ?? null, promptOverridden: Boolean(promptOverride?.trim()) },
+  });
+
+  try {
+    const result = await generatePostImageForActor(
+      postId,
+      { kind: "user", userId, isGlobalAdmin },
+      imageStyle,
+      promptOverride,
+      (record) => recordImageStep(tracer, "Image regenerated by hand", record)
+    );
+    if (!result.success) tracer.fail(result.code, result.message ?? null);
+    return result;
+  } finally {
+    await tracer.flush();
+  }
 }
 
 function logImageProviderFailure(err: ImageProviderError): void {

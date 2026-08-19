@@ -49,6 +49,8 @@ interface Props {
   canManageAnalyticsKey: boolean;
   /** Filter parsed from ?status= server-side, so the first paint is already correct. */
   initialStatusFilter: PostStatusFilter;
+  /** Offers the generation-trace action on each card. Admin-only; see the card. */
+  isGlobalAdmin?: boolean;
 }
 
 export function GeneratedPostsSection({
@@ -65,6 +67,7 @@ export function GeneratedPostsSection({
   postMetrics,
   canManageAnalyticsKey,
   initialStatusFilter,
+  isGlobalAdmin = false,
 }: Props) {
   const t = useTranslations("posts");
   const router = useRouter();
@@ -277,6 +280,7 @@ export function GeneratedPostsSection({
                 group.posts.map((p) => [p.id, postMetrics[p.id] ?? disabledMetrics()])
               )}
               canManageAnalyticsKey={canManageAnalyticsKey}
+              isGlobalAdmin={isGlobalAdmin}
             />
           ))}
         </div>

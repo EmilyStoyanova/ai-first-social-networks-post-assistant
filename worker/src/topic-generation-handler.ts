@@ -278,6 +278,10 @@ export function createTopicGenerationHandler(deps: TopicGenerationHandlerDeps = 
             // where the first channel to succeed settles it.
             anchor: resume?.anchor ?? null,
             alreadyGenerated: resume?.alreadyGenerated,
+            // Recorded on each channel's generation trace, so a run can be tied
+            // back to the job that executed it — including a retry, which is a
+            // different job from the attempt that wrote the first channels.
+            jobId: job.id,
           },
           {
             // Every committed channel updates the job's `result`, which is both

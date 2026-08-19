@@ -135,8 +135,11 @@ export function toResumeState(progress: unknown): BulkResumeState | undefined {
 }
 
 /** Maps the validated payload onto the service's input, unchanged in meaning. */
-function toServiceInput(payload: BulkGenerationPayload) {
+function toServiceInput(payload: BulkGenerationPayload, jobId: string) {
   return {
+    // Recorded on every post's generation trace, so a run can be tied back to
+    // the job that executed it. Descriptive only.
+    jobId,
     channels: payload.channels,
     numberOfPosts: payload.numberOfPosts,
     startDate: payload.startDate,
@@ -211,7 +214,7 @@ export function createBulkGenerationHandler(deps: BulkGenerationHandlerDeps = {}
       input.slug,
       input.userId,
       requester.isGlobalAdmin,
-      toServiceInput(input),
+      toServiceInput(input, job.id),
       {
         newBatchId: () => input.batchId,
         newContentGroupId: () => input.contentGroupIds[nextGroup++] ?? crypto.randomUUID(),

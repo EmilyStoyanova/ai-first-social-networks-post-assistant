@@ -1181,5 +1181,104 @@
         "description": "Choose a longer period, or another channel, to see statistics."
       }
     }
+  },
+  "generationTrace": {
+    "open": "View Generation Summary",
+    "title": "Generation Summary",
+    "subtitle": "Every step from the request to the saved post.",
+    "loading": "Loading the trace…",
+    "error": "The generation trace could not be loaded.",
+    "empty": "No trace was recorded for this post.",
+    "emptyHint": "Tracing records a run as it happens, so posts generated before it was switched on have none.",
+    "tabs": {
+      "overview": "Overview",
+      "raw": "Raw Debug"
+    },
+    "summary": {
+      "trigger": "Triggered by",
+      "requestedBy": "Requested by",
+      "automated": "Automated",
+      "channel": "Channel",
+      "language": "Language",
+      "model": "Model",
+      "attempts": "Attempts",
+      "duration": "Duration",
+      "status": "Result",
+      "startedAt": "Started",
+      "runs": "Runs",
+      "steps": "Steps",
+      "jobId": "Job",
+      "contentGroupId": "Content group",
+      "batchId": "Batch",
+      "scheduleId": "Schedule"
+    },
+    "truncatedWarning": "Some values were shortened to fit. Anything cut off is marked in place.",
+    "trigger": {
+      "manual": "Manual",
+      "manual_multi_channel": "Manual, multi-channel",
+      "bulk": "Bulk run",
+      "cron": "Scheduled (cron)",
+      "preview": "Prompt preview",
+      "system": "Background"
+    },
+    "kind": {
+      "post_generation": "Post generation",
+      "translation": "Article translation",
+      "classification": "Topic classification",
+      "extraction": "Page extraction",
+      "image": "Image generation"
+    },
+    "runStatus": {
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed"
+    },
+    "stepStatus": {
+      "success": "OK",
+      "failed": "Failed",
+      "skipped": "Skipped"
+    },
+    "stepType": {
+      "request": "Request",
+      "source": "Source",
+      "extraction": "Extraction",
+      "translation": "Translation",
+      "classification": "Classification",
+      "selection": "Selection",
+      "context": "Context",
+      "prompt": "Prompt",
+      "llm_call": "LLM call",
+      "raw_response": "Raw response",
+      "parsed_result": "Parsed result",
+      "validation": "Validation",
+      "retry": "Retry",
+      "image": "Image",
+      "persistence": "Post saved",
+      "unknown": "Step"
+    },
+    "section": {
+      "input": "Input",
+      "output": "Output",
+      "metadata": "Details",
+      "error": "Error"
+    },
+    "linked": {
+      "label": "Full detail",
+      "available": "Prompts and raw reply are in the linked run below.",
+      "missing": "The linked run is no longer available.",
+      "heading": "Linked run"
+    },
+    "copy": "Copy",
+    "copied": "Copied",
+    "expand": "Show details",
+    "collapse": "Hide details",
+    "expandAll": "Expand all",
+    "collapseAll": "Collapse all",
+    "showMore": "Show the full value",
+    "showLess": "Show less",
+    "chars": "{count} characters",
+    "attempt": "Attempt {n}",
+    "noValue": "—",
+    "rawHint": "The complete trace as stored, including every field the timeline summarises."
   }
 }

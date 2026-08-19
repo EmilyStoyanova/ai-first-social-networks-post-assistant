@@ -13,6 +13,10 @@ import { type ContentAngle, selectRetryAngle } from "./content-angle";
 import { type PostPattern, selectRetryPattern } from "./post-pattern";
 import { type ContentAspect, selectRetryAspect } from "./content-aspect";
 import { isTopicRepeated } from "./topic-memory";
+import type {
+  AttemptRejectionReason,
+  GenerationAttemptRecorder,
+} from "@/lib/generation-trace/attempt-record";
 
 export const MAX_GENERATION_ATTEMPTS = 3;
 
@@ -113,6 +117,11 @@ export interface GenerationLoopResult {
  * one. The last result is always returned, even if still flagged after all
  * attempts. Only the accepted candidate's embedding is persisted by the caller —
  * the gate never stores anything.
+ *
+ * `recorder`, when given, is told about EVERY attempt as it completes — including
+ * the ones this function discards. It is observation only: it is called inside a
+ * try/catch, its return value is ignored, and nothing in the loop branches on
+ * whether it is present. See lib/generation-trace/attempt-record.ts.
  */
 export async function generateWithRetry(
   provider: ILlmProvider,
@@ -121,7 +130,8 @@ export async function generateWithRetry(
   recentPosts: RecentPost[],
   diversityOptions?: DiversityOptions,
   semanticGate?: SemanticGate,
-  maxAttempts = MAX_GENERATION_ATTEMPTS
+  maxAttempts = MAX_GENERATION_ATTEMPTS,
+  recorder?: GenerationAttemptRecorder
 ): Promise<GenerationLoopResult> {
   let lastParsed: ParsedLlmPost | null = null;
   let lastDuplicateResult: DuplicateCheckResult = {
@@ -143,6 +153,25 @@ export async function generateWithRetry(
   const triedAspectIds: string[] = currentAspect ? [currentAspect.id] : [];
 
   let attemptsMade = 0;
+
+  /**
+   * Hands one attempt to the recorder, if there is one.
+   *
+   * Wrapped because an observer must not be able to break the thing it observes:
+   * a recorder that throws (a serialization bug, a full disk behind it) would
+   * otherwise abort a generation that was going perfectly well.
+   */
+  const report = (record: Parameters<GenerationAttemptRecorder>[0]) => {
+    if (!recorder) return;
+    try {
+      recorder(record);
+    } catch (err) {
+      console.error(
+        "[generation-trace] Attempt recorder threw (generation continues):",
+        err instanceof Error ? err.message : err
+      );
+    }
+  };
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     attemptsMade = attempt;
@@ -218,12 +247,45 @@ export async function generateWithRetry(
     // (logged by the provider) can be attributed to a specific attempt.
     console.info(`[llm-diag] generation attempt ${attempt}/${maxAttempts}`);
 
-    const response = await provider.generate({
+    const request = { systemPrompt, userPrompt, temperature: 0.85, maxTokens: 1024 };
+    const attemptStartedAt = new Date();
+
+    /** The half of an attempt record that is known before the call returns. */
+    const attemptBase = () => ({
+      attempt,
+      maxAttempts,
       systemPrompt,
       userPrompt,
-      temperature: 0.85,
-      maxTokens: 1024,
+      request: { temperature: request.temperature, maxTokens: request.maxTokens },
+      startedAt: attemptStartedAt,
+      completedAt: new Date(),
+      durationMs: Date.now() - attemptStartedAt.getTime(),
+      angle: currentAngle,
+      pattern: currentPattern,
+      aspect: currentAspect,
     });
+
+    let response: Awaited<ReturnType<typeof provider.generate>>;
+    try {
+      response = await provider.generate(request);
+    } catch (err) {
+      // A transport/provider failure ends the whole loop (it always did — this
+      // only makes sure the attempt that died is still on the record, since the
+      // throw below means nothing downstream will ever see it).
+      report({
+        ...attemptBase(),
+        rawResponse: null,
+        parsed: null,
+        error: {
+          name: err instanceof Error ? err.name : "Error",
+          message: err instanceof Error ? err.message : String(err),
+        },
+        accepted: false,
+        rejectionReason: "provider_error" satisfies AttemptRejectionReason,
+        willRetry: false,
+      });
+      throw err;
+    }
 
     // Diagnostic: classify a parse failure (invalid JSON vs. missing/invalid
     // fields such as an absent coreMessage) before it propagates to the 502
@@ -238,6 +300,20 @@ export async function generateWithRetry(
           } rawLength=${response.text.length}`
         );
       }
+      report({
+        ...attemptBase(),
+        rawResponse: response.text,
+        rawProviderPayload: response.raw,
+        parsed: null,
+        error: {
+          name: err instanceof Error ? err.name : "Error",
+          message: err instanceof Error ? err.message : String(err),
+          category: err instanceof LlmResponseParseError ? (err.category ?? undefined) : undefined,
+        },
+        accepted: false,
+        rejectionReason: "parse_error" satisfies AttemptRejectionReason,
+        willRetry: false,
+      });
       throw err;
     }
 
@@ -267,23 +343,40 @@ export async function generateWithRetry(
       lastTopicRepeated;
 
     // Diagnostic: which of the triggers fired, and whether retries remain.
-    if (needsRetry) {
-      const retryReason = lastDuplicateResult.flagged
+    const rejectionReason: AttemptRejectionReason | null = !needsRetry
+      ? null
+      : lastDuplicateResult.flagged
         ? "jaccard_duplicate"
         : lastSemanticResult.decision === "regenerate"
           ? "semantic_duplicate"
           : lastCoreMessageGeneric
             ? "generic_core_message"
             : "repeated_topic";
-      const willRetry = attempt < maxAttempts;
+    const willRetry = needsRetry && attempt < maxAttempts;
+
+    if (needsRetry) {
       console.info(
-        `[llm-diag] attempt ${attempt} needs retry: reason=${retryReason} willRetry=${willRetry}${
+        `[llm-diag] attempt ${attempt} needs retry: reason=${rejectionReason} willRetry=${willRetry}${
           willRetry ? "" : " (retries exhausted — returning last candidate)"
         }`
       );
     } else {
       console.info(`[llm-diag] attempt ${attempt} accepted`);
     }
+
+    report({
+      ...attemptBase(),
+      rawResponse: response.text,
+      rawProviderPayload: response.raw,
+      parsed: lastParsed,
+      duplicate: lastDuplicateResult,
+      semantic: lastSemanticResult,
+      coreMessageGeneric: lastCoreMessageGeneric,
+      topicRepeated: lastTopicRepeated,
+      accepted: !needsRetry,
+      rejectionReason,
+      willRetry,
+    });
 
     if (!needsRetry) break;
   }

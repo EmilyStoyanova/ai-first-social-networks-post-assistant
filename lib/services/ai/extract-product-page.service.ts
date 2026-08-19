@@ -18,6 +18,7 @@ import {
   buildSupportedProvider,
   ProviderNotAvailableError,
 } from "@/lib/ai/llm/supported-providers";
+import { GenerationTracer } from "@/lib/generation-trace/tracer";
 
 /**
  * Runs the extraction instruction of ONE product-page feed item.
@@ -82,6 +83,12 @@ export type ExtractProductPageOutcome =
 /** The FeedItem fields extraction reads. */
 export interface ExtractableItem {
   id: string;
+  /**
+   * Which company this page belongs to. Read only so the trace run can be filed
+   * under it — nothing in extraction branches on it, and it is optional so a
+   * caller assembled before tracing existed stays valid.
+   */
+  companyId?: string;
   title: string | null;
   /** The RAW stored page JSON — `{title, description, image, instructions, pageText}`. */
   content: string | null;
@@ -114,6 +121,11 @@ export interface ExtractProductPageDeps {
   itemTimeoutMs?: number;
   /** Extra calls spent repairing an unusable reply. Defaults to the module bound. */
   maxRepairAttempts?: number;
+  /**
+   * The trace recorder for this extraction. Injected in tests; production starts
+   * its own run. Observation only — nothing here branches on it.
+   */
+  tracer?: GenerationTracer;
 }
 
 /**
@@ -270,6 +282,45 @@ export async function extractProductPage(
 
   const truncated = pageTextWasTruncated(stored.pageText);
 
+  // ── Trace ─────────────────────────────────────────────────────────────────
+  // Started after the claim, for the reason translation's and classification's
+  // are: everything above settles without a model call.
+  const tracer =
+    deps.tracer ??
+    GenerationTracer.start({
+      kind: "extraction",
+      trigger: "system",
+      companyId: item.companyId ?? null,
+      feedItemId: item.id,
+      options: { attempt, maxAttempts: MAX_EXTRACTION_ATTEMPTS },
+    });
+  // Set explicitly rather than only through the init above, so an injected
+  // tracer is filed under the same company and model as one started here.
+  tracer.setCompany(item.companyId);
+  tracer.setLlm(resolved.provider, resolved.model);
+  tracer.step({
+    type: "request",
+    label: "Extract the instructed facts from the page",
+    input: { feedItemId: item.id, url: item.url, attempt },
+    metadata: { storedExtractionHash: item.extractionHash },
+  });
+  tracer.step({
+    type: "source",
+    label: "Raw scraped page",
+    output: {
+      pageTitle: stored.title ?? item.title,
+      // The owner's own description of what a post from this page must be built
+      // from — the single most useful thing to read when an extraction is wrong.
+      instructions: stored.instructions,
+      pageText: stored.pageText,
+    },
+    metadata: {
+      pageTextChars: stored.pageText.length,
+      instructionChars: stored.instructions.length,
+      pageTextTruncated: truncated,
+    },
+  });
+
   // Diagnostics carry sizes, never the page body or the instruction text.
   const diag = {
     feedItemId: item.id,
@@ -315,11 +366,59 @@ export async function extractProductPage(
     let last: ExtractionOutcome | null = null;
 
     for (let call = 1; call <= maxRepairs + 1; call++) {
+      tracer.step({
+        type: "prompt",
+        label: call > 1 ? `Call ${call} — repair prompt` : `Call ${call}`,
+        attempt: call,
+        input: { systemPrompt, userPrompt: prompt },
+        metadata: { temperature: 0, maxTokens: MAX_EXTRACTION_OUTPUT_TOKENS, isRepair: call > 1 },
+      });
+
+      const callStartedAt = new Date();
       const response = await ask(prompt);
+      tracer.setAttempts(call);
+      tracer.step({
+        type: "llm_call",
+        label: `Call ${call}`,
+        attempt: call,
+        startedAt: callStartedAt,
+        completedAt: new Date(),
+        input: { request: { temperature: 0, maxTokens: MAX_EXTRACTION_OUTPUT_TOKENS } },
+        metadata: { providerPayload: response.raw ?? null },
+      });
+      tracer.step({
+        type: "raw_response",
+        label: `Call ${call}`,
+        attempt: call,
+        output: { text: response.text },
+        metadata: { chars: response.text?.length ?? 0 },
+      });
+
       const parsed = parseExtractionResponse(response.text, { pageTextTruncated: truncated });
-      if (parsed.status !== "invalid") return { outcome: parsed, calls: call };
+      if (parsed.status !== "invalid") {
+        tracer.step({
+          type: "parsed_result",
+          label: `Call ${call} accepted — ${parsed.status}`,
+          attempt: call,
+          output:
+            parsed.status === "completed"
+              ? { content: parsed.content, data: parsed.data }
+              : { notFoundReason: parsed.reason },
+        });
+        return { outcome: parsed, calls: call };
+      }
 
       last = parsed;
+      tracer.step({
+        type: "retry",
+        label:
+          call <= maxRepairs
+            ? `Call ${call} rejected — repairing`
+            : `Call ${call} rejected — incomplete`,
+        attempt: call,
+        status: "failed",
+        output: { problem: parsed.problem, willRepair: call <= maxRepairs },
+      });
       if (call > maxRepairs) break;
 
       console.warn("[product-page-extraction] reply rejected — repairing", {
@@ -356,6 +455,12 @@ export async function extractProductPage(
           extractedAt: now(),
         },
       });
+      tracer.step({
+        type: "persistence",
+        label: "Nothing on the page matched the instruction",
+        status: "skipped",
+        output: { extractionStatus: "not_found", reason: outcome.reason },
+      });
       console.info("[product-page-extraction] nothing on the page matched the instruction", {
         ...diag,
         reason: outcome.reason,
@@ -371,6 +476,19 @@ export async function extractProductPage(
         extractionStatus: "completed",
         extractionError: null,
         extractedAt: now(),
+      },
+    });
+
+    tracer.step({
+      type: "persistence",
+      label: "Extraction stored",
+      output: { extractedContent: outcome.content, data: outcome.data },
+      metadata: {
+        provider: resolved.provider,
+        model: resolved.model,
+        modelCalls: calls,
+        extractedChars: outcome.content.length,
+        itemCount: outcome.data.items.length,
       },
     });
 
@@ -394,6 +512,14 @@ export async function extractProductPage(
     };
   } catch (err) {
     const error = err instanceof Error ? err.message : "Unknown extraction error.";
+    tracer.fail(
+      err instanceof ExtractionTimeoutError
+        ? "EXTRACTION_TIMEOUT"
+        : err instanceof IncompleteExtractionError
+          ? "INCOMPLETE_EXTRACTION"
+          : "EXTRACTION_TRANSPORT_ERROR",
+      error
+    );
 
     console.warn("[product-page-extraction] FAILED", {
       ...diag,
@@ -414,5 +540,7 @@ export async function extractProductPage(
     if (written.count === 0) return { status: "skipped", reason: "claimed" };
 
     return { status: "failed", error };
+  } finally {
+    await tracer.flush();
   }
 }

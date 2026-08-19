@@ -122,6 +122,7 @@ export default async function CompanyPostsPage({ params, searchParams }: Props) 
             // Narrowed here for the same reason the channels settings page does
             // it: the column is a free String in Prisma but only ever "en"/"bg".
             companyDefaultLang={company.defaultLang === "bg" ? "bg" : "en"}
+            isGlobalAdmin={session.user.isGlobalAdmin}
           />
         </div>
       </div>

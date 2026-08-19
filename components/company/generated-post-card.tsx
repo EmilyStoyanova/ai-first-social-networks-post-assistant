@@ -15,6 +15,7 @@ import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { BufferProfileItem } from "@/lib/services/buffer/list-buffer-profiles.service";
 import { EditPostModal } from "./edit-post-modal";
 import { PostActivityModal } from "./post-activity-modal";
+import { GenerationTraceModal } from "@/components/admin/generation-trace-modal";
 import { PostSchedulePanel } from "./post-schedule-panel";
 import { ImagePickerModal, type GalleryMediaItem } from "@/components/media/ImagePickerModal";
 import { formatDateTime } from "@/lib/i18n/format-date";
@@ -119,6 +120,17 @@ interface Props {
    *  show analytics (the approval queue) need not thread it through. */
   metrics?: Record<string, PostMetricsView>;
   canManageAnalyticsKey?: boolean;
+  /**
+   * Whether the viewer is a GLOBAL ADMIN, which is a stronger fact than the
+   * `role` beside it — a company owner is also `"owner"`, and the generation
+   * trace is not theirs to read. It carries the exact prompts, the raw model
+   * replies and a frozen copy of the brand guidelines, so it is operator detail.
+   *
+   * This only decides whether the ACTION is offered; the API enforces the same
+   * rule on its own (see the admin trace route), so a card rendered with the
+   * wrong value cannot leak anything.
+   */
+  isGlobalAdmin?: boolean;
 }
 
 /**
@@ -154,6 +166,7 @@ export function GeneratedPostCard({
   onStatusChange,
   metrics,
   canManageAnalyticsKey = false,
+  isGlobalAdmin = false,
 }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -177,6 +190,7 @@ export function GeneratedPostCard({
       onStatusChange={onStatusChange}
       metrics={metrics?.[selected.id]}
       canManageAnalyticsKey={canManageAnalyticsKey}
+      isGlobalAdmin={isGlobalAdmin}
     />
   );
 }
@@ -194,6 +208,7 @@ interface BodyProps {
   onStatusChange?: (id: string, newStatus: string) => void;
   metrics?: PostMetricsView;
   canManageAnalyticsKey?: boolean;
+  isGlobalAdmin?: boolean;
 }
 
 function GeneratedPostCardBody({
@@ -208,8 +223,10 @@ function GeneratedPostCardBody({
   onStatusChange,
   metrics,
   canManageAnalyticsKey = false,
+  isGlobalAdmin = false,
 }: BodyProps) {
   const t = useTranslations("posts");
+  const tTrace = useTranslations("generationTrace");
   const tSchedule = useTranslations("posts.schedule");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
@@ -238,6 +255,9 @@ function GeneratedPostCardBody({
 
   // ── Activity state ────────────────────────────────────────────────────────
   const [activityOpen, setActivityOpen] = useState(false);
+  // Global admin only, and lazily mounted — the trace is a large fetch nobody
+  // wants paid for on every card in a grid.
+  const [traceOpen, setTraceOpen] = useState(false);
 
   // ── Schedule state ────────────────────────────────────────────────────────
   // Held here rather than in the panel because the schedule is not only the
@@ -907,14 +927,26 @@ function GeneratedPostCardBody({
         <PostMetricsStrip metrics={metrics} canManageKey={canManageAnalyticsKey} slug={slug} />
       )}
 
-      {/* View Activity — always available */}
-      <div className="border-border mt-3 border-t pt-3">
+      {/* View Activity — always available. The generation trace sits beside it
+          for a global admin only: same footer, but operator detail (exact
+          prompts, raw model replies, a frozen copy of the brand guidelines)
+          rather than the company-facing history the activity modal shows. */}
+      <div className="border-border mt-3 flex flex-wrap gap-4 border-t pt-3">
         <button
           onClick={() => setActivityOpen(true)}
           className="text-fg-faint hover:text-fg text-xs transition-colors"
         >
           {t("viewActivity")}
         </button>
+
+        {isGlobalAdmin && (
+          <button
+            onClick={() => setTraceOpen(true)}
+            className="text-fg-faint hover:text-fg text-xs transition-colors"
+          >
+            {tTrace("open")}
+          </button>
+        )}
       </div>
 
       {editOpen && (
@@ -936,6 +968,14 @@ function GeneratedPostCardBody({
           origin={origin}
           open={activityOpen}
           onClose={() => setActivityOpen(false)}
+        />
+      )}
+
+      {traceOpen && (
+        <GenerationTraceModal
+          postId={post.id}
+          open={traceOpen}
+          onClose={() => setTraceOpen(false)}
         />
       )}
 

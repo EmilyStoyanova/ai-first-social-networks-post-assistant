@@ -72,6 +72,9 @@ function defaultSelectPending(limit: number): Promise<ExtractableItem[]> {
     take: limit,
     select: {
       id: true,
+      // Read only so the extraction's trace run can be filed under the company
+      // it belongs to; nothing in extraction itself branches on it.
+      companyId: true,
       title: true,
       content: true,
       url: true,

@@ -118,6 +118,7 @@ export default async function ChannelCalendarPage({ params, searchParams }: Prop
             role={role}
             canDelete={canDelete}
             bufferConnected={bufferConnected}
+            isGlobalAdmin={user.isGlobalAdmin}
           />
         </div>
       )}

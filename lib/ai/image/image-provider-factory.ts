@@ -33,6 +33,34 @@ function resolveProviderName(): ImageProviderName {
   return "mock";
 }
 
+/**
+ * Which image provider and model are configured, by name only.
+ *
+ * Deliberately reads the same env vars `getImageProvider` does but touches no
+ * key: a trace needs to record WHAT drew the image, and a credential must never
+ * be within reach of the code that writes rows an admin UI renders.
+ */
+export function describeImageProvider(): { provider: string; model: string | null } {
+  if (process.env.AI_MOCK_MODE === "true") return { provider: "mock", model: null };
+  const provider = resolveProviderName();
+  switch (provider) {
+    case "fal":
+      return { provider, model: process.env.FAL_MODEL ?? "fal-ai/flux/schnell" };
+    case "openai":
+      return { provider, model: process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-1" };
+    case "ideogram":
+      return { provider, model: process.env.IDEOGRAM_MODEL ?? "V_2" };
+    case "leonardo":
+      return { provider, model: process.env.LEONARDO_MODEL_ID ?? null };
+    case "worker":
+      // The worker chooses its own checkpoint; the URL is deliberately not
+      // recorded, since it can carry credentials in some deployments.
+      return { provider, model: process.env.IMAGE_WORKER_MODEL ?? null };
+    default:
+      return { provider, model: null };
+  }
+}
+
 export function getImageProvider(): IImageProvider {
   // AI_MOCK_MODE always wins regardless of IMAGE_PROVIDER
   if (process.env.AI_MOCK_MODE === "true") {

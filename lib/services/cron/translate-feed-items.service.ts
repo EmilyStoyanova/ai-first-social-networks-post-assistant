@@ -43,6 +43,9 @@ export interface TranslateFeedItemsDeps {
 
 const SELECT = {
   id: true,
+  // Read only so the translation's trace run can be filed under the company it
+  // belongs to; nothing in translation itself branches on it.
+  companyId: true,
   title: true,
   content: true,
   url: true,

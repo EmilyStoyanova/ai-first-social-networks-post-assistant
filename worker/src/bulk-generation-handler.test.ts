@@ -93,6 +93,9 @@ describe("bulk generation handler — delegation", () => {
       userId: USER_ID,
       isGlobalAdmin: false,
       input: {
+        // Descriptive only, and the one thing the handler adds: which job ran
+        // this batch, recorded on every post's generation trace.
+        jobId: "job-1",
         channels: ["linkedin", "facebook"],
         numberOfPosts: 2,
         startDate: "2026-08-17",

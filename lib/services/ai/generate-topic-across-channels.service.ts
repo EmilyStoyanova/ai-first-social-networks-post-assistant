@@ -255,6 +255,13 @@ export interface GenerateTopicInput {
    * they exist and this run did not write them.
    */
   alreadyGenerated?: readonly string[];
+  /**
+   * The queue job running this topic, when one is. Recorded on each channel's
+   * generation trace so a run can be tied back to the job that executed it —
+   * which is the difference between "the user's click" and "the worker's retry
+   * of the user's click". Purely descriptive.
+   */
+  jobId?: string;
 }
 
 export interface GenerateTopicDeps {
@@ -361,6 +368,14 @@ export async function generateTopicAcrossChannels(
       generationBatchId: input.generationBatchId,
       contentGroupId: input.contentGroupId,
       contentSourceId: input.contentSourceId,
+      // Each channel gets its OWN trace run, tied to its own post, and all of
+      // them carry this group id — so "show me every channel version of this
+      // topic's generation" is one indexed query. A batch id present here means
+      // the topic belongs to a bulk run, and the trigger derives `bulk`.
+      trace: {
+        trigger: input.generationBatchId ? "bulk" : "manual_multi_channel",
+        jobId: input.jobId ?? null,
+      },
       // Without an anchor this is the generation that DECIDES the topic, so it
       // resolves the source exactly as a single-channel generation would.
       //

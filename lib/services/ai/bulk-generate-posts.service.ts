@@ -131,6 +131,13 @@ export interface BulkGeneratePostsInput {
    * run's instruction.
    */
   sourceMix?: BulkSourceQuota[];
+  /**
+   * The queue job running this batch, when one is. Recorded on every post's
+   * generation trace so a run can be tied to the job — including the retry of a
+   * half-finished batch, which is a different job from the first attempt.
+   * Descriptive only; nothing in the batch reads it.
+   */
+  jobId?: string;
 }
 
 export interface BulkGeneratedPost {
@@ -875,6 +882,9 @@ export async function bulkGeneratePosts(
             // The topic an earlier attempt settled on, so the channels still
             // missing continue THAT story instead of each choosing a new one.
             anchor: deps.resume?.anchors[topicIndex] ?? null,
+            // Recorded on each channel's generation trace, so a run can be tied
+            // to the queue job that executed it. Descriptive only.
+            jobId: input.jobId,
           },
           {
             generate,

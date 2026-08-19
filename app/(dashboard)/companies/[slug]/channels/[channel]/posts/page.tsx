@@ -57,6 +57,7 @@ export default async function ChannelPostsPage({ params, searchParams }: Props) 
           role={role}
           bufferConnected={bufferConnected}
           initialStatusFilter={resolvePostStatusFilter(sp.status)}
+          isGlobalAdmin={user.isGlobalAdmin}
         />
       )}
     </ChannelsShell>

@@ -9,6 +9,8 @@ import { resolveLlmSelection } from "@/lib/services/ai/resolve-llm-selection.ser
 import { buildSupportedProvider } from "@/lib/ai/llm/supported-providers";
 import { prisma } from "@/lib/db/client";
 import { type SocialChannel } from "@prisma/client";
+import { GenerationTracer } from "@/lib/generation-trace/tracer";
+import { observeProvider } from "@/lib/generation-trace/observed-provider";
 
 const bodySchema = z.object({
   channel: z
@@ -161,39 +163,141 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
   // an aspect for an article the real post would not be about.
   const primaryItem = previewPrimaryItem(context.feedItems);
 
-  // Get the provider for potential extraction (graceful no-op if unavailable).
-  let selectedAspect: import("@/lib/ai/content-aspect").ContentAspect | undefined;
-  try {
-    const provider =
-      process.env.AI_MOCK_MODE === "true"
-        ? { generate: async () => ({ text: "[]" }) }
-        : buildSupportedProvider(selection.provider).instance;
-
-    const aspectResult = await resolveGenerationAspect({
-      primary: primaryItem,
-      snapshots,
-      provider,
-    });
-    selectedAspect = aspectResult.aspect;
-  } catch {
-    // No provider or extraction failed — show prompt without aspect (same as generation would do)
-    selectedAspect = undefined;
-  }
-
-  const { systemPrompt, userPrompt } = buildPrompts(
-    context,
-    primaryItem,
-    parsed.data.contentLanguage,
-    [],
-    { aspect: selectedAspect }
-  );
-
-  return NextResponse.json({
-    provider: selection.providerLabel,
-    model: selection.model,
-    llmConfigId: selection.llmConfigId,
-    systemPrompt,
-    userPrompt,
-    selectedAspect: selectedAspect ?? null,
+  /**
+   * A preview is traced because it really RUNS something.
+   *
+   * It writes no post, claims no article and calls no generation model — but
+   * aspect mining is a genuine LLM call against the same provider a real
+   * generation would use, and the prompts it returns are the prompts that would
+   * be sent. So it gets a run of its own, marked `preview` and with a null post
+   * id, rather than being silently absent from a company's history of what its
+   * AI was asked to do. It is deliberately NOT a post's trace: no post exists.
+   */
+  const tracer = GenerationTracer.start({
+    kind: "post_generation",
+    trigger: "preview",
+    companyId,
+    channel: parsed.data.channel,
+    language: parsed.data.contentLanguage ?? context.channel.postingLanguage,
+    userId: session.user.id,
+    options: { channel: parsed.data.channel, contentLanguage: parsed.data.contentLanguage ?? null },
   });
+  tracer.setLlm(selection.providerLabel, selection.model);
+  tracer.step({
+    type: "request",
+    label: "Prompt preview (no post is written)",
+    input: {
+      companyId,
+      channel: parsed.data.channel,
+      contentLanguage: parsed.data.contentLanguage ?? null,
+      requestedBy: session.user.id,
+    },
+  });
+
+  try {
+    if (primaryItem) {
+      tracer.step({
+        type: "source",
+        label: `Forecast article — ${primaryItem.sourceName ?? "unnamed"}`,
+        output: {
+          feedItemId: primaryItem.id,
+          title: primaryItem.title,
+          url: primaryItem.publicUrl ?? primaryItem.url,
+          content: primaryItem.content,
+        },
+        metadata: {
+          note: "Forecast only — a preview reserves nothing, so a real generation may claim a different article.",
+          usedTranslation: primaryItem.usedTranslation === true,
+        },
+      });
+    }
+
+    // Get the provider for potential extraction (graceful no-op if unavailable).
+    let selectedAspect: import("@/lib/ai/content-aspect").ContentAspect | undefined;
+    try {
+      const provider =
+        process.env.AI_MOCK_MODE === "true"
+          ? { generate: async () => ({ text: "[]" }) }
+          : buildSupportedProvider(selection.provider).instance;
+
+      const aspectResult = await resolveGenerationAspect({
+        primary: primaryItem,
+        snapshots,
+        // Observed, so the one LLM call a preview really makes is on the record
+        // with its exact prompt and reply — the same wrapper generation uses.
+        provider: observeProvider(provider, (call) => {
+          tracer.step({
+            type: "llm_call",
+            label: "Aspect mining",
+            status: call.error ? "failed" : "success",
+            startedAt: call.startedAt,
+            completedAt: call.completedAt,
+            durationMs: call.durationMs,
+            input: { systemPrompt: call.systemPrompt, userPrompt: call.userPrompt },
+            metadata: { request: call.request },
+            error: call.error ? `${call.error.name}: ${call.error.message}` : undefined,
+          });
+          if (call.responseText !== null) {
+            tracer.step({
+              type: "raw_response",
+              label: "Aspect mining",
+              output: { text: call.responseText },
+            });
+          }
+        }),
+      });
+      selectedAspect = aspectResult.aspect;
+    } catch (err) {
+      // No provider or extraction failed — show prompt without aspect (same as generation would do)
+      selectedAspect = undefined;
+      tracer.step({
+        type: "llm_call",
+        label: "Aspect mining unavailable",
+        status: "skipped",
+        error: err,
+      });
+    }
+
+    const { systemPrompt, userPrompt } = buildPrompts(
+      context,
+      primaryItem,
+      parsed.data.contentLanguage,
+      [],
+      { aspect: selectedAspect }
+    );
+
+    tracer.step({
+      type: "context",
+      label: "Generation context",
+      output: {
+        company: context.company,
+        brandGuidelines: context.brand,
+        channelSettings: context.channel,
+        selectedAspect: selectedAspect ?? null,
+      },
+      metadata: { candidateCount: context.feedItems.length, llmConfigId: selection.llmConfigId },
+    });
+    tracer.step({
+      type: "prompt",
+      label: "Prompts as they would be sent",
+      input: { systemPrompt, userPrompt },
+      metadata: {
+        systemPromptChars: systemPrompt.length,
+        userPromptChars: userPrompt.length,
+        // A preview stops here on purpose — nothing is generated from these.
+        sent: false,
+      },
+    });
+
+    return NextResponse.json({
+      provider: selection.providerLabel,
+      model: selection.model,
+      llmConfigId: selection.llmConfigId,
+      systemPrompt,
+      userPrompt,
+      selectedAspect: selectedAspect ?? null,
+    });
+  } finally {
+    await tracer.flush();
+  }
 }

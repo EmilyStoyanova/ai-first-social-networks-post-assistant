@@ -36,6 +36,8 @@ interface Props {
   role: PostRole;
   canDelete: boolean;
   bufferConnected: boolean;
+  /** Offers the generation-trace action on the opened card. Admin-only. */
+  isGlobalAdmin?: boolean;
 }
 
 /** Midday UTC — see the note in calendar-toolbar.tsx. */
@@ -80,6 +82,7 @@ export function PostCalendar({
   role,
   canDelete,
   bufferConnected,
+  isGlobalAdmin = false,
 }: Props) {
   const t = useTranslations("planner.calendar");
   const router = useRouter();
@@ -258,6 +261,7 @@ export function PostCalendar({
             bufferConnected={bufferConnected}
             onDelete={handleDeleted}
             onStatusChange={handleChanged}
+            isGlobalAdmin={isGlobalAdmin}
           />
         </Modal>
       )}

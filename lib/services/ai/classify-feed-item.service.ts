@@ -27,6 +27,7 @@ import {
   buildSupportedProvider,
   ProviderNotAvailableError,
 } from "@/lib/ai/llm/supported-providers";
+import { GenerationTracer } from "@/lib/generation-trace/tracer";
 
 /**
  * Classifies ONE feed item against its company's topic priorities.
@@ -78,6 +79,12 @@ export type ClassifyFeedItemOutcome =
 /** The FeedItem fields classification reads. */
 export interface ClassifiableItem {
   id: string;
+  /**
+   * Which company this article belongs to. Read only so the trace run can be
+   * filed under it — nothing in classification branches on it, and it is
+   * optional so a caller assembled before tracing existed stays valid.
+   */
+  companyId?: string;
   title: string | null;
   content: string | null;
   url: string;
@@ -111,6 +118,11 @@ export interface ClassifyFeedItemDeps {
   /** Wall-clock cap for the whole item, across its repair call. */
   itemTimeoutMs?: number;
   maxRepairAttempts?: number;
+  /**
+   * The trace recorder for this classification. Injected in tests; production
+   * starts its own run. Observation only — nothing here branches on it.
+   */
+  tracer?: GenerationTracer;
 }
 
 /**
@@ -303,6 +315,56 @@ export async function classifyFeedItem(
   const systemPrompt = buildClassificationSystemPrompt(mode);
   const userPrompt = buildClassificationUserPrompt({ text, context, inputKind });
 
+  // ── Trace ─────────────────────────────────────────────────────────────────
+  // Started after the claim, for the reason translation's is: everything above
+  // settles without a model call, and a run for "nothing to do" would stand in
+  // front of the real verdict as the most recent one.
+  const tracer =
+    deps.tracer ??
+    GenerationTracer.start({
+      kind: "classification",
+      trigger: "system",
+      companyId: item.companyId ?? null,
+      feedItemId: item.id,
+      options: { mode, inputKind, attempt, maxAttempts: MAX_CLASSIFICATION_ATTEMPTS },
+    });
+  // Set explicitly rather than only through the init above, so an injected
+  // tracer is filed under the same company and model as one started here.
+  tracer.setCompany(item.companyId);
+  tracer.setLlm(provider.provider, provider.model);
+  tracer.step({
+    type: "request",
+    label: `Classify article against topic priorities (${mode})`,
+    input: { feedItemId: item.id, url: item.url, mode, inputKind, attempt },
+    metadata: { classificationHash: hash, usedTranslation: resolved.usedTranslation },
+  });
+  tracer.step({
+    type: "context",
+    label: "Topic configuration",
+    output: {
+      // The topic lists AS THEY STOOD. Editing them tomorrow reopens the article
+      // for a fresh verdict and writes a new run; this one keeps the old lists,
+      // which is the only way "why was this rejected in March" stays answerable.
+      highPriorityTopics: priorities.high,
+      mediumPriorityTopics: priorities.medium,
+      avoidedTopics: priorities.avoided,
+      companyDescription: context.companyDescription,
+      targetAudience: context.targetAudience,
+    },
+    metadata: { mode, withCompanyContext: hasCompanyContext(context) },
+  });
+  tracer.step({
+    type: "source",
+    label: "Text judged",
+    output: { title: text.title, content: text.body },
+    metadata: {
+      // Which text the verdict was made on: a completed translation is what gets
+      // judged, so a Bulgarian topic list is compared against Bulgarian text.
+      usedTranslation: resolved.usedTranslation,
+      bodyChars: (text.body ?? "").length,
+    },
+  });
+
   // Diagnostics carry sizes and counts, never the article body or the topic lists.
   const diag = {
     feedItemId: item.id,
@@ -349,12 +411,68 @@ export async function classifyFeedItem(
     let last: ClassificationOutcome | null = null;
 
     for (let call = 1; call <= maxRepairs + 1; call++) {
+      tracer.step({
+        type: "prompt",
+        label: call > 1 ? `Call ${call} — repair prompt` : `Call ${call}`,
+        attempt: call,
+        input: { systemPrompt, userPrompt: prompt },
+        metadata: {
+          temperature: 0,
+          maxTokens: MAX_CLASSIFICATION_OUTPUT_TOKENS,
+          isRepair: call > 1,
+        },
+      });
+
+      const callStartedAt = new Date();
       const response = await ask(prompt);
+      tracer.setAttempts(call);
+      tracer.step({
+        type: "llm_call",
+        label: `Call ${call}`,
+        attempt: call,
+        startedAt: callStartedAt,
+        completedAt: new Date(),
+        input: { request: { temperature: 0, maxTokens: MAX_CLASSIFICATION_OUTPUT_TOKENS } },
+        metadata: { providerPayload: response.raw ?? null },
+      });
+      tracer.step({
+        type: "raw_response",
+        label: `Call ${call}`,
+        attempt: call,
+        output: { text: response.text },
+        metadata: { chars: response.text?.length ?? 0 },
+      });
+
       const parsed = parseClassificationResponse(response.text, priorities);
-      if (parsed.status === "ok") return { outcome: parsed, calls: call };
+      if (parsed.status === "ok") {
+        tracer.step({
+          type: "parsed_result",
+          label: `Call ${call} accepted`,
+          attempt: call,
+          output: {
+            classification: parsed.classification,
+            rejectionReason: parsed.rejectionReason,
+            matchedTopics: parsed.matchedTopics,
+            primaryTopic: parsed.primaryTopic,
+            mainSubject: parsed.mainSubject,
+            reason: parsed.reason,
+          },
+        });
+        return { outcome: parsed, calls: call };
+      }
 
       last = parsed;
-      if (call > maxRepairs) break;
+      const willRepair = call <= maxRepairs;
+      tracer.step({
+        type: "retry",
+        label: willRepair
+          ? `Call ${call} rejected — repairing`
+          : `Call ${call} rejected — untrusted`,
+        attempt: call,
+        status: "failed",
+        output: { problem: parsed.problem, willRepair },
+      });
+      if (!willRepair) break;
 
       console.warn("[classification] reply rejected — repairing", {
         ...diag,
@@ -398,7 +516,32 @@ export async function classifyFeedItem(
         classificationLeaseExpiresAt: null,
       },
     });
-    if (written.count === 0) return { status: "skipped", reason: "claimed" };
+    if (written.count === 0) {
+      tracer.skipped(
+        "persistence",
+        "A concurrent run reclaimed this article; the verdict was discarded."
+      );
+      return { status: "skipped", reason: "claimed" };
+    }
+
+    tracer.step({
+      type: "persistence",
+      label: `Verdict stored — ${outcome.classification}`,
+      output: {
+        classification: outcome.classification,
+        rejectionReason: outcome.rejectionReason,
+        matchedTopics: outcome.matchedTopics,
+        primaryTopic: outcome.primaryTopic,
+        mainSubject: outcome.mainSubject,
+        reason: outcome.reason,
+      },
+      metadata: {
+        provider: provider.provider,
+        model: provider.model,
+        modelCalls: calls,
+        classificationHash: hash,
+      },
+    });
 
     console.info("[classification] classified", {
       ...diag,
@@ -424,6 +567,14 @@ export async function classifyFeedItem(
     };
   } catch (err) {
     const error = err instanceof Error ? err.message : "Unknown classification error.";
+    tracer.fail(
+      err instanceof ClassificationTimeoutError
+        ? "CLASSIFICATION_TIMEOUT"
+        : err instanceof UntrustworthyClassificationError
+          ? "UNTRUSTWORTHY_CLASSIFICATION"
+          : "CLASSIFICATION_TRANSPORT_ERROR",
+      error
+    );
 
     console.warn("[classification] FAILED", {
       ...diag,
@@ -452,5 +603,10 @@ export async function classifyFeedItem(
     if (written.count === 0) return { status: "skipped", reason: "claimed" };
 
     return { status: "failed", error };
+  } finally {
+    // In a `finally` so a timeout or an untrusted reply is on the record exactly
+    // as fully as a verdict — a failure here leaves `classification` NULL, and
+    // "why has this article no verdict" is what the trace has to answer.
+    await tracer.flush();
   }
 }

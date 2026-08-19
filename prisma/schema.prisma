@@ -114,6 +114,47 @@ enum JobStatus {
   cancelled
 }
 
+// ─── Generation trace ─────────────────────────────────────────────────────────
+// What KIND of AI operation a run recorded. Deliberately not "everything is a
+// post generation": translation, classification and product-page extraction are
+// operations on a FEED ITEM that happen long before (and independently of) any
+// post, and a post's trace REFERENCES them rather than copying the article text
+// into every channel version of every post written from it.
+enum GenerationRunKind {
+  post_generation
+  translation
+  classification
+  extraction
+  image
+}
+
+// What asked for the run. `manual` is one person, one channel, one click;
+// `manual_multi_channel` is that click fanned out across channels; `bulk` is a
+// "generate N posts" batch; `cron` is the weekly scheduler; `preview` is the
+// prompt preview, which executes real LLM work (aspect mining) but persists no
+// post; `system` is background work with no requester (feed-item translation,
+// classification, extraction).
+enum GenerationTrigger {
+  manual
+  manual_multi_channel
+  bulk
+  cron
+  preview
+  system
+}
+
+enum GenerationRunStatus {
+  running
+  completed
+  failed
+}
+
+enum GenerationStepStatus {
+  success
+  failed
+  skipped
+}
+
 // Health/lifecycle of a worker process, reported via heartbeat. `draining` is a
 // worker that has stopped claiming new jobs and is finishing in-flight work
 // during graceful shutdown; `stopped` is a clean exit.
@@ -150,6 +191,7 @@ model User {
   generatedPosts          Post[]          @relation("PostGenerator")
   postVersions            PostVersion[]
   auditLogs               AuditLog[]
+  generationRuns          GenerationRun[]
   apiKeys                 ApiKey[]
   preferredLlmConfig      LlmConfig?               @relation("UserPreferredLlm", fields: [preferredLlmConfigId], references: [id], onDelete: SetNull)
   emailVerificationTokens EmailVerificationToken[]
@@ -185,6 +227,7 @@ model Company {
   weeklySchedules  WeeklySchedule[]
   posts            Post[]
   auditLogs        AuditLog[]
+  generationRuns   GenerationRun[]
 
   @@map("companies")
 }
@@ -468,6 +511,10 @@ model FeedItem {
   // claimed exactly once, by the first channel; the siblings are pinned to the
   // article the topic already claimed and never claim it again.
   posts  Post[]
+  /// Translation / classification / extraction traces for THIS article. A post
+  /// written from it references the run rather than copying the article text
+  /// again — see GenerationStep.linkedRunId.
+  generationRuns GenerationRun[]
 
   @@unique([sourceId, url])
   @@index([sourceId])
@@ -678,6 +725,10 @@ model Post {
   semantics   PostSemantics?
   metrics         PostMetric?
   metricSnapshots PostMetricSnapshot[]
+  /// Every AI operation that produced (or acted on) this post, newest last. A
+  /// post normally has exactly one, but the model is a list because regeneration
+  /// and later image work are separate runs.
+  generationRuns  GenerationRun[]
 
   @@index([companyId, status])
   @@index([scheduledFor])
@@ -893,6 +944,173 @@ model AuditLog {
 
   @@index([companyId, createdAt(sort: Desc)])
   @@map("audit_logs")
+}
+
+// ─── Generation trace ─────────────────────────────────────────────────────────
+//
+// ONE AI operation, and every step it took, captured as it happened.
+//
+// The whole point of these two tables is that they are a SNAPSHOT and never a
+// view: a post generated in March must still show March's brand guidelines,
+// March's channel settings and March's exact prompts after every one of those has
+// been edited. So nothing here is a foreign key to live configuration — the
+// values are copied in, as JSON, at the moment they were used. The only foreign
+// keys are identity ones (which post, which company, which article), and they
+// exist to FIND a trace, never to reconstruct it.
+//
+// A run is not one giant JSON blob on Post for two reasons. A post may have
+// several AI operations over its life (it was generated, and its image may be
+// regenerated later), and the steps of one operation need to be queryable and
+// individually renderable — a 300KB column that must be parsed whole to show a
+// timeline header is the thing this design exists to avoid.
+model GenerationRun {
+  id String @id @default(uuid())
+
+  /// The company the work was done for. Nullable only because a run can fail
+  /// before the company is resolved (an unknown slug, a membership check that
+  /// said no) — every run that reached an LLM has one.
+  companyId String? @map("company_id")
+
+  /// The post this run produced, once it exists. NULL while the run is in flight
+  /// and permanently NULL for a run that produced no post — a generation aborted
+  /// by the uniqueness gate, a preview, or a feed-item operation. Those runs are
+  /// deliberately kept: "why did this not produce a post" is the question a trace
+  /// is most often opened to answer.
+  postId String? @map("post_id")
+
+  /// The article a feed-item operation acted on (translation / classification /
+  /// extraction). NULL for post generation, whose article is recorded in the
+  /// source step instead — a post's run is about the post, not about one article.
+  feedItemId String? @map("feed_item_id")
+
+  kind    GenerationRunKind
+  trigger GenerationTrigger
+  status  GenerationRunStatus @default(running)
+
+  /// Channel and content language, denormalized off the steps so the admin list
+  /// can be filtered and read without opening every run.
+  channel  SocialChannel?
+  language String?
+
+  /// Who asked. NULL for cron and for every background feed-item operation.
+  userId String? @map("user_id")
+
+  /// Associations that let one request's runs be found together: the content
+  /// group is one topic across channels, the batch is one bulk click, the
+  /// schedule is one cron week, the job is the queue entry that executed it.
+  contentGroupId    String? @map("content_group_id")
+  generationBatchId String? @map("generation_batch_id")
+  scheduleId        String? @map("schedule_id")
+  jobId             String? @map("job_id")
+
+  /// Provenance of the model that did the work, as resolved for THIS run. A
+  /// string rather than the LlmProvider enum for the same reason PostMetric keeps
+  /// Buffer's own vocabulary: this is a historical label, and an unrecognised one
+  /// must be storable rather than crash.
+  llmProvider String? @map("llm_provider")
+  llmModel    String? @map("llm_model")
+
+  /// How many generation attempts the run made (1..MAX_GENERATION_ATTEMPTS). 0
+  /// for a run that never reached the model.
+  attempts Int @default(0)
+
+  startedAt   DateTime  @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  durationMs  Int?      @map("duration_ms")
+
+  /// The terminal failure, when there was one — the service's own error code
+  /// (CANNOT_GENERATE_UNIQUE_POST, LLM_RATE_LIMITED, …) and its message.
+  errorCode    String? @map("error_code")
+  errorMessage String? @map("error_message")
+
+  /// The request options as they arrived, sanitized. What was ASKED for, as
+  /// opposed to what was resolved — the latter is the context step's job.
+  options Json?
+
+  /// True when any captured value hit a size cap and was shortened. Surfaced in
+  /// the UI so a reader never mistakes a truncated prompt for the whole one.
+  truncated Boolean @default(false)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  company  Company?  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  post     Post?     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  feedItem FeedItem? @relation(fields: [feedItemId], references: [id], onDelete: Cascade)
+  /// SetNull, not Cascade: deleting a user must never delete the history of what
+  /// their generations did.
+  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  steps    GenerationStep[]
+
+  /// The trace viewer's own lookup: everything this post's generation did.
+  @@index([postId])
+  /// The admin list — a company's runs, newest first, including the ones that
+  /// produced no post.
+  @@index([companyId, startedAt(sort: Desc)])
+  /// Resolving the translation/classification run a post's step links to.
+  @@index([feedItemId, kind, startedAt(sort: Desc)])
+  /// "Show me every channel version of this topic's generation."
+  @@index([contentGroupId])
+  @@index([generationBatchId])
+  @@map("generation_runs")
+}
+
+// One step of one run — a thing that happened, with what went in and what came
+// out.
+//
+// `type` is a PLAIN STRING rather than an enum, for the reason Job.type and
+// AuditLog.action are: a new pipeline stage must not need a schema migration to
+// become visible, and the closed vocabulary that matters (did it succeed) is the
+// status enum beside it. The known types are listed in lib/generation-trace/
+// step-types.ts, which is also what orders the timeline.
+model GenerationStep {
+  id    String @id @default(uuid())
+  runId String @map("run_id")
+
+  /// Execution order within the run, 1-based and dense. THE ordering — never
+  /// startedAt, which ties for steps that are recorded in the same millisecond.
+  sequence Int
+
+  type   String
+  /// Human label for the timeline header when the type alone is ambiguous
+  /// ("Attempt 2 of 3", "Article image import").
+  label  String?
+  status GenerationStepStatus
+
+  /// Which generation attempt this step belongs to, for the steps that repeat
+  /// (prompt / llm_call / raw_response / validation). NULL for steps that happen
+  /// once per run.
+  attempt Int?
+
+  startedAt   DateTime? @map("started_at")
+  completedAt DateTime? @map("completed_at")
+  durationMs  Int?      @map("duration_ms")
+
+  /// The step's own payload, sanitized and size-capped. Split three ways because
+  /// that is how a reader asks about a step: what did it receive, what did it
+  /// produce, and what else is worth knowing (sizes, thresholds, decisions).
+  input    Json?
+  output   Json?
+  metadata Json?
+
+  errorMessage String? @map("error_message")
+
+  /// The run that holds this step's full detail, when the step is a REFERENCE to
+  /// an immutable artifact produced elsewhere — a feed item's translation or
+  /// classification run. The post's step keeps the verdict and an excerpt; the
+  /// linked run keeps the prompts and the raw response, once, however many posts
+  /// were later written from that article.
+  ///
+  /// Deliberately NOT a relation: the linked run may be deleted (its feed item
+  /// cascades away with its source) while this step must survive as the record of
+  /// what the post was built from. A dangling id renders as "detail no longer
+  /// available", which is the truth.
+  linkedRunId String? @map("linked_run_id")
+
+  run GenerationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, sequence])
+  @@index([runId, sequence])
+  @@map("generation_steps")
 }
 
 model CronRun {

@@ -45,6 +45,9 @@ export interface ClassifyFeedItemsDeps {
 
 const SELECT = {
   id: true,
+  // Read only so the classification's trace run can be filed under the company
+  // it belongs to; nothing in classification itself branches on it.
+  companyId: true,
   title: true,
   content: true,
   url: true,

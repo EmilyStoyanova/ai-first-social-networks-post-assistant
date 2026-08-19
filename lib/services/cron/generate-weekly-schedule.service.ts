@@ -370,6 +370,9 @@ async function fillChannelPooled(
       scheduleId,
       scheduledFor: slotFor(weekStart, have, target, config.postingWindows),
       initialStatus: "pending_approval",
+      // Descriptive only, for the generation trace: the `scheduleId` above
+      // already derives `cron`, and this adds how the article window was ordered.
+      trace: { trigger: "cron", priority: contextResult.priority },
     });
 
     if (!result.success) {
@@ -494,6 +497,8 @@ async function fillChannelFromMix(
       scheduledFor: slotFor(weekStart, totalGenerated(), target, config.postingWindows),
       initialStatus: "pending_approval",
       contentSourceId: due.sourceId,
+      // Descriptive only, for the generation trace — see the pooled path above.
+      trace: { trigger: "cron", priority: contextResult.priority },
     });
 
     if (!result.success) {

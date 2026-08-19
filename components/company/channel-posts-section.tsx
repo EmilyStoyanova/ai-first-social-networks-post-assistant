@@ -28,6 +28,8 @@ interface Props {
   role: PostRole;
   bufferConnected: boolean;
   initialStatusFilter: PostStatusFilter;
+  /** Offers the generation-trace action on each card. Admin-only; see the card. */
+  isGlobalAdmin?: boolean;
 }
 
 /**
@@ -54,6 +56,7 @@ export function ChannelPostsSection({
   role,
   bufferConnected,
   initialStatusFilter,
+  isGlobalAdmin = false,
 }: Props) {
   const t = useTranslations("planner.posts");
   const router = useRouter();
@@ -147,6 +150,7 @@ export function ChannelPostsSection({
               bufferConnected={bufferConnected}
               onDelete={handleDelete}
               onStatusChange={handleStatusChange}
+              isGlobalAdmin={isGlobalAdmin}
             />
           ))}
         </div>
