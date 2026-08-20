@@ -3,7 +3,7 @@ import { LLM_PROVIDER_LABEL } from "@/lib/ai/llm/llm-provider-factory";
 import { TextWorkerProvider } from "@/lib/ai/llm/text-worker.provider";
 import type { TranslationProvider } from "./translation-provider";
 import { OllamaTranslationProvider } from "./ollama-translation.provider";
-import { MadladTranslationProvider } from "./madlad-translation.provider";
+import { MadladTranslationProvider, MADLAD_SOURCE_LANGUAGE } from "./madlad-translation.provider";
 import {
   resolveTranslationProviderConfig,
   type EnvLike,
@@ -103,7 +103,13 @@ export async function buildTranslationProvider(
     }
     return {
       ok: true,
-      provider: new MadladTranslationProvider(url, apiKey, config.madladModel),
+      provider: new MadladTranslationProvider(
+        url,
+        apiKey,
+        config.madladModel,
+        MADLAD_SOURCE_LANGUAGE,
+        config.madladConcurrency
+      ),
       config,
     };
   }

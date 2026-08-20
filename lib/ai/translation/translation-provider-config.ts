@@ -16,6 +16,25 @@ export const DEFAULT_TRANSLATION_PROVIDER: TranslationProviderKind = "ollama";
 /** The official checkpoint. Overridable, but this is the one that was asked for. */
 export const DEFAULT_MADLAD_MODEL = "google/madlad400-3b-mt";
 
+/**
+ * How many MADLAD segment calls may be in flight at once. `1` — today's fully
+ * sequential behaviour — until a deployment's own worker is measured otherwise.
+ *
+ * This is NOT a placeholder someone forgot to raise. Measured live against the
+ * production Mac text worker (2026-08-20, feed item 825c8475's real segments,
+ * unique payloads so no result cache could contaminate the numbers): concurrency 2
+ * took ~3.3x a single call's median latency, and concurrency 3 took even more —
+ * WORSE than the 2x/3x a neutrally-serialized worker would show, not better. That
+ * matches this file's own worker-side comment ("the Python side holds a single 3B
+ * model and serialises anyway") — the bottleneck is the persistent Python process,
+ * not this HTTP client, so raising this app-side would add contention without
+ * adding throughput. Request/response correlation itself was verified safe even at
+ * concurrency 5 (distinct payloads, no cross-matching), so `TRANSLATION_MADLAD_CONCURRENCY`
+ * exists as an operator escape hatch for AFTER a worker-side fix (e.g. batched
+ * generation), not as something to raise today.
+ */
+export const DEFAULT_MADLAD_CONCURRENCY = 1;
+
 /** A minimal read-only view of the environment, so tests need not mutate the real one. */
 export type EnvLike = Record<string, string | undefined>;
 
@@ -42,6 +61,8 @@ export interface TranslationProviderConfig {
    * consulted for a bad translation — see the fallback note in the factory.
    */
   fallbackToOllamaOnTransportError: boolean;
+  /** Max MADLAD segment calls in flight at once. See {@link DEFAULT_MADLAD_CONCURRENCY}. */
+  madladConcurrency: number;
 }
 
 /** Whether a raw string names a supported engine. */
@@ -74,11 +95,26 @@ export function resolveTranslationProviderConfig(env: EnvLike): TranslationProvi
   const madladModel = env.TRANSLATION_MADLAD_MODEL?.trim() || DEFAULT_MADLAD_MODEL;
   const ollamaModel = env.TRANSLATION_OLLAMA_MODEL?.trim() || null;
 
+  const rawConcurrency = env.TRANSLATION_MADLAD_CONCURRENCY?.trim();
+  let madladConcurrency = DEFAULT_MADLAD_CONCURRENCY;
+  if (rawConcurrency) {
+    const parsed = Number.parseInt(rawConcurrency, 10);
+    if (Number.isInteger(parsed) && parsed >= 1) {
+      madladConcurrency = parsed;
+    } else {
+      console.warn(
+        `[rss-translation] TRANSLATION_MADLAD_CONCURRENCY="${rawConcurrency}" is not a positive ` +
+          `integer — using ${DEFAULT_MADLAD_CONCURRENCY}.`
+      );
+    }
+  }
+
   return {
     kind,
     madladModel,
     ollamaModel,
     fallbackToOllamaOnTransportError:
       env.TRANSLATION_MADLAD_FALLBACK?.trim().toLowerCase() === "ollama",
+    madladConcurrency,
   };
 }

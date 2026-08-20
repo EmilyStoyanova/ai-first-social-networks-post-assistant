@@ -622,3 +622,179 @@ describe("MadladTranslationProvider — budgets", () => {
     assert.equal(requests.length, 0, "no call may be made for an empty article");
   });
 });
+
+// ─── Bounded concurrency (TRANSLATION_MADLAD_CONCURRENCY) ─────────────────────
+//
+// Measured against the real production worker (2026-08-20), raising concurrency did
+// NOT improve throughput — it measured WORSE than the fully-serialized case — so the
+// default stays 1 (see DEFAULT_MADLAD_CONCURRENCY's comment). This suite proves the
+// MECHANISM is correct for when a deployment's own worker measures differently:
+// order is preserved regardless of completion order, the in-flight bound is real
+// (not just structurally assumed), one failing segment still fails the whole
+// article, the item deadline still stops new work, and concurrency 1 — the
+// production default — is byte-for-byte the old sequential behaviour (already
+// proven above: every existing test in this file runs at the default and is
+// unmodified).
+describe("MadladTranslationProvider — bounded concurrency", () => {
+  const delayed = (text: string, ms: number): Promise<Response> =>
+    new Promise((resolve) => setTimeout(() => resolve(reply(text)), ms));
+
+  it("preserves source order in the reassembled article regardless of completion order", async () => {
+    // "Gamma" answers FIRST (0ms), "Alpha" answers LAST (60ms) — the exact opposite of
+    // source order — so a pass here can only mean reassembly is order-preserving.
+    stubFetch(async (body) => {
+      const text = String(body.text);
+      if (text === "Alpha one.") return delayed("Преведено Алфа.", 60);
+      if (text === "Beta two.") return delayed("Преведено Бета.", 30);
+      if (text === "Gamma three.") return delayed("Преведено Гама.", 0);
+      return translated();
+    });
+
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      3
+    );
+    const result = await p.translate(
+      requestFor(null, "Alpha one. Beta two. Gamma three."),
+      contextFor()
+    );
+
+    assert.equal(result.translatedContent, "Преведено Алфа. Преведено Бета. Преведено Гама.");
+  });
+
+  it("never exceeds the configured concurrency, and actually reaches it", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    stubFetch(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 15));
+      inFlight -= 1;
+      return translated();
+    });
+
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      2
+    );
+    await p.translate(requestFor(null, "One. Two. Three. Four. Five."), contextFor());
+
+    assert.ok(maxInFlight <= 2, `expected at most 2 in flight, saw ${maxInFlight}`);
+    assert.equal(
+      maxInFlight,
+      2,
+      "concurrency 2 should actually reach 2 in flight, not silently stay at 1"
+    );
+  });
+
+  it("a single failing segment rejects the WHOLE translation, with no partial content ever built", async () => {
+    stubFetch(async (body) => {
+      const text = String(body.text);
+      if (text === "Beta two.") {
+        await new Promise((r) => setTimeout(r, 5));
+        return json({ error: "boom", provider: "madlad" }, 500);
+      }
+      await new Promise((r) => setTimeout(r, 25));
+      return translated();
+    });
+
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      3
+    );
+    await assert.rejects(
+      p.translate(requestFor(null, "Alpha one. Beta two. Gamma three."), contextFor()),
+      (err: unknown) => err instanceof TranslationTransportError && /500/.test(err.message)
+    );
+  });
+
+  it("restores each segment's own protected value correctly, even completing out of order", async () => {
+    const URL_A = "https://example.com/a";
+    const URL_B = "https://example.com/b";
+    const URL_C = "https://example.com/c";
+
+    function echoingDelayed(body: Record<string, unknown>, ms: number): Promise<Response> {
+      const text = String(body.text);
+      const holders = text.match(/\[\[\d+\]\]/g) ?? [];
+      const out =
+        holders.length > 0
+          ? `Преведено изречение с ${holders.join(" и ")} на български език.`
+          : "Преведено изречение на български език.";
+      return delayed(out, ms);
+    }
+
+    stubFetch(async (body) => {
+      const text = String(body.text);
+      // First sentence (carries URL_A) answers SLOWEST; last (carries URL_C) FASTEST —
+      // reversed from source order, so a correct restoration can only come from
+      // per-segment isolation, not from completion order.
+      if (text.startsWith("Read")) return echoingDelayed(body, 60);
+      if (text.startsWith("Visit")) return echoingDelayed(body, 30);
+      return echoingDelayed(body, 0);
+    });
+
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      3
+    );
+    const result = await p.translate(
+      requestFor(null, `Read ${URL_A} today. Visit ${URL_B} next. See ${URL_C} also.`),
+      contextFor()
+    );
+
+    const found = result.translatedContent?.match(/https:\/\/\S+/g) ?? [];
+    assert.deepEqual(
+      found.map((u) => u.replace(/[.,]$/, "")),
+      [URL_A, URL_B, URL_C],
+      "each URL must land back in ITS OWN sentence, in source order"
+    );
+  });
+
+  it("still stops before starting new work once the item deadline passes", async () => {
+    let clock = Date.now();
+    stubFetch(() => {
+      clock += 1_000;
+      return translated();
+    });
+
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      2
+    );
+    await assert.rejects(
+      p.translate(
+        requestFor(null, "One. Two. Three. Four. Five. Six."),
+        contextFor({ now: () => new Date(clock), itemDeadlineMs: clock + 2_500 })
+      ),
+      (err: unknown) => err instanceof TranslationTimeoutError
+    );
+    assert.ok(requests.length < 6, "must not have run every segment past the deadline");
+  });
+
+  it("concurrency 1 (the production default) reproduces the exact prior sequential order", async () => {
+    stubFetch(translated);
+    // No 5th argument — exercises the DEFAULT, exactly like every test above this suite.
+    const p = new MadladTranslationProvider("http://w:3002", "k", "google/madlad400-3b-mt");
+    await p.translate(requestFor(TITLE, CONTENT), contextFor());
+
+    assert.deepEqual(
+      requests.map((r) => r.body.text),
+      [TITLE, "A fire extinguisher can last between 5 and 15 years.", "Check the pressure gauge."]
+    );
+  });
+});

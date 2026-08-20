@@ -59,6 +59,54 @@ export const MADLAD_SOURCE_LANGUAGE = "en";
 /** Per-request cap for ONE segment call. Bounded further by the caller's own budget. */
 export const MADLAD_SEGMENT_TIMEOUT_MS = 120_000;
 
+/**
+ * Runs `count` indexed jobs with at most `concurrency` in flight at once, writing
+ * each result into ITS OWN index regardless of which job settles first — so the
+ * caller can always reassemble in source order without caring what order the
+ * network happened to answer in.
+ *
+ * The first rejection wins: once any job throws, no NEW job is dispatched, but a
+ * job already in flight in another slot is never abandoned mid-request — this
+ * function still awaits it before rejecting. That means nothing here can ever
+ * produce a partial result set to work with: the caller sees either all `count`
+ * results or exactly one thrown error, precisely like the fully sequential loop
+ * this replaces (`concurrency: 1` reproduces it exactly, call for call, in order).
+ */
+async function runBounded<T>(
+  count: number,
+  concurrency: number,
+  job: (index: number) => Promise<T>
+): Promise<T[]> {
+  const results: T[] = new Array(count);
+  let nextIndex = 0;
+  let failed = false;
+  let failure: unknown;
+
+  async function worker(): Promise<void> {
+    for (;;) {
+      if (failed) return;
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= count) return;
+      try {
+        results[index] = await job(index);
+      } catch (err) {
+        if (!failed) {
+          failed = true;
+          failure = err;
+        }
+        return;
+      }
+    }
+  }
+
+  const poolSize = Math.max(1, Math.min(concurrency, count));
+  await Promise.all(Array.from({ length: poolSize }, () => worker()));
+
+  if (failed) throw failure;
+  return results;
+}
+
 /** What the worker is expected to answer with. Every field is validated before use. */
 interface MadladWorkerReply {
   text?: unknown;
@@ -93,7 +141,9 @@ export class MadladTranslationProvider implements TranslationProvider {
     private readonly workerUrl: string,
     private readonly apiKey: string,
     readonly model: string,
-    private readonly sourceLang: string = MADLAD_SOURCE_LANGUAGE
+    private readonly sourceLang: string = MADLAD_SOURCE_LANGUAGE,
+    /** Max segment calls in flight at once. See `DEFAULT_MADLAD_CONCURRENCY`'s comment. */
+    private readonly concurrency: number = 1
   ) {}
 
   async translate(
@@ -157,29 +207,40 @@ export class MadladTranslationProvider implements TranslationProvider {
     });
 
     const callStartedAt = new Date();
-    const translations: string[] = [];
-    const segmentDurations: number[] = [];
-    let workerModel: string | null = null;
-    let workerDevice: string | null = null;
 
-    // Sequential by design — see the class comment. Each segment re-checks the item
-    // deadline, so a slow worker stops the article at the budget instead of after it.
-    for (const [index, segment] of protectedSegments.entries()) {
+    // Bounded concurrency — see `runBounded` and `DEFAULT_MADLAD_CONCURRENCY`.
+    // `concurrency: 1` (today's default) processes strictly index-by-index, in
+    // order, one call at a time — byte-for-byte the same sequence the old `for`
+    // loop ran. Every job re-checks the item deadline itself, so a slow worker
+    // still stops the article at the budget instead of running past it, exactly
+    // as before; a job that throws stops all NEW dispatch and the whole call
+    // rejects, so a failed segment can never lead to a partial article.
+    const replies = await runBounded(protectedSegments.length, this.concurrency, (index) => {
       const remainingMs = context.itemDeadlineMs - now().getTime();
       if (remainingMs <= 0) throw new TranslationTimeoutError(context.itemTimeoutMs, "item");
       const budgetMs = Math.min(context.attemptTimeoutMs, remainingMs);
 
-      const reply = await withTranslationTimeout(
-        this.callWorker(segment.text, request.targetLang, budgetMs, index, segments.length),
+      return withTranslationTimeout(
+        this.callWorker(
+          protectedSegments[index].text,
+          request.targetLang,
+          budgetMs,
+          index,
+          segments.length
+        ),
         budgetMs,
         "attempt"
       );
+    });
 
-      translations.push(reply.text);
-      if (reply.durationMs !== null) segmentDurations.push(reply.durationMs);
-      workerModel ??= reply.model;
-      workerDevice ??= reply.device;
-    }
+    const translations = replies.map((reply) => reply.text);
+    const segmentDurations = replies
+      .map((reply) => reply.durationMs)
+      .filter((ms): ms is number => ms !== null);
+    // Sourced from segment 0's own reply rather than a "first to resolve" race, so
+    // the reported model/device never depends on completion order.
+    const workerModel = replies[0]?.model ?? null;
+    const workerDevice = replies[0]?.device ?? null;
 
     const workerDurationMs = segmentDurations.reduce((sum, ms) => sum + ms, 0);
 
