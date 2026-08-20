@@ -144,6 +144,64 @@ describe("protectTokens — ordinal/decade compounds are prose, not identifiers"
   });
 });
 
+// ─── Regression: real production failure, cardinal form (MADLAD, feed item 825c8475,
+// segment 32/120, 2026-08-20) ──────────────────────────────────────────────────────
+//
+// "15-minute" matches the SAME internal-punctuation identifier shape as "13th-century"
+// (a digit run and a letter run joined by a hyphen), but has no ordinal/decade suffix, so
+// the earlier ORDINAL_OR_DECADE_COMPOUND exclusion did not cover it. Protecting it placed
+// [[0]] in the same unreliable attributive-adjective slot; measured against the real
+// worker, MADLAD did not just drop the placeholder, it invented a DIFFERENT number in its
+// place ("10 минути" for source "15-minute"), and restoreTokens correctly rejected the
+// result rather than storing a silently wrong translation:
+//   "Translation dropped [[0]] in segment 32/120 — the protected value(s) 1 could not be
+//    restored unambiguously (15-minute)."
+// Left unprotected, the same live worker translates the phrase correctly and faithfully
+// ("a 15-minute drive" → "на 15 минути път"), so the fix widens the existing exclusion to
+// make the ordinal/decade suffix optional rather than adding a second, parallel rule.
+describe("protectTokens — plain cardinal-number-hyphen-word compounds are prose too", () => {
+  it("does not protect the exact failing production sentence (segment 32/120)", () => {
+    const source =
+      "Should you want to venture off the property, the towns of Montepulciano and Pienza " +
+      "are a 15-minute drive by car and offer rich Italian history and some of the area's " +
+      "best Pecorino cheese.";
+    const { text, values } = protectTokens(source);
+    assert.equal(text, source, "the sentence must reach MADLAD completely untouched");
+    assert.deepEqual(values, []);
+  });
+
+  it("does not protect other ordinary cardinal-number prose compounds", () => {
+    for (const source of [
+      "A 3-day itinerary through Tuscany.",
+      "The hotel earned a 5-star rating.",
+      "A 10-year renovation project.",
+      "The estate has a 20-room main house.",
+      "A quick 2-hour transfer from the airport.",
+      "It ships with 4-wheel drive.",
+      "The 100-acre estate borders the vineyard.",
+    ]) {
+      assert.deepEqual(protectTokens(source).values, [], `expected "${source}" to stay untouched`);
+    }
+  });
+
+  it("still protects genuine identifiers of unrelated shapes", () => {
+    for (const [source, expected] of [
+      ["The model is DCD-800 and it weighs 1.6 kg.", "DCD-800"],
+      ["Configured as TX-2/B on the panel.", "TX-2/B"],
+      ["Firmware v2.14.3 fixes the charging fault.", "v2.14.3"],
+      ["The unit is rated P2 for this duty cycle.", "P2"],
+      ["Wired for 230V mains only.", "230V"],
+    ] as const) {
+      const { values } = protectTokens(source);
+      assert.deepEqual(
+        values.map((v) => v.value),
+        [expected],
+        `expected "${expected}" to remain protected in "${source}"`
+      );
+    }
+  });
+});
+
 describe("protectTokens — what is deliberately left translatable", () => {
   /**
    * Measured against the real model: it renders these CORRECTLY and localises them
