@@ -1144,6 +1144,82 @@ describe("sanitiseTranslationContent — guards", () => {
   });
 });
 
+// ─── Regression: real production failures (MADLAD, 2026-08-20) ────────────────
+//
+// Two real ArchDaily FeedItems translated via MADLAD came back with the main article
+// paragraph AND the "Year:" fact missing, while page furniture ("More SpecsLess Specs",
+// a gallery counter) was translated. Both real `content` values are reproduced here
+// (trimmed to the structure that matters) to pin the two distinct root causes found by
+// tracing FeedItem.content → sanitiseTranslationContent → segmentArticle for feed items
+// be0e77ec-c1bd-4258-bb1c-c6bc7cc3ec3e and 81e9f558-aeb5-4174-947f-19af1b606f09.
+
+describe("sanitiseTranslationContent — real ArchDaily regressions", () => {
+  it("does not truncate the article at a lead photo's OWN 'Save this picture!' caption", () => {
+    // Reproduces feed item 81e9f558-aeb5-4174-947f-19af1b606f09 (Canopy Design at Starfire
+    // Discovery Camp). ArchDaily renders "Save this picture!" TWICE: once as a harmless
+    // gallery-counter caption near the top (glued to the next word, so it never matched the
+    // trailer marker's \b anchor), and again as the caption for the LEAD photo of the real
+    // body, immediately before "Text description provided by the architects." — on its own
+    // line, so it DID match, and the trailer cut discarded the entire article that followed:
+    // sanitised length fell from 2977 to 667 in production. The lookahead in TRAILER_MARKERS
+    // must recognise this second occurrence as part of the body, not the start of the trailer.
+    const content = [
+      "ArchDaily",
+      "Canopy Design at Starfire Discovery Camp / CM Design",
+      "SaveSave this picture!© Weiqi Jin+ 32",
+      "Architects: CM Design",
+      "Year: ",
+      "",
+      "2026",
+      "",
+      "Design Team: Chen Danping、Qiu Chen City: ShenzhenCountry: ChinaMore SpecsLess Specs",
+      "Save this picture!© Weiqi JinText description provided by the architects. Shenzhen " +
+        "Dapeng New District Starfire Discovery Camp is a comprehensive outdoor practice base " +
+        "integrating research-based education, agro-cultural tourism, and leisure experiences. " +
+        "It is adjacent to Dongshan Temple, with Dapeng Fortress and Jiaochangwei to the west.",
+      "",
+      "Project gallerySee allShow lessAbout this officeCM DesignOffice",
+      'Cite:  "Canopy Design at Starfire Discovery Camp / CM Design"  20 Aug 2026. ArchDaily.  ' +
+        "Accessed . <https://www.archdaily.com/1183494/canopy-design-at-starfire-discovery-camp> " +
+        "ISSN 0719-8884想阅读文章的中文版本吗?",
+    ].join("\n");
+
+    const clean = sanitiseTranslationContent(content)!;
+    assert.ok(
+      clean.includes("Shenzhen Dapeng New District Starfire Discovery Camp"),
+      `the main article paragraph must survive, got: ${clean}`
+    );
+    assert.ok(clean.includes("is a comprehensive outdoor practice base"));
+    // The genuine trailer (cite block, ISSN, Chinese switcher) must still be removed.
+    assert.ok(!clean.includes("Cite:"));
+    assert.ok(!clean.includes("ISSN"));
+    assert.ok(!clean.includes("想阅读"));
+  });
+
+  it("keeps a standalone fact value that a spec table renders on its own line", () => {
+    // Reproduces feed item be0e77ec-c1bd-4258-bb1c-c6bc7cc3ec3e (Strathmore Courtyard House).
+    // ArchDaily's "Year:" field renders the label and its value as separate lines, with blank
+    // whitespace-only lines between them ("Year: \n   \n   \n2025\n   \n"). A bare "2025" line
+    // has no \p{L} letter, so normaliseWhitespace's old letter-only filter treated it as
+    // "a widget's leftovers" and dropped it — before segmentation ever saw it. In production
+    // the fact was gone from sanitiseTranslationContent's OWN output, not just from segments.
+    const content = [
+      "Year",
+      "Completion year of this architecture project",
+      "Year: ",
+      "          ",
+      "          ",
+      "          2025",
+      "        ",
+      "",
+      "Photographs",
+    ].join("\n");
+
+    const clean = sanitiseTranslationContent(content)!;
+    assert.ok(clean.includes("2025"), `the year value must survive, got: ${JSON.stringify(clean)}`);
+  });
+});
+
 // ─── Shrinking retry budget ───────────────────────────────────────────────────
 
 describe("shrinkTranslationContentBudget", () => {

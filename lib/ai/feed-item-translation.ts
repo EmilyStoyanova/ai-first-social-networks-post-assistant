@@ -454,7 +454,12 @@ const TRAILER_MARKERS: readonly RegExp[] = [
   /\bCite:\s/i,
   /\bISSN\s+\d/i,
   /\bDid you know\?/i,
-  /\bSave this (?:picture|article)\b/i,
+  // NOT a trailer when it is the lead photo's OWN caption, immediately ahead of the real
+  // body ("Save this picture!© Weiqi JinText description provided by the architects. …") —
+  // ArchDaily renders that caption a second time, right before the article, distinct from
+  // the earlier gallery-counter caption near the top. Cutting there discarded the entire
+  // article; the lookahead tells the two apart by what follows within the same line.
+  /\bSave this (?:picture|article)\b(?![^\n]{0,80}Text description provided by the architects)/i,
   // The "read this in Chinese/Portuguese/Spanish?" switcher, in the languages ArchDaily emits.
   /想阅读文章的中文版本吗/,
   /\bTradução\b|\b¿Quieres leer/i,
@@ -543,8 +548,11 @@ function normaliseWhitespace(text: string): string {
       .replace(/[^\S\n]{2,}/gu, " ")
       .split("\n")
       .map((line) => line.trim())
-      // A line of pure punctuation or digits is a widget's leftovers, never a sentence.
-      .filter((line) => line === "" || /\p{L}/u.test(line))
+      // A line of pure punctuation is a widget's leftovers, never a sentence — but a line of
+      // pure digits is kept: structured pages (ArchDaily's spec table) render a fact's label
+      // and its value on separate lines ("Year:" / "2025"), and dropping the bare number here
+      // silently deleted the fact before it ever reached segmentation.
+      .filter((line) => line === "" || /[\p{L}\p{N}]/u.test(line))
       .join("\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim()

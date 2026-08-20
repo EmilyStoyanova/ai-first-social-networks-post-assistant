@@ -428,3 +428,36 @@ describe("reassembleArticle", () => {
     assert.equal(translatedContent, source);
   });
 });
+
+// ─── Regression: feed item be0e77ec-c1bd-4258-bb1c-c6bc7cc3ec3e (real, 2026-08-20) ──
+//
+// ArchDaily's "Year:" spec-table field renders its label and value as separate lines
+// ("Year: " then, several blank lines later, "2025"). The bare "2025" line has no
+// \p{L} letter, so it was treated as "a rule, a stray bullet or a widget's leftovers"
+// and silently skipped — the value never became a segment, so it could never appear in
+// the stored translation, independent of anything MADLAD did.
+describe("segmentArticle — a standalone digit line is a value, not a rule", () => {
+  it("keeps a bare year on its own line as its own segment", () => {
+    const content = "Year:\n\n2025\n\nPhotographs";
+    const { segments } = segmentArticle(null, content, { maxContentChars: 100_000 });
+    assert.ok(
+      segments.some((s) => s === "2025"),
+      `expected a "2025" segment, got: ${JSON.stringify(segments)}`
+    );
+  });
+
+  it("round-trips a standalone digit line through an identity translation", () => {
+    const source = "Year:\nPhotographs\n\n2025\n\nCategory: Houses";
+    const { translatedContent } = roundTrip(null, source);
+    assert.ok(
+      translatedContent?.includes("2025"),
+      `expected "2025" to survive, got: ${translatedContent}`
+    );
+  });
+
+  it("still drops a line of pure punctuation — not every letterless line is a value", () => {
+    const content = "First paragraph.\n\n———\n\nSecond paragraph.";
+    const { segments } = segmentArticle(null, content, { maxContentChars: 100_000 });
+    assert.ok(!segments.some((s) => s === "———"), "a bare rule must still be skipped");
+  });
+});

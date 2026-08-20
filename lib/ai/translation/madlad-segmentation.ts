@@ -299,10 +299,12 @@ export function segmentArticle(
           const prefix = marker ? marker[1].replace(/\s+$/, " ") : "";
           const lineBody = marker ? rawLine.trim().slice(marker[1].length) : rawLine;
 
-          // A line with no letter in it is a rule, a stray bullet or a widget's
-          // leftovers — never a sentence. Sending it would spend a call to have a
-          // decoder hallucinate something in place of "———".
-          if (!/\p{L}/u.test(lineBody)) continue;
+          // A line with neither a letter nor a digit is a rule, a stray bullet or a
+          // widget's leftovers — never a sentence. Sending it would spend a call to have
+          // a decoder hallucinate something in place of "———". A line of pure digits IS
+          // kept: it is how a structured spec table (ArchDaily's "Year:" / "2025") renders
+          // a fact's value on its own line, separate from its label.
+          if (!/[\p{L}\p{N}]/u.test(lineBody)) continue;
 
           let first = true;
           for (const sentence of splitSentences(lineBody.trim())) {
