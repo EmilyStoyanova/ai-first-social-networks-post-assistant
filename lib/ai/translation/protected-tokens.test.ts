@@ -87,6 +87,63 @@ describe("protectTokens — the other justified classes", () => {
   });
 });
 
+// ─── Regression: real production failure (MADLAD, feed item 825c8475, 2026-08-20) ──
+//
+// "13th-century" matched the internal-punctuation identifier shape (a digit run and a
+// letter run joined by a hyphen — the same shape as "DCD-800") and was protected as
+// [[0]]. That placed the placeholder in an ATTRIBUTIVE-ADJECTIVE slot immediately before
+// the noun it modifies ("a [[0]] church"); measured live against the real worker, MADLAD
+// drops (or hallucinates a real adjective over) a placeholder in exactly that position,
+// and restoreTokens correctly rejected the result rather than storing a corrupted
+// translation:
+//   "Translation dropped [[0]] in segment 9/17 — the protected value(s) 1 could not be
+//    restored unambiguously (13th-century)."
+// Left unprotected, the SAME live worker translates the phrase correctly and faithfully
+// on its own ("13th-century church" → "църква от 13-ти век"), so the token never needed
+// protection: this is prose, not a code, and the fix removes it from the identifier
+// shape rather than changing the placeholder syntax.
+describe("protectTokens — ordinal/decade compounds are prose, not identifiers", () => {
+  it("does not protect the exact failing production sentence (segment 9/17)", () => {
+    const source =
+      "At the whole-village resort, which sprawls over 2,700 acres and has 146 rooms, " +
+      "one main cobblestoned street leads down from the castle to a 13th-century church, " +
+      "a row of boutiques, gelaterias, and pizzerias, and the two hotel buildings.";
+    const { text, values } = protectTokens(source);
+    assert.equal(text, source, "the sentence must reach MADLAD completely untouched");
+    assert.deepEqual(values, []);
+  });
+
+  it("does not protect the other two ordinal/decade compounds from the same real article", () => {
+    // Segment 10/17 of the same feed item — "19th-century" and "1980s-built" matched the
+    // identical over-broad shape and would have failed the same way had this segment been
+    // reached first.
+    const source =
+      "The older of the two—a repurposed 19th-century tobacco warehouse—sits opposite " +
+      "the 1980s-built low-slung main building, which has sublime valley views.";
+    assert.deepEqual(protectTokens(source).values, []);
+  });
+
+  it("does not protect other ordinal/decade-compound shapes", () => {
+    for (const source of [
+      "Built in the 21st-century style.",
+      "A 1st-place finish for the team.",
+      "The 90s-style decor was intentional.",
+    ]) {
+      assert.deepEqual(protectTokens(source).values, [], `expected "${source}" to stay untouched`);
+    }
+  });
+
+  it("still protects a genuine model code of the identical digit-hyphen-letter shape", () => {
+    // "DCD-800" and "13th-century" share the same raw shape (digits, a hyphen, letters):
+    // the fix must tell them apart by CONTENT (an ordinal/decade suffix followed by a
+    // plain lowercase word), not by narrowing the shape check itself, or a real identifier
+    // would leak through untranslated-and-unprotected.
+    const { text, values } = protectTokens("The model is DCD-800 and it weighs 1.6 kg.");
+    assert.equal(text, "The model is [[0]] and it weighs 1.6 kg.");
+    assert.deepEqual(values, [{ kind: "identifier", value: "DCD-800" }]);
+  });
+});
+
 describe("protectTokens — what is deliberately left translatable", () => {
   /**
    * Measured against the real model: it renders these CORRECTLY and localises them

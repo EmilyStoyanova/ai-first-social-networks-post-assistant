@@ -85,6 +85,25 @@ const URL = /^(?:https?:\/\/|www\.)[^\s]+$/i;
 const EMAIL = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
 
 /**
+ * An ordinal or decade compounded with a plain lowercase word — "13th-century",
+ * "1980s-built", "21st-century" — reads as prose, not as a code, and MADLAD translates
+ * it correctly and faithfully left alone: "13th-century church" → "църква от 13-ти век".
+ *
+ * It was previously caught by the internal-punctuation branch below (a digit run joined
+ * to a letter run by a hyphen is indistinguishable, by shape alone, from "DCD-800"), and
+ * that is a real production failure, not a theoretical one: protecting it forces the
+ * placeholder into an ATTRIBUTIVE-ADJECTIVE slot immediately before the noun it modifies
+ * ("a [[0]] church", "[[0]] church stood…") — measured against the real worker, that is
+ * precisely the position `[[n]]` is unreliable in. The model either drops the token
+ * outright or hallucinates a real adjective in its place ("a small church"), because a
+ * bracketed non-word does not fit the grammatical slot a real adjective would. The same
+ * placeholder in a NOUN position (an appositive, a sentence-final complement, a "the
+ * [[0]] warehouse" subject) survives reliably — the problem is the position this
+ * specific token class forces the placeholder into, not the `[[n]]` syntax itself.
+ */
+const ORDINAL_OR_DECADE_COMPOUND = /^\d+(?:st|nd|rd|th|s)-[a-z]+$/;
+
+/**
  * Whether a token is a product/model/version identifier rather than a word.
  *
  * Narrow on purpose. It requires BOTH a letter and a digit, and then one of two shapes
@@ -94,12 +113,14 @@ const EMAIL = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
  *
  * That admits model codes, SKUs and version strings while leaving "5kg", "12mm" and
  * "1.6" alone — which matters, because those are exactly the tokens the model gets
- * RIGHT and localises, and freezing them would be a regression.
+ * RIGHT and localises, and freezing them would be a regression. The ordinal/decade
+ * exclusion above is carved out of the internal-punctuation shape for the same reason.
  */
 function isIdentifier(token: string): boolean {
   if (token.length < 2) return false;
   if (!/[A-Za-z]/.test(token)) return false;
   if (!/\d/.test(token)) return false;
+  if (ORDINAL_OR_DECADE_COMPOUND.test(token)) return false;
   if (/^[A-Za-z0-9]+[-._/][A-Za-z0-9]+(?:[-._/][A-Za-z0-9]+)*$/.test(token)) return true;
   return !/[a-z]/.test(token) && /^[A-Z0-9]+$/.test(token);
 }
