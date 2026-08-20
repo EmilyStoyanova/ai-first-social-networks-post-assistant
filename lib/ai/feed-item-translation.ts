@@ -1023,7 +1023,18 @@ export function buildTranslationRetryPrompt(
  *   • repetition        — right shape and language, but the body is a decoding loop.
  */
 export type TranslationParseFailure =
-  "invalid_json" | "schema_validation" | "empty_translation" | "wrong_language" | "repetition";
+  | "invalid_json"
+  | "schema_validation"
+  | "empty_translation"
+  | "wrong_language"
+  | "repetition"
+  /**
+   * A value that was held OUT of the decoder — a URL, an e-mail address, a model
+   * code — did not come back intact, so the translation cannot be reassembled without
+   * guessing. Raised only by the NMT engine (see lib/ai/translation/protected-tokens.ts);
+   * the prompt-based engine sends no placeholders and can never produce it.
+   */
+  | "protected_token";
 
 /** The correction sent back to the model, per failure reason. */
 const DEFAULT_FEEDBACK: Record<TranslationParseFailure, string> = {
@@ -1037,6 +1048,8 @@ const DEFAULT_FEEDBACK: Record<TranslationParseFailure, string> = {
     "Your translation was not Bulgarian. Write it again in standard Bulgarian Cyrillic only, using the Bulgarian alphabet (а б в г д е ж з и й к л м н о п р с т у ф х ц ч ш щ ъ ь ю я). Do not use Russian, Macedonian or Serbian letters or spelling.",
   repetition:
     "Your translation broke down and repeated the same word or phrase over and over. Translate the text once, from the beginning, as normal continuous prose.",
+  protected_token:
+    "Your translation did not reproduce the placeholders exactly. Copy every [[n]] placeholder through unchanged, once each, and translate only the words around them.",
 };
 
 export class TranslationParseError extends Error {
@@ -1071,10 +1084,13 @@ export class TranslationParseError extends Error {
 }
 
 /**
- * Whether regenerating is worth a retry slot. Every parse failure here is a MODEL-output
- * defect — a different sample of the same prompt, with the defect named back to it, can come
- * out clean — so all of them are retriable. Kept as an explicit predicate (rather than
- * "always true") so a future non-retriable reason has one obvious place to be excluded.
+ * Whether regenerating is worth a retry slot. Every parse failure listed here is a
+ * MODEL-output defect of the prompt-based engine — a different sample of the same prompt,
+ * with the defect named back to it, can come out clean.
+ *
+ * `protected_token` is deliberately absent: it can only be raised by the NMT engine, whose
+ * decoding is deterministic, so re-sending the same segments would reproduce the same
+ * dropped placeholder and spend the budget doing it.
  *
  * Note what is NOT on this list, because that is the point: a source article with no body is
  * not a parse failure at all. It never reaches the model (see

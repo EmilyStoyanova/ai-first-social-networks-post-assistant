@@ -3,21 +3,12 @@ import type { ILlmProvider } from "@/lib/ai/types";
 import type { TranslationReplyMode } from "@/lib/ai/feed-item-translation";
 import {
   buildTranslationPrompts,
-  buildTranslationRetryPrompt,
   classifyTranslationInput,
   computeTranslationBackoff,
   computeTranslationHash,
   estimateTokenCount,
-  isRetriableParseFailure,
-  parseTranslationResponse,
-  samplingForTry,
-  shrinkTranslationContentBudget,
   TranslationParseError,
   MAX_TRANSLATION_ATTEMPTS,
-  MAX_TRANSLATION_CONTENT_CHARS,
-  MAX_TRANSLATION_OUTPUT_TOKENS,
-  MAX_TRANSLATION_RETRIES,
-  MIN_TRANSLATION_CONTENT_CHARS,
   TRANSLATION_ATTEMPT_TIMEOUT_MS,
   TRANSLATION_ITEM_TIMEOUT_MS,
 } from "@/lib/ai/feed-item-translation";
@@ -28,6 +19,18 @@ import {
   ProviderNotAvailableError,
 } from "@/lib/ai/llm/supported-providers";
 import { GenerationTracer } from "@/lib/generation-trace/tracer";
+import type {
+  ArticleTranslation,
+  ArticleTranslationContext,
+  TranslationProvider,
+} from "@/lib/ai/translation/translation-provider";
+import { TranslationTransportError } from "@/lib/ai/translation/translation-provider";
+import {
+  buildOllamaTranslationProvider,
+  buildTranslationProvider,
+} from "@/lib/ai/translation/translation-provider-factory";
+import type { EnvLike } from "@/lib/ai/translation/translation-provider-config";
+import { TranslationTimeoutError } from "@/lib/ai/translation/translation-timeout";
 
 /**
  * Translates one feed item into the source's target language (v2-4).
@@ -121,41 +124,19 @@ export interface TranslateFeedItemDeps {
    * starts its own run. Observation only — nothing here branches on it.
    */
   tracer?: GenerationTracer;
+  /**
+   * Where the ENGINE selection is read from. Defaults to `process.env`, which is the
+   * only thing production ever passes; injected so a test can exercise
+   * `TRANSLATION_PROVIDER=madlad` without mutating the process for every other test
+   * running beside it.
+   */
+  env?: EnvLike;
 }
 
-/** One model call (or one item) exceeded its wall-clock budget. */
-export class TranslationTimeoutError extends Error {
-  readonly code = "TRANSLATION_TIMEOUT" as const;
-  constructor(ms: number, scope: "attempt" | "item") {
-    super(`Translation ${scope} exceeded its ${ms}ms budget.`);
-    this.name = "TranslationTimeoutError";
-  }
-}
-
-/**
- * Rejects with a {@link TranslationTimeoutError} if `work` has not settled within `ms`.
- *
- * The underlying request is NOT cancelled — the provider owns its own AbortSignal and will
- * tear the socket down at its own (much longer) cap. This bound exists so a hung article
- * stops occupying the batch, not to manage the socket: control returns immediately, the item
- * is recorded failed, and the run moves to the next article. A late settle is swallowed
- * rather than surfacing as an unhandled rejection.
- */
-function withTimeout<T>(work: Promise<T>, ms: number, scope: "attempt" | "item"): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new TranslationTimeoutError(ms, scope)), ms);
-    work.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      }
-    );
-  });
-}
+// Moved to lib/ai/translation/translation-timeout.ts so a provider can enforce its own
+// per-call budget without importing this service. Re-exported because it is part of this
+// module's published surface.
+export { TranslationTimeoutError };
 
 async function defaultResolveProvider(): Promise<
   { ok: true; instance: ILlmProvider; provider: string; model: string } | { ok: false }
@@ -271,13 +252,21 @@ export async function translateFeedItem(
     return { status: "skipped", reason: "max_attempts" };
   }
 
-  const resolved = await resolveProvider();
-  if (!resolved.ok) {
-    // A missing admin default is an operator problem, not an article problem:
-    // leave the item queued at its current attempt count so it translates
-    // normally once a provider is configured.
+  // Which ENGINE translates (ollama | madlad) is decided here, once, from the environment.
+  // With TRANSLATION_PROVIDER unset this resolves to exactly the path that has always run.
+  const built = await buildTranslationProvider({ resolveLlm: resolveProvider, env: deps.env });
+  if (!built.ok) {
+    // A missing admin default — or a MADLAD selection with no text worker configured — is an
+    // operator problem, not an article problem: leave the item queued at its current attempt
+    // count so it translates normally once a provider is configured.
+    console.warn("[rss-translation] no translation provider available", {
+      feedItemId: item.id,
+      engine: built.config.kind,
+      reason: built.reason,
+    });
     return { status: "no_provider" };
   }
+  let translator: TranslationProvider = built.provider;
 
   const attempt = item.translationAttemptCount + 1;
 
@@ -305,8 +294,12 @@ export async function translateFeedItem(
     return { status: "skipped", reason: "claimed" };
   }
 
-  const { systemPrompt, userPrompt, mode, schema, contentChars, derivedTitle } =
-    buildTranslationPrompts(item.title, item.content, targetLang);
+  // Built here, not inside the engine, so the trace's `source` step and whatever the
+  // engine sends can never disagree about which article text was actually used. The
+  // prompt-based engine sends this bundle as-is; MADLAD reads only `mode` from it and
+  // works from the raw title/content.
+  const prompts = buildTranslationPrompts(item.title, item.content, targetLang);
+  const { systemPrompt, userPrompt, mode, contentChars, derivedTitle } = prompts;
 
   // ── Trace ─────────────────────────────────────────────────────────────────
   // Started only HERE, after the claim, because everything above returns without
@@ -328,12 +321,22 @@ export async function translateFeedItem(
   // same company and model as one this function started itself.
   tracer.setCompany(item.companyId);
   tracer.setLanguage(targetLang);
-  tracer.setLlm(resolved.provider, resolved.model);
+  tracer.setLlm(translator.providerLabel, translator.model);
   tracer.step({
     type: "request",
     label: `Translate article to ${targetLang}`,
     input: { feedItemId: item.id, url: item.url, targetLang, mode, attempt },
-    metadata: { inputKind, derivedTitle, contentHash: hash },
+    metadata: {
+      inputKind,
+      derivedTitle,
+      contentHash: hash,
+      // Which ENGINE ran, spelled out, because `providerLabel` alone cannot say it:
+      // both engines are served by the text worker, so without this a MADLAD run and a
+      // Qwen run are not distinguishable in a trace.
+      translationEngine: translator.kind,
+      translationProvider: translator.providerLabel,
+      translationModel: translator.model,
+    },
   });
   tracer.step({
     type: "source",
@@ -371,217 +374,122 @@ export async function translateFeedItem(
     // Rough prompt-token estimate — carried on every log (start/success/failure) so a timeout
     // can be correlated with input size and the num_predict ceiling at a glance.
     promptTokenEstimate: estimateTokenCount(systemPrompt + userPrompt),
+    // The engine and the exact model, on EVERY line this article produces. Without it a
+    // log tells you an article failed but not which translator failed it, which is the
+    // one thing you need when two engines are being compared.
+    translationEngine: translator.kind,
+    translationProvider: translator.providerLabel,
+    translationModel: translator.model,
   };
   const startedAtMs = now().getTime();
   const attemptTimeoutMs = deps.attemptTimeoutMs ?? TRANSLATION_ATTEMPT_TIMEOUT_MS;
   const itemDeadlineMs = startedAtMs + (deps.itemTimeoutMs ?? TRANSLATION_ITEM_TIMEOUT_MS);
-  const maxTries = MAX_TRANSLATION_RETRIES + 1;
+  const maxTries = translator.maxTries;
+  // The one line an operator greps for to answer "which translator is actually running?".
+  // All three facts, because no two of them imply the third: both engines are served by
+  // the text worker, and one worker could serve either model.
+  console.info(
+    `[rss-translation] Translation Engine: ${translator.kind} | ` +
+      `Provider: ${translator.providerLabel} | Model: ${translator.model}`
+  );
   // Logged BEFORE the call so an item whose request hangs and never returns (e.g. process
   // killed or lease reaped) still leaves a line naming the exact in-flight feed item.
   console.info("[rss-translation] translating item", { ...diag, maxTries });
 
-  // Declared outside the try so the failure log can report how many model calls were spent.
+  // Declared outside the delegated call so the failure log can report how many model
+  // calls were spent — a return value cannot answer that when the engine throws.
   let tries = 0;
+  /**
+   * Set only when a TECHNICAL MADLAD failure was retried on the other engine. Carried to
+   * the trace, the success log and the failure log, because "this article is Qwen output
+   * even though the deployment says MADLAD" is invisible otherwise — and it is exactly
+   * the thing that would quietly poison a MADLAD-vs-Qwen comparison.
+   */
+  let fallback: { from: string; to: string; reason: string } | null = null;
 
   try {
-    let translatedTitle: string | null = null;
-    let translatedContent: string | null = null;
-    let usedRepair = false;
-    let repairs: string[] = [];
-    /** Raw provider payload of the try that SUCCEEDED — source of the Ollama metrics below. */
-    let lastResponseRaw: unknown;
-    /**
-     * The prompt for the NEXT try. Starts as the original request and, after a rejected reply,
-     * becomes the original request plus a correction naming the exact defect — so a retry is a
-     * correction rather than a re-roll (see buildTranslationRetryPrompt).
-     */
-    let currentUserPrompt = userPrompt;
-    /**
-     * The request a correction is appended TO. Normally the original, but a truncation replaces
-     * it with a shorter-bodied rebuild, so every later try inherits the smaller article rather
-     * than reverting to the one that could not be finished.
-     */
-    let baseUserPrompt = userPrompt;
-    /** Body budget in force. Halved (down to a floor) each time a reply is cut off. */
-    let contentBudget = MAX_TRANSLATION_CONTENT_CHARS;
+    // ── The one delegated step ────────────────────────────────────────────────
+    // Everything around it belongs to the ITEM (claim, attempts, backoff, trace,
+    // persistence) and is identical whichever engine ran. Everything inside belongs to
+    // the ENGINE: how it is prompted, whether it regenerates, and what it accepts.
+    const request = {
+      feedItemId: item.id,
+      url: item.url,
+      title: item.title,
+      content: item.content,
+      targetLang,
+      mode,
+      prompts,
+    };
+    const contextFor = (engine: TranslationProvider): ArticleTranslationContext => ({
+      tracer,
+      now,
+      diag: {
+        ...diag,
+        translationEngine: engine.kind.toUpperCase(),
+        translationModel: engine.model,
+      },
+      attemptTimeoutMs,
+      itemDeadlineMs,
+      itemTimeoutMs: deps.itemTimeoutMs ?? TRANSLATION_ITEM_TIMEOUT_MS,
+      reportTry: (n: number) => {
+        tries = n;
+      },
+    });
 
-    // In-request regeneration loop. A bad reply from the self-hosted model (invalid JSON, a
-    // decoding loop, drifted language) is usually transient, and a fresh sample seconds later
-    // succeeds — far better than failing the item and waiting out a 5-minute backoff. Each try
-    // varies the sampling (see samplingForTry): re-issuing the same prompt at temperature 0
-    // would deterministically reproduce the same bad reply.
-    for (let tryIndex = 0; tryIndex < maxTries; tryIndex += 1) {
-      const remainingMs = itemDeadlineMs - now().getTime();
-      if (remainingMs <= 0) {
-        throw new TranslationTimeoutError(
-          deps.itemTimeoutMs ?? TRANSLATION_ITEM_TIMEOUT_MS,
-          "item"
-        );
-      }
-      // Never let one try run past the item's own budget.
-      const budgetMs = Math.min(attemptTimeoutMs, remainingMs);
-      const { temperature, repeatPenalty } = samplingForTry(tryIndex);
-      const tryStartedMs = now().getTime();
-      tries = tryIndex + 1;
+    let result: ArticleTranslation;
+    try {
+      result = await translator.translate(request, contextFor(translator));
+    } catch (err) {
+      // ── Fallback, narrowly ──────────────────────────────────────────────────
+      // ONLY a technical fault (unreachable worker, non-2xx, malformed envelope,
+      // timeout) may be retried on another engine, ONLY when explicitly enabled, and
+      // never silently. A rejected TRANSLATION is not a fault — it is the engine's
+      // answer, and swapping engines behind it would hide exactly what a MADLAD trial
+      // exists to measure. TranslationParseError is therefore deliberately absent from
+      // the condition below: a bad translation fails the item, as it always has.
+      const technical =
+        err instanceof TranslationTransportError || err instanceof TranslationTimeoutError;
+      const replacement =
+        translator.kind === "madlad" && built.config.fallbackToOllamaOnTransportError && technical
+          ? await buildOllamaTranslationProvider({ resolveLlm: resolveProvider, env: deps.env })
+          : null;
+      if (!replacement) throw err;
 
-      console.info("[rss-translation] attempt", {
-        feedItemId: item.id,
-        try: tries,
-        of: maxTries,
-        temperature,
-        repeatPenalty,
-        budgetMs,
-      });
-
-      tracer.step({
-        type: "prompt",
-        label: tries > 1 ? `Try ${tries} — corrected prompt` : `Try ${tries}`,
-        attempt: tries,
-        input: { systemPrompt, userPrompt: currentUserPrompt },
-        metadata: {
-          temperature,
-          repeatPenalty,
-          contentBudget,
-          schema,
-          isRetryPrompt: tries > 1,
-        },
-      });
-
-      const callStartedAt = new Date();
-      const response = await withTimeout(
-        resolved.instance.generate({
-          systemPrompt,
-          userPrompt: currentUserPrompt,
-          // Schema-constrained structured output: the Ollama `format` schema makes the reply a
-          // strict object instead of free-form text — {title, content} normally, {title} alone
-          // for a bodyless item, so the model is never constrained to invent an article.
-          // Temperature starts at 0 for fidelity and rises only on a regeneration.
-          temperature,
-          repeatPenalty,
-          format: schema,
-          // Bounded generation: without this Ollama runs unlimited and a runaway article never
-          // returns within the deadline. The capped body fits well under this ceiling.
-          maxTokens: MAX_TRANSLATION_OUTPUT_TOKENS,
-        }),
-        budgetMs,
-        "attempt"
-      );
-
-      tracer.step({
-        type: "llm_call",
-        label: `Try ${tries} of ${maxTries}`,
-        attempt: tries,
-        startedAt: callStartedAt,
-        completedAt: new Date(),
-        input: {
-          request: { temperature, repeatPenalty, maxTokens: MAX_TRANSLATION_OUTPUT_TOKENS },
-        },
-        metadata: { providerPayload: response.raw ?? null, budgetMs },
+      const reason = err instanceof Error ? err.message : String(err);
+      fallback = {
+        from: `madlad (${translator.model})`,
+        to: `${replacement.kind} (${replacement.model})`,
+        reason,
+      };
+      console.warn(`[rss-translation] MADLAD FAILED TECHNICALLY — falling back to ${fallback.to}`, {
+        ...diag,
+        fallbackUsed: true,
+        ...fallback,
+        error: reason,
       });
       tracer.step({
-        type: "raw_response",
-        label: `Try ${tries}`,
-        attempt: tries,
-        output: { text: response.text },
-        metadata: { chars: response.text?.length ?? 0 },
+        type: "retry",
+        label: `MADLAD unavailable — falling back to ${fallback.to}`,
+        status: "failed",
+        output: { fallbackUsed: true, ...fallback },
+        error: err,
       });
 
-      try {
-        const parsedReply = parseTranslationResponse(response.text, targetLang, { mode });
-        translatedTitle = parsedReply.translatedTitle;
-        translatedContent = parsedReply.translatedContent;
-        usedRepair = parsedReply.usedRepair;
-        repairs = parsedReply.repairs;
-        lastResponseRaw = response.raw;
-        tracer.setAttempts(tries);
-        tracer.step({
-          type: "parsed_result",
-          label: `Try ${tries} accepted`,
-          attempt: tries,
-          output: { translatedTitle, translatedContent },
-          metadata: { usedRepair, repairs },
-        });
-        break;
-      } catch (parseErr) {
-        // The transport succeeded (HTTP 200) but the reply was rejected. Log the SHAPE of the
-        // raw output — first/last 200 chars and total length only, never the full body — plus
-        // the failure `reason` so the modes are distinguishable: invalid JSON, a
-        // schema-validation failure, an empty translation, wrong-language output, or a loop.
-        const text = response.text ?? "";
-        const parseError = parseErr instanceof TranslationParseError ? parseErr : null;
-        const reason = parseError?.reason ?? "invalid_json";
-        const willRetry = isRetriableParseFailure(reason) && tryIndex < maxTries - 1;
-        console.warn("[rss-translation] unusable model response", {
-          ...diag,
-          try: tries,
-          of: maxTries,
-          reason,
-          willRetry,
-          // Separates "the model wrote something wrong" from "the model never finished" — the
-          // two are both invalid_json in the logs but only one is fixed by asking for less.
-          truncated: parseError?.truncated ?? false,
-          ...(parseError?.repetition
-            ? {
-                repetitionKind: parseError.repetition.kind,
-                repetitionSample: parseError.repetition.sample.slice(0, 40),
-                repetitionCount: parseError.repetition.count,
-              }
-            : {}),
-          elapsedMs: now().getTime() - tryStartedMs,
-          responseLength: text.length,
-          responseFirst200: text.slice(0, 200),
-          responseLast200: text.length > 200 ? text.slice(-200) : "",
-          error: parseErr instanceof Error ? parseErr.message : String(parseErr),
-        });
-        tracer.setAttempts(tries);
-        tracer.step({
-          type: "retry",
-          label: willRetry
-            ? `Try ${tries} rejected — regenerating`
-            : `Try ${tries} rejected — giving up`,
-          attempt: tries,
-          status: "failed",
-          output: {
-            reason,
-            willRetry,
-            truncated: parseError?.truncated ?? false,
-            repetition: parseError?.repetition ?? null,
-          },
-          error: parseErr,
-        });
-        // Retries exhausted (or a reason regeneration cannot fix) — record the failure.
-        if (!willRetry) throw parseErr;
-
-        // A cut-off reply means the request was too big to finish, so re-asking for the same
-        // article would truncate again — the exact three-truncations-then-failed pattern in the
-        // logs. Rebuild the request around a smaller body first; the correction is then appended
-        // to THAT, and every later try inherits it. Only the size changes: the number of tries
-        // (maxTries) and the cross-run attempt/backoff schedule are untouched.
-        if (parseError?.truncated && contentBudget > MIN_TRANSLATION_CONTENT_CHARS) {
-          contentBudget = shrinkTranslationContentBudget(contentBudget);
-          const shorter = buildTranslationPrompts(item.title, item.content, targetLang, {
-            maxContentChars: contentBudget,
-          });
-          baseUserPrompt = shorter.userPrompt;
-          console.info("[rss-translation] shrinking article for the next try", {
-            feedItemId: item.id,
-            try: tries,
-            contentBudget,
-            translatedBodyChars: shorter.contentChars,
-          });
-        }
-
-        // Name the defect in the next request. Without this the retry differs only in its
-        // sampling, and a model that answered in prose (or in Macedonian) has been given no
-        // reason to answer differently.
-        if (parseError) {
-          currentUserPrompt = buildTranslationRetryPrompt(baseUserPrompt, {
-            reason: parseError.reason,
-            feedback: parseError.feedback,
-          });
-        }
-      }
+      // Provenance follows the engine that actually produced the text; otherwise the
+      // stored provider/model would name an engine that never ran.
+      translator = replacement;
+      tracer.setLlm(replacement.providerLabel, replacement.model);
+      tries = 0;
+      result = await translator.translate(request, contextFor(translator));
     }
+
+    const { translatedTitle, translatedContent, usedRepair, repairs } = result;
+    /** HTTP calls to the model. Differs from `tries` for the segment-at-a-time engine. */
+    const modelCalls = result.modelCalls ?? result.tries;
+    /** Raw provider payload of the try that SUCCEEDED — source of the Ollama metrics below. */
+    const lastResponseRaw = result.raw;
+    tries = result.tries;
 
     // Success is written UNCONDITIONALLY by id and always wins: a genuine, completed
     // translation is the outcome we most want to keep, even if a lease-expiry hand-off
@@ -596,8 +504,8 @@ export async function translateFeedItem(
         translationStatus: "completed",
         translationHash: hash,
         translatedAt: now(),
-        translationProvider: resolved.provider,
-        translationModel: resolved.model,
+        translationProvider: translator.providerLabel,
+        translationModel: translator.model,
         translationError: null,
         translationNextRetryAt: null,
         translationLeaseExpiresAt: null,
@@ -609,21 +517,34 @@ export async function translateFeedItem(
       label: "Translation stored",
       output: { translatedTitle, translatedContent, targetLang },
       metadata: {
-        provider: resolved.provider,
-        model: resolved.model,
+        engine: translator.kind,
+        provider: translator.providerLabel,
+        model: translator.model,
         mode,
         tries,
+        modelCalls,
         translationHash: hash,
+        // Present and true only on the narrow technical-fallback path, so a reader of
+        // this run never has to infer which engine's text they are looking at.
+        ...(fallback
+          ? { fallbackUsed: true, fallbackFrom: fallback.from, fallbackTo: fallback.to }
+          : { fallbackUsed: false }),
       },
     });
 
     console.info("[rss-translation] item translated", {
       ...diag,
       elapsedMs: now().getTime() - startedAtMs,
-      // How many model calls this item actually cost — >1 means a regeneration was needed.
+      // How many attempts this item cost — >1 means a regeneration was needed — and how
+      // many HTTP calls that came to, which for the segment-at-a-time engine is one per
+      // segment rather than one per attempt.
       tries,
-      provider: resolved.provider,
-      model: resolved.model,
+      modelCalls,
+      provider: translator.providerLabel,
+      model: translator.model,
+      ...(fallback
+        ? { fallbackUsed: true, fallbackFrom: fallback.from, fallbackReason: fallback.reason }
+        : {}),
       // When true, structured output was NOT clean and the defensive repair salvaged the
       // reply — a signal that Ollama's `format` may not be honoured for this model/worker.
       usedRepair,
@@ -641,7 +562,12 @@ export async function translateFeedItem(
       ...ollamaMetrics(lastResponseRaw),
     });
 
-    return { status: "translated", provider: resolved.provider, model: resolved.model, mode };
+    return {
+      status: "translated",
+      provider: translator.providerLabel,
+      model: translator.model,
+      mode,
+    };
   } catch (err) {
     const error = err instanceof Error ? err.message : "Unknown translation error.";
     tracer.fail(
@@ -666,6 +592,11 @@ export async function translateFeedItem(
       // The final rejection reason when the model's output was the problem, so a run's
       // failures can be counted by cause without re-reading every warning above them.
       failureReason: err instanceof TranslationParseError ? err.reason : "transport",
+      // A failure AFTER a fallback means both engines failed — a different situation
+      // from either one failing alone, and one nobody would guess from this line.
+      ...(fallback
+        ? { fallbackUsed: true, fallbackFrom: fallback.from, fallbackReason: fallback.reason }
+        : {}),
       error,
     });
 

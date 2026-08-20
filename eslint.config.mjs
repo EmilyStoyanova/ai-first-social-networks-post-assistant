@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Not part of this app. text-worker/ holds the CommonJS + Python halves that are
+    // copied onto the Mac text worker and run in ITS runtime, under its own rules —
+    // linting them with the Next.js/ESM ruleset only reports that CommonJS is CommonJS.
+    "text-worker/**",
   ]),
   {
     rules: {
