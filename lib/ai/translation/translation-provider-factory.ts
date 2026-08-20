@@ -108,7 +108,8 @@ export async function buildTranslationProvider(
         apiKey,
         config.madladModel,
         MADLAD_SOURCE_LANGUAGE,
-        config.madladConcurrency
+        config.madladConcurrency,
+        config.madladHttpBatchSize
       ),
       config,
     };

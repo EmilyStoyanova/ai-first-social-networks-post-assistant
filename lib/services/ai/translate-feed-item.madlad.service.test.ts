@@ -99,8 +99,13 @@ const realFetch = globalThis.fetch;
 let requests: { url: string; body: Record<string, unknown>; headers: Record<string, string> }[] =
   [];
 
-function stubWorker(handler: (text: string, call: number) => Response) {
-  let call = 0;
+/**
+ * The default MADLAD provider batches every segment that fits under its HTTP batch
+ * size (30) into ONE `/translate` call, so these fixtures' 3 segments (title + two
+ * paragraphs) arrive as a single request — the handler answers with the WHOLE
+ * `texts[]` array for that call, not one text at a time.
+ */
+function stubWorker(handler: (texts: string[]) => Response) {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
     requests.push({
@@ -108,15 +113,14 @@ function stubWorker(handler: (text: string, call: number) => Response) {
       body,
       headers: (init?.headers ?? {}) as Record<string, string>,
     });
-    call += 1;
-    return handler(String(body.text), call);
+    return handler((body.texts as string[]) ?? []);
   }) as typeof fetch;
 }
 
-/** A well-formed MADLAD reply. */
-function madlad(text: string, status = 200): Response {
+/** A well-formed BATCH MADLAD reply. */
+function madlad(texts: string[], status = 200): Response {
   return new Response(
-    JSON.stringify({ text, provider: "madlad", model: "google/madlad400-3b-mt", durationMs: 400 }),
+    JSON.stringify({ texts, provider: "madlad", model: "google/madlad400-3b-mt", durationMs: 400 }),
     { status, headers: { "content-type": "application/json" } }
   );
 }
@@ -141,7 +145,7 @@ describe("translateFeedItem with TRANSLATION_PROVIDER=madlad", () => {
   it("translates through POST /translate and stores the result", async () => {
     const { db, last } = makeDb();
     const llm = makeLlm(QWEN_REPLY);
-    stubWorker((_text, call) => madlad(BULGARIAN[call - 1]));
+    stubWorker((texts) => madlad(BULGARIAN.slice(0, texts.length)));
 
     const item = makeItem();
     const outcome = await translateFeedItem(item, "bg", {
@@ -171,7 +175,7 @@ describe("translateFeedItem with TRANSLATION_PROVIDER=madlad", () => {
   it("hits /translate, not /generate, and never asks the LLM anything", async () => {
     const { db } = makeDb();
     const llm = makeLlm(QWEN_REPLY);
-    stubWorker((_text, call) => madlad(BULGARIAN[call - 1]));
+    stubWorker((texts) => madlad(BULGARIAN.slice(0, texts.length)));
 
     await translateFeedItem(makeItem(), "bg", {
       db,
@@ -189,14 +193,14 @@ describe("translateFeedItem with TRANSLATION_PROVIDER=madlad", () => {
     assert.deepEqual(Object.keys(requests[0].body).sort(), [
       "sourceLanguage",
       "targetLanguage",
-      "text",
+      "texts",
     ]);
   });
 
   it("does NOT use MADLAD when the variable is absent — the default is unchanged", async () => {
     const { db, last } = makeDb();
     const llm = makeLlm(QWEN_REPLY);
-    stubWorker(() => madlad("никога"));
+    stubWorker(() => madlad(["никога"]));
 
     const outcome = await translateFeedItem(makeItem(), "bg", {
       db,
@@ -220,7 +224,7 @@ describe("translateFeedItem with TRANSLATION_PROVIDER=madlad", () => {
       store: { saveRun: async (run) => void runs.push(run) },
       newId: () => "run-madlad",
     });
-    stubWorker((_text, call) => madlad(BULGARIAN[call - 1]));
+    stubWorker((texts) => madlad(BULGARIAN.slice(0, texts.length)));
 
     await translateFeedItem(makeItem(), "bg", {
       db: makeDb().db,
@@ -238,13 +242,14 @@ describe("translateFeedItem with TRANSLATION_PROVIDER=madlad", () => {
     assert.equal(meta(run, "request").translationProvider, "TEXT_WORKER");
     assert.equal(meta(run, "request").translationModel, "google/madlad400-3b-mt");
 
-    // Cost, in the units this engine actually spends it in.
+    // Cost, in the units this engine actually spends it in — 3 segments, but ONE HTTP
+    // batch call under the default batch size (30), so modelCalls is 1, not 3.
     assert.equal(meta(run, "persistence").engine, "madlad");
     assert.equal(meta(run, "persistence").tries, 1);
-    assert.equal(meta(run, "persistence").modelCalls, 3);
+    assert.equal(meta(run, "persistence").modelCalls, 1);
     assert.equal(meta(run, "persistence").fallbackUsed, false);
 
-    assert.equal(meta(run, "llm_call").workerCalls, 3);
+    assert.equal(meta(run, "llm_call").workerRequests, 1);
     assert.equal(meta(run, "llm_call").segmentCount, 3);
   });
 });
@@ -255,7 +260,7 @@ describe("translateFeedItem with MADLAD — a bad translation", () => {
   it("fails the item when the output is not Bulgarian", async () => {
     const { db, last } = makeDb();
     // The worker answers, in good faith, with the English it was given.
-    stubWorker((text) => madlad(text));
+    stubWorker((texts) => madlad(texts));
 
     const outcome = await translateFeedItem(makeItem(), "bg", {
       db,
@@ -274,7 +279,7 @@ describe("translateFeedItem with MADLAD — a bad translation", () => {
     // The distinction the whole trial rests on: a poor translation is MADLAD's ANSWER.
     // Swapping engines behind it would make the two indistinguishable in the data.
     const llm = makeLlm(QWEN_REPLY);
-    stubWorker((text) => madlad(text));
+    stubWorker((texts) => madlad(texts));
 
     const outcome = await translateFeedItem(makeItem(), "bg", {
       db: makeDb().db,
@@ -288,7 +293,7 @@ describe("translateFeedItem with MADLAD — a bad translation", () => {
   });
 
   it("spends exactly one attempt — a beam-search retry would reproduce the answer", async () => {
-    stubWorker((text) => madlad(text));
+    stubWorker((texts) => madlad(texts));
 
     await translateFeedItem(makeItem(), "bg", {
       db: makeDb().db,
@@ -297,8 +302,8 @@ describe("translateFeedItem with MADLAD — a bad translation", () => {
       resolveProvider: makeLlm(QWEN_REPLY).resolve,
     });
 
-    // Three segments, one pass. No second pass over the article.
-    assert.equal(requests.length, 3);
+    // Three segments, one batch, one pass. No second pass over the article.
+    assert.equal(requests.length, 1);
   });
 });
 
@@ -347,12 +352,12 @@ describe("translateFeedItem with MADLAD — a technical failure", () => {
 
   it("also falls back on a non-2xx and on a foreign envelope", async () => {
     for (const bad of [
-      () => madlad("боклук", 503),
+      () => madlad(["боклук"], 503),
       () =>
-        new Response(JSON.stringify({ text: "Текст на български език тук.", provider: "ollama" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
+        new Response(
+          JSON.stringify({ texts: ["Текст на български език тук."], provider: "ollama" }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        ),
     ]) {
       const llm = makeLlm(QWEN_REPLY);
       stubWorker(bad);
@@ -425,10 +430,10 @@ describe("translateFeedItem with MADLAD — configuration", () => {
   it("honours TRANSLATION_MADLAD_MODEL in what it stores", async () => {
     const { db, last } = makeDb();
     stubWorker(
-      (_text, call) =>
+      (texts) =>
         new Response(
           JSON.stringify({
-            text: BULGARIAN[call - 1],
+            texts: BULGARIAN.slice(0, texts.length),
             provider: "madlad",
             model: "google/madlad400-10b-mt",
           }),

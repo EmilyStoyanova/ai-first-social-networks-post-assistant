@@ -117,6 +117,29 @@ describe("buildTranslationProvider — MADLAD", () => {
     assert.ok(result.ok);
     assert.equal(result.provider.model, "google/madlad400-10b-mt");
   });
+
+  it("threads the configured HTTP batch size through to the built provider's config", async () => {
+    const result = await buildTranslationProvider({
+      resolveLlm: llm,
+      env: {
+        ...WORKER_ENV,
+        TRANSLATION_PROVIDER: "madlad",
+        TRANSLATION_MADLAD_HTTP_BATCH_SIZE: "10",
+      },
+    });
+    assert.ok(result.ok);
+    assert.equal(result.provider.kind, "madlad");
+    assert.equal(result.config.madladHttpBatchSize, 10);
+  });
+
+  it("defaults the HTTP batch size to 30 when unset", async () => {
+    const result = await buildTranslationProvider({
+      resolveLlm: llm,
+      env: { ...WORKER_ENV, TRANSLATION_PROVIDER: "madlad" },
+    });
+    assert.ok(result.ok);
+    assert.equal(result.config.madladHttpBatchSize, 30);
+  });
 });
 
 describe("buildTranslationProvider — the Ollama model override", () => {

@@ -9,9 +9,10 @@ import { GenerationTracer } from "@/lib/generation-trace/tracer";
 import type { PersistableRun } from "@/lib/generation-trace/store";
 
 /**
- * The wire contract asserted here is the one the RUNNING Mac worker implements:
- * one text per call, `{ text, sourceLanguage, targetLanguage }` in and
- * `{ text, provider, model, durationMs }` out. Nothing here talks to a real worker.
+ * The wire contract asserted here is the one the RUNNING Mac worker implements
+ * (text-worker commit d829fec): a BATCH per call, `{ texts, sourceLanguage,
+ * targetLanguage }` in and `{ texts, provider, model, durationMs }` out, in the same
+ * order. Nothing here talks to a real worker.
  *
  * The split down the middle of this file is the important one: a bad TRANSLATION is a
  * TranslationParseError (the engine answered; the answer was unusable), while a bad
@@ -45,10 +46,10 @@ function json(payload: unknown, status = 200): Response {
   });
 }
 
-/** A well-formed worker reply carrying `text`. */
-function reply(text: string, extra: Record<string, unknown> = {}): Response {
+/** A well-formed BATCH worker reply carrying `texts`, in request order. */
+function reply(texts: string[], extra: Record<string, unknown> = {}): Response {
   return json({
-    text,
+    texts,
     provider: "madlad",
     model: "google/madlad400-3b-mt",
     durationMs: 412,
@@ -56,11 +57,17 @@ function reply(text: string, extra: Record<string, unknown> = {}): Response {
   });
 }
 
-/** Answers every segment with plausible Bulgarian, so the quality gate is satisfied. */
+const bodyTexts = (body: Record<string, unknown>): string[] => (body.texts as string[]) ?? [];
+
+/** Answers every segment in the batch with plausible, distinct Bulgarian. */
 let counter = 0;
-function translated(): Response {
-  counter += 1;
-  return reply(`Преведен сегмент ${counter} на български език.`);
+function translated(body: Record<string, unknown>): Response {
+  return reply(
+    bodyTexts(body).map(() => {
+      counter += 1;
+      return `Преведен сегмент ${counter} на български език.`;
+    })
+  );
 }
 
 beforeEach(() => {
@@ -102,6 +109,7 @@ function requestFor(title: string | null, content: string | null) {
   };
 }
 
+/** Default provider — httpBatchSize defaults to 30, comfortably above every fixture here. */
 function provider() {
   return new MadladTranslationProvider(
     "http://192.168.31.102:3002/",
@@ -123,26 +131,27 @@ describe("MadladTranslationProvider — the request", () => {
     assert.equal(requests[0].headers["content-type"], "application/json");
   });
 
-  it("sends exactly text + sourceLanguage + targetLanguage, and nothing else", async () => {
+  it("sends exactly texts + sourceLanguage + targetLanguage, and nothing else", async () => {
     stubFetch(translated);
     await provider().translate(requestFor(TITLE, null), contextFor());
 
     assert.deepEqual(requests[0].body, {
-      text: TITLE,
+      texts: [TITLE],
       sourceLanguage: "en",
       targetLanguage: "bg",
     });
   });
 
-  it("sends ONE text per call — one call per segment, in document order", async () => {
+  it("sends every segment that fits under the batch size in ONE HTTP call, in document order", async () => {
     stubFetch(translated);
     await provider().translate(requestFor(TITLE, CONTENT), contextFor());
 
-    assert.equal(requests.length, 3, "title + two paragraphs");
-    assert.deepEqual(
-      requests.map((r) => r.body.text),
-      [TITLE, "A fire extinguisher can last between 5 and 15 years.", "Check the pressure gauge."]
-    );
+    assert.equal(requests.length, 1, "title + two paragraphs all fit under the default batch size");
+    assert.deepEqual(requests[0].body.texts, [
+      TITLE,
+      "A fire extinguisher can last between 5 and 15 years.",
+      "Check the pressure gauge.",
+    ]);
   });
 
   it("sends only the title for a bodyless article", async () => {
@@ -150,7 +159,7 @@ describe("MadladTranslationProvider — the request", () => {
     await provider().translate(requestFor(TITLE, null), contextFor());
 
     assert.equal(requests.length, 1);
-    assert.equal(requests[0].body.text, TITLE);
+    assert.deepEqual(requests[0].body.texts, [TITLE]);
   });
 
   it("honours an explicit source language", async () => {
@@ -173,11 +182,25 @@ describe("MadladTranslationProvider — attempts versus calls", () => {
     assert.equal(provider().maxTries, 1);
   });
 
-  it("reports the HTTP calls separately, because one attempt is many calls here", async () => {
+  it("reports the HTTP calls separately, because one attempt can be many BATCHES", async () => {
     stubFetch(translated);
-    const result = await provider().translate(requestFor(TITLE, CONTENT), contextFor());
+    // httpBatchSize 2: 3 segments (title + 2 paragraphs) split into batches of [2, 1].
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      2
+    );
+    const result = await p.translate(requestFor(TITLE, CONTENT), contextFor());
 
-    assert.equal(result.modelCalls, 3);
+    assert.equal(requests.length, 2);
+    assert.equal(
+      result.modelCalls,
+      2,
+      "modelCalls is the true HTTP request count, not the segment count"
+    );
     assert.notEqual(result.modelCalls, result.tries, "conflating the two hides the real cost");
   });
 
@@ -222,22 +245,54 @@ describe("MadladTranslationProvider — the reply", () => {
     assert.deepEqual(result.repairs, []);
   });
 
-  it("sums the worker's own durations and carries the device through for the trace", async () => {
-    stubFetch(() => reply("Преведен текст на български език.", { device: "mps", durationMs: 100 }));
+  it("carries the worker's own duration and device through for the trace — one batch, one durationMs", async () => {
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map(() => "Преведен текст на български език."),
+        { device: "mps", durationMs: 100 }
+      )
+    );
     const result = await provider().translate(requestFor(TITLE, CONTENT), contextFor());
 
     assert.deepEqual(result.raw, {
       provider: "madlad",
       model: "google/madlad400-3b-mt",
       device: "mps",
-      durationMs: 300,
-      segmentCount: 3,
-      workerCalls: 3,
+      durationMs: 100,
+      translatedSegments: 3,
+      httpBatchSize: 30,
+      workerRequests: 1,
       protectedTokens: 0,
     });
   });
 
-  it("records the segment and call counts on the trace", async () => {
+  it("sums duration ACROSS batches when more than one HTTP call was made", async () => {
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map(() => "Преведен текст на български език."),
+        { device: "mps", durationMs: 100 }
+      )
+    );
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      2
+    );
+    const result = await p.translate(requestFor(TITLE, CONTENT), contextFor());
+
+    assert.equal(requests.length, 2, "3 segments at batch size 2 -> two HTTP calls");
+    assert.equal(
+      (result.raw as { durationMs: number }).durationMs,
+      200,
+      "100ms per batch, 2 batches"
+    );
+    assert.equal((result.raw as { workerRequests: number }).workerRequests, 2);
+  });
+
+  it("records the segment and batch counts on the trace", async () => {
     const runs: PersistableRun[] = [];
     const tracer = GenerationTracer.start({
       kind: "translation",
@@ -254,7 +309,8 @@ describe("MadladTranslationProvider — the reply", () => {
       (runs[0].steps.find((s) => s.type === type)?.metadata ?? {}) as Record<string, unknown>;
 
     assert.equal(meta("llm_call").segmentCount, 3);
-    assert.equal(meta("llm_call").workerCalls, 3);
+    assert.equal(meta("llm_call").httpBatchSize, 30);
+    assert.equal(meta("llm_call").workerRequests, 1);
     // The engine's own name, on the step that shows what was sent.
     assert.equal(meta("prompt").engine, "madlad");
     assert.equal(meta("prompt").model, "google/madlad400-3b-mt");
@@ -267,14 +323,15 @@ describe("MadladTranslationProvider — protected values", () => {
   const URL_A = "https://example.com/safety/extinguisher-checklist";
   const URL_B = "https://example.com/b";
 
-  /** Answers in Bulgarian, echoing back whatever placeholders it was given. */
+  /** Answers in Bulgarian, echoing back whatever placeholders each segment was given. */
   function echoing(body: Record<string, unknown>): Response {
-    const text = String(body.text);
-    const holders = text.match(/\[\[\d+\]\]/g) ?? [];
     return reply(
-      holders.length > 0
-        ? `Преведено изречение с ${holders.join(" и ")} на български език.`
-        : "Преведено изречение на български език."
+      bodyTexts(body).map((text) => {
+        const holders = text.match(/\[\[\d+\]\]/g) ?? [];
+        return holders.length > 0
+          ? `Преведено изречение с ${holders.join(" и ")} на български език.`
+          : "Преведено изречение на български език.";
+      })
     );
   }
 
@@ -286,12 +343,10 @@ describe("MadladTranslationProvider — protected values", () => {
     );
 
     for (const request of requests) {
-      assert.ok(
-        !String(request.body.text).includes("example.com"),
-        `a raw URL reached the model: ${request.body.text}`
-      );
+      const sent = bodyTexts(request.body).join(" ");
+      assert.ok(!sent.includes("example.com"), `a raw URL reached the model: ${sent}`);
     }
-    assert.ok(requests.some((r) => String(r.body.text).includes("[[0]]")));
+    assert.ok(requests.some((r) => bodyTexts(r.body).some((t) => t.includes("[[0]]"))));
   });
 
   it("restores the URL exactly into the stored translation", async () => {
@@ -339,10 +394,37 @@ describe("MadladTranslationProvider — protected values", () => {
     assert.equal((result.raw as { protectedTokens: number }).protectedTokens, 2);
   });
 
+  it("restores protected values correctly across MULTIPLE batches, each isolated to its own segment", async () => {
+    const URL_C = "https://example.com/c";
+    stubFetch(echoing);
+    // httpBatchSize 1 forces each sentence into its own HTTP call — the strictest test
+    // that per-segment protected values never leak across a batch boundary.
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      1
+    );
+    const result = await p.translate(
+      requestFor(null, `Read ${URL_A} today. Visit ${URL_B} next. See ${URL_C} also.`),
+      contextFor()
+    );
+
+    assert.equal(requests.length, 3, "one HTTP call per segment at batch size 1");
+    const found = result.translatedContent?.match(/https:\/\/\S+/g) ?? [];
+    assert.deepEqual(
+      found.map((u) => u.replace(/[.,]$/, "")),
+      [URL_A, URL_B, URL_C],
+      "each URL must land back in ITS OWN sentence, in source order"
+    );
+  });
+
   it("REJECTS a translation that dropped a placeholder — no silent URL loss", async () => {
     // Exactly what the first real benchmark produced, before the placeholders existed:
-    // a fluent Bulgarian sentence with the URL simply gone.
-    stubFetch(() => reply("Пълните указания за проверка са публикувани на адрес."));
+    // a fluent Bulgarian sentence with the URL simply gone. Title + one body segment.
+    stubFetch(() => reply(["Заглавие", "Пълните указания за проверка са публикувани на адрес."]));
 
     await assert.rejects(
       provider().translate(
@@ -354,7 +436,7 @@ describe("MadladTranslationProvider — protected values", () => {
   });
 
   it("REJECTS a translation that duplicated a placeholder", async () => {
-    stubFetch(() => reply("Указанията са на [[0]] и на [[0]] едновременно."));
+    stubFetch(() => reply(["Заглавие", "Указанията са на [[0]] и на [[0]] едновременно."]));
 
     await assert.rejects(
       provider().translate(
@@ -366,7 +448,7 @@ describe("MadladTranslationProvider — protected values", () => {
   });
 
   it("REJECTS a translation that mangled a placeholder", async () => {
-    stubFetch(() => reply("Указанията са публикувани на __ днес и още нещо."));
+    stubFetch(() => reply(["Заглавие", "Указанията са публикувани на __ днес и още нещо."]));
 
     await assert.rejects(
       provider().translate(
@@ -380,7 +462,9 @@ describe("MadladTranslationProvider — protected values", () => {
   it("REJECTS an invented URL that was never in the source", async () => {
     // The article-level invariant, independent of per-segment restoration: the model
     // hallucinated a URL of its own into an article that had none.
-    stubFetch(() => reply("Вижте https://spam.example.net/x за повече информация."));
+    stubFetch((body) =>
+      reply(bodyTexts(body).map(() => "Вижте https://spam.example.net/x за повече информация."))
+    );
 
     await assert.rejects(
       provider().translate(requestFor(TITLE, CONTENT), contextFor()),
@@ -410,7 +494,7 @@ describe("MadladTranslationProvider — protected values", () => {
       contextFor()
     );
 
-    const sent = requests.map((r) => String(r.body.text)).join(" ");
+    const sent = requests.flatMap((r) => bodyTexts(r.body)).join(" ");
     assert.ok(!sent.includes("service@example.com"));
     assert.ok(!sent.includes("DCD-800"));
   });
@@ -422,7 +506,7 @@ describe("MadladTranslationProvider — protected values", () => {
       contextFor()
     );
 
-    const sent = requests.map((r) => String(r.body.text)).join(" ");
+    const sent = requests.flatMap((r) => bodyTexts(r.body)).join(" ");
     assert.ok(sent.includes("12.5 bar"), "freezing a decimal would force English formatting");
     assert.ok(sent.includes("90 Nm"));
   });
@@ -432,7 +516,7 @@ describe("MadladTranslationProvider — protected values", () => {
 
 describe("MadladTranslationProvider — unusable output is rejected, not stored", () => {
   it("rejects an untranslated (still-English) reply", async () => {
-    stubFetch((body) => reply(String(body.text)));
+    stubFetch((body) => reply(bodyTexts(body)));
 
     await assert.rejects(
       provider().translate(requestFor(TITLE, CONTENT), contextFor()),
@@ -441,11 +525,9 @@ describe("MadladTranslationProvider — unusable output is rejected, not stored"
   });
 
   it("rejects a decoding loop", async () => {
-    let n = 0;
-    stubFetch(() => {
-      n += 1;
-      return reply(n === 1 ? "Заглавие на статията" : "със ".repeat(40));
-    });
+    stubFetch((body) =>
+      reply(bodyTexts(body).map((_, i) => (i === 0 ? "Заглавие на статията" : "със ".repeat(40))))
+    );
 
     await assert.rejects(
       provider().translate(requestFor(TITLE, CONTENT), contextFor()),
@@ -455,7 +537,7 @@ describe("MadladTranslationProvider — unusable output is rejected, not stored"
 
   it("does not dress a rejected translation up as a transport fault", async () => {
     // The distinction that governs the fallback: this must NOT be a transport error.
-    stubFetch((body) => reply(String(body.text)));
+    stubFetch((body) => reply(bodyTexts(body)));
 
     await assert.rejects(
       provider().translate(requestFor(TITLE, CONTENT), contextFor()),
@@ -497,26 +579,47 @@ describe("MadladTranslationProvider — transport faults", () => {
     );
   });
 
-  it("reports a missing text field rather than storing undefined", async () => {
+  it("reports a missing texts array rather than storing undefined", async () => {
     stubFetch(() => json({ provider: "madlad", model: "google/madlad400-3b-mt" }));
 
     await assert.rejects(
       provider().translate(requestFor(TITLE, CONTENT), contextFor()),
-      rejectsAsTransport(/no text/)
+      rejectsAsTransport(/no texts array/)
     );
   });
 
-  it("reports a non-string text field", async () => {
-    stubFetch(() => json({ text: 42, provider: "madlad" }));
+  it("reports a non-array texts field", async () => {
+    stubFetch(() => json({ texts: "not an array", provider: "madlad" }));
 
     await assert.rejects(
       provider().translate(requestFor(TITLE, CONTENT), contextFor()),
-      rejectsAsTransport(/no text/)
+      rejectsAsTransport(/no texts array/)
+    );
+  });
+
+  it("rejects a response whose entry count does not match the request", async () => {
+    // Requested 3 segments (title + 2 paragraphs), worker answers with only 2.
+    stubFetch(() => reply(["Едно.", "Две."]));
+
+    await assert.rejects(
+      provider().translate(requestFor(TITLE, CONTENT), contextFor()),
+      rejectsAsTransport(/2 translation\(s\) for 3 segment\(s\) requested/)
+    );
+  });
+
+  it("reports a non-string entry within an otherwise well-formed batch", async () => {
+    stubFetch(() => json({ texts: [42, "Две.", "Три."], provider: "madlad" }));
+
+    await assert.rejects(
+      provider().translate(requestFor(TITLE, CONTENT), contextFor()),
+      rejectsAsTransport(/no text for segment 1\/3/)
     );
   });
 
   it("refuses an empty translation rather than silently losing the paragraph", async () => {
-    stubFetch(() => reply("   "));
+    stubFetch((body) =>
+      reply(bodyTexts(body).map((_, i) => (i === 0 ? "   " : "Преведен текст.")))
+    );
 
     await assert.rejects(
       provider().translate(requestFor(TITLE, CONTENT), contextFor()),
@@ -527,19 +630,19 @@ describe("MadladTranslationProvider — transport faults", () => {
   it("refuses a foreign envelope — a /generate reply must never pass as MADLAD", async () => {
     // Shaped exactly like a valid reply except for the provider. Accepting it would
     // store a chat model's output under MADLAD's name and invalidate the comparison.
-    stubFetch(() => json({ text: "Някакъв текст на български език тук.", provider: "ollama" }));
+    stubFetch(() => json({ texts: ["Някакъв текст на български език тук."], provider: "ollama" }));
 
     await assert.rejects(
-      provider().translate(requestFor(TITLE, CONTENT), contextFor()),
+      provider().translate(requestFor(TITLE, null), contextFor()),
       rejectsAsTransport(/foreign envelope/)
     );
   });
 
   it("refuses a reply with no provider envelope at all", async () => {
-    stubFetch(() => json({ text: "Някакъв текст на български език тук." }));
+    stubFetch(() => json({ texts: ["Някакъв текст на български език тук."] }));
 
     await assert.rejects(
-      provider().translate(requestFor(TITLE, CONTENT), contextFor()),
+      provider().translate(requestFor(TITLE, null), contextFor()),
       rejectsAsTransport(/foreign envelope/)
     );
   });
@@ -568,16 +671,35 @@ describe("MadladTranslationProvider — transport faults", () => {
     );
   });
 
-  it("names the segment that failed, so a 12-segment article is diagnosable", async () => {
-    let n = 0;
-    stubFetch(() => {
-      n += 1;
-      return n < 3 ? translated() : json({ error: "boom", provider: "madlad" }, 500);
-    });
+  it("names the exact ARTICLE-level segment that failed, even inside a shared batch", async () => {
+    // All 3 segments ride in ONE batch (default batch size 30); only the 3rd entry in
+    // the reply is bad. The error must still say "segment 3/3", not "entry 3 of batch".
+    stubFetch((body) => reply(bodyTexts(body).map((_, i) => (i === 2 ? "" : "Преведен текст."))));
 
     await assert.rejects(
       provider().translate(requestFor(TITLE, CONTENT), contextFor()),
       rejectsAsTransport(/segment 3\/3/)
+    );
+  });
+
+  it("names the segment correctly relative to its OWN batch, not just the article", async () => {
+    // batch size 2: batches are [title, para1] and [para2]. para2 is article-index 3,
+    // but batch-local index 1 — the error must report the ARTICLE index (3/3), proving
+    // startIndex is threaded through correctly rather than reset per batch.
+    stubFetch((body) => reply(bodyTexts(body).map(() => "")));
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      2
+    );
+
+    await assert.rejects(
+      p.translate(requestFor(TITLE, CONTENT), contextFor()),
+      (err: unknown) =>
+        err instanceof TranslationTransportError && /segment 1\/3 \(batch 1\/2\)/.test(err.message)
     );
   });
 });
@@ -594,23 +716,59 @@ describe("MadladTranslationProvider — budgets", () => {
     );
   });
 
-  it("stops mid-article when the ITEM deadline passes, instead of finishing the batch", async () => {
-    // Every call is fine; the clock is what runs out. A per-segment engine must notice
-    // between segments, or a slow worker overruns the item budget by a whole article.
+  it("stops before starting a new BATCH once the item deadline passes", async () => {
+    // Every call is fine; the clock is what runs out. Batch size 1 forces one HTTP call
+    // per segment, so this exercises exactly the same timing shape the old per-segment
+    // loop did — now expressed as "between batches" rather than "between segments".
     let clock = Date.now();
-    stubFetch(() => {
+    stubFetch((body) => {
       clock += 1_000;
-      return translated();
+      return translated(body);
     });
 
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      1
+    );
     await assert.rejects(
-      provider().translate(
+      p.translate(
         requestFor(TITLE, CONTENT),
         contextFor({ now: () => new Date(clock), itemDeadlineMs: clock + 1_500 })
       ),
       (err: unknown) => err instanceof TranslationTimeoutError
     );
-    assert.ok(requests.length < 3, "it must not have run every segment");
+    assert.ok(requests.length < 3, "it must not have run every batch");
+  });
+
+  it("stops before starting a new batch even when several segments share each batch", async () => {
+    // 6 segments, batch size 2 -> 3 planned batches. The clock exhausts the budget
+    // after the first batch, so the second and third must never be sent.
+    let clock = Date.now();
+    stubFetch((body) => {
+      clock += 1_000;
+      return translated(body);
+    });
+
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      2
+    );
+    await assert.rejects(
+      p.translate(
+        requestFor(null, "One. Two. Three. Four. Five. Six."),
+        contextFor({ now: () => new Date(clock), itemDeadlineMs: clock + 1_500 })
+      ),
+      (err: unknown) => err instanceof TranslationTimeoutError
+    );
+    assert.ok(requests.length < 3, "it must not have run every planned batch");
   });
 
   it("refuses an article that sanitises down to nothing", async () => {
@@ -623,85 +781,79 @@ describe("MadladTranslationProvider — budgets", () => {
   });
 });
 
-// ─── Bounded concurrency (TRANSLATION_MADLAD_CONCURRENCY) ─────────────────────
+// ─── HTTP batching (TRANSLATION_MADLAD_HTTP_BATCH_SIZE) ───────────────────────
 //
-// Measured against the real production worker (2026-08-20), raising concurrency did
-// NOT improve throughput — it measured WORSE than the fully-serialized case — so the
-// default stays 1 (see DEFAULT_MADLAD_CONCURRENCY's comment). This suite proves the
-// MECHANISM is correct for when a deployment's own worker measures differently:
-// order is preserved regardless of completion order, the in-flight bound is real
-// (not just structurally assumed), one failing segment still fails the whole
-// article, the item deadline still stops new work, and concurrency 1 — the
-// production default — is byte-for-byte the old sequential behaviour (already
-// proven above: every existing test in this file runs at the default and is
-// unmodified).
-describe("MadladTranslationProvider — bounded concurrency", () => {
-  const delayed = (text: string, ms: number): Promise<Response> =>
-    new Promise((resolve) => setTimeout(() => resolve(reply(text)), ms));
+// Integrates the text-worker's batch API (commit d829fec): protected segments are
+// chunked into sequential `texts[]` HTTP calls instead of one call per segment.
+// Measured against the real production worker (2026-08-20, feed item 825c8475, 120
+// real segments): sequential single-segment calls took 189.4s over 120 HTTP requests;
+// batches of 30 (4 HTTP requests) took 124.9s — a 1.52x speedup, with ordering,
+// protected-token restoration, and memory verified stable. Batches are always sent
+// SEQUENTIALLY, never concurrently — see the class header and
+// `DEFAULT_MADLAD_CONCURRENCY`'s comment for why client-side concurrency is a
+// different, proven-harmful lever, superseded by batching for MADLAD specifically.
+describe("MadladTranslationProvider — HTTP batching", () => {
+  function makeSegments(n: number): string {
+    return Array.from({ length: n }, (_, i) => `Segment number ${i + 1} of the article.`).join(" ");
+  }
 
-  it("preserves source order in the reassembled article regardless of completion order", async () => {
-    // "Gamma" answers FIRST (0ms), "Alpha" answers LAST (60ms) — the exact opposite of
-    // source order — so a pass here can only mean reassembly is order-preserving.
-    stubFetch(async (body) => {
-      const text = String(body.text);
-      if (text === "Alpha one.") return delayed("Преведено Алфа.", 60);
-      if (text === "Beta two.") return delayed("Преведено Бета.", 30);
-      if (text === "Gamma three.") return delayed("Преведено Гама.", 0);
-      return translated();
-    });
-
+  it("splits a 120-segment article into exactly 4 HTTP requests at batch size 30", async () => {
+    stubFetch(translated);
     const p = new MadladTranslationProvider(
       "http://w:3002",
       "k",
       "google/madlad400-3b-mt",
       "en",
-      3
+      1,
+      30
     );
-    const result = await p.translate(
-      requestFor(null, "Alpha one. Beta two. Gamma three."),
-      contextFor()
-    );
+    // 119 body segments + 1 title = 120 total; batches of 30 -> 4 requests.
+    await p.translate(requestFor(TITLE, makeSegments(119)), contextFor());
 
-    assert.equal(result.translatedContent, "Преведено Алфа. Преведено Бета. Преведено Гама.");
-  });
-
-  it("never exceeds the configured concurrency, and actually reaches it", async () => {
-    let inFlight = 0;
-    let maxInFlight = 0;
-    stubFetch(async () => {
-      inFlight += 1;
-      maxInFlight = Math.max(maxInFlight, inFlight);
-      await new Promise((r) => setTimeout(r, 15));
-      inFlight -= 1;
-      return translated();
-    });
-
-    const p = new MadladTranslationProvider(
-      "http://w:3002",
-      "k",
-      "google/madlad400-3b-mt",
-      "en",
-      2
-    );
-    await p.translate(requestFor(null, "One. Two. Three. Four. Five."), contextFor());
-
-    assert.ok(maxInFlight <= 2, `expected at most 2 in flight, saw ${maxInFlight}`);
-    assert.equal(
-      maxInFlight,
-      2,
-      "concurrency 2 should actually reach 2 in flight, not silently stay at 1"
+    assert.equal(requests.length, 4);
+    assert.deepEqual(
+      requests.map((r) => bodyTexts(r.body).length),
+      [30, 30, 30, 30]
     );
   });
 
-  it("a single failing segment rejects the WHOLE translation, with no partial content ever built", async () => {
-    stubFetch(async (body) => {
-      const text = String(body.text);
-      if (text === "Beta two.") {
-        await new Promise((r) => setTimeout(r, 5));
-        return json({ error: "boom", provider: "madlad" }, 500);
-      }
-      await new Promise((r) => setTimeout(r, 25));
-      return translated();
+  it("preserves source order in the reassembled article across multiple batches", async () => {
+    // Each segment's translation encodes its OWN source number in Cyrillic digits'
+    // position, so a pass here can only mean each translated entry landed back at its
+    // own source position, batch after batch — never at the position it happened to
+    // be answered from.
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((t) => {
+          const n = /number (\d+)/.exec(t)?.[1] ?? "?";
+          return `Преведен сегмент номер ${n} от статията на български език.`;
+        })
+      )
+    );
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      4
+    );
+
+    const result = await p.translate(requestFor(null, makeSegments(10)), contextFor());
+
+    const expected = Array.from(
+      { length: 10 },
+      (_, i) => `Преведен сегмент номер ${i + 1} от статията на български език.`
+    ).join(" ");
+    assert.equal(result.translatedContent, expected);
+  });
+
+  it("rejects the WHOLE article when one batch fails, even after earlier batches succeeded", async () => {
+    let call = 0;
+    stubFetch((body) => {
+      call += 1;
+      if (call === 2) return json({ error: "boom", provider: "madlad" }, 500);
+      return translated(body);
     });
 
     const p = new MadladTranslationProvider(
@@ -709,37 +861,25 @@ describe("MadladTranslationProvider — bounded concurrency", () => {
       "k",
       "google/madlad400-3b-mt",
       "en",
-      3
+      1,
+      4
     );
     await assert.rejects(
-      p.translate(requestFor(null, "Alpha one. Beta two. Gamma three."), contextFor()),
+      p.translate(requestFor(null, makeSegments(10)), contextFor()),
       (err: unknown) => err instanceof TranslationTransportError && /500/.test(err.message)
     );
+    assert.equal(call, 2, "the third batch must never be sent once the second one failed");
   });
 
-  it("restores each segment's own protected value correctly, even completing out of order", async () => {
-    const URL_A = "https://example.com/a";
-    const URL_B = "https://example.com/b";
-    const URL_C = "https://example.com/c";
-
-    function echoingDelayed(body: Record<string, unknown>, ms: number): Promise<Response> {
-      const text = String(body.text);
-      const holders = text.match(/\[\[\d+\]\]/g) ?? [];
-      const out =
-        holders.length > 0
-          ? `Преведено изречение с ${holders.join(" и ")} на български език.`
-          : "Преведено изречение на български език.";
-      return delayed(out, ms);
-    }
-
-    stubFetch(async (body) => {
-      const text = String(body.text);
-      // First sentence (carries URL_A) answers SLOWEST; last (carries URL_C) FASTEST —
-      // reversed from source order, so a correct restoration can only come from
-      // per-segment isolation, not from completion order.
-      if (text.startsWith("Read")) return echoingDelayed(body, 60);
-      if (text.startsWith("Visit")) return echoingDelayed(body, 30);
-      return echoingDelayed(body, 0);
+  it("rejects the whole article on a protected-token failure inside one of several batches", async () => {
+    const URL_X = "https://example.com/x";
+    stubFetch((body) => {
+      const texts = bodyTexts(body);
+      // Drop the placeholder only for the segment carrying the URL — everything else
+      // echoes back cleanly, so a pass here proves ONE bad segment still fails the lot.
+      return reply(
+        texts.map((t) => (t.includes("[[0]]") ? "Изречение без адрес." : "Преведено изречение."))
+      );
     });
 
     const p = new MadladTranslationProvider(
@@ -747,54 +887,63 @@ describe("MadladTranslationProvider — bounded concurrency", () => {
       "k",
       "google/madlad400-3b-mt",
       "en",
-      3
-    );
-    const result = await p.translate(
-      requestFor(null, `Read ${URL_A} today. Visit ${URL_B} next. See ${URL_C} also.`),
-      contextFor()
-    );
-
-    const found = result.translatedContent?.match(/https:\/\/\S+/g) ?? [];
-    assert.deepEqual(
-      found.map((u) => u.replace(/[.,]$/, "")),
-      [URL_A, URL_B, URL_C],
-      "each URL must land back in ITS OWN sentence, in source order"
-    );
-  });
-
-  it("still stops before starting new work once the item deadline passes", async () => {
-    let clock = Date.now();
-    stubFetch(() => {
-      clock += 1_000;
-      return translated();
-    });
-
-    const p = new MadladTranslationProvider(
-      "http://w:3002",
-      "k",
-      "google/madlad400-3b-mt",
-      "en",
-      2
+      1,
+      4
     );
     await assert.rejects(
-      p.translate(
-        requestFor(null, "One. Two. Three. Four. Five. Six."),
-        contextFor({ now: () => new Date(clock), itemDeadlineMs: clock + 2_500 })
-      ),
-      (err: unknown) => err instanceof TranslationTimeoutError
+      p.translate(requestFor(null, `Visit ${URL_X} for details. ${makeSegments(8)}`), contextFor()),
+      (err: unknown) => err instanceof TranslationParseError && err.reason === "protected_token"
     );
-    assert.ok(requests.length < 6, "must not have run every segment past the deadline");
   });
 
-  it("concurrency 1 (the production default) reproduces the exact prior sequential order", async () => {
+  it("batch size 1 sends one texts[] call per segment and still works end to end", async () => {
     stubFetch(translated);
-    // No 5th argument — exercises the DEFAULT, exactly like every test above this suite.
-    const p = new MadladTranslationProvider("http://w:3002", "k", "google/madlad400-3b-mt");
-    await p.translate(requestFor(TITLE, CONTENT), contextFor());
-
-    assert.deepEqual(
-      requests.map((r) => r.body.text),
-      [TITLE, "A fire extinguisher can last between 5 and 15 years.", "Check the pressure gauge."]
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      1
     );
+    const result = await p.translate(requestFor(TITLE, CONTENT), contextFor());
+
+    assert.equal(requests.length, 3, "title + two paragraphs, one HTTP call each");
+    for (const request of requests) {
+      assert.equal(
+        bodyTexts(request.body).length,
+        1,
+        "batch size 1 still uses the texts[] contract"
+      );
+    }
+    assert.ok(result.translatedContent);
+  });
+
+  it("setting concurrency has NO effect on batch dispatch — batches always run sequentially", async () => {
+    // The client-side concurrency mechanism is superseded by batching for MADLAD: it is
+    // kept parsing for backward compatibility (see DEFAULT_MADLAD_CONCURRENCY), but must
+    // never cause simultaneous /translate requests here, regardless of its value.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    stubFetch(async (body) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 10));
+      inFlight -= 1;
+      return translated(body);
+    });
+
+    // concurrency=5 (would have meant 5-at-once under the old mechanism), batch size 2.
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      5,
+      2
+    );
+    await p.translate(requestFor(null, makeSegments(10)), contextFor());
+
+    assert.equal(maxInFlight, 1, "batches must never overlap, whatever `concurrency` is set to");
   });
 });

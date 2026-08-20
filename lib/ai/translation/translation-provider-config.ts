@@ -30,10 +30,42 @@ export const DEFAULT_MADLAD_MODEL = "google/madlad400-3b-mt";
  * not this HTTP client, so raising this app-side would add contention without
  * adding throughput. Request/response correlation itself was verified safe even at
  * concurrency 5 (distinct payloads, no cross-matching), so `TRANSLATION_MADLAD_CONCURRENCY`
- * exists as an operator escape hatch for AFTER a worker-side fix (e.g. batched
- * generation), not as something to raise today.
+ * was added as an operator escape hatch for AFTER a worker-side fix.
+ *
+ * That worker-side fix has since landed as HTTP BATCHING (see
+ * {@link DEFAULT_MADLAD_HTTP_BATCH_SIZE}), not as safe simultaneous requests — batching
+ * measured a real 1.52x speedup; concurrent single-segment HTTP calls measured a
+ * REGRESSION. `TRANSLATION_MADLAD_CONCURRENCY` therefore has NO EFFECT on the MADLAD
+ * batch dispatch path today: it is kept parsing (so a deployment that already set it
+ * does not start seeing a warning) and the constructor still accepts it, but nothing
+ * in `MadladTranslationProvider.translate()` reads it for batch requests, which are
+ * always sequential regardless of its value.
  */
 export const DEFAULT_MADLAD_CONCURRENCY = 1;
+
+/**
+ * The worker's own hard ceiling for one `/translate` batch request. Fixed by the
+ * worker, not a deployment choice — never raise this from the app side.
+ */
+export const MADLAD_MAX_HTTP_BATCH_SIZE = 32;
+
+/**
+ * How many segments go in ONE `/translate` HTTP request, using the worker's `texts[]`
+ * batch contract (commit d829fec on the text-worker repo). Measured live against a
+ * real 120-segment article (feed item 825c8475, 2026-08-20): sequential one-per-call
+ * took 189.4s over 120 HTTP requests; batches of 30 (4 HTTP requests, 32 model.generate
+ * calls internally at the worker's own batch size of 4) took 124.9s — a 1.52x
+ * speedup, with ordering, protected-token restoration, and memory all verified stable.
+ *
+ * 30, not the worker's max of 32: the same margin below a hard ceiling this file
+ * already uses elsewhere (batch 32 would be the ceiling itself, leaving zero room for
+ * the worker's own internal chunking to round evenly). This is UNRELATED to
+ * {@link DEFAULT_MADLAD_CONCURRENCY} (client-side simultaneous HTTP requests — proven
+ * to hurt, stays 1) and to the worker's own `MADLAD_GENERATE_BATCH_SIZE=4` (its
+ * internal `model.generate` batch size, not configurable from here): this constant
+ * controls only how many PROTECTED SEGMENTS ride in one sequential HTTP call.
+ */
+export const DEFAULT_MADLAD_HTTP_BATCH_SIZE = 30;
 
 /** A minimal read-only view of the environment, so tests need not mutate the real one. */
 export type EnvLike = Record<string, string | undefined>;
@@ -63,6 +95,8 @@ export interface TranslationProviderConfig {
   fallbackToOllamaOnTransportError: boolean;
   /** Max MADLAD segment calls in flight at once. See {@link DEFAULT_MADLAD_CONCURRENCY}. */
   madladConcurrency: number;
+  /** Segments per `/translate` HTTP batch. See {@link DEFAULT_MADLAD_HTTP_BATCH_SIZE}. */
+  madladHttpBatchSize: number;
 }
 
 /** Whether a raw string names a supported engine. */
@@ -109,6 +143,20 @@ export function resolveTranslationProviderConfig(env: EnvLike): TranslationProvi
     }
   }
 
+  const rawHttpBatchSize = env.TRANSLATION_MADLAD_HTTP_BATCH_SIZE?.trim();
+  let madladHttpBatchSize = DEFAULT_MADLAD_HTTP_BATCH_SIZE;
+  if (rawHttpBatchSize) {
+    const parsed = Number.parseInt(rawHttpBatchSize, 10);
+    if (Number.isInteger(parsed) && parsed >= 1 && parsed <= MADLAD_MAX_HTTP_BATCH_SIZE) {
+      madladHttpBatchSize = parsed;
+    } else {
+      console.warn(
+        `[rss-translation] TRANSLATION_MADLAD_HTTP_BATCH_SIZE="${rawHttpBatchSize}" is not an ` +
+          `integer between 1 and ${MADLAD_MAX_HTTP_BATCH_SIZE} — using ${DEFAULT_MADLAD_HTTP_BATCH_SIZE}.`
+      );
+    }
+  }
+
   return {
     kind,
     madladModel,
@@ -116,5 +164,6 @@ export function resolveTranslationProviderConfig(env: EnvLike): TranslationProvi
     fallbackToOllamaOnTransportError:
       env.TRANSLATION_MADLAD_FALLBACK?.trim().toLowerCase() === "ollama",
     madladConcurrency,
+    madladHttpBatchSize,
   };
 }

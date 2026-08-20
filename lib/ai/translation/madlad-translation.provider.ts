@@ -22,16 +22,23 @@ import { TranslationParseError } from "@/lib/ai/feed-item-translation";
  * ── The wire contract ────────────────────────────────────────────────────────
  * POST {TEXT_WORKER_URL}/translate
  *
- *   request:  { "text": "…", "sourceLanguage": "en", "targetLanguage": "bg" }
- *   response: { "text": "…", "provider": "madlad",
- *               "model": "google/madlad400-3b-mt", "durationMs": 412 }
+ *   request:  { "texts": ["…", "…"], "sourceLanguage": "en", "targetLanguage": "bg" }
+ *   response: { "texts": ["…", "…"], "provider": "madlad",
+ *               "model": "google/madlad400-3b-mt", "durationMs": 3120 }
  *
- * ONE text per call — this is the shape the running worker actually implements, and
- * it is what this class sends, field for field, with nothing extra. An article is
- * therefore N calls, one per segment, issued strictly in sequence: the Python side
- * holds a single 3B model and serialises anyway, so concurrency here would only move
- * the queue from the worker into the network and make each call's latency a
- * measurement of the others.
+ * The worker (text-worker commit d829fec) also still answers the older singular
+ * `{ text }` / `{ text }` shape, but this class never sends it: `texts[]` is used for
+ * every request, including a "batch" of one, so there is exactly one wire format and
+ * one response-parsing path to reason about and test — see
+ * `DEFAULT_MADLAD_HTTP_BATCH_SIZE` for why 30, not 1 or the worker's ceiling of 32.
+ *
+ * An article's segments are chunked into HTTP batches and sent STRICTLY IN SEQUENCE,
+ * never simultaneously: the Python side holds a single 3B model, and measurement
+ * showed concurrent single-segment HTTP requests make total latency WORSE, not
+ * better (see `DEFAULT_MADLAD_CONCURRENCY`). Batching is a different lever — fewer,
+ * larger HTTP calls, each translated as one internal `model.generate` batch on the
+ * worker — and it measured a real 1.52x speedup on a 120-segment article precisely
+ * because it is NOT client-side concurrency.
  *
  * The app owns the splitting and the reassembly (see madlad-segmentation.ts), so the
  * worker stays a dumb, stateless translator and the structure-preserving logic stays
@@ -43,8 +50,8 @@ import { TranslationParseError } from "@/lib/ai/feed-item-translation";
  * text returns the same text, so a retry would spend the budget to reproduce the
  * defect. A rejected translation is therefore recorded as a failure and picked up by
  * the normal cross-run backoff, exactly like an exhausted retry budget. `maxTries`
- * counts ATTEMPTS, not HTTP calls — one attempt costs one call per segment, reported
- * separately as `modelCalls`.
+ * counts ATTEMPTS, not HTTP calls — one attempt costs one HTTP call per BATCH of
+ * segments, reported separately as `modelCalls`.
  */
 
 /**
@@ -56,60 +63,26 @@ import { TranslationParseError } from "@/lib/ai/feed-item-translation";
  */
 export const MADLAD_SOURCE_LANGUAGE = "en";
 
-/** Per-request cap for ONE segment call. Bounded further by the caller's own budget. */
-export const MADLAD_SEGMENT_TIMEOUT_MS = 120_000;
-
 /**
- * Runs `count` indexed jobs with at most `concurrency` in flight at once, writing
- * each result into ITS OWN index regardless of which job settles first — so the
- * caller can always reassemble in source order without caring what order the
- * network happened to answer in.
- *
- * The first rejection wins: once any job throws, no NEW job is dispatched, but a
- * job already in flight in another slot is never abandoned mid-request — this
- * function still awaits it before rejecting. That means nothing here can ever
- * produce a partial result set to work with: the caller sees either all `count`
- * results or exactly one thrown error, precisely like the fully sequential loop
- * this replaces (`concurrency: 1` reproduces it exactly, call for call, in order).
+ * Per-request cap for ONE HTTP batch call. Bounded further by the caller's own
+ * budget. A batch of {@link DEFAULT_MADLAD_HTTP_BATCH_SIZE} segments measured well
+ * under a minute per call in production, so this stays generous headroom rather than
+ * a tight fit — it was never tight even back when it bounded a single segment.
  */
-async function runBounded<T>(
-  count: number,
-  concurrency: number,
-  job: (index: number) => Promise<T>
-): Promise<T[]> {
-  const results: T[] = new Array(count);
-  let nextIndex = 0;
-  let failed = false;
-  let failure: unknown;
+export const MADLAD_REQUEST_TIMEOUT_MS = 120_000;
 
-  async function worker(): Promise<void> {
-    for (;;) {
-      if (failed) return;
-      const index = nextIndex;
-      nextIndex += 1;
-      if (index >= count) return;
-      try {
-        results[index] = await job(index);
-      } catch (err) {
-        if (!failed) {
-          failed = true;
-          failure = err;
-        }
-        return;
-      }
-    }
+/** Splits `items` into consecutive groups of at most `size`, in order, none empty. */
+function chunkIntoBatches<T>(items: readonly T[], size: number): T[][] {
+  const batches: T[][] = [];
+  for (let start = 0; start < items.length; start += size) {
+    batches.push(items.slice(start, start + size));
   }
-
-  const poolSize = Math.max(1, Math.min(concurrency, count));
-  await Promise.all(Array.from({ length: poolSize }, () => worker()));
-
-  if (failed) throw failure;
-  return results;
+  return batches;
 }
 
-/** What the worker is expected to answer with. Every field is validated before use. */
-interface MadladWorkerReply {
-  text?: unknown;
+/** What the worker is expected to answer a batch with. Every field is validated before use. */
+interface MadladBatchWorkerReply {
+  texts?: unknown;
   provider?: unknown;
   model?: unknown;
   device?: unknown;
@@ -117,9 +90,9 @@ interface MadladWorkerReply {
   error?: unknown;
 }
 
-/** One validated segment translation. */
-interface SegmentReply {
-  text: string;
+/** One validated HTTP batch's worth of segment translations, still in request order. */
+interface BatchReply {
+  texts: string[];
   model: string | null;
   device: string | null;
   durationMs: number | null;
@@ -142,8 +115,13 @@ export class MadladTranslationProvider implements TranslationProvider {
     private readonly apiKey: string,
     readonly model: string,
     private readonly sourceLang: string = MADLAD_SOURCE_LANGUAGE,
-    /** Max segment calls in flight at once. See `DEFAULT_MADLAD_CONCURRENCY`'s comment. */
-    private readonly concurrency: number = 1
+    /**
+     * Retained for constructor/config backward compatibility only — NOT read by the
+     * HTTP batch dispatch below. See `DEFAULT_MADLAD_CONCURRENCY`'s comment.
+     */
+    private readonly concurrency: number = 1,
+    /** Segments per `/translate` HTTP batch. See `DEFAULT_MADLAD_HTTP_BATCH_SIZE`. */
+    private readonly httpBatchSize: number = 30
   ) {}
 
   async translate(
@@ -170,6 +148,10 @@ export class MadladTranslationProvider implements TranslationProvider {
     const protectedValues: ProtectedValue[][] = protectedSegments.map((p) => p.values);
     const protectedCount = protectedValues.reduce((sum, v) => sum + v.length, 0);
 
+    // HTTP batches — see DEFAULT_MADLAD_HTTP_BATCH_SIZE. Computed up front: chunking
+    // is deterministic, so the planned request count is known before the first call.
+    const batches = chunkIntoBatches(protectedSegments, this.httpBatchSize);
+
     context.reportTry?.(1);
     console.info("[rss-translation] attempt", {
       feedItemId: request.feedItemId,
@@ -178,6 +160,8 @@ export class MadladTranslationProvider implements TranslationProvider {
       engine: "madlad",
       model: this.model,
       segments: segments.length,
+      httpBatchSize: this.httpBatchSize,
+      httpBatchCount: batches.length,
       protectedTokens: protectedCount,
     });
 
@@ -198,6 +182,8 @@ export class MadladTranslationProvider implements TranslationProvider {
         engine: "madlad",
         model: this.model,
         segmentCount: segments.length,
+        httpBatchSize: this.httpBatchSize,
+        httpBatchCount: batches.length,
         contentChars,
         pieces: plan.body.length,
         hasTitle: plan.titleIndex !== null,
@@ -208,45 +194,53 @@ export class MadladTranslationProvider implements TranslationProvider {
 
     const callStartedAt = new Date();
 
-    // Bounded concurrency — see `runBounded` and `DEFAULT_MADLAD_CONCURRENCY`.
-    // `concurrency: 1` (today's default) processes strictly index-by-index, in
-    // order, one call at a time — byte-for-byte the same sequence the old `for`
-    // loop ran. Every job re-checks the item deadline itself, so a slow worker
-    // still stops the article at the budget instead of running past it, exactly
-    // as before; a job that throws stops all NEW dispatch and the whole call
-    // rejects, so a failed segment can never lead to a partial article.
-    const replies = await runBounded(protectedSegments.length, this.concurrency, (index) => {
+    // Sequential by design — see the class comment: measurement showed CONCURRENT
+    // single-segment HTTP requests make total latency worse, and batching (fewer,
+    // larger sequential calls) is the lever that actually helped. Each batch
+    // re-checks the item deadline itself before it is sent, so a slow worker still
+    // stops the article at the budget instead of running past it; a batch that
+    // throws stops all further batches and the whole call rejects, so a failed
+    // batch can never lead to a partial article being reassembled or stored.
+    const batchReplies: BatchReply[] = [];
+    let segmentsSentSoFar = 0;
+    for (const batch of batches) {
       const remainingMs = context.itemDeadlineMs - now().getTime();
       if (remainingMs <= 0) throw new TranslationTimeoutError(context.itemTimeoutMs, "item");
       const budgetMs = Math.min(context.attemptTimeoutMs, remainingMs);
 
-      return withTranslationTimeout(
-        this.callWorker(
-          protectedSegments[index].text,
+      const reply = await withTranslationTimeout(
+        this.callWorkerBatch(
+          batch.map((p) => p.text),
           request.targetLang,
           budgetMs,
-          index,
+          segmentsSentSoFar,
+          batchReplies.length,
+          batches.length,
           segments.length
         ),
         budgetMs,
         "attempt"
       );
-    });
+      batchReplies.push(reply);
+      segmentsSentSoFar += batch.length;
+    }
 
-    const translations = replies.map((reply) => reply.text);
-    const segmentDurations = replies
+    const translations = batchReplies.flatMap((reply) => reply.texts);
+    const batchDurations = batchReplies
       .map((reply) => reply.durationMs)
       .filter((ms): ms is number => ms !== null);
-    // Sourced from segment 0's own reply rather than a "first to resolve" race, so
-    // the reported model/device never depends on completion order.
-    const workerModel = replies[0]?.model ?? null;
-    const workerDevice = replies[0]?.device ?? null;
+    // Sourced from the first batch's own reply rather than a "first to resolve"
+    // race, so the reported model/device never depends on completion order.
+    const workerModel = batchReplies[0]?.model ?? null;
+    const workerDevice = batchReplies[0]?.device ?? null;
 
-    const workerDurationMs = segmentDurations.reduce((sum, ms) => sum + ms, 0);
+    const workerDurationMs = batchDurations.reduce((sum, ms) => sum + ms, 0);
 
     tracer.step({
       type: "llm_call",
-      label: `MADLAD translate — ${segments.length} segment${segments.length === 1 ? "" : "s"}`,
+      label:
+        `MADLAD translate — ${segments.length} segment${segments.length === 1 ? "" : "s"}` +
+        ` in ${batches.length} HTTP batch${batches.length === 1 ? "" : "es"}`,
       attempt: 1,
       startedAt: callStartedAt,
       completedAt: new Date(),
@@ -264,11 +258,13 @@ export class MadladTranslationProvider implements TranslationProvider {
           device: workerDevice,
           durationMs: workerDurationMs || null,
         },
-        // The two numbers that answer "what did this article cost?" for an engine whose
-        // cost is per segment rather than per attempt.
+        // What did this article cost: how many segments were translated, in how many
+        // ACTUAL HTTP requests (batched, so no longer one-to-one with segment count),
+        // and at what configured batch size.
         segmentCount: segments.length,
-        workerCalls: segments.length,
-        segmentDurationsMs: segmentDurations,
+        httpBatchSize: this.httpBatchSize,
+        workerRequests: batches.length,
+        batchDurationsMs: batchDurations,
         elapsedMs: now().getTime() - callStartedAt.getTime(),
       },
     });
@@ -332,7 +328,8 @@ export class MadladTranslationProvider implements TranslationProvider {
         of: 1,
         engine: "madlad",
         willRetry: false,
-        workerCalls: segments.length,
+        translatedSegments: segments.length,
+        workerRequests: batches.length,
         elapsedMs: now().getTime() - callStartedAt.getTime(),
         error: reason,
       });
@@ -356,7 +353,8 @@ export class MadladTranslationProvider implements TranslationProvider {
       output: { translatedTitle, translatedContent },
       metadata: {
         segmentCount: translations.length,
-        workerCalls: segments.length,
+        httpBatchSize: this.httpBatchSize,
+        workerRequests: batches.length,
         protectedTokens: protectedCount,
         urls: extractUrls(segments.join("\n")).length,
       },
@@ -366,7 +364,9 @@ export class MadladTranslationProvider implements TranslationProvider {
       translatedTitle,
       translatedContent,
       tries: 1,
-      modelCalls: segments.length,
+      // The TRUE HTTP call count — batching means this is no longer one per segment.
+      // See `translatedSegments`/`httpBatchSize` on `raw` for the segment-level counts.
+      modelCalls: batches.length,
       // An NMT engine returns plain strings — there is no JSON to salvage, ever.
       usedRepair: false,
       repairs: [],
@@ -375,32 +375,39 @@ export class MadladTranslationProvider implements TranslationProvider {
         model: workerModel ?? this.model,
         device: workerDevice,
         durationMs: workerDurationMs || null,
-        segmentCount: translations.length,
-        workerCalls: segments.length,
+        translatedSegments: translations.length,
+        httpBatchSize: this.httpBatchSize,
+        workerRequests: batches.length,
         protectedTokens: protectedCount,
       },
     };
   }
 
   /**
-   * One HTTP call to the worker for ONE segment, with the envelope fully validated
-   * before it is trusted.
+   * One HTTP call to the worker for ONE BATCH of segments, with the envelope and
+   * every entry in it fully validated before any of it is trusted.
    *
    * Every failure here is a {@link TranslationTransportError} — the engine did not
-   * answer, or did not answer in the agreed shape — which is the only class of failure
-   * a fallback may ever consider. Nothing is allowed through on a guess: a reply
-   * missing its text, carrying another provider's envelope, or holding an empty string
-   * would each silently delete a paragraph from an article nobody reads in the original.
+   * answer, or did not answer in the agreed shape — which is the only class of
+   * failure a fallback may ever consider. Nothing is allowed through on a guess: a
+   * reply missing its `texts` array, carrying another provider's envelope, holding
+   * the wrong number of entries, or holding one empty/non-string entry FAILS THE
+   * WHOLE BATCH — never repaired, never partially accepted, so a corrupt or
+   * incomplete batch reply can never leave one segment silently untranslated while
+   * its neighbours are stored as if the article were complete.
    */
-  private async callWorker(
-    text: string,
+  private async callWorkerBatch(
+    texts: string[],
     targetLang: string,
     budgetMs: number,
-    index: number,
-    total: number
-  ): Promise<SegmentReply> {
+    /** Article-level index of this batch's FIRST segment — for diagnosable errors. */
+    startIndex: number,
+    batchIndex: number,
+    batchCount: number,
+    totalSegments: number
+  ): Promise<BatchReply> {
     const url = this.workerUrl.replace(/\/+$/, "");
-    const where = `segment ${index + 1}/${total}`;
+    const where = `batch ${batchIndex + 1}/${batchCount}`;
 
     let res: Response;
     try {
@@ -413,11 +420,11 @@ export class MadladTranslationProvider implements TranslationProvider {
         // Exactly the three fields the worker accepts. Nothing else is sent: an extra
         // field is a contract this side would then be free to drift on.
         body: JSON.stringify({
-          text,
+          texts,
           sourceLanguage: this.sourceLang,
           targetLanguage: targetLang,
         }),
-        signal: requestSignal(Math.min(MADLAD_SEGMENT_TIMEOUT_MS, Math.max(1, budgetMs))),
+        signal: requestSignal(Math.min(MADLAD_REQUEST_TIMEOUT_MS, Math.max(1, budgetMs))),
       });
     } catch (err) {
       if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
@@ -435,9 +442,9 @@ export class MadladTranslationProvider implements TranslationProvider {
       );
     }
 
-    let data: MadladWorkerReply;
+    let data: MadladBatchWorkerReply;
     try {
-      data = (await res.json()) as MadladWorkerReply;
+      data = (await res.json()) as MadladBatchWorkerReply;
     } catch {
       throw new TranslationTransportError(`MADLAD worker returned a non-JSON body (${where})`);
     }
@@ -450,7 +457,7 @@ export class MadladTranslationProvider implements TranslationProvider {
     }
 
     // The envelope must name MADLAD. Without this check a `/translate` route
-    // accidentally wired to `/generate` returns a perfectly shaped `{ text }` and the
+    // accidentally wired to `/generate` returns a perfectly shaped reply and the
     // pipeline stores a chat model's output under MADLAD's name — the one confusion
     // that would invalidate every comparison this integration exists to make.
     if (typeof data.provider !== "string" || data.provider.toLowerCase() !== "madlad") {
@@ -459,18 +466,37 @@ export class MadladTranslationProvider implements TranslationProvider {
       );
     }
 
-    if (typeof data.text !== "string") {
+    if (!Array.isArray(data.texts)) {
       throw new TranslationTransportError(
-        `MADLAD worker returned no text (${where}): got ${typeof data.text}`
+        `MADLAD worker returned no texts array (${where}): got ${typeof data.texts}`
       );
     }
-    const translated = data.text.trim();
-    if (translated.length === 0) {
-      // Silently accepting this would drop the segment's paragraph from the article and
-      // report success. A translator that answers nothing has not answered.
+    if (data.texts.length !== texts.length) {
       throw new TranslationTransportError(
-        `MADLAD worker returned an empty translation (${where}) for ${text.length} characters`
+        `MADLAD worker returned ${data.texts.length} translation(s) for ${texts.length} ` +
+          `segment(s) requested (${where})`
       );
+    }
+
+    const validated: string[] = [];
+    for (let i = 0; i < data.texts.length; i += 1) {
+      const entry: unknown = data.texts[i];
+      const segmentWhere = `segment ${startIndex + i + 1}/${totalSegments} (${where})`;
+      if (typeof entry !== "string") {
+        throw new TranslationTransportError(
+          `MADLAD worker returned no text for ${segmentWhere}: got ${typeof entry}`
+        );
+      }
+      const trimmed = entry.trim();
+      if (trimmed.length === 0) {
+        // Silently accepting this would drop the segment's paragraph from the article
+        // and report success. A translator that answers nothing has not answered.
+        throw new TranslationTransportError(
+          `MADLAD worker returned an empty translation for ${segmentWhere} ` +
+            `(${texts[i].length} characters sent)`
+        );
+      }
+      validated.push(trimmed);
     }
 
     const model = typeof data.model === "string" ? data.model : null;
@@ -484,7 +510,7 @@ export class MadladTranslationProvider implements TranslationProvider {
     }
 
     return {
-      text: translated,
+      texts: validated,
       model,
       device: typeof data.device === "string" ? data.device : null,
       durationMs: typeof data.durationMs === "number" ? data.durationMs : null,
