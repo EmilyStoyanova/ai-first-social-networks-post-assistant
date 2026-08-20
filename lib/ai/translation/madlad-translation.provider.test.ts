@@ -601,6 +601,70 @@ describe("MadladTranslationProvider — unusable output is rejected, not stored"
       "no retry is attempted — the whole article fails on the first batch"
     );
   });
+
+  // ─── Regression: real production title failure (MADLAD, feed item
+  // 8cf9a29f-4778-4f5b-a4e7-8dcb7977bc5f, 2026-08-20, "MSI MEG CORELIQUID E15 360
+  // Review") ──────────────────────────────────────────────────────────────────────
+  //
+  // The title is always segment 1 (`segmentArticle` sends it whole, never through the
+  // sentence splitter). `E15` is a genuine model identifier and `protectTokens` froze
+  // it correctly: "MSI MEG CORELIQUID [[0]] 360 Review" went on the wire. The worker
+  // returned "[0] 360 Преглед на продукта" — MSI/MEG/CORELIQUID dropped outright, and
+  // the placeholder itself collapsed from double brackets to single ("[[0]]" → "[0]"),
+  // which `restoreTokens`'s `\[\[(\d+)\]\]` pattern correctly does not match, so it is
+  // reported (accurately) as dropped. Reproduced here byte-for-byte against the real
+  // production error message.
+  //
+  // INVESTIGATED AND REJECTED: changing the placeholder syntax (`#0#`, `@0@`) or
+  // switching to "translate unprotected, verify byte-identity, fall back to
+  // protection". Both were measured live against the real worker on this exact title
+  // and on several other genuine identifiers (DCD-800, TX-2/B, P2, 230V, v2.14.3) in
+  // both title and full-sentence position, repeated 3x each (MADLAD's beam search is
+  // deterministic, so repeats confirm rather than sample):
+  //
+  //   • In a normal SENTENCE, every identifier tested — protected or not — survived
+  //     reliably (byte-identical when unprotected, exact restoration when protected),
+  //     matching the extensive prose measurements already recorded at the top of
+  //     protected-tokens.ts.
+  //   • In TITLE position specifically — a bare noun phrase with no verb, several
+  //     consecutive brand/model tokens and no sentence grammar for the placeholder to
+  //     anchor to — content loss happened with EVERY strategy tried, protected or
+  //     unprotected, `[[0]]`/`#0#`/`@0@` alike: MSI/MEG/CORELIQUID/DDR5-6000/PW313D/G2
+  //     were dropped outright, or the whole title was replaced with unrelated
+  //     hallucinated Bulgarian prose, in both directions. The unprotected form is not
+  //     a safe fallback either — MADLAD homoglyph-substituted the identifier itself in
+  //     one run ("E15" → "Е15", Cyrillic constituent letter, byte-different) while
+  //     transliterating the surrounding brand tokens.
+  //   • Critically, `#0#` "survived" as a raw token in one run while everything AROUND
+  //     it was hallucinated into an unrelated sentence — a worse outcome than today's
+  //     rejection, because a token merely surviving inside fabricated prose would pass
+  //     `restoreTokens` and could pass the language/repetition gates too, storing a
+  //     fabricated title as if it were a translation. Today's placeholder-mangling
+  //     failure is accidental, but it is not silent: it rejects rather than stores.
+  //
+  // MADLAD-400 is a SENTENCE-level NMT model (see madlad-segmentation.ts); a headline
+  // noun phrase is out-of-distribution input for it, independent of protection. No
+  // placeholder syntax or byte-identity check closes that gap, so none is applied
+  // here — see the final report for the proposed (not implemented) title-handling
+  // strategies this points to instead.
+  it("REJECTS the exact production title failure — a headline's placeholder collapses, not just drops", async () => {
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 0 ? "[0] 360 Преглед на продукта" : "Преведен сегмент на български език."
+        )
+      )
+    );
+
+    await assert.rejects(
+      provider().translate(requestFor("MSI MEG CORELIQUID E15 360 Review", CONTENT), contextFor()),
+      (err: unknown) =>
+        err instanceof TranslationParseError &&
+        err.reason === "protected_token" &&
+        /dropped \[\[0\]\] in segment 1\/\d+/.test(err.message) &&
+        /\(E15\)/.test(err.message)
+    );
+  });
 });
 
 // ─── Transport faults: distinct from bad output, because only these may fall back ──
