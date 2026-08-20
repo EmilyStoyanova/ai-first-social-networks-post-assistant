@@ -1,4 +1,5 @@
 import { TranslationParseError } from "@/lib/ai/feed-item-translation";
+import { ABBREVIATIONS } from "@/lib/ai/translation/madlad-segmentation";
 
 /**
  * Holding non-translatable values out of the decoder.
@@ -148,13 +149,95 @@ function classify(token: string): ProtectedTokenKind | null {
 }
 
 /**
+ * Sentence punctuation immediately followed by an uppercase letter and a lowercase
+ * letter, with NO whitespace between them at all — the shape a broken extraction leaves
+ * when two paragraphs are concatenated without a separator:
+ *   "...the area's sine qua non grande dame since 1965.In the 55 rooms..."
+ * (feed item 825c8475, segment 69/120 — "1965.In" matched the version-string shape of
+ * `isIdentifier` below and was protected; MADLAD dropped the placeholder, and the whole
+ * translation was correctly rejected rather than stored corrupted). The same article
+ * carries dozens of these from widget/byline concatenation ("Read Full ReviewLa Roqqa",
+ * "—S.M.Read Full Review") — a systemic extraction artifact, not a one-off.
+ *
+ * Requiring a LOWERCASE second letter is what keeps this from firing inside a real
+ * decimal or version string: every digit that can legally follow "." in those (`12.5`,
+ * `v2.14.3`) is a DIGIT, never an uppercase letter, so this pattern cannot match there
+ * at all — see `normaliseGluedSentenceBoundaries` below for why URLs and e-mail
+ * addresses need a separate, explicit exclusion instead of relying on this alone.
+ */
+const GLUED_SENTENCE_BOUNDARY = /[.!?…]\p{Lu}\p{Ll}/u;
+
+/**
+ * Inserts the missing space at a glued sentence boundary, so neither `protectTokens`
+ * below nor MADLAD itself ever sees "1965.In" as a single unit.
+ *
+ * Walks the SAME whitespace-delimited tokens `protectTokens` walks, using the SAME
+ * leading/trailing punctuation stripping, so "core" means the same thing in both
+ * places. A token is left completely untouched when:
+ *   • it IS a URL or e-mail address — a "." inside either is data, and `[^\s]+` in
+ *     both those patterns would otherwise happily swallow a glued word past the real
+ *     boundary ("www.example.com.The" reads as one non-whitespace run); splitting it
+ *     would corrupt the address, so recognising it as one is checked FIRST and wins;
+ *   • the word immediately before the punctuation is a known abbreviation ("etc.",
+ *     "approx.") or a single-letter initial ("J.") — the exact judgement
+ *     `splitSentences`/`endsSentence` already make in madlad-segmentation.ts for the
+ *     ordinary, whitespace-preceded case, reused here via the shared
+ *     {@link ABBREVIATIONS} list so a glued boundary and a spaced one are classified by
+ *     one rule, not two that could drift apart. (A multi-letter abbreviated name like
+ *     "J.K." is not specially excluded: splitting "J.K.Rowling" into "J.K. Rowling" is
+ *     the CORRECT canonical form, not a corruption, and neither half contains a digit,
+ *     so it can never be misclassified as an identifier either way.)
+ *
+ * Everything else gets exactly one space inserted, right after the punctuation mark —
+ * nothing is deleted, reordered, or translated here, so this can never introduce the
+ * kind of loss the rest of this module exists to prevent.
+ */
+export function normaliseGluedSentenceBoundaries(text: string): string {
+  let out = "";
+  let cursor = 0;
+
+  const token = /\S+/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = token.exec(text)) !== null) {
+    const raw = match[0];
+    const lead = LEADING.exec(raw)?.[0] ?? "";
+    const withoutLead = raw.slice(lead.length);
+    const trail = TRAILING.exec(withoutLead)?.[0] ?? "";
+    const core = withoutLead.slice(0, withoutLead.length - trail.length);
+    if (core.length === 0) continue;
+    if (URL.test(core) || EMAIL.test(core)) continue;
+
+    const boundary = GLUED_SENTENCE_BOUNDARY.exec(core);
+    if (!boundary || boundary.index === undefined) continue;
+
+    const splitAt = boundary.index + 1; // right after the punctuation mark
+    const word = core.slice(0, splitAt).replace(/[.!?…]+$/u, "");
+    if (ABBREVIATIONS.has(word.toLowerCase())) continue;
+    if (word.length === 1 && /\p{L}/u.test(word)) continue; // a single-letter initial
+
+    const absoluteSplit = match.index + lead.length + splitAt;
+    out += text.slice(cursor, absoluteSplit) + " ";
+    cursor = absoluteSplit;
+  }
+
+  out += text.slice(cursor);
+  return out;
+}
+
+/**
  * Replaces every protected value in one segment with a placeholder.
  *
  * Works on whitespace-delimited tokens, stripping the punctuation that surrounds a
  * value without belonging to it — so "(see https://example.com/a)," protects the URL
  * and leaves the bracket and the comma in the sentence for the model to place.
+ *
+ * The text is first passed through {@link normaliseGluedSentenceBoundaries}, so a
+ * broken-extraction artifact like "1965.In" is never a candidate token here in the
+ * first place — see that function for what it does and does not touch.
  */
-export function protectTokens(text: string): ProtectedText {
+export function protectTokens(rawText: string): ProtectedText {
+  const text = normaliseGluedSentenceBoundaries(rawText);
   const values: ProtectedValue[] = [];
   let out = "";
   let cursor = 0;

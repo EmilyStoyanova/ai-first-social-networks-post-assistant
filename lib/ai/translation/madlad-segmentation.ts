@@ -71,8 +71,15 @@ export const NO_CONTENT_CAP = Number.POSITIVE_INFINITY;
  */
 const LINE_MARKER = /^((?:[-–—*•·‣▪◦]|#{1,6}|\d{1,3}[.)]|[ivxIVX]{1,4}[.)])\s+)/;
 
-/** Abbreviations whose full stop ends a word, not a sentence. */
-const ABBREVIATIONS = new Set([
+/**
+ * Abbreviations whose full stop ends a word, not a sentence.
+ *
+ * Exported so protected-tokens.ts can apply the SAME judgement to a GLUED boundary (no
+ * whitespace at all — "1965.In") that this file already applies to a spaced one — see
+ * `NUMBER_HYPHEN_WORD_COMPOUND`'s neighbour, the glued-boundary normalisation, in that
+ * file. One list, not two that could drift apart.
+ */
+export const ABBREVIATIONS = new Set([
   "mr",
   "mrs",
   "ms",

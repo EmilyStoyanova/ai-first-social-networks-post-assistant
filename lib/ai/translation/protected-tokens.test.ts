@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { extractUrls, protectTokens, restoreTokens } from "./protected-tokens";
+import {
+  extractUrls,
+  normaliseGluedSentenceBoundaries,
+  protectTokens,
+  restoreTokens,
+} from "./protected-tokens";
 import { TranslationParseError } from "@/lib/ai/feed-item-translation";
 
 /**
@@ -199,6 +204,117 @@ describe("protectTokens — plain cardinal-number-hyphen-word compounds are pros
         `expected "${expected}" to remain protected in "${source}"`
       );
     }
+  });
+
+  // ─── Regression: real production failure, glued sentence boundary (MADLAD, feed item
+  // 825c8475, segment 69/120, 2026-08-20) ────────────────────────────────────────────
+  //
+  // The scraped source is missing a whitespace after a sentence-ending period —
+  // "...the area's sine qua non grande dame since 1965.In the 55 rooms..." — so
+  // `protectTokens`'s whitespace tokeniser saw "1965.In" as ONE token, which matched the
+  // internal-punctuation identifier/version shape (the same branch that legitimately
+  // protects "v2.14.3") and was protected as [[0]]. MADLAD dropped it, and the whole
+  // translation was correctly rejected:
+  //   "Translation dropped [[0]] in segment 69/120 — the protected value(s) 1 could not
+  //    be restored unambiguously (1965.In)."
+  // The fix is a normalisation pass, `normaliseGluedSentenceBoundaries`, run before
+  // tokenisation: it inserts the missing space so "1965.In" is never a candidate token
+  // at all, using the same abbreviation/initial judgement `endsSentence` already makes
+  // for the ordinary, whitespace-preceded case, and explicitly refusing to touch a URL
+  // or e-mail address (where a "." is data, not punctuation).
+  describe("normaliseGluedSentenceBoundaries — the exact production failure", () => {
+    it("inserts the missing space in the exact failing production sentence (segment 69/120)", () => {
+      const source =
+        "La Roqqa, a cliffside retreat whose distinctive coral-orange façade and secluded " +
+        "views of the Tyrrhenian Sea created ripples upon opening in 2023, has provided a " +
+        "forward-looking alternative to Hotel Il Pellicano (which you'll see below), the " +
+        "area’s sine qua non grande dame since 1965.In the 55 rooms and suites, " +
+        "floor-to-ceiling windows let sunshine flood onto walls of sage green or Terra di " +
+        "Siena orange, which pop against crisp white bed linens.";
+      const fixed = normaliseGluedSentenceBoundaries(source);
+      assert.ok(fixed.includes("since 1965. In the 55 rooms"), fixed);
+      assert.deepEqual(
+        protectTokens(source).values,
+        [],
+        "1965.In must never become a protected token"
+      );
+    });
+
+    it("fixes at least three other glued boundaries from the same real article", () => {
+      const cases: [string, string][] = [
+        ["…boltholes nestled in hilltop towns.August 17, 2026Tobias Kaser…", "towns. August"],
+        ["…Il Salviatino feels worlds away. —S.M.Read Full Review…", "—S.M. Read"],
+        ["…the top picks in Florence.Powered By: Booking.com", "Florence. Powered"],
+      ];
+      for (const [source, expectedSubstring] of cases) {
+        const fixed = normaliseGluedSentenceBoundaries(source);
+        assert.ok(
+          fixed.includes(expectedSubstring),
+          `expected "${expectedSubstring}" in normalised output, got ${JSON.stringify(fixed)}`
+        );
+      }
+    });
+
+    it("fixes ordinary glued prose boundaries generically", () => {
+      for (const [source, expected] of [
+        ["The hotel.It was lovely.", "The hotel. It was lovely."],
+        ["Loved the great view.The room was clean.", "Loved the great view. The room was clean."],
+        [
+          "Do you need to plan ahead?Planning ahead helps.",
+          "Do you need to plan ahead? Planning ahead helps.",
+        ],
+      ] as const) {
+        assert.equal(normaliseGluedSentenceBoundaries(source), expected);
+      }
+    });
+  });
+
+  describe("normaliseGluedSentenceBoundaries — must not touch real versions, decimals, URLs, emails, initials, or abbreviations", () => {
+    const UNTOUCHED = [
+      "Firmware v2.14.3 fixes the charging fault.",
+      "The pack costs 1.5 for the base unit.",
+      "The needle should sit at approx. 12.5 bar for a powder unit.",
+      "Visit example.com for details.",
+      "Read https://example.com/a for more.",
+      "Write to service@example.com before it expires.",
+      "J.K. Rowling wrote the series.",
+      "It happened in the U.S.A. after the war.",
+      "It happened in the U.K. last year.",
+      "See fig. 3 for the diagram.",
+      "The model is DCD-800 and it weighs 1.6 kg.",
+    ];
+
+    for (const source of UNTOUCHED) {
+      it(`leaves "${source.slice(0, 40)}…" completely unchanged`, () => {
+        assert.equal(normaliseGluedSentenceBoundaries(source), source);
+      });
+    }
+
+    it("never disturbs what protectTokens protects for these sentences", () => {
+      assert.deepEqual(protectTokens("Firmware v2.14.3 fixes the charging fault.").values, [
+        { kind: "identifier", value: "v2.14.3" },
+      ]);
+      assert.deepEqual(protectTokens("Read https://example.com/a for more.").values, [
+        { kind: "url", value: "https://example.com/a" },
+      ]);
+      assert.deepEqual(protectTokens("Write to service@example.com before it expires.").values, [
+        { kind: "email", value: "service@example.com" },
+      ]);
+      assert.deepEqual(protectTokens("The model is DCD-800 and it weighs 1.6 kg.").values, [
+        { kind: "identifier", value: "DCD-800" },
+      ]);
+    });
+
+    it("never splits a glued URL or e-mail even when a capital letter follows the domain", () => {
+      // A "." inside a URL or e-mail is data, never a sentence boundary — even when the
+      // glued word after it happens to start with a capital letter, which would
+      // otherwise match the glued-boundary shape.
+      const urlCase = "See www.example.com.The article covers it in full.";
+      assert.equal(normaliseGluedSentenceBoundaries(urlCase), urlCase);
+
+      const emailCase = "Write to service@example.com.The reply comes within a day.";
+      assert.equal(normaliseGluedSentenceBoundaries(emailCase), emailCase);
+    });
   });
 });
 
