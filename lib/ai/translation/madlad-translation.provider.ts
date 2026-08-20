@@ -1,4 +1,5 @@
 import { requestSignal } from "@/lib/http/request-deadline";
+import { GenerationTracer } from "@/lib/generation-trace/tracer";
 import type {
   ArticleTranslation,
   ArticleTranslationContext,
@@ -9,8 +10,25 @@ import { TranslationTransportError } from "./translation-provider";
 import { TranslationTimeoutError, withTranslationTimeout } from "./translation-timeout";
 import { reassembleArticle, segmentArticle } from "./madlad-segmentation";
 import { assertUsableTranslation } from "./translated-text-validation";
-import { extractUrls, protectTokens, restoreTokens, type ProtectedValue } from "./protected-tokens";
-import { TranslationParseError } from "@/lib/ai/feed-item-translation";
+import {
+  extractUrls,
+  protectTokens,
+  restoreTokens,
+  type ProtectedText,
+  type ProtectedValue,
+} from "./protected-tokens";
+import { buildTranslationPrompts, TranslationParseError } from "@/lib/ai/feed-item-translation";
+import {
+  emptyRepairReport,
+  maxRepairsFor,
+  MIN_REPAIR_BUDGET_MS,
+  originalSegments,
+  repairedSegments,
+  REPAIR_BUDGET_MS,
+  unpreservedValues,
+  type RepairReport,
+  type ResolveRepairProvider,
+} from "./segment-repair";
 
 /**
  * google/madlad400-3b-mt, served by the EXISTING text worker.
@@ -63,6 +81,31 @@ import { TranslationParseError } from "@/lib/ai/feed-item-translation";
  */
 export const MADLAD_SOURCE_LANGUAGE = "en";
 
+/**
+ * The repair facts every log line, trace step and stored payload reports, under ONE
+ * set of names so a reader never has to correlate three different spellings.
+ *
+ * A segment that stayed English is named explicitly and counted separately from one
+ * that was successfully repaired — the two are very different things to a reader, and
+ * collapsing them into a single "repairs" number would hide exactly the case that
+ * matters: text the pipeline chose not to translate.
+ */
+function repairMetadata(report: RepairReport): Record<string, unknown> {
+  const repaired = repairedSegments(report);
+  const original = originalSegments(report);
+  return {
+    repairedSegments: repaired.length,
+    fallbackToOriginalSegments: original.length,
+    repairedSegmentIndices: repaired,
+    fallbackSegmentIndices: original,
+    repairProvider: report.provider,
+    repairModel: report.model,
+    repairFailureReasons: report.records
+      .filter((r) => r.reason !== null)
+      .map((r) => ({ segment: r.segment, reason: r.reason, lostValues: r.lostValues ?? [] })),
+  };
+}
+
 /** Splits `items` into consecutive groups of at most `size`, in order, none empty. */
 function chunkIntoBatches<T>(items: readonly T[], size: number): T[][] {
   const batches: T[][] = [];
@@ -113,7 +156,16 @@ export class MadladTranslationProvider implements TranslationProvider {
      */
     private readonly concurrency: number = 1,
     /** Segments per `/translate` HTTP batch. See `DEFAULT_MADLAD_HTTP_BATCH_SIZE`. */
-    private readonly httpBatchSize: number = 30
+    private readonly httpBatchSize: number = 30,
+    /**
+     * Builds the engine that repairs a segment MADLAD could not carry — see
+     * segment-repair.ts. Optional: with no resolver (or one that yields null) a
+     * segment that cannot be restored keeps its original English, which is the same
+     * graceful degradation an unusable repair produces. Called AT MOST ONCE per
+     * article, and only after a segment has actually failed, so a healthy article
+     * never resolves an LLM at all.
+     */
+    private readonly resolveRepairProvider: ResolveRepairProvider | null = null
   ) {}
 
   async translate(
@@ -303,16 +355,31 @@ export class MadladTranslationProvider implements TranslationProvider {
     // articles.
     let translatedTitle: string | null;
     let translatedContent: string | null;
+    let repairReport: RepairReport = emptyRepairReport();
 
     try {
-      // Rejected here rather than repaired: a guess about which URL belonged where is
-      // exactly the silent corruption the placeholders exist to prevent.
-      const restored = translations.map((text, index) =>
-        restoreTokens(text, protectedValues[index], `segment ${index + 1}/${segments.length}`)
+      // Never GUESSED at: a placeholder that did not come back is not repaired by
+      // deciding which value probably belonged where. A segment MADLAD could not carry
+      // is re-translated by a DIFFERENT engine and then verified byte-for-byte, or it
+      // keeps its original English — see segment-repair.ts.
+      const restoration = await this.restoreSegments(
+        translations,
+        protectedSegments,
+        segments,
+        request,
+        context
       );
+      repairReport = restoration.report;
 
-      const placeholderForm = reassembleArticle(plan, translations);
-      const restoredForm = reassembleArticle(plan, restored);
+      // Two arrays, deliberately: `forGate` is what the quality gate judges and keeps
+      // the PLACEHOLDER form for untouched segments (a restored URL is a run of Latin
+      // letters, and the Bulgarian check counts letters), while `restored` is what is
+      // stored. A repaired or original-English segment is identical in both, so a
+      // segment left in English IS shown to the language gate rather than hidden from
+      // it — that is what makes the gate a genuine second bound on how much of an
+      // article may stay untranslated.
+      const placeholderForm = reassembleArticle(plan, restoration.forGate);
+      const restoredForm = reassembleArticle(plan, restoration.restored);
       translatedTitle = restoredForm.translatedTitle;
       translatedContent = restoredForm.translatedContent;
 
@@ -348,6 +415,10 @@ export class MadladTranslationProvider implements TranslationProvider {
         willRetry: false,
         translatedSegments: segments.length,
         workerRequests: batches.length,
+        // Reported on the FAILURE path too: "how far did repair get before the article
+        // was failed" is the first question asked of an article that hit the cap.
+        repairedSegments: repairedSegments(repairReport).length,
+        fallbackToOriginalSegments: originalSegments(repairReport).length,
         elapsedMs: now().getTime() - callStartedAt.getTime(),
         error: reason,
       });
@@ -359,8 +430,29 @@ export class MadladTranslationProvider implements TranslationProvider {
         status: "failed",
         output: { willRetry: false },
         error: err,
+        metadata: repairMetadata(repairReport),
       });
       throw err;
+    }
+
+    const repaired = repairedSegments(repairReport);
+    const leftOriginal = originalSegments(repairReport);
+    if (repairReport.records.length > 0) {
+      // Never only in the trace: an article carrying English segments must be visible
+      // to someone reading logs, not just to someone who opens the run.
+      console.info("[rss-translation] segments repaired outside MADLAD", {
+        feedItemId: request.feedItemId,
+        segments: segments.length,
+        repairedSegments: repaired.length,
+        fallbackToOriginalSegments: leftOriginal.length,
+        repairedIndices: repaired,
+        fallbackIndices: leftOriginal,
+        repairProvider: repairReport.provider,
+        repairModel: repairReport.model,
+        reasons: repairReport.records
+          .filter((r) => r.reason !== null)
+          .map((r) => `${r.segment}: ${r.reason}`),
+      });
     }
 
     tracer.setAttempts(1);
@@ -375,6 +467,7 @@ export class MadladTranslationProvider implements TranslationProvider {
         workerRequests: batches.length,
         protectedTokens: protectedCount,
         urls: extractUrls(segments.join("\n")).length,
+        ...repairMetadata(repairReport),
       },
     });
 
@@ -384,8 +477,15 @@ export class MadladTranslationProvider implements TranslationProvider {
       tries: 1,
       // The TRUE HTTP call count — batching means this is no longer one per segment.
       // See `translatedSegments`/`httpBatchSize` on `raw` for the segment-level counts.
-      modelCalls: batches.length,
-      // An NMT engine returns plain strings — there is no JSON to salvage, ever.
+      // Batch calls PLUS the repair calls — an article that needed repairs cost more
+      // than its batches, and reporting only the batches would understate it.
+      modelCalls: batches.length + repairReport.records.length,
+      // `usedRepair`/`repairs` are the JSON-SALVAGE fields of the prompt-based engine
+      // (a truncated reply patched back into valid JSON). An NMT engine has no JSON to
+      // salvage, so they stay false/empty here — segment repair is a different thing
+      // entirely and is reported under its own names below, deliberately not folded
+      // into these, so "did the reply need repairing to parse" keeps meaning exactly
+      // what it has always meant.
       usedRepair: false,
       repairs: [],
       raw: {
@@ -397,8 +497,189 @@ export class MadladTranslationProvider implements TranslationProvider {
         httpBatchSize: this.httpBatchSize,
         workerRequests: batches.length,
         protectedTokens: protectedCount,
+        ...repairMetadata(repairReport),
       },
     };
+  }
+
+  /**
+   * Restores every segment, repairing the ones MADLAD could not carry.
+   *
+   * Returns two parallel arrays in SOURCE ORDER — index i is always segment i, whether
+   * it was restored untouched, repaired, or left English — because reassembly folds
+   * them positionally and a reordering here would silently rearrange the article.
+   */
+  private async restoreSegments(
+    translations: readonly string[],
+    protectedSegments: readonly ProtectedText[],
+    sourceSegments: readonly string[],
+    request: ArticleTranslationRequest,
+    context: ArticleTranslationContext
+  ): Promise<{ restored: string[]; forGate: string[]; report: RepairReport }> {
+    const restored: string[] = [];
+    const forGate: string[] = [];
+    const report = emptyRepairReport();
+    const limit = maxRepairsFor(sourceSegments.length);
+
+    /** `undefined` = not resolved yet, `null` = resolved and unavailable. */
+    let repairProvider: TranslationProvider | null | undefined = undefined;
+
+    for (let index = 0; index < translations.length; index += 1) {
+      const values = protectedSegments[index].values;
+      const where = `segment ${index + 1}/${sourceSegments.length}`;
+
+      /** The restoration failure, kept so it can be re-thrown unchanged if unrepairable. */
+      let restorationError: unknown;
+      try {
+        restored.push(restoreTokens(translations[index], values, where));
+        forGate.push(translations[index]);
+        continue;
+      } catch (err) {
+        // ── What may be repaired, and nothing else ───────────────────────────
+        // ONLY a protected-token restoration failure on a segment that actually had
+        // protected values. A repetition loop, a drifted language, a transport fault
+        // and a malformed reply all keep their existing semantics and fail the
+        // article, because re-translating one segment does not address any of them —
+        // and a segment with NO protected values has nothing for the byte-exact check
+        // to verify, so a "repair" there would be an unverifiable substitution.
+        const repairable =
+          err instanceof TranslationParseError &&
+          err.reason === "protected_token" &&
+          values.length > 0;
+        if (!repairable) throw err;
+        restorationError = err;
+      }
+
+      if (repairProvider === undefined) {
+        try {
+          repairProvider = (await this.resolveRepairProvider?.()) ?? null;
+        } catch {
+          repairProvider = null;
+        }
+        if (repairProvider !== null) {
+          report.provider = repairProvider.providerLabel;
+          report.model = repairProvider.model;
+        }
+      }
+
+      // No repair engine at all — so nothing was attempted, nothing was verified, and
+      // there is no evidence on which to keep a segment. This is the pre-repair
+      // behaviour, preserved exactly: reject the article rather than storing text the
+      // pipeline never checked. Graceful degradation to the original English is what a
+      // deployment gets by CONFIGURING a repair engine, not something it gets by
+      // omission — see repairSegment for the cases it then covers.
+      if (repairProvider === null) throw restorationError;
+
+      if (report.records.length >= limit) {
+        // Deliberately fails the WHOLE article rather than storing one that is mostly
+        // English. See MAX_REPAIR_SHARE for how the bound was measured.
+        throw new TranslationParseError(
+          `Translation needed more than ${limit} repaired segment(s) of ` +
+            `${sourceSegments.length} — the article is too damaged to store ` +
+            `(repaired ${repairedSegments(report).join(", ") || "none"}; ` +
+            `kept original ${originalSegments(report).join(", ") || "none"}).`,
+          "protected_token"
+        );
+      }
+
+      const outcome = await this.repairSegment(
+        sourceSegments[index],
+        values,
+        repairProvider,
+        request,
+        context,
+        where
+      );
+      report.records.push({ segment: index + 1, ...outcome.record });
+      restored.push(outcome.text);
+      forGate.push(outcome.text);
+    }
+
+    return { restored, forGate, report };
+  }
+
+  /**
+   * Re-translates ONE segment with the repair engine, or reports why the original was
+   * kept. Never throws except when the ARTICLE's own deadline has already passed.
+   */
+  private async repairSegment(
+    source: string,
+    values: readonly ProtectedValue[],
+    provider: TranslationProvider,
+    request: ArticleTranslationRequest,
+    context: ArticleTranslationContext,
+    where: string
+  ): Promise<{
+    text: string;
+    record: { outcome: "repaired" | "original"; reason: string | null; lostValues?: string[] };
+  }> {
+    const keepOriginal = (reason: string, lostValues?: string[]) => ({
+      text: source,
+      record: { outcome: "original" as const, reason, ...(lostValues ? { lostValues } : {}) },
+    });
+
+    const remainingMs = context.itemDeadlineMs - context.now().getTime();
+    // Already past the article's budget: that is a timeout for the article, not a
+    // fallback decision, and it is reported exactly as the batch loop reports it.
+    if (remainingMs <= 0) throw new TranslationTimeoutError(context.itemTimeoutMs, "item");
+    if (remainingMs < MIN_REPAIR_BUDGET_MS) {
+      return keepOriginal(
+        `only ${remainingMs}ms of the item budget remained, below the ${MIN_REPAIR_BUDGET_MS}ms a repair needs`
+      );
+    }
+
+    // The repair engine receives the ORIGINAL segment with its real identifiers — never
+    // the `[[n]]` form. A prompt-based model is instructed to keep brand and model
+    // strings unchanged, which is the whole reason it can succeed where MADLAD cannot;
+    // handing it placeholders would recreate the very problem being repaired.
+    //
+    // `content: null` puts buildTranslationPrompts into its `title_only` mode, whose
+    // schema is `{"title": "..."}` and whose prompt explicitly forbids inventing a
+    // body. That mode already existed; nothing about prompt generation is duplicated
+    // here, and the engine's own 3000-char article cap is irrelevant to one segment.
+    const prompts = buildTranslationPrompts(source, null, request.targetLang);
+    const budgetMs = Math.min(REPAIR_BUDGET_MS, remainingMs);
+
+    let result;
+    try {
+      result = await provider.translate(
+        { ...request, title: source, content: null, mode: prompts.mode, prompts },
+        {
+          ...context,
+          // A NARROWED context is what bounds the repair: the prompt engine enforces
+          // its own budget from these two fields, so no timeout logic is duplicated
+          // and its behaviour is not modified. `reportTry` is dropped so a repair's
+          // internal regenerations never inflate the ARTICLE's attempt count.
+          attemptTimeoutMs: Math.min(context.attemptTimeoutMs, budgetMs),
+          itemDeadlineMs: context.now().getTime() + budgetMs,
+          itemTimeoutMs: budgetMs,
+          tracer: GenerationTracer.disabled(),
+          reportTry: undefined,
+        }
+      );
+    } catch (err) {
+      return keepOriginal(
+        `repair engine failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    const translated = result.translatedTitle;
+    if (translated === null || translated.trim().length === 0) {
+      return keepOriginal("repair engine returned nothing");
+    }
+
+    // The bar the whole mechanism exists for. Measured on real segments, the prompt
+    // engine transliterates an identifier often enough that trusting it would just
+    // move the silent corruption one engine along ("Gen.2" → "Ген.2").
+    const lost = unpreservedValues(values, translated);
+    if (lost.length > 0) {
+      return keepOriginal(
+        `repair did not preserve ${lost.join(", ")} byte-identically in ${where}`,
+        lost
+      );
+    }
+
+    return { text: translated.trim(), record: { outcome: "repaired", reason: null } };
   }
 
   /**

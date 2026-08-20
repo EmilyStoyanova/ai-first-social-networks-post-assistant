@@ -2,7 +2,8 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { MadladTranslationProvider } from "./madlad-translation.provider";
 import { TranslationTransportError } from "./translation-provider";
-import type { ArticleTranslationContext } from "./translation-provider";
+import type { ArticleTranslationContext, TranslationProvider } from "./translation-provider";
+import { MAX_REPAIRS_PER_ARTICLE, maxRepairsFor, MIN_REPAIR_BUDGET_MS } from "./segment-repair";
 import { TranslationTimeoutError } from "./translation-timeout";
 import { buildTranslationPrompts, TranslationParseError } from "@/lib/ai/feed-item-translation";
 import { GenerationTracer } from "@/lib/generation-trace/tracer";
@@ -263,6 +264,16 @@ describe("MadladTranslationProvider — the reply", () => {
       httpBatchSize: 30,
       workerRequests: 1,
       protectedTokens: 0,
+      // A healthy article reports the repair counters as ZERO rather than omitting
+      // them, so "no segment needed repair" and "this payload predates repair" are
+      // distinguishable in stored data instead of both reading as an absent field.
+      repairedSegments: 0,
+      fallbackToOriginalSegments: 0,
+      repairedSegmentIndices: [],
+      fallbackSegmentIndices: [],
+      repairProvider: null,
+      repairModel: null,
+      repairFailureReasons: [],
     });
   });
 
@@ -319,22 +330,22 @@ describe("MadladTranslationProvider — the reply", () => {
 
 // ─── Protected values: URLs must survive the round trip ──────────────────────
 
+const URL_A = "https://example.com/safety/extinguisher-checklist";
+const URL_B = "https://example.com/b";
+
+/** Answers in Bulgarian, echoing back whatever placeholders each segment was given. */
+function echoing(body: Record<string, unknown>): Response {
+  return reply(
+    bodyTexts(body).map((text) => {
+      const holders = text.match(/\[\[\d+\]\]/g) ?? [];
+      return holders.length > 0
+        ? `Преведено изречение с ${holders.join(" и ")} на български език.`
+        : "Преведено изречение на български език.";
+    })
+  );
+}
+
 describe("MadladTranslationProvider — protected values", () => {
-  const URL_A = "https://example.com/safety/extinguisher-checklist";
-  const URL_B = "https://example.com/b";
-
-  /** Answers in Bulgarian, echoing back whatever placeholders each segment was given. */
-  function echoing(body: Record<string, unknown>): Response {
-    return reply(
-      bodyTexts(body).map((text) => {
-        const holders = text.match(/\[\[\d+\]\]/g) ?? [];
-        return holders.length > 0
-          ? `Преведено изречение с ${holders.join(" и ")} на български език.`
-          : "Преведено изречение на български език.";
-      })
-    );
-  }
-
   it("never sends a raw URL to the model — it would be translated or deleted", async () => {
     stubFetch(echoing);
     await provider().translate(
@@ -512,6 +523,486 @@ describe("MadladTranslationProvider — protected values", () => {
   });
 });
 
+// ─── Segment repair: one bad segment must not cost the whole article ──────────
+
+/**
+ * MADLAD drops a `[[n]]` placeholder whenever it sits next to a brand token — proved
+ * by holding a sentence fixed and varying only the neighbours (see the brand-adjacency
+ * regression below). Re-sending it to MADLAD is useless because beam search is
+ * deterministic, so the failing segment ALONE goes to the prompt-based engine, and the
+ * result is accepted only if every protected value survives byte-for-byte.
+ *
+ * The fake repair engine here stands in for `OllamaTranslationProvider`. It is a real
+ * `TranslationProvider`, so what these tests exercise is the wiring the factory builds,
+ * not a parallel code path.
+ */
+function repairEngine(
+  answer: (segment: string) => string | Promise<string>,
+  kind: "ollama" | "madlad" = "ollama"
+): { provider: TranslationProvider; calls: string[] } {
+  const calls: string[] = [];
+  return {
+    calls,
+    provider: {
+      kind,
+      providerLabel: "TEXT_WORKER",
+      model: "qwen3:8b",
+      maxTries: 3,
+      async translate(request) {
+        calls.push(request.title ?? "");
+        return {
+          translatedTitle: await answer(request.title ?? ""),
+          translatedContent: null,
+          tries: 1,
+          usedRepair: false,
+          repairs: [],
+          raw: null,
+        };
+      },
+    },
+  };
+}
+
+/** A MADLAD provider wired to `engine`, at an explicit batch size. */
+function repairing(engine: TranslationProvider | null, batchSize = 30) {
+  return new MadladTranslationProvider(
+    "http://w:3002",
+    "k",
+    "google/madlad400-3b-mt",
+    "en",
+    1,
+    batchSize,
+    engine === null ? null : async () => engine
+  );
+}
+
+describe("MadladTranslationProvider — segment repair", () => {
+  // ─── A. The real production case ────────────────────────────────────────────
+  // Feed item 8cf9a29f, segment 11/59: an ordinary sentence with a subject and a
+  // verb, whose `[[0]]` (E15) MADLAD drops because "MSI's MEG CORELIQUID" sits
+  // beside it. Measured live, the prompt engine renders this segment correctly and
+  // keeps "E15" byte-identical, so the article completes instead of failing.
+  const MSI_SENTENCE =
+    "Today, I'm taking a closer look at MSI's MEG CORELIQUID E15 360 all-in-one liquid cooler.";
+
+  it("repairs the real E15 body segment through the prompt engine and completes the article", async () => {
+    // MADLAD answers segment 2 without the placeholder — the exact production defect.
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 1
+            ? "Днес ще разгледам по-отблизо течния охладител който е всичко в едно."
+            : "Преведено изречение на български език."
+        )
+      )
+    );
+    const engine = repairEngine(
+      () => "Днес разглеждам по-близо MSI MEG CORELIQUID E15 360 охладител с течност."
+    );
+
+    const result = await repairing(engine.provider).translate(
+      requestFor("Заглавие на статията", MSI_SENTENCE),
+      contextFor()
+    );
+
+    assert.equal(engine.calls.length, 1, "only the failing segment is repaired");
+    // The repair engine must receive the ORIGINAL segment with real identifiers —
+    // handing it the [[n]] form would recreate the very problem being repaired.
+    assert.equal(engine.calls[0], MSI_SENTENCE);
+    assert.ok(engine.calls[0].includes("E15"));
+    assert.ok(!engine.calls[0].includes("[["));
+    // And the identifier survives byte-identically into the stored article.
+    assert.ok(result.translatedContent?.includes("E15"));
+    const raw = result.raw as Record<string, unknown>;
+    assert.equal(raw.repairedSegments, 1);
+    assert.equal(raw.fallbackToOriginalSegments, 0);
+    assert.deepEqual(raw.repairedSegmentIndices, [2]);
+  });
+
+  // ─── B. A repair that transliterates is not a repair ────────────────────────
+  // Measured on real segments: the prompt engine renders "Gen.2" as "Ген.2" and
+  // "50-Series" as "50-Серия". Both read perfectly and are silently wrong, which is
+  // precisely the loss the placeholders exist to prevent.
+  it("REJECTS a repair that transliterates the identifier and keeps the original English", async () => {
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 1 ? "Акумулаторната бормашина е мощна." : "Преведено изречение на български език."
+        )
+      )
+    );
+    const source = "The DeWalt DCD-800 is a powerful cordless drill.";
+    const engine = repairEngine(() => "Деуолт ДЦД-800 е мощна безжична бормашина.");
+
+    const result = await repairing(engine.provider).translate(
+      requestFor("Заглавие на статията", source),
+      contextFor()
+    );
+
+    assert.equal(engine.calls.length, 1);
+    // The Cyrillic near-miss is discarded entirely — the segment stays English.
+    assert.ok(result.translatedContent?.includes(source));
+    assert.ok(!result.translatedContent?.includes("ДЦД-800"));
+    const raw = result.raw as Record<string, unknown>;
+    assert.equal(raw.repairedSegments, 0);
+    assert.equal(raw.fallbackToOriginalSegments, 1);
+    assert.deepEqual(raw.fallbackSegmentIndices, [2]);
+    assert.match(JSON.stringify(raw.repairFailureReasons), /DCD-800/);
+  });
+
+  it("requires byte identity for a URL too, not only model codes", async () => {
+    // An upper-cased URL reads as "the same" link and is not the same string. The
+    // article is padded with healthy Bulgarian segments so that the one English
+    // segment left behind cannot drag the whole article under the Bulgarian-share
+    // gate — this test is about byte identity, not about that bound.
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 1 ? "Указанията са публикувани днес." : `Преведен сегмент ${i} на български език.`
+        )
+      )
+    );
+    const engine = repairEngine(() => `Указанията са публикувани на ${URL_A.toUpperCase()} днес.`);
+    // Distinct sentences: eight identical ones would trip the repetition gate, since
+    // the stub answers each segment with the same Bulgarian string.
+    const padding = Array.from(
+      { length: 8 },
+      (_, i) => `Ordinary sentence number ${i + 1} carrying no data at all.`
+    );
+
+    const result = await repairing(engine.provider).translate(
+      requestFor(
+        "Заглавие на статията",
+        [`Guidance is published at ${URL_A} today.`, ...padding].join(" ")
+      ),
+      contextFor()
+    );
+
+    const raw = result.raw as Record<string, unknown>;
+    assert.equal(raw.repairedSegments, 0, "a case-changed URL is not the same URL");
+    assert.equal(raw.fallbackToOriginalSegments, 1);
+  });
+
+  it("does not accept an identifier that is merely a SUBSTRING of a longer token", async () => {
+    // "E15" inside "E150" is a different model. Byte identity alone would pass this.
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 1 ? "Охладителят е добър." : "Преведено изречение на български език."
+        )
+      )
+    );
+    const engine = repairEngine(() => "Охладителят MSI E150 е добър.");
+
+    const result = await repairing(engine.provider).translate(
+      requestFor("Заглавие на статията", "The MSI MEG CORELIQUID E15 cooler is good."),
+      contextFor()
+    );
+
+    const raw = result.raw as Record<string, unknown>;
+    assert.equal(raw.repairedSegments, 0);
+    assert.equal(raw.fallbackToOriginalSegments, 1);
+  });
+
+  // ─── C. The healthy path is untouched ───────────────────────────────────────
+  it("never resolves or calls the repair engine when every segment restores cleanly", async () => {
+    stubFetch(echoing);
+    let resolved = 0;
+    const engine = repairEngine(() => "не трябва да се случва");
+    const provider = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      30,
+      async () => {
+        resolved += 1;
+        return engine.provider;
+      }
+    );
+
+    await provider.translate(
+      requestFor("Заглавие", `See ${URL_A} for details about model DCD-800.`),
+      contextFor()
+    );
+
+    assert.equal(resolved, 0, "a healthy article must never even resolve an LLM");
+    assert.equal(engine.calls.length, 0);
+  });
+
+  // ─── D. Order is positional, and repair must not disturb it ─────────────────
+  it("keeps repaired, fallback and untouched segments in exact source order", async () => {
+    // Segment index 0 is the title; body sentences are indices 1-5. Indices 2 and 4
+    // fail: 2 repairs cleanly, 4 transliterates and therefore stays English.
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) => {
+          if (i === 2 || i === 4) return "Изречение без запазена стойност.";
+          return `Преведен сегмент ${i} на български език.`;
+        })
+      )
+    );
+    const engine = repairEngine((segment) =>
+      segment.includes("E15") ? "Втори сегмент с E15 запазен." : "Четвърти сегмент с ДЦД-800."
+    );
+
+    const result = await repairing(engine.provider).translate(
+      requestFor(
+        "Заглавие на статията",
+        [
+          "First ordinary sentence here.",
+          "Second sentence about the MSI MEG CORELIQUID E15 cooler.",
+          "Third ordinary sentence here.",
+          "Fourth sentence about the DeWalt DCD-800 drill.",
+          "Fifth ordinary sentence here.",
+        ].join(" ")
+      ),
+      contextFor()
+    );
+
+    const body = result.translatedContent ?? "";
+    const order = [
+      "Преведен сегмент 1",
+      "Втори сегмент с E15 запазен.",
+      "Преведен сегмент 3",
+      "Fourth sentence about the DeWalt DCD-800 drill.",
+      "Преведен сегмент 5",
+    ];
+    let cursor = -1;
+    for (const piece of order) {
+      const at = body.indexOf(piece);
+      assert.ok(at > cursor, `"${piece}" is out of source order`);
+      cursor = at;
+    }
+    const raw = result.raw as Record<string, unknown>;
+    assert.deepEqual(raw.repairedSegmentIndices, [3]);
+    assert.deepEqual(raw.fallbackSegmentIndices, [5]);
+  });
+
+  // ─── E. Too much damage fails the article ───────────────────────────────────
+  it("fails the WHOLE article rather than storing one that is mostly English", async () => {
+    // 8 segments, every one carrying an identifier MADLAD drops. The cap for 8
+    // segments is ceil(8 × 0.25) = 2, so the third failure ends the article.
+    stubFetch((body) => reply(bodyTexts(body).map(() => "Изречение без стойност.")));
+    const engine = repairEngine(() => "Превод без запазен идентификатор.");
+    const content = Array.from(
+      { length: 8 },
+      (_, i) => `Sentence ${i + 1} about the DeWalt DCD-800 drill.`
+    ).join(" ");
+
+    await assert.rejects(
+      repairing(engine.provider).translate(requestFor(null, content), contextFor()),
+      (err: unknown) =>
+        err instanceof TranslationParseError &&
+        err.reason === "protected_token" &&
+        /needed more than 2 repaired segment/.test(err.message)
+    );
+  });
+
+  it("scales the cap with article length — measured hardware reviews need 16-21%", async () => {
+    assert.equal(maxRepairsFor(59), 12, "MSI: 25% would be 15, the absolute cap is 12");
+    assert.equal(maxRepairsFor(29), 8, "XMG needed 6");
+    assert.equal(maxRepairsFor(18), 5, "Kioxia needed 3");
+    assert.equal(maxRepairsFor(56), 12, "AVerMedia needed 9");
+    // The rule this replaced (max 5, or 10%, whichever smaller) would have failed
+    // every one of those four real articles.
+    assert.ok(maxRepairsFor(29) > Math.min(5, Math.floor(29 * 0.1)));
+    assert.equal(maxRepairsFor(4), 1, "a tiny article still gets one repair");
+    assert.equal(maxRepairsFor(400), MAX_REPAIRS_PER_ARTICLE, "and a huge one is still bounded");
+  });
+
+  // ─── F. The article deadline still wins ─────────────────────────────────────
+  it("does not START a repair without a safe budget, and keeps the original instead", async () => {
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 1 ? "Изречение без стойност." : "Преведено изречение на български език."
+        )
+      )
+    );
+    const engine = repairEngine(() => "не трябва да се случва");
+    const source = "The DeWalt DCD-800 is a powerful cordless drill.";
+
+    // Deadline is real but too close to fit a repair inside it.
+    const result = await repairing(engine.provider).translate(
+      requestFor("Заглавие на статията", source),
+      contextFor({ itemDeadlineMs: Date.now() + MIN_REPAIR_BUDGET_MS - 5_000 })
+    );
+
+    assert.equal(engine.calls.length, 0, "no repair is attempted without budget");
+    assert.ok(result.translatedContent?.includes(source));
+    const raw = result.raw as Record<string, unknown>;
+    assert.equal(raw.fallbackToOriginalSegments, 1);
+    assert.match(JSON.stringify(raw.repairFailureReasons), /item budget/);
+  });
+
+  it("reports an EXHAUSTED item deadline as a timeout, not as a fallback", async () => {
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 1 ? "Изречение без стойност." : "Преведено изречение на български език."
+        )
+      )
+    );
+    const engine = repairEngine(() => "не трябва да се случва");
+
+    await assert.rejects(
+      repairing(engine.provider).translate(
+        requestFor("Заглавие на статията", "The DeWalt DCD-800 is a powerful cordless drill."),
+        contextFor({ itemDeadlineMs: Date.now() - 1 })
+      ),
+      (err: unknown) => err instanceof TranslationTimeoutError
+    );
+    assert.equal(engine.calls.length, 0);
+  });
+
+  // ─── H / I. The title is segment 1, so it is covered by the same mechanism ───
+  it("repairs a TITLE segment and stores the repaired title", async () => {
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 0 ? "[0] 360 Преглед на продукта" : "Преведено изречение на български език."
+        )
+      )
+    );
+    const engine = repairEngine(() => "MSI MEG CORELIQUID E15 360 Ревю");
+
+    const result = await repairing(engine.provider).translate(
+      requestFor("MSI MEG CORELIQUID E15 360 Review", CONTENT),
+      contextFor()
+    );
+
+    assert.equal(result.translatedTitle, "MSI MEG CORELIQUID E15 360 Ревю");
+    assert.ok(result.translatedTitle?.includes("E15"));
+    assert.deepEqual((result.raw as Record<string, unknown>).repairedSegmentIndices, [1]);
+  });
+
+  it("keeps the ORIGINAL English title — never null — when the title cannot be repaired", async () => {
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 0 ? "[0] 360 Преглед на продукта" : "Преведено изречение на български език."
+        )
+      )
+    );
+    // Transliterated: rejected, so the source title stands.
+    const engine = repairEngine(() => "МСИ МЕГ КОРЕЛИКУИД Е15 360 Ревю");
+
+    const result = await repairing(engine.provider).translate(
+      requestFor("MSI MEG CORELIQUID E15 360 Review", CONTENT),
+      contextFor()
+    );
+
+    // Null here would hand classification and generation an article with NO title,
+    // because resolveFeedItemContent returns translatedTitle verbatim beside a body.
+    assert.equal(result.translatedTitle, "MSI MEG CORELIQUID E15 360 Review");
+    assert.ok(result.translatedContent, "the body is still stored, translated");
+    assert.deepEqual((result.raw as Record<string, unknown>).fallbackSegmentIndices, [1]);
+  });
+
+  // ─── J / K. Only protected-token failures may be repaired ───────────────────
+  it("does NOT repair a repetition loop — that article still fails", async () => {
+    // The degenerate segment carries NO protected value, so restoration succeeds and
+    // the repetition gate is unambiguously what rejects the article. (A segment that
+    // both loops AND drops a placeholder would fail restoration first, which is a
+    // protected-token failure and a different test.)
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 1 ? `Въпреки това, ${"0".repeat(488)}` : "Преведено изречение на български език."
+        )
+      )
+    );
+    const engine = repairEngine(() => "не трябва да се случва");
+
+    await assert.rejects(
+      repairing(engine.provider).translate(
+        requestFor("Заглавие на статията", "An ordinary sentence with no data in it at all."),
+        contextFor()
+      ),
+      (err: unknown) => err instanceof TranslationParseError && err.reason === "repetition"
+    );
+    assert.equal(engine.calls.length, 0, "a loop is not a protected-token failure");
+  });
+
+  it("does NOT repair an untranslated (wrong-language) reply", async () => {
+    stubFetch((body) => reply(bodyTexts(body)));
+    const engine = repairEngine(() => "не трябва да се случва");
+
+    await assert.rejects(
+      repairing(engine.provider).translate(requestFor(TITLE, CONTENT), contextFor()),
+      (err: unknown) => err instanceof TranslationParseError && err.reason === "wrong_language"
+    );
+    assert.equal(engine.calls.length, 0);
+  });
+
+  it("does NOT repair a transport fault — the article fails and may still fall back", async () => {
+    stubFetch(() => json({ error: "model not loaded" }, 503));
+    const engine = repairEngine(() => "не трябва да се случва");
+
+    await assert.rejects(
+      repairing(engine.provider).translate(requestFor(TITLE, CONTENT), contextFor()),
+      (err: unknown) => err instanceof TranslationTransportError
+    );
+    assert.equal(engine.calls.length, 0);
+  });
+
+  it("does NOT repair a segment that carried no protected value at all", async () => {
+    // An invented placeholder in a segment that had none: there is nothing for the
+    // byte-exact check to verify, so a substitution here could never be validated.
+    stubFetch((body) =>
+      reply(bodyTexts(body).map(() => "Преведен текст с [[0]] в него на български."))
+    );
+    const engine = repairEngine(() => "не трябва да се случва");
+
+    await assert.rejects(
+      repairing(engine.provider).translate(requestFor(TITLE, CONTENT), contextFor()),
+      (err: unknown) => err instanceof TranslationParseError && err.reason === "protected_token"
+    );
+    assert.equal(engine.calls.length, 0);
+  });
+
+  it("preserves the pre-repair behaviour exactly when no repair engine is configured", async () => {
+    // Graceful degradation is what a deployment gets by CONFIGURING a repair engine,
+    // never by omission: with none, an unrestorable segment still fails the article
+    // rather than being stored unverified.
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 1 ? "Изречение без стойност." : "Преведено изречение на български език."
+        )
+      )
+    );
+
+    await assert.rejects(
+      repairing(null).translate(
+        requestFor("Заглавие на статията", "The DeWalt DCD-800 is a powerful cordless drill."),
+        contextFor()
+      ),
+      (err: unknown) => err instanceof TranslationParseError && err.reason === "protected_token"
+    );
+  });
+
+  it("counts repair calls in modelCalls, so a repaired article does not understate its cost", async () => {
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 1 ? "Изречение без стойност." : "Преведено изречение на български език."
+        )
+      )
+    );
+    const engine = repairEngine(() => "Изречение с DCD-800 запазен.");
+
+    const result = await repairing(engine.provider).translate(
+      requestFor("Заглавие на статията", "The DeWalt DCD-800 is a powerful cordless drill."),
+      contextFor()
+    );
+
+    assert.equal(result.modelCalls, 2, "one MADLAD batch plus one repair call");
+  });
+});
+
 // ─── Quality gate: the same bar as the prompt-based engine ────────────────────
 
 describe("MadladTranslationProvider — unusable output is rejected, not stored", () => {
@@ -622,10 +1113,15 @@ describe("MadladTranslationProvider — unusable output is rejected, not stored"
   // both title and full-sentence position, repeated 3x each (MADLAD's beam search is
   // deterministic, so repeats confirm rather than sample):
   //
-  //   • In a normal SENTENCE, every identifier tested — protected or not — survived
-  //     reliably (byte-identical when unprotected, exact restoration when protected),
-  //     matching the extensive prose measurements already recorded at the top of
-  //     protected-tokens.ts.
+  //   • CORRECTED 2026-08-20, see `brand-adjacent` below: an earlier revision of this
+  //     comment claimed identifiers "survive reliably in a normal SENTENCE". That was
+  //     WRONG, and wrong in a way worth recording, because it was drawn from short,
+  //     simple probe sentences whose identifier had no brand neighbour. Re-measured
+  //     with the identifier's NEIGHBOURS as the variable, a placeholder is lost in
+  //     ordinary prose too. What survives is an identifier standing on its own as a
+  //     grammatical subject ("The DJI [[0]] is a compact drone." → kept); what is lost
+  //     is the same placeholder next to a brand token ("The DeWalt [[0]] is a powerful
+  //     cordless drill." → dropped). Sentence-vs-title was never the real variable.
   //   • In TITLE position specifically — a bare noun phrase with no verb, several
   //     consecutive brand/model tokens and no sentence grammar for the placeholder to
   //     anchor to — content loss happened with EVERY strategy tried, protected or
@@ -642,11 +1138,8 @@ describe("MadladTranslationProvider — unusable output is rejected, not stored"
   //     fabricated title as if it were a translation. Today's placeholder-mangling
   //     failure is accidental, but it is not silent: it rejects rather than stores.
   //
-  // MADLAD-400 is a SENTENCE-level NMT model (see madlad-segmentation.ts); a headline
-  // noun phrase is out-of-distribution input for it, independent of protection. No
-  // placeholder syntax or byte-identity check closes that gap, so none is applied
-  // here — see the final report for the proposed (not implemented) title-handling
-  // strategies this points to instead.
+  // No placeholder syntax or byte-identity check closes that gap, so none is applied
+  // here — see `brand-adjacent` below for what the real variable turned out to be.
   it("REJECTS the exact production title failure — a headline's placeholder collapses, not just drops", async () => {
     stubFetch((body) =>
       reply(
@@ -662,6 +1155,64 @@ describe("MadladTranslationProvider — unusable output is rejected, not stored"
         err instanceof TranslationParseError &&
         err.reason === "protected_token" &&
         /dropped \[\[0\]\] in segment 1\/\d+/.test(err.message) &&
+        /\(E15\)/.test(err.message)
+    );
+  });
+
+  // ─── Regression: the SAME feed item fails in its BODY too — the real variable is a
+  // BRAND-ADJACENT placeholder, not a headline ────────────────────────────────────
+  //
+  // Routing the title away from MADLAD does NOT make 8cf9a29f translatable. Run
+  // DB-free against the real worker with the title withheld, the article still failed —
+  // at segment 10/58, which is an ordinary, well-formed sentence with a subject and a
+  // verb:
+  //
+  //   "Today, I'm taking a closer look at MSI's MEG CORELIQUID [[0]] 360
+  //    all-in-one liquid cooler."
+  //     → "Днес ще разгледам по-отблизо течния охладител който е всичко в едно."
+  //
+  // Every brand token AND the placeholder are gone. Holding the sentence fixed and
+  // varying ONLY the number of brand tokens beside the placeholder isolates the cause
+  // exactly (real worker, 2026-08-20):
+  //
+  //   "…a closer look at the [[0]] all-in-one liquid cooler."             KEPT
+  //   "…a closer look at the MSI [[0]] all-in-one liquid cooler."         LOST
+  //   "…a closer look at the MSI MEG [[0]] all-in-one liquid cooler."     LOST
+  //   "…a closer look at the MSI MEG CORELIQUID [[0]] all-in-one …"       LOST
+  //
+  // ONE adjacent brand token is enough. The same effect explains the controls that
+  // looked like passes earlier: "The DJI [[0]] is a compact drone." keeps its
+  // placeholder (the identifier is the subject) while "The DeWalt [[0]] is a powerful
+  // cordless drill." loses it — same shape, same length, same position, different
+  // neighbour. So this is one failure class, not a title one and a body one, and a
+  // title-level fix cannot close it: `translate()` deliberately still fails the WHOLE
+  // article, which is why 8cf9a29f is not retryable until a segment-level repair
+  // exists. See the final report for the proposed (not implemented) design.
+  it("REJECTS a brand-adjacent placeholder in ORDINARY BODY PROSE, not just in a headline", async () => {
+    // Segment 1 is the title and translates fine here; the failure is in the body,
+    // which is the whole point — this article has no headline problem left to blame.
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((_, i) =>
+          i === 1
+            ? "Днес ще разгледам по-отблизо течния охладител който е всичко в едно."
+            : "Преведен сегмент на български език."
+        )
+      )
+    );
+
+    await assert.rejects(
+      provider().translate(
+        requestFor(
+          "Заглавие на статията",
+          "Today, I'm taking a closer look at MSI's MEG CORELIQUID E15 360 all-in-one liquid cooler."
+        ),
+        contextFor()
+      ),
+      (err: unknown) =>
+        err instanceof TranslationParseError &&
+        err.reason === "protected_token" &&
+        /dropped \[\[0\]\] in segment 2\/\d+/.test(err.message) &&
         /\(E15\)/.test(err.message)
     );
   });
