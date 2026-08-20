@@ -707,11 +707,18 @@ describe("MadladTranslationProvider — transport faults", () => {
 // ─── Budgets ──────────────────────────────────────────────────────────────────
 
 describe("MadladTranslationProvider — budgets", () => {
-  it("times out an attempt that outlives its budget", async () => {
+  it("times out a batch that outlives the remaining ITEM budget", async () => {
+    // A batch's budget is its fair share of the time left on the ITEM deadline — NOT
+    // `attemptTimeoutMs`, which is deliberately not consulted for batches any more (see
+    // the 90s production abort documented in `translate()`). So the item deadline is
+    // what has to be short here for a hung worker to be cut loose.
     globalThis.fetch = (() => new Promise<Response>(() => {})) as typeof fetch;
 
     await assert.rejects(
-      provider().translate(requestFor(TITLE, null), contextFor({ attemptTimeoutMs: 20 })),
+      provider().translate(
+        requestFor(TITLE, null),
+        contextFor({ itemDeadlineMs: Date.now() + 20, itemTimeoutMs: 20 })
+      ),
       (err: unknown) => err instanceof TranslationTimeoutError
     );
   });
@@ -769,6 +776,135 @@ describe("MadladTranslationProvider — budgets", () => {
       (err: unknown) => err instanceof TranslationTimeoutError
     );
     assert.ok(requests.length < 3, "it must not have run every planned batch");
+  });
+
+  // ─── Regression: the real 90s batch abort ──────────────────────────────────
+  //
+  // Feed item 0a0e3631-2fed-4283-b686-3506a31fbc09 (2026-08-20): 29 segments, ONE
+  // batch, aborted at 90090ms with "MADLAD request exceeded its deadline (batch
+  // 1/1)" — while the 210s item budget still had ~120s left. The cause was
+  // `min(context.attemptTimeoutMs, remainingMs)`: TRANSLATION_ATTEMPT_TIMEOUT_MS is
+  // 90s, a shared cron-linked constant sized for ONE model call (one Ollama
+  // completion, or one tiny pre-batching MADLAD segment), which silently became the
+  // ceiling for a whole 29-segment batch. Real benchmarks show large batches
+  // legitimately exceed 90s.
+  // These use REAL timers with small values (the provider's timeout race is a real
+  // setTimeout), scaled so the ratio that matters is the production one: a batch that
+  // runs LONGER than `attemptTimeoutMs` but SHORTER than the item budget. Under the
+  // old `min(attemptTimeoutMs, remainingMs)` every one of these aborted; under the
+  // fair-share budget they complete.
+  describe("a batch may outlive the per-attempt constant when the item deadline allows", () => {
+    /** Answers after `ms` of REAL time — the clock the timeout race actually watches. */
+    function slowWorker(ms: number) {
+      stubFetch(
+        (body) =>
+          new Promise<Response>((resolve) => setTimeout(() => resolve(translated(body)), ms))
+      );
+    }
+
+    it("completes a batch that runs well past attemptTimeoutMs — the exact production abort", async () => {
+      // attemptTimeoutMs 20ms, worker takes 150ms, item budget 5s. This is the 90s/210s
+      // production shape in miniature: under the old code the batch was cut at
+      // `attemptTimeoutMs` even though the item deadline had plenty left.
+      slowWorker(150);
+
+      const p = new MadladTranslationProvider("http://w:3002", "k", "google/madlad400-3b-mt");
+      const result = await p.translate(
+        requestFor(TITLE, CONTENT),
+        contextFor({
+          attemptTimeoutMs: 20,
+          itemDeadlineMs: Date.now() + 5_000,
+          itemTimeoutMs: 5_000,
+        })
+      );
+
+      assert.equal(requests.length, 1, "one batch");
+      assert.ok(
+        result.translatedContent,
+        "a batch longer than attemptTimeoutMs must NOT be aborted while item time remains"
+      );
+    });
+
+    it("still aborts a batch that outlives the remaining ITEM budget", async () => {
+      // The deadline is still real and still enforced — it is now the ITEM budget
+      // rather than the shared attempt constant.
+      globalThis.fetch = (() => new Promise<Response>(() => {})) as typeof fetch;
+
+      const p = new MadladTranslationProvider("http://w:3002", "k", "google/madlad400-3b-mt");
+      await assert.rejects(
+        p.translate(
+          requestFor(TITLE, CONTENT),
+          contextFor({
+            attemptTimeoutMs: 90_000,
+            itemDeadlineMs: Date.now() + 60,
+            itemTimeoutMs: 60,
+          })
+        ),
+        (err: unknown) => err instanceof TranslationTimeoutError
+      );
+    });
+
+    it("gives each batch only a SHARE of the remaining time, so batch 1 cannot starve the rest", async () => {
+      // 10 segments at batch size 2 -> 5 batches, item budget 1000ms. Fair share is
+      // ~200ms for the first batch, so a hung worker is cut loose at roughly that,
+      // NOT after consuming the article's whole 1000ms allowance.
+      globalThis.fetch = (() => new Promise<Response>(() => {})) as typeof fetch;
+
+      const p = new MadladTranslationProvider(
+        "http://w:3002",
+        "k",
+        "google/madlad400-3b-mt",
+        "en",
+        1,
+        2
+      );
+      const startedAt = Date.now();
+      await assert.rejects(
+        p.translate(
+          requestFor(null, "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten."),
+          contextFor({
+            attemptTimeoutMs: 90_000,
+            itemDeadlineMs: startedAt + 1_000,
+            itemTimeoutMs: 1_000,
+          })
+        ),
+        (err: unknown) => err instanceof TranslationTimeoutError
+      );
+
+      const elapsed = Date.now() - startedAt;
+      assert.ok(
+        elapsed < 700,
+        `batch 1 must not consume the whole item budget; it took ${elapsed}ms of 1000ms`
+      );
+    });
+
+    it("lets every batch of a multi-batch article finish inside one item deadline", async () => {
+      // The other half of fairness: five quick batches must all complete, and the whole
+      // article must still land inside its item budget.
+      slowWorker(20);
+
+      const p = new MadladTranslationProvider(
+        "http://w:3002",
+        "k",
+        "google/madlad400-3b-mt",
+        "en",
+        1,
+        2
+      );
+      const startedAt = Date.now();
+      const result = await p.translate(
+        requestFor(null, "One. Two. Three. Four. Five. Six. Seven. Eight. Nine. Ten."),
+        contextFor({
+          attemptTimeoutMs: 20,
+          itemDeadlineMs: startedAt + 5_000,
+          itemTimeoutMs: 5_000,
+        })
+      );
+
+      assert.equal(requests.length, 5, "five batches");
+      assert.ok(result.translatedContent);
+      assert.ok(Date.now() - startedAt < 5_000, "the article must finish inside its item deadline");
+    });
   });
 
   it("refuses an article that sanitises down to nothing", async () => {

@@ -63,14 +63,6 @@ import { TranslationParseError } from "@/lib/ai/feed-item-translation";
  */
 export const MADLAD_SOURCE_LANGUAGE = "en";
 
-/**
- * Per-request cap for ONE HTTP batch call. Bounded further by the caller's own
- * budget. A batch of {@link DEFAULT_MADLAD_HTTP_BATCH_SIZE} segments measured well
- * under a minute per call in production, so this stays generous headroom rather than
- * a tight fit — it was never tight even back when it bounded a single segment.
- */
-export const MADLAD_REQUEST_TIMEOUT_MS = 120_000;
-
 /** Splits `items` into consecutive groups of at most `size`, in order, none empty. */
 function chunkIntoBatches<T>(items: readonly T[], size: number): T[][] {
   const batches: T[][] = [];
@@ -201,12 +193,38 @@ export class MadladTranslationProvider implements TranslationProvider {
     // stops the article at the budget instead of running past it; a batch that
     // throws stops all further batches and the whole call rejects, so a failed
     // batch can never lead to a partial article being reassembled or stored.
+    //
+    // `context.attemptTimeoutMs` (TRANSLATION_ATTEMPT_TIMEOUT_MS, 90s) is NOT used
+    // here. It is a SHARED, cron-linked constant sized for "one model call" in the
+    // shape it has always meant — one Ollama completion, or, before batching existed,
+    // one tiny MADLAD segment (see its own doc comment: "a healthy capped-body
+    // translation lands in ~45-60s, so 90s is generous"). A BATCH of up to
+    // `httpBatchSize` segments is not that shape: a real 29-segment batch in
+    // production ran past 90s and was wrongly aborted (feed item
+    // 0a0e3631-2fed-4283-b686-3506a31fbc09, 2026-08-20, "MADLAD request exceeded its
+    // deadline (batch 1/1)" at 90090ms — exactly `min(attemptTimeoutMs, remainingMs)`
+    // with remainingMs still comfortably above it). Reusing that constant here would
+    // silently re-impose a per-segment-era limit on a batch-era request, and it is
+    // shared with Ollama, so it cannot simply be raised without changing Ollama's
+    // own timeout too — which is out of scope.
+    //
+    // Instead each batch gets a FAIR SHARE of whatever article time is actually
+    // left, split across the batches not yet attempted. For a single-batch article
+    // (httpBatchCount 1 — exactly the failing case above) this is the entire
+    // remaining item budget, which is the direct fix. For a multi-batch article it
+    // both prevents an early batch from starving the ones after it (bounded by
+    // dividing, not by taking everything) AND is self-correcting: a batch that
+    // finishes faster than its share leaves MORE than a flat share for the next
+    // one, since remainingMs shrinks by less than budgetMs did. By construction
+    // `budgetMs` can never exceed `remainingMs`, so the TOTAL across every batch
+    // can never exceed the article's own item deadline either.
     const batchReplies: BatchReply[] = [];
     let segmentsSentSoFar = 0;
     for (const batch of batches) {
       const remainingMs = context.itemDeadlineMs - now().getTime();
       if (remainingMs <= 0) throw new TranslationTimeoutError(context.itemTimeoutMs, "item");
-      const budgetMs = Math.min(context.attemptTimeoutMs, remainingMs);
+      const remainingBatches = batches.length - batchReplies.length;
+      const budgetMs = Math.max(1, Math.floor(remainingMs / remainingBatches));
 
       const reply = await withTranslationTimeout(
         this.callWorkerBatch(
@@ -424,7 +442,13 @@ export class MadladTranslationProvider implements TranslationProvider {
           sourceLanguage: this.sourceLang,
           targetLanguage: targetLang,
         }),
-        signal: requestSignal(Math.min(MADLAD_REQUEST_TIMEOUT_MS, Math.max(1, budgetMs))),
+        // `budgetMs` is the caller's fair-share-of-remaining-article-time budget (see
+        // `translate()`), already bounded by the item deadline — no separate fixed
+        // ceiling is applied here. A previous fixed ceiling (120s) was removed after
+        // it was proven wrong by a real production batch (see `translate()`'s
+        // comment); a hardcoded guess is exactly the failure class this fix removes,
+        // not one to reintroduce at a different number.
+        signal: requestSignal(Math.max(1, budgetMs)),
       });
     } catch (err) {
       if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
