@@ -1,8 +1,4 @@
-import {
-  capTranslationContent,
-  sanitiseTranslationContent,
-  MAX_TRANSLATION_CONTENT_CHARS,
-} from "@/lib/ai/feed-item-translation";
+import { capTranslationContent, sanitiseTranslationContent } from "@/lib/ai/feed-item-translation";
 
 /**
  * Cutting an article into pieces MADLAD can actually translate, and putting the
@@ -40,6 +36,31 @@ import {
  * reliably longer than its English source — still fits with room to spare.
  */
 export const MAX_SEGMENT_CHARS = 700;
+
+/**
+ * No article-level content budget, by default.
+ *
+ * `MAX_TRANSLATION_CONTENT_CHARS` (3000, in feed-item-translation.ts) exists for the
+ * PROMPT-BASED engine: it sends the whole body in ONE call and must get back ONE
+ * complete JSON reply inside a wall-clock budget, so an oversized body risks a 300s
+ * timeout or a reply truncated mid-JSON (see that constant's own comment). MADLAD does
+ * not have that failure mode — this module already cuts the body into independent,
+ * sentence-sized calls bounded by {@link MAX_SEGMENT_CHARS} each — so applying the same
+ * 3000-char article cap here was inherited, not needed, and its actual effect in
+ * production was silent data loss: feed item 825c8475 (23,416 raw chars) was capped to
+ * 3,003 before segmentation ever ran, translated only its opening ~13%, and was stored
+ * as `completed` with no signal that ~87% of the article was simply never sent.
+ *
+ * Going uncapped is safe here specifically BECAUSE the per-item wall-clock ceiling
+ * (`TRANSLATION_ITEM_TIMEOUT_MS`) already guards the total cost: `translate()` below
+ * checks the remaining item budget before every segment call and throws a clean
+ * {@link TranslationTimeoutError} rather than ever returning a partial article — so an
+ * article too long to finish fails visibly and retries with the normal backoff, exactly
+ * like any other over-budget item, instead of silently completing with most of its text
+ * missing. That per-item ceiling is shared with the cron's own run budget and is left
+ * untouched here.
+ */
+export const NO_CONTENT_CAP = Number.POSITIVE_INFINITY;
 
 /**
  * A leading list/heading marker, held out of the translated text.
@@ -118,7 +139,12 @@ export interface SegmentedArticle {
 }
 
 export interface SegmentArticleOptions {
-  /** Body-character budget. Defaults to the same cap the prompt-based engine uses. */
+  /**
+   * Body-character budget. Unbounded (`Infinity`) by default — see
+   * {@link NO_CONTENT_CAP} for why this must NOT default to the prompt-based engine's
+   * {@link MAX_TRANSLATION_CONTENT_CHARS}. Tests pass an explicit value to exercise
+   * capping deliberately (see the "caps the body…" test in madlad-segmentation.test.ts).
+   */
   maxContentChars?: number;
   /** Per-segment character cap. Defaults to {@link MAX_SEGMENT_CHARS}. */
   maxSegmentChars?: number;
@@ -243,9 +269,11 @@ function chunkSentence(sentence: string, limit: number): Separated[] {
 /**
  * Cuts an article into translatable segments.
  *
- * The body is sanitised and capped with the SAME helpers the prompt-based engine
- * uses, so the two engines are given the same article and a benchmark compares
- * translation quality rather than input budgets.
+ * The body is sanitised with the SAME cleanup the prompt-based engine uses (stripped
+ * markup, boilerplate trailers, language-switcher noise — see
+ * sanitiseTranslationContent), so both engines translate the same ARTICLE. Capping is
+ * deliberately NOT shared by default: see {@link NO_CONTENT_CAP} for why the prompt-based
+ * engine's article-length budget does not apply to a segment-at-a-time engine.
  */
 export function segmentArticle(
   title: string | null,
@@ -266,10 +294,7 @@ export function segmentArticle(
   let contentChars = 0;
   if (options.mode !== "title_only") {
     const cleaned = sanitiseTranslationContent(content);
-    const capped = capTranslationContent(
-      cleaned,
-      options.maxContentChars ?? MAX_TRANSLATION_CONTENT_CHARS
-    );
+    const capped = capTranslationContent(cleaned, options.maxContentChars ?? NO_CONTENT_CAP);
     contentChars = capped?.length ?? 0;
 
     if (capped) {

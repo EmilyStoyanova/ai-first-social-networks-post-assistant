@@ -91,10 +91,39 @@ describe("segmentArticle", () => {
     assert.ok(segments.every((s) => s.trim().length > 0));
   });
 
-  it("caps the body with the same budget the prompt-based engine uses", () => {
+  it("caps the body when an explicit budget is given", () => {
     const huge = "Изречение за проверка. ".repeat(1000);
     const { contentChars } = segmentArticle("t", huge, { maxContentChars: 500 });
     assert.ok(contentChars <= 500, `sent ${contentChars} chars against a 500 budget`);
+  });
+
+  // ─── Regression: real production truncation (MADLAD, feed item 825c8475, 2026-08-20) ──
+  //
+  // segmentArticle used to default its article-level budget to the PROMPT-BASED engine's
+  // MAX_TRANSLATION_CONTENT_CHARS (3000) — a limit that exists because that engine sends
+  // the whole body in one call and must get back one complete JSON reply inside a
+  // wall-clock budget. MADLAD has no such call: it already cuts the body into independent,
+  // sentence-sized segments (MAX_SEGMENT_CHARS). Sharing the 3000-char article cap anyway
+  // meant a 23,416-char real article was capped to 3,003 chars BEFORE segmentation ever
+  // ran, silently translating only its opening ~13% while the item was stored `completed`
+  // with no signal anything was missing. See NO_CONTENT_CAP.
+  it("does NOT cap the body by default — the article-level cap is opt-in, not inherited", () => {
+    const huge = "Изречение за проверка. ".repeat(1000); // 24,000 chars, well over the old 3000 cap
+    const { contentChars } = segmentArticle("t", huge, {});
+    assert.ok(
+      contentChars > 3000,
+      `default segmentation must not silently cap at the prompt-based engine's budget, got ${contentChars}`
+    );
+    assert.equal(contentChars, huge.trim().length, "the full sanitised body must be sent uncapped");
+  });
+
+  it("never appends the prompt-based engine's truncation marker when uncapped", () => {
+    const huge = "Изречение за проверка. ".repeat(1000);
+    const { segments } = segmentArticle(null, huge, {});
+    assert.ok(
+      segments.every((s) => !s.includes("[…]")),
+      "an uncapped article must never be marked as an excerpt"
+    );
   });
 
   it("defaults the segment cap to MAX_SEGMENT_CHARS", () => {
