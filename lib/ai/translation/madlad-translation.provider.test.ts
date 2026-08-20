@@ -544,6 +544,63 @@ describe("MadladTranslationProvider — unusable output is rejected, not stored"
       (err: unknown) => !(err instanceof TranslationTransportError)
     );
   });
+
+  // ─── Regression: real production degeneration (MADLAD, feed item 6d3c5514-b786-
+  // 48b8-b467-5ad28bfca0ce, 2026-08-20) ──────────────────────────────────────────
+  //
+  // Segment 17/26 of a real article (source text ending "...pl 5985.") degenerated
+  // into a `repeated_char` loop — MADLAD translated the leading clause coherently,
+  // then got stuck generating "0" 488 times while producing a number ("1985 г., ...
+  // 100000...0"). The other 25 segments in the SAME batch translated fine, and the
+  // article-level quality gate correctly rejected the whole thing.
+  //
+  // INVESTIGATED AND REJECTED: an isolated-segment retry (re-sending only the failing
+  // segment, singular or as a batch of one, and accepting it if that attempt passes).
+  // Live against the real worker, the exact failing segment was sent 3x via singular
+  // `{text}` and 3x via `texts:[one]` — all 6 runs reproduced the IDENTICAL 543-char
+  // degenerate output, byte for byte. This is not a coincidence: `protectTokens`
+  // output for one segment never depends on what else is in its batch, and MADLAD's
+  // beam search is deterministic (`maxTries = 1` above, for the same reason) — so a
+  // segment that degenerates has EXACTLY the same input whether it is retried alone
+  // or was part of a batch, and therefore is GUARANTEED to reproduce the same
+  // output. An isolated retry can only ever help a failure that batching itself
+  // caused (cross-segment contamination, padding, etc.) — proven NOT the case here —
+  // never a failure that is a property of the segment's own content. Implementing a
+  // retry here would add HTTP calls and complexity for a class of failure it can
+  // never fix, so `translate()` correctly still fails the WHOLE article on any
+  // single degenerate segment, exactly as it did before batching existed.
+  it("fails the WHOLE article when exactly one segment in an otherwise-healthy batch degenerates", async () => {
+    stubFetch((body) =>
+      reply(
+        bodyTexts(body).map((t, i) =>
+          i === 16 ? `Въпреки това, ${"0".repeat(488)}` : `Преведен сегмент ${i} на български език.`
+        )
+      )
+    );
+
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      30
+    );
+    const content = Array.from(
+      { length: 25 },
+      (_, i) => `Real sentence number ${i + 1} here.`
+    ).join(" ");
+
+    await assert.rejects(
+      p.translate(requestFor(TITLE, content), contextFor()),
+      (err: unknown) => err instanceof TranslationParseError && err.reason === "repetition"
+    );
+    assert.equal(
+      requests.length,
+      1,
+      "no retry is attempted — the whole article fails on the first batch"
+    );
+  });
 });
 
 // ─── Transport faults: distinct from bad output, because only these may fall back ──
