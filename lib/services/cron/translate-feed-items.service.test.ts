@@ -77,7 +77,7 @@ describe("translateFeedItems", () => {
     const deps = makeDeps([makeCandidate("a"), makeCandidate("b")]);
     const summary = await translateFeedItems({ companyId: "c1" }, deps);
 
-    assert.deepEqual(summary, { scanned: 2, translated: 2, failed: 0, skipped: 0 });
+    assert.deepEqual(summary, { scanned: 2, translated: 2, failed: 0, skipped: 0, deferred: 0 });
     assert.deepEqual(
       deps.calls.map((c) => c.id),
       ["a", "b"]
@@ -163,7 +163,7 @@ describe("translateFeedItems", () => {
   it("does nothing when there is no backlog", async () => {
     const deps = makeDeps([]);
     const summary = await translateFeedItems({ companyId: "c1" }, deps);
-    assert.deepEqual(summary, { scanned: 0, translated: 0, failed: 0, skipped: 0 });
+    assert.deepEqual(summary, { scanned: 0, translated: 0, failed: 0, skipped: 0, deferred: 0 });
   });
 
   it("squeezes each item's own budget down to what the run has left", async () => {
@@ -199,7 +199,7 @@ describe("translateFeedItems", () => {
     );
 
     assert.equal(deps.calls.length, 0, "no item may start on an unusable budget");
-    assert.deepEqual(summary, { scanned: 0, translated: 0, failed: 0, skipped: 0 });
+    assert.deepEqual(summary, { scanned: 0, translated: 0, failed: 0, skipped: 0, deferred: 0 });
   });
 
   it("counts an item skipped for having no source text, without stopping the batch", async () => {
@@ -231,5 +231,138 @@ describe("translateFeedItems", () => {
       deps.calls.map((c) => c.id),
       ["a"]
     );
+  });
+});
+
+// ─── Size-aware admission: don't start what the run cannot finish ─────────────
+
+/**
+ * The flat {@link MIN_TRANSLATION_ITEM_BUDGET_MS} floor is one number for every
+ * article, but MADLAD splits an article into HTTP batches and gives each a fair SHARE
+ * of the item budget. So the longer the article, the less time each batch gets out of
+ * the same remaining run budget — something a flat floor cannot see.
+ *
+ * Feed item 5bdc0e48-827e-4b73-9990-e5d3b0446b87 is the exact failure this prevents:
+ * 99 segments / 4 batches, admitted because the run had 33,340ms left and
+ * 33,340 > 20,000, whereupon MADLAD correctly computed floor(33,340 / 4) = 8,335ms per
+ * batch and batch 1/4 aborted at ~8,335ms. Measured, the article needs ~82.8s.
+ */
+const MADLAD_ENV = {
+  TRANSLATION_PROVIDER: "madlad",
+  TEXT_WORKER_URL: "http://w:3002",
+  TEXT_WORKER_API_KEY: "k",
+};
+
+/** Body long enough to segment into `n` sentences, so batch count is controllable. */
+function bodyOfSentences(n: number): string {
+  return Array.from({ length: n }, (_, i) => `Real sentence number ${i + 1} here.`).join(" ");
+}
+
+function longCandidate(id: string, sentences: number): Candidate {
+  return { ...makeCandidate(id), content: bodyOfSentences(sentences) };
+}
+
+describe("translateFeedItems — size-aware admission", () => {
+  it("defers a 4-batch article when the run has only the ~33s that broke 5bdc0e48", async () => {
+    // 99 sentences + title → 4 batches at size 30 → needs 4 × 25s = 100s.
+    const deps = makeDeps([longCandidate("big", 99)]);
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => 33_340 },
+      { ...deps, env: MADLAD_ENV }
+    );
+
+    assert.equal(deps.calls.length, 0, "the article that can only abort is never started");
+    assert.equal(summary.deferred, 1);
+    assert.equal(summary.scanned, 0, "a deferred item was never scanned, let alone attempted");
+  });
+
+  it("does not fail, claim, or otherwise touch a deferred item", async () => {
+    const deps = makeDeps([longCandidate("big", 99)]);
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => 33_340 },
+      { ...deps, env: MADLAD_ENV }
+    );
+
+    // `translate` is what claims the item and increments its attempt count; never
+    // calling it is exactly what keeps the item eligible with its attempts intact.
+    assert.equal(deps.calls.length, 0);
+    assert.equal(summary.failed, 0, "deferring is not failing");
+    assert.equal(summary.skipped, 0, "nor is it skipping");
+    assert.equal(summary.translated, 0);
+  });
+
+  it("still runs a short one-batch item on the same budget", async () => {
+    // A handful of sentences → 1 batch → needs 25s, and 33.3s is enough.
+    const deps = makeDeps([longCandidate("small", 5)]);
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => 33_340 },
+      { ...deps, env: MADLAD_ENV }
+    );
+
+    assert.equal(deps.calls.length, 1, "a small article still fits and must not be deferred");
+    assert.equal(summary.translated, 1);
+    assert.equal(summary.deferred, 0);
+  });
+
+  it("runs the SAME long article when the run has enough budget for it", async () => {
+    const deps = makeDeps([longCandidate("big", 99)]);
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => 200_000 },
+      { ...deps, env: MADLAD_ENV }
+    );
+
+    assert.equal(deps.calls.length, 1);
+    assert.equal(summary.translated, 1);
+    assert.equal(summary.deferred, 0);
+  });
+
+  it("defers only the article that does not fit and keeps going", async () => {
+    // `continue`, not `break`: a later short article can still be translated.
+    const deps = makeDeps([longCandidate("big", 99), longCandidate("small", 4)]);
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => 33_340 },
+      { ...deps, env: MADLAD_ENV }
+    );
+
+    assert.deepEqual(
+      deps.calls.map((c) => c.id),
+      ["small"]
+    );
+    assert.equal(summary.deferred, 1);
+    assert.equal(summary.translated, 1);
+  });
+
+  it("leaves the per-item timeout semantics untouched once an item IS admitted", async () => {
+    const deps = makeDeps([longCandidate("big", 99)]);
+    await translateFeedItems(
+      { companyId: "c1", remainingMs: () => 150_000 },
+      { ...deps, env: MADLAD_ENV }
+    );
+
+    // Still the pre-existing squeeze: min(TRANSLATION_ITEM_TIMEOUT_MS, remaining).
+    assert.equal(deps.calls[0].itemTimeoutMs, 150_000);
+    assert.ok(deps.calls[0].itemTimeoutMs! <= TRANSLATION_ITEM_TIMEOUT_MS);
+  });
+
+  it("does not apply to the prompt-based engine, whose cost does not scale with segments", async () => {
+    // Ollama sends ONE request per article, so a long article is not more batches and
+    // the flat floor already covers it. Nothing about that path may change here.
+    const deps = makeDeps([longCandidate("big", 99)]);
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => 33_340 },
+      { ...deps, env: { TRANSLATION_PROVIDER: "ollama" } }
+    );
+
+    assert.equal(deps.calls.length, 1, "the Ollama path is unchanged by the MADLAD gate");
+    assert.equal(summary.deferred, 0);
+  });
+
+  it("does not gate at all when the run reports no budget (the interactive path)", async () => {
+    const deps = makeDeps([longCandidate("big", 99)]);
+    const summary = await translateFeedItems({ companyId: "c1" }, { ...deps, env: MADLAD_ENV });
+
+    assert.equal(deps.calls.length, 1);
+    assert.equal(deps.calls[0].itemTimeoutMs, undefined, "no budget means no squeeze, as before");
+    assert.equal(summary.deferred, 0);
   });
 });

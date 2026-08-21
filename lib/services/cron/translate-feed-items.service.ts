@@ -1,10 +1,14 @@
 import { prisma } from "@/lib/db/client";
 import {
+  buildTranslationPrompts,
+  estimatedTranslationBudgetMs,
   MIN_TRANSLATION_ITEM_BUDGET_MS,
   TRANSLATION_BATCH_SIZE,
   TRANSLATION_ITEM_TIMEOUT_MS,
   resolveTranslationConfig,
 } from "@/lib/ai/feed-item-translation";
+import { segmentArticle } from "@/lib/ai/translation/madlad-segmentation";
+import { resolveTranslationProviderConfig } from "@/lib/ai/translation/translation-provider-config";
 import { translationSelectableWhere } from "@/lib/ai/feed-item-translation-claim";
 import {
   translateFeedItem,
@@ -27,6 +31,13 @@ export interface TranslateFeedItemsSummary {
   translated: number;
   failed: number;
   skipped: number;
+  /**
+   * Items left for a future run because this one had too little budget for an article
+   * of their size. Counted separately from `skipped` (a source with translation turned
+   * off) and from `failed`: a deferred item was never claimed, never attempted and is
+   * still fully eligible — nothing about it changed.
+   */
+  deferred: number;
   /** Set when the batch stopped early because no default provider is configured. */
   reason?: "no_provider";
 }
@@ -39,6 +50,8 @@ export interface TranslateFeedItemsDeps {
   findCandidates?: (companyId: string, limit: number) => Promise<CandidateRow[]>;
   loadCompanyLang?: (companyId: string) => Promise<string>;
   translate?: typeof translateFeedItem;
+  /** Defaults to `process.env`. Injected so the admission gate is testable. */
+  env?: Record<string, string | undefined>;
 }
 
 const SELECT = {
@@ -106,7 +119,21 @@ export async function translateFeedItems(
       return company?.defaultLang ?? "en";
     });
 
-  const summary: TranslateFeedItemsSummary = { scanned: 0, translated: 0, failed: 0, skipped: 0 };
+  const summary: TranslateFeedItemsSummary = {
+    scanned: 0,
+    translated: 0,
+    failed: 0,
+    skipped: 0,
+    deferred: 0,
+  };
+
+  // The size-aware gate below only makes sense for an engine that splits an article
+  // into several HTTP calls. The prompt-based engine sends ONE request per article, so
+  // its cost does not scale with segment count and the flat floor already covers it —
+  // reading the config here keeps this file from guessing which engine will run.
+  const providerConfig = resolveTranslationProviderConfig(deps.env ?? process.env);
+  const translationEngineIsBatched = providerConfig.kind === "madlad";
+  const madladHttpBatchSize = providerConfig.madladHttpBatchSize;
 
   const candidates = await findCandidates(opts.companyId, limit);
   if (candidates.length === 0) return summary;
@@ -131,6 +158,32 @@ export async function translateFeedItems(
     // that can only time out (and burn one of its five cross-run attempts doing so).
     const remaining = opts.remainingMs?.();
     if (remaining !== undefined && remaining <= MIN_TRANSLATION_ITEM_BUDGET_MS) break;
+
+    // And too little left for THIS article specifically. The floor above is one number
+    // for every article, but MADLAD splits the item budget into a fair share per HTTP
+    // batch, so a long article started on a nearly-spent run gives each batch a slice
+    // too small to answer in and aborts on batch 1 (feed item 5bdc0e48: 99 segments,
+    // 33,340ms left, floor(33,340/4) = 8,335ms, aborted at 8,335ms). Deferring costs
+    // nothing — the item is NOT claimed here, so it keeps its attempt count, its status
+    // and its place in the queue, and the very next run picks it up with a full budget.
+    // `continue`, not `break`: a shorter article later in the batch may still fit.
+    if (remaining !== undefined && translationEngineIsBatched) {
+      const { segments } = segmentArticle(item.title, item.content, {
+        mode: buildTranslationPrompts(item.title, item.content, cfg.targetLanguage).mode,
+      });
+      const requiredBudgetMs = estimatedTranslationBudgetMs(segments.length, madladHttpBatchSize);
+      if (remaining < requiredBudgetMs) {
+        console.info("[rss-translation] translation item deferred due to insufficient run budget", {
+          feedItemId: item.id,
+          remainingRunBudgetMs: remaining,
+          segments: segments.length,
+          estimatedBatchCount: Math.max(1, Math.ceil(segments.length / madladHttpBatchSize)),
+          requiredBudgetMs,
+        });
+        summary.deferred += 1;
+        continue;
+      }
+    }
 
     summary.scanned += 1;
     const outcome: TranslateFeedItemOutcome = await translate(

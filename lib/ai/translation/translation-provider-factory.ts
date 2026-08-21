@@ -109,7 +109,20 @@ export async function buildTranslationProvider(
         config.madladModel,
         MADLAD_SOURCE_LANGUAGE,
         config.madladConcurrency,
-        config.madladHttpBatchSize
+        config.madladHttpBatchSize,
+        // Repairs the individual segments MADLAD cannot carry — see segment-repair.ts.
+        // LAZY on purpose: this closure is invoked at most once per article, and only
+        // after a segment has actually failed restoration, so an article with no
+        // brand-adjacent identifier never resolves an LLM at all and "MADLAD does not
+        // touch the LLM selection" stays true for every article but those.
+        //
+        // NOTE the coupling, stated rather than hidden: the repair engine is the ADMIN
+        // DEFAULT LLM, the same one `TRANSLATION_MADLAD_FALLBACK=ollama` already uses.
+        // Changing that default changes which model repairs a segment, which is why
+        // the engine and model that answered are recorded on the trace, in the log
+        // line and in `raw` rather than assumed — and why every repaired segment is
+        // verified byte-for-byte regardless of which model produced it.
+        () => buildOllamaTranslationProvider({ resolveLlm: options.resolveLlm, env })
       ),
       config,
     };
