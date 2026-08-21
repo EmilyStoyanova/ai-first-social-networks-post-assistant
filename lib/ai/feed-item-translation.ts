@@ -282,6 +282,52 @@ export const TRANSLATION_ITEM_TIMEOUT_MS = 210_000;
 export const MIN_TRANSLATION_ITEM_BUDGET_MS = 20_000;
 
 /**
+ * What ONE MADLAD HTTP batch costs, for the admission estimate below.
+ *
+ * 25s, measured against the production worker rather than guessed. Real articles,
+ * whole-article wall clock divided by batch count:
+ *
+ *   Intel Xeon 658X   99 segments   4 batches   82.8s   →  20.7s / batch
+ *   MSI E15 360       59 segments   2 batches   28.2s   →  14.1s / batch
+ *   AVerMedia         56 segments   2 batches   28.2s   →  14.1s / batch
+ *   Cerebras         140 segments   5 batches            (same 20-30s band)
+ *
+ * The observed band is 14-21s, so 25s sits above every measurement: this number is
+ * used to decide whether to START an article, and erring high defers an article to
+ * the next run (costless — it stays pending) while erring low starts one that can
+ * only time out and burn an attempt. Deliberately NOT an environment knob: it
+ * describes what the hardware does, and a deployment that changes hardware should
+ * re-measure rather than tune a guess.
+ */
+export const ESTIMATED_MADLAD_BATCH_MS = 25_000;
+
+/**
+ * The run budget an article of `segmentCount` segments needs before it is worth
+ * starting, given the MADLAD batch size in force.
+ *
+ * ── Why a flat floor was not enough ──────────────────────────────────────────
+ * {@link MIN_TRANSLATION_ITEM_BUDGET_MS} is a single number for every article, but
+ * MADLAD's own per-batch budget is a fair SHARE of the item budget — the item
+ * deadline divided by the batch count. So the bigger the article, the less time each
+ * batch gets from the same remaining budget, and a flat floor cannot see that.
+ *
+ * Feed item 5bdc0e48-827e-4b73-9990-e5d3b0446b87 is the exact failure: 99 segments,
+ * 4 batches, admitted because the run had 33,340ms left and 33,340 > 20,000. MADLAD
+ * then correctly computed floor(33,340 / 4) = 8,335ms per batch and batch 1/4 aborted
+ * at ~8,335ms. The article genuinely needs ~82.8s. It was doomed at admission, and it
+ * spent one of its five cross-run attempts proving it — which is precisely what the
+ * floor's own comment says the floor exists to prevent.
+ *
+ * The estimate deliberately ignores the data-only bypass (see `isDataOnlySegment`),
+ * which can only REMOVE batches: counting every segment can therefore overestimate
+ * the batch count but never underestimate it, so the gate errs toward deferring.
+ */
+export function estimatedTranslationBudgetMs(segmentCount: number, httpBatchSize: number): number {
+  const batches = Math.max(1, Math.ceil(segmentCount / Math.max(1, httpBatchSize)));
+  return batches * ESTIMATED_MADLAD_BATCH_MS;
+}
+
+/**
  * Rough token estimate for DIAGNOSTICS ONLY (~4 chars/token). Cyrillic tokenises higher than
  * Latin, so treat this as a lower bound. It exists to correlate slow or timed-out
  * translations with input/output size when the worker does not forward Ollama's exact token

@@ -264,6 +264,8 @@ describe("MadladTranslationProvider — the reply", () => {
       httpBatchSize: 30,
       workerRequests: 1,
       protectedTokens: 0,
+      bypassedDataOnlySegments: 0,
+      bypassedDataOnlyIndices: [],
       // A healthy article reports the repair counters as ZERO rather than omitting
       // them, so "no segment needed repair" and "this payload predates repair" are
       // distinguishable in stored data instead of both reading as an absent field.
@@ -575,6 +577,172 @@ function repairing(engine: TranslationProvider | null, batchSize = 30) {
     engine === null ? null : async () => engine
   );
 }
+
+// ─── Data-only bypass: a spec-table cell is data, not language ────────────────
+
+/**
+ * ServeTheHome-style articles arrive with their HTML comparison tables flattened one
+ * CELL per line, so an article's specification block becomes dozens of segments that
+ * are a single value each ("44GB", "43.2PB/sec", "16U"). `protectTokens` turns each
+ * into a bare "[[0]]" — and a lone placeholder is the one input MADLAD reliably
+ * mangles, answering "[0]". On feed item 67e084f6-61cf-41c8-8946-608290e7ea83 that was
+ * 23 of 33 restoration failures.
+ *
+ * The bypass is lossless rather than lenient: every value in such a segment is
+ * protected, so a SUCCESSFUL restoration would have reproduced the source byte for
+ * byte. Returning the source directly is the same answer, reached without the
+ * round-trip that can only lose it.
+ */
+describe("MadladTranslationProvider — data-only segments are never sent", () => {
+  it("does not send a bare protected technical value to the model", async () => {
+    stubFetch(translated);
+    const result = await provider().translate(
+      requestFor("Заглавие на статията", "The rack holds the drives.\n\n44GB\n\n43.2PB/sec"),
+      contextFor()
+    );
+
+    const sent = requests.flatMap((r) => bodyTexts(r.body));
+    assert.ok(!sent.includes("[[0]]"), "a lone placeholder must never go on the wire");
+    assert.ok(!sent.some((t) => /^\s*(\[\[\d+\]\]\s*)+$/.test(t)));
+    const raw = result.raw as Record<string, unknown>;
+    assert.equal(raw.bypassedDataOnlySegments, 2);
+  });
+
+  it("bypasses a segment of several protected values joined by punctuation", async () => {
+    stubFetch(translated);
+    const result = await provider().translate(
+      requestFor("Заглавие на статията", "The rack holds the drives.\n\nDCD-800 / TX-2/B"),
+      contextFor()
+    );
+
+    assert.equal((result.raw as Record<string, unknown>).bypassedDataOnlySegments, 1);
+  });
+
+  it("does NOT bypass prose that merely CONTAINS a protected value", async () => {
+    stubFetch(echoing);
+    const result = await provider().translate(
+      requestFor("Заглавие на статията", "The system has 44GB of SRAM. Supports 6E networking."),
+      contextFor()
+    );
+
+    const raw = result.raw as Record<string, unknown>;
+    assert.equal(raw.bypassedDataOnlySegments, 0, "one word of prose disqualifies a segment");
+    const sent = requests.flatMap((r) => bodyTexts(r.body)).join(" ");
+    assert.ok(sent.includes("[[0]]"), "prose segments still go to the model, protected");
+  });
+
+  it("stores a bypassed segment byte-identically", async () => {
+    stubFetch(translated);
+    const result = await provider().translate(
+      requestFor("Заглавие на статията", "The rack holds the drives.\n\n43.2PB/sec"),
+      contextFor()
+    );
+
+    assert.ok(
+      result.translatedContent?.includes("43.2PB/sec"),
+      "the source value must survive exactly, not as a translation of itself"
+    );
+  });
+
+  it("keeps bypassed and translated segments in exact source order", async () => {
+    stubFetch((body) =>
+      reply(bodyTexts(body).map((_, i) => `Преведен сегмент ${i} на български език.`))
+    );
+    const result = await provider().translate(
+      requestFor(
+        "Заглавие на статията",
+        ["First real sentence here.", "44GB", "Second real sentence here.", "16U"].join("\n\n")
+      ),
+      contextFor()
+    );
+
+    const body = result.translatedContent ?? "";
+    const order = ["Преведен сегмент 1", "44GB", "Преведен сегмент 2", "16U"];
+    let cursor = -1;
+    for (const piece of order) {
+      const at = body.indexOf(piece);
+      assert.ok(at > cursor, `"${piece}" is out of source order`);
+      cursor = at;
+    }
+    assert.deepEqual((result.raw as Record<string, unknown>).bypassedDataOnlyIndices, [3, 5]);
+  });
+
+  it("consumes NO repair quota and is counted apart from repairs and fallbacks", async () => {
+    let resolved = 0;
+    stubFetch(translated);
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      30,
+      async () => {
+        resolved += 1;
+        return null;
+      }
+    );
+    const result = await p.translate(
+      requestFor(
+        "Заглавие на статията",
+        ["A real sentence here.", "44GB", "40GB", "16U", "CS-4"].join("\n\n")
+      ),
+      contextFor()
+    );
+
+    assert.equal(resolved, 0, "a bypass is not a repair — no repair engine is resolved");
+    const raw = result.raw as Record<string, unknown>;
+    assert.equal(raw.bypassedDataOnlySegments, 4);
+    assert.equal(raw.repairedSegments, 0);
+    assert.equal(raw.fallbackToOriginalSegments, 0);
+  });
+
+  // The shape that started this: a Cerebras-like article whose table cells alone would
+  // blow the cap. 40 segments → cap 10. 20 data cells + 4 prose failures: 24
+  // interventions without the bypass, 4 with it.
+  it("keeps a table-heavy article under the repair cap that its cells alone would blow", async () => {
+    const prose = Array.from({ length: 20 }, (_, i) => `Real sentence number ${i + 1} here.`);
+    const cells = Array.from({ length: 20 }, (_, i) => `${i + 10}GB`);
+    stubFetch((body) =>
+      reply(bodyTexts(body).map((_, i) => `Преведен сегмент ${i} на български език.`))
+    );
+
+    const result = await provider().translate(
+      requestFor("Заглавие на статията", [...prose, ...cells].join("\n\n")),
+      contextFor()
+    );
+
+    const raw = result.raw as Record<string, unknown>;
+    assert.equal(raw.bypassedDataOnlySegments, 20);
+    assert.equal(raw.repairedSegments, 0);
+    assert.equal(raw.fallbackToOriginalSegments, 0);
+    // And every cell is still present, exactly.
+    for (const cell of cells) assert.ok(result.translatedContent?.includes(cell));
+  });
+
+  it("refuses an article that is nothing BUT data rather than storing it untranslated", async () => {
+    stubFetch(translated);
+    await assert.rejects(
+      provider().translate(requestFor(null, "44GB\n\n40GB\n\n16U"), contextFor()),
+      (err: unknown) => err instanceof TranslationParseError && err.reason === "empty_translation"
+    );
+    assert.equal(requests.length, 0, "nothing translatable means nothing is sent");
+  });
+
+  it("still names the correct ARTICLE segment in an error when earlier segments were bypassed", async () => {
+    // Segments: 1 title, 2 "44GB" (bypassed), 3 prose. A worker fault on the prose
+    // segment must name 3/3, not 2/3, even though it was the 2nd thing SENT.
+    stubFetch((body) => reply(bodyTexts(body).map((_, i) => (i === 1 ? "" : "Преведен текст."))));
+
+    await assert.rejects(
+      provider().translate(
+        requestFor("Заглавие на статията", "44GB\n\nA real sentence here."),
+        contextFor()
+      ),
+      (err: unknown) => err instanceof TranslationTransportError && /segment 3\/3/.test(err.message)
+    );
+  });
+});
 
 describe("MadladTranslationProvider — segment repair", () => {
   // ─── A. The real production case ────────────────────────────────────────────

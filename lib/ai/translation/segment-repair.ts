@@ -1,4 +1,4 @@
-import type { ProtectedValue } from "./protected-tokens";
+import type { ProtectedText, ProtectedValue } from "./protected-tokens";
 import type { TranslationProvider } from "./translation-provider";
 
 /**
@@ -89,6 +89,55 @@ export const MAX_REPAIRS_PER_ARTICLE = 12;
 export function maxRepairsFor(segmentCount: number): number {
   return Math.min(Math.ceil(segmentCount * MAX_REPAIR_SHARE), MAX_REPAIRS_PER_ARTICLE);
 }
+
+/**
+ * A segment with nothing to translate: after protection, only placeholders remain.
+ *
+ * ── Why this exists ──────────────────────────────────────────────────────────
+ * ServeTheHome (and any site with HTML comparison tables) is extracted one table
+ * CELL per line, so an article's specification table arrives as dozens of segments
+ * that are a single value each:
+ *
+ *   "44GB"   "43.2PB/sec"   "16U"   "CS-4"   "300GB/sec"
+ *
+ * Every one of those is a protected identifier, so `protectTokens` turns the WHOLE
+ * segment into a bare "[[0]]". Sending that to a translation model is meaningless —
+ * there is no language in it — and measured against the real worker it is actively
+ * harmful: MADLAD answers a lone "[[0]]" with "[0]", collapsing the brackets, which
+ * `restoreTokens` correctly refuses. On feed item
+ * 67e084f6-61cf-41c8-8946-608290e7ea83 that accounted for **23 of 33** restoration
+ * failures (140 segments, 23.6% → 7.1% once bypassed), i.e. the model was being
+ * asked to translate data and then failing the article for mangling it.
+ *
+ * The bypass is LOSSLESS by construction, not a quality compromise: every value in
+ * such a segment is protected, so a SUCCESSFUL restoration would have substituted
+ * each placeholder back to its exact source value and reproduced the source segment
+ * byte for byte. Returning the source directly is therefore the same answer the
+ * model could have given at best — reached without the round-trip that can only
+ * lose it. Nothing is skipped that could have been translated.
+ *
+ * ── Deliberately conservative ────────────────────────────────────────────────
+ * Two conditions, both required:
+ *   • the segment carries at least one PROTECTED value — a segment with none has
+ *     never had this failure mode, and leaving it alone keeps the change from
+ *     touching ordinary prose or bare numbers ("900,000", "Up to 4 TB") at all;
+ *   • removing the placeholders leaves NO letter, in any script — so a single word
+ *     of prose anywhere in the segment disqualifies it.
+ *
+ * Bypassed:      "44GB" → "[[0]]"          "[[0]] / [[1]]"        "16U"
+ * NOT bypassed:  "The system has [[0]] of SRAM."   "Supports [[0]] networking."
+ *                "WSE-3 Turbo" → "[[0]] Turbo"     "Model [[0]] improves speed."
+ */
+export function isDataOnlySegment(protectedText: ProtectedText): boolean {
+  if (protectedText.values.length === 0) return false;
+  return !ANY_LETTER.test(protectedText.text.replace(PLACEHOLDER_PATTERN, ""));
+}
+
+/** Mirrors `protected-tokens.ts`'s placeholder syntax — kept in step with it. */
+const PLACEHOLDER_PATTERN = /\[\[\d+\]\]/g;
+
+/** A letter in ANY script: what "there is still something to translate" means here. */
+const ANY_LETTER = /\p{L}/u;
 
 /** Letters (any script) and digits — what may not sit against an identifier's edge. */
 const ALPHANUMERIC = /[\p{L}\p{N}]/u;

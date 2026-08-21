@@ -22,7 +22,13 @@ interface Harness {
   failed: Array<{ actions: Record<string, unknown>; error: string }>;
 }
 
-const OK: TranslateFeedItemsSummary = { scanned: 2, translated: 2, failed: 0, skipped: 0 };
+const OK: TranslateFeedItemsSummary = {
+  scanned: 2,
+  translated: 2,
+  failed: 0,
+  skipped: 0,
+  deferred: 0,
+};
 
 function harness(overrides: Partial<TranslationCronDeps> = {}): Harness {
   const state: Harness = { translated: [], finished: [], failed: [], deps: {} };
@@ -60,7 +66,7 @@ describe("runTranslationCron — bounded batching", () => {
       },
       translate: async ({ companyId }) => {
         h.translated.push(companyId);
-        return { scanned: 2, translated: 2, failed: 0, skipped: 1 };
+        return { scanned: 2, translated: 2, failed: 0, skipped: 1, deferred: 0 };
       },
     });
 
@@ -130,7 +136,7 @@ describe("runTranslationCron — continuation across runs", () => {
       translate: async ({ companyId }) => {
         const take = Math.min(batch, pending[companyId]);
         pending[companyId] -= take;
-        return { scanned: take, translated: take, failed: 0, skipped: 0 };
+        return { scanned: take, translated: take, failed: 0, skipped: 0, deferred: 0 };
       },
       countRemaining: async () => withPending().reduce((sum, c) => sum + pending[c], 0),
     };
@@ -219,7 +225,7 @@ describe("runTranslationCron — partial company failure", () => {
       translate: async ({ companyId }) => {
         if (companyId === "cBad") throw new Error("translate boom");
         drained.push(companyId);
-        return { scanned: 1, translated: 1, failed: 0, skipped: 0 };
+        return { scanned: 1, translated: 1, failed: 0, skipped: 0, deferred: 0 };
       },
     });
 
@@ -240,8 +246,8 @@ describe("runTranslationCron — partial company failure", () => {
       selectCompanies: async () => ["c1", "c2"],
       translate: async ({ companyId }) =>
         companyId === "c1"
-          ? { scanned: 3, translated: 1, failed: 2, skipped: 0 }
-          : { scanned: 2, translated: 2, failed: 0, skipped: 0 },
+          ? { scanned: 3, translated: 1, failed: 2, skipped: 0, deferred: 0 }
+          : { scanned: 2, translated: 2, failed: 0, skipped: 0, deferred: 0 },
     });
 
     const s = await runTranslationCron(h.deps);

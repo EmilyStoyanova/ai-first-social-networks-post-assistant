@@ -20,6 +20,7 @@ import {
 import { buildTranslationPrompts, TranslationParseError } from "@/lib/ai/feed-item-translation";
 import {
   emptyRepairReport,
+  isDataOnlySegment,
   maxRepairsFor,
   MIN_REPAIR_BUDGET_MS,
   originalSegments,
@@ -103,6 +104,21 @@ function repairMetadata(report: RepairReport): Record<string, unknown> {
     repairFailureReasons: report.records
       .filter((r) => r.reason !== null)
       .map((r) => ({ segment: r.segment, reason: r.reason, lostValues: r.lostValues ?? [] })),
+  };
+}
+
+/**
+ * The bypass facts, under their OWN names.
+ *
+ * Deliberately separate from the repair counters: a bypassed segment was never sent,
+ * never repaired and never fell back, so folding it into `repairedSegments` or
+ * `fallbackToOriginalSegments` would overstate both and hide the one thing a reader
+ * needs to know — that the pipeline recognised the segment as data and left it alone.
+ */
+function dataOnlyMetadata(indices: readonly number[]): Record<string, unknown> {
+  return {
+    bypassedDataOnlySegments: indices.length,
+    bypassedDataOnlyIndices: [...indices],
   };
 }
 
@@ -192,9 +208,31 @@ export class MadladTranslationProvider implements TranslationProvider {
     const protectedValues: ProtectedValue[][] = protectedSegments.map((p) => p.values);
     const protectedCount = protectedValues.reduce((sum, v) => sum + v.length, 0);
 
+    // A segment that is nothing BUT protected values — a flattened spec-table cell like
+    // "44GB" or "43.2PB/sec" — carries no language at all, and a successful restoration
+    // would hand back its source byte for byte anyway. It is therefore never sent: the
+    // model can only damage it (a lone "[[0]]" comes back as "[0]"), and on feed item
+    // 67e084f6 that was 23 of 33 restoration failures. See isDataOnlySegment.
+    const dataOnly = protectedSegments.map(isDataOnlySegment);
+    const dataOnlyIndices = dataOnly.flatMap((v, i) => (v ? [i + 1] : []));
+    /** Article indices, in order, of the segments actually sent to the worker. */
+    const sendIndices = segments.map((_, i) => i).filter((i) => !dataOnly[i]);
+
+    if (sendIndices.length === 0) {
+      // Every segment is data. Storing it verbatim would record an untranslated article
+      // as "completed", so this fails loudly instead — a parse failure rather than a
+      // transport one, because the engine is fine and the INPUT is not translatable.
+      throw new TranslationParseError(
+        `Nothing translatable in ${segments.length} segment(s) — every segment is protected data.`,
+        "empty_translation"
+      );
+    }
+
     // HTTP batches — see DEFAULT_MADLAD_HTTP_BATCH_SIZE. Computed up front: chunking
     // is deterministic, so the planned request count is known before the first call.
-    const batches = chunkIntoBatches(protectedSegments, this.httpBatchSize);
+    // Batches carry ARTICLE indices, so a batch knows which segment each entry is and
+    // every diagnostic stays article-level even though the bypassed ones are absent.
+    const batches = chunkIntoBatches(sendIndices, this.httpBatchSize);
 
     context.reportTry?.(1);
     console.info("[rss-translation] attempt", {
@@ -204,6 +242,8 @@ export class MadladTranslationProvider implements TranslationProvider {
       engine: "madlad",
       model: this.model,
       segments: segments.length,
+      segmentsSent: sendIndices.length,
+      bypassedDataOnlySegments: dataOnlyIndices.length,
       httpBatchSize: this.httpBatchSize,
       httpBatchCount: batches.length,
       protectedTokens: protectedCount,
@@ -219,13 +259,15 @@ export class MadladTranslationProvider implements TranslationProvider {
         sourceLanguage: this.sourceLang,
         targetLanguage: request.targetLang,
         // What actually goes on the wire, placeholders and all — so a trace shows the
-        // request as sent rather than a tidied-up version of it.
-        segments: protectedSegments.map((p) => p.text),
+        // request as sent rather than a tidied-up version of it. Bypassed data-only
+        // segments are absent here because they are genuinely never sent.
+        segments: sendIndices.map((i) => protectedSegments[i].text),
       },
       metadata: {
         engine: "madlad",
         model: this.model,
         segmentCount: segments.length,
+        segmentsSent: sendIndices.length,
         httpBatchSize: this.httpBatchSize,
         httpBatchCount: batches.length,
         contentChars,
@@ -233,6 +275,7 @@ export class MadladTranslationProvider implements TranslationProvider {
         hasTitle: plan.titleIndex !== null,
         protectedTokens: protectedCount,
         protectedKinds: protectedValues.flat().map((v) => v.kind),
+        ...dataOnlyMetadata(dataOnlyIndices),
       },
     });
 
@@ -271,7 +314,6 @@ export class MadladTranslationProvider implements TranslationProvider {
     // `budgetMs` can never exceed `remainingMs`, so the TOTAL across every batch
     // can never exceed the article's own item deadline either.
     const batchReplies: BatchReply[] = [];
-    let segmentsSentSoFar = 0;
     for (const batch of batches) {
       const remainingMs = context.itemDeadlineMs - now().getTime();
       if (remainingMs <= 0) throw new TranslationTimeoutError(context.itemTimeoutMs, "item");
@@ -280,10 +322,12 @@ export class MadladTranslationProvider implements TranslationProvider {
 
       const reply = await withTranslationTimeout(
         this.callWorkerBatch(
-          batch.map((p) => p.text),
+          batch.map((i) => protectedSegments[i].text),
           request.targetLang,
           budgetMs,
-          segmentsSentSoFar,
+          // Article-level indices, so an error names the segment the ARTICLE has even
+          // though bypassed segments were never in the batch.
+          batch,
           batchReplies.length,
           batches.length,
           segments.length
@@ -292,10 +336,15 @@ export class MadladTranslationProvider implements TranslationProvider {
         "attempt"
       );
       batchReplies.push(reply);
-      segmentsSentSoFar += batch.length;
     }
 
-    const translations = batchReplies.flatMap((reply) => reply.texts);
+    // Back to ARTICLE order and ARTICLE length. A bypassed segment takes its own source
+    // text verbatim; everything else takes the worker's answer, in the order it was sent.
+    const sentTexts = batchReplies.flatMap((reply) => reply.texts);
+    const translations: string[] = segments.slice();
+    sendIndices.forEach((articleIndex, sentPosition) => {
+      translations[articleIndex] = sentTexts[sentPosition];
+    });
     const batchDurations = batchReplies
       .map((reply) => reply.durationMs)
       .filter((ms): ms is number => ms !== null);
@@ -366,6 +415,7 @@ export class MadladTranslationProvider implements TranslationProvider {
         translations,
         protectedSegments,
         segments,
+        dataOnly,
         request,
         context
       );
@@ -419,6 +469,7 @@ export class MadladTranslationProvider implements TranslationProvider {
         // was failed" is the first question asked of an article that hit the cap.
         repairedSegments: repairedSegments(repairReport).length,
         fallbackToOriginalSegments: originalSegments(repairReport).length,
+        bypassedDataOnlySegments: dataOnlyIndices.length,
         elapsedMs: now().getTime() - callStartedAt.getTime(),
         error: reason,
       });
@@ -430,13 +481,24 @@ export class MadladTranslationProvider implements TranslationProvider {
         status: "failed",
         output: { willRetry: false },
         error: err,
-        metadata: repairMetadata(repairReport),
+        metadata: { ...repairMetadata(repairReport), ...dataOnlyMetadata(dataOnlyIndices) },
       });
       throw err;
     }
 
     const repaired = repairedSegments(repairReport);
     const leftOriginal = originalSegments(repairReport);
+    if (dataOnlyIndices.length > 0) {
+      // Its own line, not folded into the repair summary: these segments were never
+      // sent and never repaired, and an operator comparing "segments" against
+      // "workerRequests × batchSize" needs to see why the two no longer agree.
+      console.info("[rss-translation] data-only segments bypassed", {
+        feedItemId: request.feedItemId,
+        segments: segments.length,
+        segmentsSent: sendIndices.length,
+        ...dataOnlyMetadata(dataOnlyIndices),
+      });
+    }
     if (repairReport.records.length > 0) {
       // Never only in the trace: an article carrying English segments must be visible
       // to someone reading logs, not just to someone who opens the run.
@@ -468,6 +530,7 @@ export class MadladTranslationProvider implements TranslationProvider {
         protectedTokens: protectedCount,
         urls: extractUrls(segments.join("\n")).length,
         ...repairMetadata(repairReport),
+        ...dataOnlyMetadata(dataOnlyIndices),
       },
     });
 
@@ -498,6 +561,7 @@ export class MadladTranslationProvider implements TranslationProvider {
         workerRequests: batches.length,
         protectedTokens: protectedCount,
         ...repairMetadata(repairReport),
+        ...dataOnlyMetadata(dataOnlyIndices),
       },
     };
   }
@@ -513,6 +577,8 @@ export class MadladTranslationProvider implements TranslationProvider {
     translations: readonly string[],
     protectedSegments: readonly ProtectedText[],
     sourceSegments: readonly string[],
+    /** Per-segment: was this bypassed as data-only and therefore never sent? */
+    dataOnly: readonly boolean[],
     request: ArticleTranslationRequest,
     context: ArticleTranslationContext
   ): Promise<{ restored: string[]; forGate: string[]; report: RepairReport }> {
@@ -527,6 +593,26 @@ export class MadladTranslationProvider implements TranslationProvider {
     for (let index = 0; index < translations.length; index += 1) {
       const values = protectedSegments[index].values;
       const where = `segment ${index + 1}/${sourceSegments.length}`;
+
+      if (dataOnly[index]) {
+        // Never sent, so there is nothing to restore and nothing to verify. The stored
+        // text is the source byte for byte — exactly what a successful restoration
+        // would have produced, since every value in it was protected. Consumes NO
+        // repair quota and is counted under its own metric.
+        //
+        // It contributes NOTHING to the quality gate, deliberately. The gate judges what
+        // the MODEL produced, and no model ran here. Feeding it the placeholder form
+        // instead is actively wrong: every such segment renders as "[[0]]" (each segment
+        // numbers its own placeholders from zero), so a table of two dozen cells reads to
+        // `detectRepetition` as the word "0" repeated two dozen times and condemns a
+        // perfectly good article as a decoding loop. Feeding it the SOURCE would be wrong
+        // the other way — a run of Latin letters dragging the Bulgarian-share check down.
+        // An empty string is the honest answer: this segment was not translated, so it is
+        // not evidence either for or against the translation's quality.
+        restored.push(sourceSegments[index]);
+        forGate.push("");
+        continue;
+      }
 
       /** The restoration failure, kept so it can be re-thrown unchanged if unrepairable. */
       let restorationError: unknown;
@@ -699,8 +785,12 @@ export class MadladTranslationProvider implements TranslationProvider {
     texts: string[],
     targetLang: string,
     budgetMs: number,
-    /** Article-level index of this batch's FIRST segment — for diagnosable errors. */
-    startIndex: number,
+    /**
+     * Article-level index (0-based) of each entry in `texts`, in the same order.
+     * Carried rather than derived from a start offset because data-only segments are
+     * bypassed, so a batch's entries are no longer contiguous in the article.
+     */
+    articleIndices: readonly number[],
     batchIndex: number,
     batchCount: number,
     totalSegments: number
@@ -786,7 +876,7 @@ export class MadladTranslationProvider implements TranslationProvider {
     const validated: string[] = [];
     for (let i = 0; i < data.texts.length; i += 1) {
       const entry: unknown = data.texts[i];
-      const segmentWhere = `segment ${startIndex + i + 1}/${totalSegments} (${where})`;
+      const segmentWhere = `segment ${articleIndices[i] + 1}/${totalSegments} (${where})`;
       if (typeof entry !== "string") {
         throw new TranslationTransportError(
           `MADLAD worker returned no text for ${segmentWhere}: got ${typeof entry}`
