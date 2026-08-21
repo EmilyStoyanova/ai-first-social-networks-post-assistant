@@ -91,7 +91,7 @@
     "intro": {
       "heading": "Social media post generator",
       "lead": "Create high-quality, relevant content for Facebook, Instagram and LinkedIn with AI.",
-      "description": "The platform finds suitable content across RSS feeds, product pages, events and other sources, analyses it, and turns it into posts adapted to your company, your brand and the channel you pick.",
+      "description": "The platform finds suitable content across RSS articles, product pages, events and other sources, analyses it, and turns it into posts adapted to your company, your brand and the channel you pick.",
       "flowLabel": "How it works",
       "flow": {
         "sources": "Sources",
