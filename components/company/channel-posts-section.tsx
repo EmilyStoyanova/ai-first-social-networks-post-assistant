@@ -17,6 +17,7 @@ import {
   type PostStatusFilter,
 } from "@/lib/posts/post-status-filter";
 import { groupPostsByTopic } from "@/lib/posts/post-groups";
+import { applyPostEdit } from "@/lib/posts/apply-post-edit";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { PostRole } from "@/lib/posts/post-actions";
 
@@ -95,6 +96,13 @@ export function ChannelPostsSection({
     setPosts((prev) => prev.filter((post) => post.id !== id));
   }
 
+  /** A saved edit lands in the list, not only in the card that made it — see
+   *  the note on `handleEdited` in GeneratedPostsSection. No refresh: nothing
+   *  outside this grid reads a post's text. */
+  function handleEdited(id: string, content: string, hashtags: string[]) {
+    setPosts((prev) => applyPostEdit(prev, id, content, hashtags));
+  }
+
   function handleStatusChange(id: string, newStatus: string) {
     setPosts((prev) =>
       prev.map((post) => (post.id === id ? { ...post, status: newStatus } : post))
@@ -150,6 +158,7 @@ export function ChannelPostsSection({
               bufferConnected={bufferConnected}
               onDelete={handleDelete}
               onStatusChange={handleStatusChange}
+              onEdited={handleEdited}
               isGlobalAdmin={isGlobalAdmin}
             />
           ))}

@@ -19,6 +19,7 @@ import {
   type PostStatusFilter,
 } from "@/lib/posts/post-status-filter";
 import { groupPostsByTopic } from "@/lib/posts/post-groups";
+import { applyPostEdit } from "@/lib/posts/apply-post-edit";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
 import type { GenerationChannelOption } from "@/lib/posts/generation-channels";
@@ -156,6 +157,23 @@ export function GeneratedPostsSection({
   }
 
   /**
+   * A post's text or hashtags were saved.
+   *
+   * No `router.refresh()` here, unlike a status change: nothing outside this
+   * grid reads a post's text — the tab badge and the filter counts are about
+   * status — so the local record is the whole update, and refreshing would cost
+   * a server round trip to re-render text that is already correct.
+   *
+   * The card has repainted itself already. What this fixes is the record behind
+   * it: without it the list still held the pre-edit text, and the card re-seeds
+   * from the list whenever it remounts, which the channel-version selector does
+   * every time it moves to a sibling and back.
+   */
+  function handleEdited(id: string, content: string, hashtags: string[]) {
+    setPosts((prev) => applyPostEdit(prev, id, content, hashtags));
+  }
+
+  /**
    * A card owns its own status while an action is in flight, but the list owns
    * the counts — so an approve/reject/submit has to land here too. Without it
    * the card's badge would flip while the post stayed in "Pending approval"
@@ -273,6 +291,7 @@ export function GeneratedPostsSection({
               bufferConnected={bufferConnected}
               onDelete={handleDelete}
               onStatusChange={handleStatusChange}
+              onEdited={handleEdited}
               // Per version, because each channel's post has its own reach. A
               // post generated after page load has no metrics row yet, so it
               // falls back to the disabled/pending state rather than crashing.

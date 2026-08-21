@@ -114,6 +114,24 @@ export function PostCalendar({
     router.refresh();
   }
 
+  /**
+   * A post was edited in the modal.
+   *
+   * `router.refresh()` rather than a local patch, because this component
+   * deliberately holds no post state at all — `entries` is decided on the server
+   * and every cell chip draws `entry.post.text` straight from it. Refreshing IS
+   * updating the source of truth here; patching would mean introducing the local
+   * copy this file exists to avoid.
+   *
+   * The write has already committed by the time this runs, so the refresh brings
+   * back the edited text, and the open card is showing that same text from its
+   * own state in the meantime — there is no window in which the old value
+   * returns.
+   */
+  function handleEdited() {
+    router.refresh();
+  }
+
   function handleDeleted() {
     setOpenPostId(null);
     router.refresh();
@@ -261,6 +279,7 @@ export function PostCalendar({
             bufferConnected={bufferConnected}
             onDelete={handleDeleted}
             onStatusChange={handleChanged}
+            onEdited={handleEdited}
             isGlobalAdmin={isGlobalAdmin}
           />
         </Modal>

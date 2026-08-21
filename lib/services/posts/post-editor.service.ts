@@ -17,13 +17,67 @@ export interface EditPostInput {
   hashtags: string[];
 }
 
+/**
+ * A successful edit reports what was WRITTEN, not what was asked for.
+ *
+ * The two differ: content is trimmed and hashtags are trimmed and emptied out
+ * below, so a client that echoed its own request back into the UI would show a
+ * value the database does not hold. The card seeds its visible text from this,
+ * which is why it is part of the result rather than something the caller has to
+ * re-fetch.
+ */
 export type UpdatePostResult =
-  | { success: true }
+  | { success: true; content: string; hashtags: string[] }
   | {
       success: false;
       code: "NOT_FOUND" | "FORBIDDEN" | "POST_LOCKED" | "VALIDATION_ERROR";
       message?: string;
     };
+
+// ── Injectable surface ──────────────────────────────────────────────────────
+// The narrow slice of Prisma `updatePost` touches, so the edit rules are
+// provable without a database. Same pattern, and same reason, as ApprovalDb in
+// post-approval.service.ts: the real client satisfies this shape, and tests
+// inject a fake that captures writes.
+
+export interface PostEditorDb {
+  post: {
+    findUnique: (args: {
+      where: { id: string };
+      select: { companyId: true; status: true; content: true; hashtags: true };
+    }) => Promise<{
+      companyId: string;
+      status: string;
+      content: string;
+      hashtags: string[];
+    } | null>;
+    update: (args: {
+      where: { id: string };
+      data: { content?: string; hashtags?: string[] };
+    }) => Promise<unknown>;
+  };
+  postVersion: {
+    findFirst: (args: {
+      where: { postId: string };
+      orderBy: { version: "desc" };
+      select: { version: true };
+    }) => Promise<{ version: number } | null>;
+    create: (args: {
+      data: { postId: string; version: number; content: string; changedBy: string };
+    }) => Promise<unknown>;
+  };
+  companyMember: {
+    findFirst: (args: {
+      where: { companyId: string; userId: string };
+      select: { role: true };
+    }) => Promise<{ role: string } | null>;
+  };
+}
+
+export interface PostEditorDeps {
+  db?: PostEditorDb;
+  auditLog?: typeof createAuditLog;
+}
 
 export type GetVersionsResult =
   | { success: true; versions: PostVersionItem[] }
@@ -38,6 +92,7 @@ export type RestoreVersionResult =
     };
 
 async function resolvePostAccess(
+  db: PostEditorDb,
   postId: string,
   userId: string,
   isGlobalAdmin: boolean
@@ -49,7 +104,7 @@ async function resolvePostAccess(
       isOwner: boolean;
     }
 > {
-  const post = await prisma.post.findUnique({
+  const post = await db.post.findUnique({
     where: { id: postId },
     select: { companyId: true, status: true, content: true, hashtags: true },
   });
@@ -59,7 +114,7 @@ async function resolvePostAccess(
     return { ok: true, post, isOwner: true };
   }
 
-  const membership = await prisma.companyMember.findFirst({
+  const membership = await db.companyMember.findFirst({
     where: { companyId: post.companyId, userId },
     select: { role: true },
   });
@@ -68,8 +123,8 @@ async function resolvePostAccess(
   return { ok: true, post, isOwner: membership.role === "owner" };
 }
 
-async function nextVersionNumber(postId: string): Promise<number> {
-  const last = await prisma.postVersion.findFirst({
+async function nextVersionNumber(db: PostEditorDb, postId: string): Promise<number> {
+  const last = await db.postVersion.findFirst({
     where: { postId },
     orderBy: { version: "desc" },
     select: { version: true },
@@ -81,13 +136,17 @@ export async function updatePost(
   postId: string,
   userId: string,
   isGlobalAdmin: boolean,
-  input: EditPostInput
+  input: EditPostInput,
+  deps: PostEditorDeps = {}
 ): Promise<UpdatePostResult> {
+  const db: PostEditorDb = deps.db ?? prisma;
+  const writeAuditLog = deps.auditLog ?? createAuditLog;
+
   if (!input.content.trim()) {
     return { success: false, code: "VALIDATION_ERROR", message: "Content cannot be empty." };
   }
 
-  const ctx = await resolvePostAccess(postId, userId, isGlobalAdmin);
+  const ctx = await resolvePostAccess(db, postId, userId, isGlobalAdmin);
   if (!ctx.ok) return { success: false, code: ctx.code };
 
   if (!EDITABLE_STATUSES.has(ctx.post.status)) {
@@ -107,18 +166,18 @@ export async function updatePost(
     changedFields.push("hashtags");
   }
 
-  const version = await nextVersionNumber(postId);
+  const version = await nextVersionNumber(db, postId);
 
-  await prisma.postVersion.create({
+  await db.postVersion.create({
     data: { postId, version, content: ctx.post.content, changedBy: userId },
   });
 
-  await prisma.post.update({
+  await db.post.update({
     where: { id: postId },
     data: { content: newContent, hashtags: newHashtags },
   });
 
-  await createAuditLog({
+  await writeAuditLog({
     companyId: ctx.post.companyId,
     userId,
     action: AUDIT_ACTIONS.POST_EDITED,
@@ -127,7 +186,7 @@ export async function updatePost(
     metadata: { changedFields },
   });
 
-  return { success: true };
+  return { success: true, content: newContent, hashtags: newHashtags };
 }
 
 export async function getPostVersions(
@@ -135,7 +194,7 @@ export async function getPostVersions(
   userId: string,
   isGlobalAdmin: boolean
 ): Promise<GetVersionsResult> {
-  const ctx = await resolvePostAccess(postId, userId, isGlobalAdmin);
+  const ctx = await resolvePostAccess(prisma, postId, userId, isGlobalAdmin);
   if (!ctx.ok) return { success: false, code: ctx.code };
 
   const rows = await prisma.postVersion.findMany({
@@ -170,7 +229,7 @@ export async function restoreVersion(
   userId: string,
   isGlobalAdmin: boolean
 ): Promise<RestoreVersionResult> {
-  const ctx = await resolvePostAccess(postId, userId, isGlobalAdmin);
+  const ctx = await resolvePostAccess(prisma, postId, userId, isGlobalAdmin);
   if (!ctx.ok) return { success: false, code: ctx.code };
 
   if (!ctx.isOwner) return { success: false, code: "FORBIDDEN" };
@@ -189,7 +248,7 @@ export async function restoreVersion(
   });
   if (!ver) return { success: false, code: "VERSION_NOT_FOUND" };
 
-  const version = await nextVersionNumber(postId);
+  const version = await nextVersionNumber(prisma, postId);
 
   await prisma.postVersion.create({
     data: { postId, version, content: ctx.post.content, changedBy: userId },

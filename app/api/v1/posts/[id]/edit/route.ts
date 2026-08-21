@@ -67,5 +67,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
   }
 
-  return NextResponse.json({ ok: true });
+  // `ok: true` is kept exactly as it was; `post` is added beside it. It carries
+  // the values as PERSISTED (content trimmed, blank hashtags dropped), so the
+  // card can repaint from the write rather than from the request it made — and
+  // without a second fetch to read back what this call already knows.
+  return NextResponse.json({
+    ok: true,
+    post: { content: result.content, hashtags: result.hashtags },
+  });
 }

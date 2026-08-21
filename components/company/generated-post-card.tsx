@@ -116,6 +116,14 @@ interface Props {
   bufferConnected: boolean;
   onDelete: (id: string) => void;
   onStatusChange?: (id: string, newStatus: string) => void;
+  /**
+   * A post's text or hashtags were saved. Reported for the same reason
+   * `onStatusChange` is: the card repaints from its own state, but the record
+   * lives in whatever owns the list, and a card that remounts — the channel
+   * selector moving to a sibling and back — re-seeds from that record. A parent
+   * that ignores this shows the pre-edit text again on the next remount.
+   */
+  onEdited?: (id: string, content: string, hashtags: string[]) => void;
   /** Engagement metrics by post id (v2-7). Optional so callers that do not
    *  show analytics (the approval queue) need not thread it through. */
   metrics?: Record<string, PostMetricsView>;
@@ -164,6 +172,7 @@ export function GeneratedPostCard({
   bufferConnected,
   onDelete,
   onStatusChange,
+  onEdited,
   metrics,
   canManageAnalyticsKey = false,
   isGlobalAdmin = false,
@@ -188,6 +197,7 @@ export function GeneratedPostCard({
       bufferConnected={bufferConnected}
       onDelete={onDelete}
       onStatusChange={onStatusChange}
+      onEdited={onEdited}
       metrics={metrics?.[selected.id]}
       canManageAnalyticsKey={canManageAnalyticsKey}
       isGlobalAdmin={isGlobalAdmin}
@@ -206,6 +216,7 @@ interface BodyProps {
   bufferConnected: boolean;
   onDelete: (id: string) => void;
   onStatusChange?: (id: string, newStatus: string) => void;
+  onEdited?: (id: string, content: string, hashtags: string[]) => void;
   metrics?: PostMetricsView;
   canManageAnalyticsKey?: boolean;
   isGlobalAdmin?: boolean;
@@ -221,6 +232,7 @@ function GeneratedPostCardBody({
   bufferConnected,
   onDelete,
   onStatusChange,
+  onEdited,
   metrics,
   canManageAnalyticsKey = false,
   isGlobalAdmin = false,
@@ -350,9 +362,18 @@ function GeneratedPostCardBody({
   }, []);
 
   // ── Edit ──────────────────────────────────────────────────────────────────
+  /**
+   * Called only after the save has been accepted — the modal throws on a failed
+   * response and stays open, so nothing below ever runs on unsaved text.
+   *
+   * Local state first, because that is what this card paints; then the parent,
+   * which owns the record. Both are the values the server reported writing, so
+   * the two cannot disagree and a later refresh cannot roll either one back.
+   */
   function handlePostSaved(newContent: string, newHashtags: string[]) {
     setLocalText(newContent);
     setLocalHashtags(newHashtags);
+    onEdited?.(post.id, newContent, newHashtags);
   }
 
   // ── Approval ──────────────────────────────────────────────────────────────

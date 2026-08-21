@@ -97,7 +97,21 @@ export function EditPostModal({
         const json = (await res.json()) as { error?: { message?: string } };
         throw new Error(apiError(json.error));
       }
-      onSaved(text, hashtags);
+
+      // What the server WROTE, not what we asked it to write: it trims the
+      // content and drops blank hashtags, so echoing the form values back would
+      // leave the card showing something the database does not hold. Falls back
+      // to the submitted values if the field is absent, so an older response
+      // shape still saves correctly rather than blanking the post.
+      const json = (await res.json()) as {
+        post?: { content?: unknown; hashtags?: unknown };
+      };
+      const savedContent = typeof json.post?.content === "string" ? json.post.content : text;
+      const savedHashtags = Array.isArray(json.post?.hashtags)
+        ? json.post.hashtags.filter((h): h is string => typeof h === "string")
+        : hashtags;
+
+      onSaved(savedContent, savedHashtags);
       onClose();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
