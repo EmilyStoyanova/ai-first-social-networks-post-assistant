@@ -88,6 +88,38 @@
     "tagline": "Post Assistant"
   },
   "auth": {
+    "intro": {
+      "heading": "Social media post generator",
+      "lead": "Create high-quality, relevant content for Facebook, Instagram and LinkedIn with AI.",
+      "description": "The platform finds suitable content across RSS feeds, product pages, events and other sources, analyses it, and turns it into posts adapted to your company, your brand and the channel you pick.",
+      "flowLabel": "How it works",
+      "flow": {
+        "sources": "Sources",
+        "analysis": "AI analysis",
+        "generation": "Generation",
+        "publishing": "Publishing"
+      },
+      "capabilitiesLabel": "What the platform does",
+      "capabilities": {
+        "discovery": {
+          "title": "Content discovery",
+          "description": "Track new articles and other sources that fit your audience, automatically."
+        },
+        "analysis": {
+          "title": "AI analysis and selection",
+          "description": "The system scores the content and prioritises the topics most relevant to your business."
+        },
+        "generation": {
+          "title": "Post generation",
+          "description": "AI writes posts adapted to each social network, following the language, tone and brand guidelines."
+        },
+        "publishing": {
+          "title": "Review, scheduling and publishing",
+          "description": "Approve posts, schedule them and manage your content from one place."
+        }
+      },
+      "closing": "Less time hunting for ideas. More quality content for your audience."
+    },
     "login": {
       "email": "Email",
       "password": "Password",

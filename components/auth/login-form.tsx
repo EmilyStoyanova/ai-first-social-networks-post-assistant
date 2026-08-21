@@ -108,8 +108,10 @@ export function LoginForm({
   }
 
   return (
-    <div className="bg-bg flex min-h-screen flex-1 items-center justify-center px-4 py-12">
-      <div className="rounded-card border-border bg-surface w-full max-w-md border px-5 py-8 shadow-sm sm:px-8 sm:py-10">
+    // The page owns the placement (split screen on desktop, stacked on mobile);
+    // this component owns the card.
+    <div className="mx-auto w-full max-w-md">
+      <div className="rounded-card border-border bg-surface border px-5 py-8 shadow-md sm:px-8 sm:py-10">
         {/* Brand */}
         <div className="mb-8 flex flex-col items-center gap-3">
           <Logo size="lg" />
