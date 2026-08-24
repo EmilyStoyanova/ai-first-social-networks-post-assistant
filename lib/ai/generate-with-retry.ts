@@ -8,6 +8,11 @@ import {
 } from "./quality/duplicate-detection";
 import { type SemanticDecision } from "./quality/semantic-duplicate";
 import { assessCoreMessage } from "./quality/core-message-quality";
+import {
+  validateGenerationCompliance,
+  NO_COMPLIANCE_CHECK,
+  type ComplianceResult,
+} from "./quality/generation-compliance";
 import { buildRetryUserPrompt } from "./prompt-builder";
 import { type ContentAngle, selectRetryAngle } from "./content-angle";
 import { type PostPattern, selectRetryPattern } from "./post-pattern";
@@ -97,6 +102,16 @@ export interface GenerationLoopResult {
    * retry trigger and a diagnostic signal (Topic Memory).
    */
   topicRepeated: boolean;
+  /**
+   * Post-generation compliance gate (Step 2): whether the accepted (or last)
+   * candidate's text actually satisfies the angle/hook/CTA it was generated
+   * under. A failure is a retry trigger like the others; NO_COMPLIANCE_CHECK
+   * when no angle/pattern was supplied to check against. Still failing here
+   * after the last attempt is fatal to the caller — the generation service
+   * refuses to persist a post that never met its own requirements
+   * (POST_FAILED_COMPLIANCE).
+   */
+  complianceResult: ComplianceResult;
   /** Number of generation attempts actually made (1..maxAttempts). */
   attempts: number;
   /** The content angle that produced the accepted (or last) result. */
@@ -142,6 +157,8 @@ export async function generateWithRetry(
   let lastSemanticResult: SemanticGateResult = NO_SEMANTIC_GATE;
   let lastCoreMessageGeneric = false;
   let lastTopicRepeated = false;
+  let lastComplianceResult: ComplianceResult = NO_COMPLIANCE_CHECK;
+  let lastRejectionReason: AttemptRejectionReason | null = null;
 
   // Track angles, patterns, and aspects tried during this run so retries pick fresh ones.
   let currentAngle: ContentAngle | undefined = diversityOptions?.initialAngle;
@@ -184,7 +201,13 @@ export async function generateWithRetry(
       let retryPattern: PostPattern | undefined;
       let retryAspect: ContentAspect | undefined;
 
-      if (diversityOptions) {
+      // A retry caused ONLY by a failed compliance check must not rotate the
+      // angle/pattern/aspect — the requirement was correct, only the execution
+      // was not, so switching to a different pattern would dodge it rather than
+      // fix it. Every other retry reason keeps rotating exactly as before.
+      const rotateDiversity = lastRejectionReason !== "compliance_failed";
+
+      if (diversityOptions && rotateDiversity) {
         if (currentAngle !== undefined) {
           const usedAngles = [...(diversityOptions.recentAngles as ContentAngle[]), ...triedAngles];
           retryAngle = selectRetryAngle(currentAngle, usedAngles);
@@ -230,6 +253,12 @@ export async function generateWithRetry(
       // picks a genuinely different subject (Topic Memory).
       const repeatedTopic = lastTopicRepeated && lastParsed.topic ? lastParsed.topic : undefined;
 
+      // When the previous attempt failed the compliance gate, name exactly
+      // which requirements it missed so the model can fix them directly.
+      const complianceFailure = !lastComplianceResult.passed
+        ? { reasons: lastComplianceResult.reasons }
+        : undefined;
+
       userPrompt = buildRetryUserPrompt(baseUserPrompt, {
         candidateText: lastParsed.text,
         matchedText: matchedPost?.text ?? "",
@@ -237,6 +266,7 @@ export async function generateWithRetry(
         semanticDuplicate,
         genericCoreMessage,
         repeatedTopic,
+        complianceFailure,
         forcedAngle: retryAngle,
         forcedPattern: retryPattern,
         forcedAspect: retryAspect,
@@ -331,16 +361,29 @@ export async function generateWithRetry(
     lastCoreMessageGeneric = assessCoreMessage(lastParsed.coreMessage).generic;
     // Topic Memory: reject a candidate whose normalized topic was already used.
     lastTopicRepeated = isTopicRepeated(lastParsed.topic, diversityOptions?.recentTopics ?? []);
+    // Post-generation compliance gate (Step 2): did the text actually follow
+    // the angle/hook/CTA it was generated under? Only runs when both are known.
+    lastComplianceResult =
+      currentAngle !== undefined && currentPattern !== undefined
+        ? validateGenerationCompliance({
+            text: lastParsed.text,
+            angle: currentAngle,
+            pattern: currentPattern,
+          })
+        : NO_COMPLIANCE_CHECK;
 
     // Retry on a near-verbatim (Jaccard) hit, a semantic-duplicate "regenerate",
-    // a generic coreMessage (broad praise hides real repetition), OR a repeated
-    // conceptual topic. All four are fail-safe: the last candidate is returned
-    // even if still flagged.
+    // a generic coreMessage (broad praise hides real repetition), a repeated
+    // conceptual topic, OR a failed compliance check. The loop itself never
+    // throws: the last candidate is returned with every verdict attached, and
+    // the caller decides which verdicts are fatal (the generation service
+    // aborts on an unresolved duplicate and on unresolved noncompliance).
     const needsRetry =
       lastDuplicateResult.flagged ||
       lastSemanticResult.decision === "regenerate" ||
       lastCoreMessageGeneric ||
-      lastTopicRepeated;
+      lastTopicRepeated ||
+      !lastComplianceResult.passed;
 
     // Diagnostic: which of the triggers fired, and whether retries remain.
     const rejectionReason: AttemptRejectionReason | null = !needsRetry
@@ -351,7 +394,10 @@ export async function generateWithRetry(
           ? "semantic_duplicate"
           : lastCoreMessageGeneric
             ? "generic_core_message"
-            : "repeated_topic";
+            : lastTopicRepeated
+              ? "repeated_topic"
+              : "compliance_failed";
+    lastRejectionReason = rejectionReason;
     const willRetry = needsRetry && attempt < maxAttempts;
 
     if (needsRetry) {
@@ -373,6 +419,7 @@ export async function generateWithRetry(
       semantic: lastSemanticResult,
       coreMessageGeneric: lastCoreMessageGeneric,
       topicRepeated: lastTopicRepeated,
+      compliance: lastComplianceResult,
       accepted: !needsRetry,
       rejectionReason,
       willRetry,
@@ -388,6 +435,7 @@ export async function generateWithRetry(
     semanticResult: lastSemanticResult,
     coreMessageGeneric: lastCoreMessageGeneric,
     topicRepeated: lastTopicRepeated,
+    complianceResult: lastComplianceResult,
     attempts: attemptsMade,
     selectedAngle: currentAngle,
     selectedPattern: currentPattern,

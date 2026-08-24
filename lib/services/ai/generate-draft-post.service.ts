@@ -79,8 +79,16 @@ import { observeProvider } from "@/lib/generation-trace/observed-provider";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
+// The text satisfies every deterministic compliance check at once (Step 2's
+// generation-compliance gate) — a Contrast opening, 2 list-style tips, and
+// every checkable CTA — so it is accepted on the first attempt regardless of
+// which angle/hook/CTA a test's (possibly empty) diversity history selects.
 const MOCK_LLM_TEXT = JSON.stringify({
-  text: "Big things are coming! Stay tuned for what we have in store. 🚀",
+  text:
+    "While most teams stay quiet before a launch, we like to build in the open — big things are coming!\n" +
+    "1. A first look drops this week.\n" +
+    "2. Early access opens right after.\n" +
+    "Follow us, share this with a friend, visit our website, and comment your thoughts below — what do you think?",
   hashtags: ["innovation", "growth", "comingsoon"],
   coreMessage:
     "Anticipation for an upcoming launch builds excitement and keeps the audience engaged.",
@@ -212,6 +220,12 @@ export type GenerateDraftPostErrorCode =
   // duplicate (near-verbatim, semantic, or a repeated topic). We refuse to
   // persist a post we could not make unique.
   | "CANNOT_GENERATE_UNIQUE_POST"
+  // Every retry was exhausted and the final candidate still did not follow the
+  // content pattern it was generated under (missing CTA, missing tips, missing
+  // contrast hook). Distinct from CANNOT_GENERATE_UNIQUE_POST: the post may be
+  // perfectly unique — it just is not the post that was asked for. We refuse to
+  // persist a candidate the compliance gate never passed.
+  | "POST_FAILED_COMPLIANCE"
   // Source articles existed but every one was already claimed (concurrent
   // run / exhausted pool). Not an error — callers skip cleanly.
   | "NO_FEED_ITEMS_AVAILABLE"
@@ -230,6 +244,12 @@ export interface GenerateDraftPostFailure {
   reason?: UniquenessFailureReason;
   /** Set only for CANNOT_GENERATE_UNIQUE_POST — attempts made before aborting. */
   attempts?: number;
+  /**
+   * Set only for POST_FAILED_COMPLIANCE — the compliance requirements the final
+   * candidate still missed, verbatim from the gate (e.g. "Follow CTA is
+   * required; no follow/connect invitation was found.").
+   */
+  complianceReasons?: string[];
   /**
    * Set only for LLM_RATE_LIMITED, and only when the provider advertised a
    * Retry-After — how long to wait before trying again.
@@ -1293,6 +1313,7 @@ async function runGeneration(
     semanticResult,
     coreMessageGeneric,
     topicRepeated,
+    complianceResult,
     attempts,
     selectedAngle,
     selectedPattern,
@@ -1339,6 +1360,49 @@ async function runGeneration(
       message: "Could not generate a sufficiently unique post after all attempts.",
       reason,
       attempts,
+    };
+  }
+
+  // ── Compliance abort ──────────────────────────────────────────────────────
+  // Same shape as the uniqueness abort above, and deliberately placed after it
+  // so that block's behaviour is untouched: a duplicate still reports as a
+  // duplicate. What is left here is a candidate that is unique but does not do
+  // what its own content pattern required (no Follow CTA, no actionable tips,
+  // no contrast hook) after every retry. Persisting it is exactly the silent
+  // acceptance the compliance gate exists to prevent, so generation aborts and
+  // the claimed source article goes back to the pool.
+  //
+  // The gate reports `passed` for anything it cannot check deterministically
+  // (structure, unverifiable CTA types, other angles/hooks), so this can only
+  // fire on a requirement that was actually measured and actually missed.
+  if (!complianceResult.passed) {
+    await releaseClaimedFeedItem();
+    console.warn(
+      `[generation] Aborted after ${attempts} attempts → code=POST_FAILED_COMPLIANCE reasons=${complianceResult.reasons.join(
+        " | "
+      )} (post not saved).`
+    );
+    tracer.step({
+      type: "validation",
+      label: "Compliance abort — post NOT saved",
+      status: "failed",
+      output: {
+        attempts,
+        reasons: complianceResult.reasons,
+        angle: selectedAngle ?? null,
+        hook: selectedPattern?.hookType ?? null,
+        structure: selectedPattern?.structure ?? null,
+        cta: selectedPattern?.ctaType ?? null,
+        claimReleased: ownedClaimId !== null,
+      },
+      metadata: { checked: complianceResult.checked },
+    });
+    return {
+      success: false,
+      code: "POST_FAILED_COMPLIANCE",
+      message: `The generated post did not follow its required content pattern after ${attempts} attempts.`,
+      attempts,
+      complianceReasons: complianceResult.reasons,
     };
   }
 

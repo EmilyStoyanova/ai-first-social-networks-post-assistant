@@ -532,6 +532,8 @@ function defaultFailureMessage(failure: GenerateDraftPostFailure): string {
   switch (failure.code) {
     case "CANNOT_GENERATE_UNIQUE_POST":
       return "Could not write a sufficiently different post for this channel.";
+    case "POST_FAILED_COMPLIANCE":
+      return "The post written for this channel did not follow its required content pattern.";
     case "NO_FEED_ITEMS_AVAILABLE":
     case "SELECTED_SOURCE_UNAVAILABLE":
       return "There was nothing left to write from for this channel.";

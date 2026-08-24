@@ -186,6 +186,7 @@ export interface BulkGeneratedGroup {
 export type BulkFailureReason =
   | "no_eligible_content"
   | "not_unique"
+  | "quality_gate"
   | "provider_error"
   | "configuration"
   | "channel_limit"
@@ -484,6 +485,8 @@ export function classifyBulkFailure(code: GenerateDraftPostErrorCode): BulkFailu
       return "no_eligible_content";
     case "CANNOT_GENERATE_UNIQUE_POST":
       return "not_unique";
+    case "POST_FAILED_COMPLIANCE":
+      return "quality_gate";
     case "LLM_RATE_LIMITED":
     case "LLM_PROVIDER_ERROR":
     case "LLM_RESPONSE_PARSE_ERROR":
@@ -505,6 +508,7 @@ export function classifyBulkFailure(code: GenerateDraftPostErrorCode): BulkFailu
 const DEFAULT_MESSAGES: Record<BulkFailureReason, string> = {
   no_eligible_content: "No unused source material is available to write another post from.",
   not_unique: "Could not write another post that is sufficiently different from recent ones.",
+  quality_gate: "The generated post did not follow its required content pattern.",
   provider_error: "The AI provider could not complete this generation.",
   configuration: "No usable AI model is configured for this generation.",
   channel_limit: "The generated post exceeded the channel's character limit.",

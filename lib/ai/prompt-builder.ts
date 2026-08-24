@@ -660,6 +660,15 @@ export interface RetryContext {
    * the model is told exactly which subject to move away from.
    */
   repeatedTopic?: string;
+  /**
+   * Present when the retry was triggered by a failed post-generation compliance
+   * check (Step 2): the angle/hook/structure/CTA were the right ones, but the
+   * text did not actually satisfy them (e.g. a "Tips & Tricks" post with zero
+   * tips, or a "Follow" CTA with no follow invitation). Unlike every other retry
+   * reason, this one must NOT change the angle, pattern, or content aspect — the
+   * requirement was correct, only the execution was not.
+   */
+  complianceFailure?: { reasons: string[] };
   /** When provided the retry prompt forces the model to use this angle. */
   forcedAngle?: ContentAngle;
   /** When provided the retry prompt forces the model to use this writing pattern. */
@@ -742,6 +751,50 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
       ].join("\n")
     : "";
 
+  // Compliance-failure block — the angle/hook/structure/CTA were the right
+  // ones; the text just did not satisfy them.
+  const complianceBlock = retry.complianceFailure
+    ? [
+        "## It did not follow its own required content pattern",
+        ...retry.complianceFailure.reasons.map((r) => `- ${r}`),
+        "",
+      ].join("\n")
+    : "";
+
+  // A retry caused ONLY by a failed compliance check needs the OPPOSITE framing
+  // of every other retry reason below: every other trigger tells the model to
+  // switch away from the rejected attempt (different angle, different hook,
+  // different claim). Compliance failure means the pattern was correct and the
+  // execution was not, so switching it would just dodge the requirement instead
+  // of fixing it. Only take this branch when nothing else also fired.
+  const complianceOnly =
+    retry.complianceFailure &&
+    !retry.forcedAngle &&
+    !retry.forcedPattern &&
+    !retry.semanticDuplicate &&
+    !retry.genericCoreMessage &&
+    !retry.repeatedTopic &&
+    !retry.matchedText;
+
+  if (complianceOnly) {
+    const complianceOnlyBlock = [
+      `⚠ REGENERATION REQUIRED (did not follow its own required content pattern).`,
+      "",
+      "## Rejected attempt",
+      "---",
+      retry.candidateText,
+      "---",
+      "",
+      "## What was wrong",
+      ...retry.complianceFailure!.reasons.map((r) => `- ${r}`),
+      "",
+      "## What you MUST do",
+      "Keep the EXACT SAME angle, hook, structure, and CTA as the rejected attempt above — do not switch to a different pattern, topic, or content aspect.",
+      "Rewrite the post so it genuinely satisfies every requirement listed above.",
+    ].join("\n");
+    return `${complianceOnlyBlock}\n\n${baseUserPrompt}`;
+  }
+
   const retryBlock = [
     `⚠ REGENERATION REQUIRED (too close to an existing post).`,
     "",
@@ -754,6 +807,7 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     semanticBlock,
     genericCoreBlock,
     repeatedTopicBlock,
+    complianceBlock,
     forcedBlock,
     "## What you must NOT do",
     "- Do not paraphrase the rejected attempt.",

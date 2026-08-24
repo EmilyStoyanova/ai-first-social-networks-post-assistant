@@ -18,6 +18,7 @@ import type { ContentAspect } from "@/lib/ai/content-aspect";
 import type { PostPattern } from "@/lib/ai/post-pattern";
 import type { ParsedLlmPost } from "@/lib/ai/parse-llm-post";
 import type { DuplicateCheckResult } from "@/lib/ai/quality/duplicate-detection";
+import type { ComplianceResult } from "@/lib/ai/quality/generation-compliance";
 import type { SemanticGateResult } from "@/lib/ai/generate-with-retry";
 
 /** Why an attempt was not accepted. Mirrors the loop's own retry triggers. */
@@ -26,6 +27,7 @@ export type AttemptRejectionReason =
   | "semantic_duplicate"
   | "generic_core_message"
   | "repeated_topic"
+  | "compliance_failed"
   | "parse_error"
   | "provider_error";
 
@@ -53,6 +55,8 @@ export interface GenerationAttemptRecord {
   semantic?: SemanticGateResult;
   coreMessageGeneric?: boolean;
   topicRepeated?: boolean;
+  /** Post-generation compliance gate (Step 2) — did the text follow its own angle/hook/CTA? */
+  compliance?: ComplianceResult;
   /** The diversity levers this attempt actually used. */
   angle?: ContentAngle;
   pattern?: PostPattern;

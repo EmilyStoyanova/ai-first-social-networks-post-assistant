@@ -225,6 +225,30 @@ export function recordAttemptSteps(
     });
   }
 
+  if (record.compliance) {
+    tracer.step({
+      type: "validation",
+      label: "Generation compliance",
+      attempt,
+      status: record.compliance.passed ? "success" : "failed",
+      output: {
+        passed: record.compliance.passed,
+        reasons: record.compliance.reasons,
+        angle: record.angle ?? null,
+        hook: record.pattern?.hookType ?? null,
+        structure: record.pattern?.structure ?? null,
+        cta: record.pattern?.ctaType ?? null,
+      },
+      metadata: {
+        checked: record.compliance.checked,
+        // Story Arc (and every structure) is stylistically too flexible to
+        // validate deterministically — this is a documented limitation, not a
+        // silent pass. See lib/ai/quality/generation-compliance.ts.
+        structureNote: "Structure is never deterministically checked (not_checked).",
+      },
+    });
+  }
+
   // ── What the next attempt was told to change ──────────────────────────────
   if (!record.accepted) {
     tracer.step({

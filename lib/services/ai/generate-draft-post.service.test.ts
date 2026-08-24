@@ -426,7 +426,13 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
   it("aborts and does NOT save when the candidate is a near-verbatim duplicate on every attempt", async () => {
     // Jaccard path: a recent post identical to the mock output flags every attempt,
     // so the loop exhausts with duplicateResult.flagged and generation aborts.
-    const MOCK_TEXT = "Big things are coming! Stay tuned for what we have in store. 🚀";
+    // Must mirror MOCK_LLM_TEXT's `text` field in generate-draft-post.service.ts
+    // exactly — the near-verbatim match is what forces the Jaccard flag here.
+    const MOCK_TEXT =
+      "While most teams stay quiet before a launch, we like to build in the open — big things are coming!\n" +
+      "1. A first look drops this week.\n" +
+      "2. Early access opens right after.\n" +
+      "Follow us, share this with a friend, visit our website, and comment your thoughts below — what do you think?";
     const recentRows: RecentRow[] = [{ id: "recent-1", content: MOCK_TEXT, promptSnapshot: null }];
     // ACCEPT_GATE: the semantic gate is clean, so only Jaccard forces the abort.
     const { deps, created } = makeDeps(recentRows, ACCEPT_GATE);
@@ -2576,5 +2582,173 @@ describe("generatePostFromContext — manuallyScheduled", () => {
     assert.ok(result.success);
     assert.equal(created()!.manuallyScheduled, false);
     assert.equal(created()!.generationBatchId, "batch-1");
+  });
+});
+
+// ─── Compliance abort (Step 2) ────────────────────────────────────────────────
+// The compliance gate is only worth having if failing it has a consequence. A
+// candidate that never satisfies the content pattern it was generated under must
+// not be quietly persisted as though it had.
+//
+// These drive the REAL retry loop (only the provider is substituted), so what is
+// exercised is the actual gate, the actual retries, and the actual abort.
+
+describe("generatePostFromContext — compliance abort", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  // With no post history the pattern selector picks the first value of every
+  // dimension: hook "Question", structure "Single Insight", CTA "Comment Prompt".
+  // So the requirement these fixtures are judged against is the Comment Prompt CTA.
+  const NONCOMPLIANT = JSON.stringify({
+    text: "Our team shipped a new release this morning. It is available to every customer today.",
+    hashtags: ["release"],
+    coreMessage: "The new release removes the manual export step customers asked about.",
+    imagePrompt: "A laptop showing a changelog",
+  });
+
+  const COMPLIANT = JSON.stringify({
+    text:
+      "Our team shipped a new release this morning. It is available to every customer today. " +
+      "What would you automate first? Tell us in the comments.",
+    hashtags: ["release"],
+    coreMessage: "The new release removes the manual export step customers asked about.",
+    imagePrompt: "A laptop showing a changelog",
+  });
+
+  /**
+   * Runs the real loop against a scripted provider. The last scripted response
+   * is reused once the script runs out, so a two-entry script describes "fails,
+   * then succeeds" and a one-entry script describes "fails every time".
+   */
+  function scriptDeps(script: string[], base: GenerateDraftPostDeps) {
+    let calls = 0;
+    const deps: GenerateDraftPostDeps = { ...base };
+    deps.generateWithRetry = async (_provider, system, user, recent, diversity, gate, max) => {
+      const { generateWithRetry } = await import("@/lib/ai/generate-with-retry");
+      const scripted = {
+        generate: async () => {
+          const text = script[Math.min(calls, script.length - 1)];
+          calls++;
+          return { text };
+        },
+      };
+      return generateWithRetry(scripted, system, user, recent, diversity, gate, max);
+    };
+    return { deps, calls: () => calls };
+  }
+
+  it("does NOT save a candidate that fails compliance on every attempt", async () => {
+    const { deps: base, created, embedded } = makeDeps([]);
+    const { deps, calls } = scriptDeps([NONCOMPLIANT], base);
+
+    const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
+
+    assert.equal(result.success, false, "a never-compliant post must not be persisted");
+    if (!result.success) {
+      assert.equal(result.code, "POST_FAILED_COMPLIANCE");
+      assert.equal(result.attempts, 3);
+      // The reasons name what was missing, not merely that something was.
+      assert.ok(
+        result.complianceReasons?.some((r) => /Comment Prompt/i.test(r)),
+        `expected a Comment Prompt reason, got ${JSON.stringify(result.complianceReasons)}`
+      );
+    }
+    assert.equal(created(), null, "the post must NOT be saved");
+    assert.equal(embedded(), null, "no embedding for an aborted post");
+    assert.equal(calls(), 3, "every attempt was spent before aborting");
+  });
+
+  it("releases the claimed source article when it aborts on compliance", async () => {
+    let claims = 0;
+    let releases = 0;
+    const db: GenerateDraftPostDb = {
+      post: {
+        findMany: async () => [],
+        create: async () => {
+          throw new Error("post.create must not be called on an aborted generation");
+        },
+      },
+      feedItem: {
+        updateMany: async () => {
+          if (claims === 0) {
+            claims++;
+            return { count: 1 };
+          }
+          releases++;
+          return { count: 1 };
+        },
+      },
+    };
+    const { deps } = scriptDeps([NONCOMPLIANT], {
+      db,
+      auditLog: async () => {},
+      embed: async () => ({ status: "embedded" }),
+      recordCalibration: async () => {},
+      autoSourceImage: async () => ({ status: "skipped", reason: "no_source_image" }),
+      semanticGate: ACCEPT_GATE,
+      loadDefaultLlmConfig: async () => ({ id: "default-cfg", provider: "grok" }),
+    });
+    const ctx = makeContext({
+      feedItems: [
+        {
+          id: "article-1",
+          title: "Launch incoming",
+          content: "We are preparing something big.",
+          url: "https://example.com/launch",
+          publishedAt: null,
+          consumable: true,
+        },
+      ],
+      hasArticleSources: true,
+    });
+
+    const result = await generatePostFromContext(ctx, "co-1", {}, deps);
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "POST_FAILED_COMPLIANCE");
+    assert.equal(claims, 1, "the article was claimed");
+    assert.equal(releases, 1, "the claim was released on abort");
+  });
+
+  it("proceeds normally when a retry brings the post into compliance", async () => {
+    const { deps: base, created, embedded } = makeDeps([]);
+    const { deps, calls } = scriptDeps([NONCOMPLIANT, COMPLIANT], base);
+
+    const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
+
+    assert.ok(result.success, "a compliant retry must be saved like any other post");
+    assert.equal(calls(), 2, "one retry, then accepted");
+    assert.ok(created(), "the post was saved");
+    assert.match(created()!.content as string, /Tell us in the comments/);
+    assert.ok(embedded(), "the accepted post was embedded, as on any normal success");
+  });
+
+  it("still reports a duplicate as a duplicate when the candidate is ALSO noncompliant", async () => {
+    // The compliance abort sits AFTER the uniqueness abort on purpose. A post
+    // that trips both must keep reporting the uniqueness failure it always did,
+    // so nothing about the pre-existing exhaustion behaviour changes.
+    const noncompliantText = JSON.parse(NONCOMPLIANT).text as string;
+    const rows: RecentRow[] = [{ id: "recent-1", content: noncompliantText, promptSnapshot: null }];
+    const { deps: base, created } = makeDeps(rows, ACCEPT_GATE);
+    const { deps } = scriptDeps([NONCOMPLIANT], base);
+
+    const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
+
+    assert.equal(result.success, false);
+    if (!result.success) {
+      assert.equal(result.code, "CANNOT_GENERATE_UNIQUE_POST");
+      assert.equal(result.reason, "jaccard_duplicate");
+    }
+    assert.equal(created(), null);
   });
 });

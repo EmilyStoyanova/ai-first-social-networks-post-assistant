@@ -159,5 +159,23 @@ export function generationErrorResponse(result: GenerateDraftPostFailure): NextR
         },
         { status: 409 }
       );
+
+    case "POST_FAILED_COMPLIANCE":
+      // 409, like its sibling above: the request was fine, the generator could
+      // not produce a post that met its own requirements. The reasons ride
+      // along so the UI can say WHAT was missing, not just that something was.
+      return NextResponse.json(
+        {
+          error: {
+            code: "POST_FAILED_COMPLIANCE",
+            message:
+              result.message ??
+              "The generated post did not follow its required content pattern. Try again.",
+            reasons: result.complianceReasons,
+            attempts: result.attempts,
+          },
+        },
+        { status: 409 }
+      );
   }
 }

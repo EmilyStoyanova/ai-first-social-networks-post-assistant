@@ -55,6 +55,9 @@ export const API_ERROR_CODES = [
   "EMAIL_NOT_VERIFIED",
   "POST_TOO_LONG_WITH_URL",
   "CANNOT_GENERATE_UNIQUE_POST",
+  // Generation compliance — the post never followed the angle/hook/CTA it was
+  // generated under, through every retry. Not a uniqueness problem.
+  "POST_FAILED_COMPLIANCE",
   "NO_FEED_ITEMS_AVAILABLE",
   // Manual generation — the RSS source picked in the form ran dry (or went away).
   "SELECTED_SOURCE_UNAVAILABLE",

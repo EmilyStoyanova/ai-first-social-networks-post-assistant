@@ -38,12 +38,15 @@ function jsonPostWithTopic(text: string, topic: string): string {
 }
 
 // Full DiversityOptions carrying the normalized topic memory. Angle/pattern are
-// valid so retry selection has something to rotate through.
+// valid so retry selection has something to rotate through. ctaType is "No
+// CTA" and hookType/angle are ones the compliance gate never checks (Step 2),
+// so these fixtures exercise Topic Memory in isolation without also tripping
+// the new compliance gate on CLEAN_TEXT/DUPLICATE_TEXT's nonsense sentences.
 function makeDiversity(topicMemory: string[]): DiversityOptions {
   return {
     initialAngle: "Educational",
     recentAngles: [],
-    initialPattern: { hookType: "Question", structure: "List", ctaType: "Share" },
+    initialPattern: { hookType: "Question", structure: "List", ctaType: "No CTA" },
     recentPatterns: [],
     recentTopics: topicMemory,
   };
@@ -51,6 +54,17 @@ function makeDiversity(topicMemory: string[]): DiversityOptions {
 
 const DUPLICATE_TEXT = "a b c d e";
 const CLEAN_TEXT = "x y z w q";
+
+// Satisfies every deterministic compliance check at once (Tips & Tricks tip
+// count, Contrast hook, and every checkable CTA) — used where a test's retry
+// rotates angle/hook/structure/CTA to an unpredictable value (LRU-driven, not
+// under the test's control) and the response still needs to be accepted.
+const UNIVERSALLY_COMPLIANT_TEXT = [
+  "While most guides repeat the same tired tips, here is what actually works in Lisbon.",
+  "1. Try the pastel de nata from a bakery, not a chain.",
+  "2. Order the bifana sandwich from a stall near Praça da Figueira.",
+  "Follow us, share this with a friend, visit our website, and comment your favorite spot below — what's yours?",
+].join("\n");
 
 const recentPost: RecentPost = { id: "p1", text: "a b c d" };
 
@@ -308,9 +322,13 @@ describe("Topic Memory — 2. same destination, different topic is accepted", ()
 describe("Topic Memory — 3. repeated then fresh topic retries once and accepts", () => {
   it("returns attempts=2 and topicRepeated=false", async () => {
     // Attempt 1 repeats the memory; attempt 2 is a fresh topic that is accepted.
+    // Note: a topic-memory retry (unlike a compliance-only retry) still rotates
+    // angle/hook/structure/CTA as it always has, so attempt 2's response must
+    // satisfy the compliance gate under WHATEVER pattern that rotation lands on
+    // — UNIVERSALLY_COMPLIANT_TEXT does, regardless of which one it is.
     const provider = recordingProvider([
       jsonPostWithTopic(CLEAN_TEXT, "Authentic Lisbon"),
-      jsonPostWithTopic(CLEAN_TEXT, "Lisbon street food"),
+      jsonPostWithTopic(UNIVERSALLY_COMPLIANT_TEXT, "Lisbon street food"),
     ]);
     const result = await generateWithRetry(
       provider,
@@ -373,5 +391,97 @@ describe("generateWithRetry — gray zone accepts without retrying", () => {
 
     assert.strictEqual(provider.callCount, 1, "gray zone is accepted, not regenerated");
     assert.strictEqual(result.semanticResult.decision, "gray_zone");
+  });
+});
+
+// ─── Post-generation compliance gate (Step 2) ──────────────────────────────
+// Angle: Tips & Tricks, Hook: Question (unchecked), Structure: List
+// (unchecked), CTA: Follow — mirrors the real production pattern
+// (Tips & Tricks / Contrast / Follow) that was accepted with 0 tips and no
+// Follow CTA.
+
+function makeComplianceDiversity(): DiversityOptions {
+  return {
+    initialAngle: "Tips & Tricks",
+    recentAngles: [],
+    initialPattern: { hookType: "Question", structure: "List", ctaType: "Follow" },
+    recentPatterns: [],
+    recentTopics: [],
+  };
+}
+
+// CLEAN_TEXT ("x y z w q") has no sentence punctuation and no follow language,
+// so it fails BOTH the tips count (0) and the Follow CTA check.
+const COMPLIANT_TIPS_FOLLOW_TEXT = [
+  "Here are two ways to plan a smarter trip.",
+  "1. Book your tickets at least two months in advance.",
+  "2. Pack only what fits in a single carry-on bag.",
+  "Follow us for more travel tips!",
+].join("\n");
+
+describe("generateWithRetry — compliance failure triggers a retry", () => {
+  it("retries a noncompliant candidate and accepts a compliant one", async () => {
+    const provider = makeProvider([jsonPost(CLEAN_TEXT), jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
+
+    assert.strictEqual(provider.callCount, 2, "should retry exactly once");
+    assert.strictEqual(result.complianceResult.passed, true);
+    assert.strictEqual(result.attempts, 2);
+    assert.strictEqual(result.parsed.text, COMPLIANT_TIPS_FOLLOW_TEXT);
+  });
+
+  it("keeps the SAME angle/hook/structure/CTA across the retry — never rotates for a compliance-only failure", async () => {
+    const provider = makeProvider([jsonPost(CLEAN_TEXT), jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT)]);
+    const diversity = makeComplianceDiversity();
+    const result = await generateWithRetry(provider, "sys", "user", [], diversity);
+
+    assert.deepEqual(result.selectedAngle, diversity.initialAngle);
+    assert.deepEqual(result.selectedPattern, diversity.initialPattern);
+  });
+
+  it("the retry prompt names the concrete compliance failure reasons, without forcing a different pattern", async () => {
+    const provider = recordingProvider([
+      jsonPost(CLEAN_TEXT),
+      jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT),
+    ]);
+    await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
+
+    const retryPrompt = provider.prompts[1];
+    assert.match(retryPrompt, /Tips & Tricks requires 2–4 actionable tips; found 0/);
+    assert.match(retryPrompt, /Follow CTA is required/);
+    // Every other retry reason tells the model to switch pattern/topic — a pure
+    // compliance retry must not, since the pattern itself was already correct.
+    assert.doesNotMatch(retryPrompt, /FORCED CONTENT PATTERN/);
+    assert.doesNotMatch(retryPrompt, /Do not reuse the same hook type/);
+  });
+
+  it("exhausts attempts and hands the failed verdict back rather than throwing", async () => {
+    // The loop reports; it does not decide. `complianceResult.passed === false`
+    // surviving to the return value is what lets the generation service refuse
+    // to save the post (POST_FAILED_COMPLIANCE) — see
+    // generate-draft-post.service.test.ts, "compliance abort". So the contract
+    // asserted here is "never throws AND never launders the failure into a pass".
+    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
+
+    assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
+    assert.strictEqual(result.attempts, MAX_GENERATION_ATTEMPTS);
+    assert.strictEqual(result.complianceResult.passed, false);
+    assert.ok(result.complianceResult.reasons.length > 0);
+    assert.strictEqual(result.parsed.text, CLEAN_TEXT);
+  });
+});
+
+describe("generateWithRetry — compliance check needs an angle AND a pattern to run", () => {
+  it("never fails compliance when no diversity options are given at all", async () => {
+    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", []);
+
+    assert.strictEqual(
+      provider.callCount,
+      1,
+      "nothing to check against — accepted on the first try"
+    );
+    assert.strictEqual(result.complianceResult.passed, true);
   });
 });
