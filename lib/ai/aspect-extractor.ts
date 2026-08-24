@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { z } from "zod";
-import type { ILlmProvider, FeedItemContext } from "./types";
+import type { ILlmProvider, LlmRequest, FeedItemContext } from "./types";
 import { validateAspects, type ContentAspect } from "./content-aspect";
 import { renderFeedItemContent } from "./source-content";
 
@@ -45,28 +44,53 @@ function buildSourceContent(primary: FeedItemContext): string {
 }
 
 // ─── Response parsing ─────────────────────────────────────────────────────────
-
-const RawAspectArraySchema = z.array(
-  z.object({
-    title: z.string(),
-    focus: z.string(),
-    visualConcept: z.string(),
-  })
-);
+//
+// Parsing only confirms the reply is a JSON array — the SHAPE of each element is
+// deliberately not enforced here. A strict schema over the whole array (as this
+// used to be, via z.array(z.object({...})).safeParse) fails the array wholesale
+// the moment ONE element is malformed, discarding every valid aspect alongside
+// it. validateAspects() below is the actual per-object gate: it inspects each
+// element independently and only drops the ones that fail, so one bad element
+// (e.g. a "(title" key instead of "title") costs exactly one aspect, not the pool.
 
 function stripFences(raw: string): string {
   const fenced = raw.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/);
   return fenced ? fenced[1].trim() : raw.trim();
 }
 
+/** Parses one LLM reply into validated aspects. Never throws — worst case, []. */
+function parseAspects(text: string, existingFocuses: string[]): ContentAspect[] {
+  const cleaned = stripFences(text);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  return validateAspects(parsed, existingFocuses);
+}
+
 // ─── Extraction ───────────────────────────────────────────────────────────────
+
+const NO_VALID_ASPECTS_FEEDBACK =
+  "\n\nYour previous response contained no valid aspect objects — it was either " +
+  "unparseable, not a JSON array, or every element was missing/malformed " +
+  '"title", "focus", or "visualConcept". Return ONLY a JSON array of well-formed ' +
+  "aspect objects, each with all three fields as non-empty strings.";
 
 /**
  * Calls the LLM provider to extract distinct content aspects from the PRIMARY
  * feed item — the one article the post will be written from and linked to.
  * existingFocuses are passed as exclusions so progressive extraction rounds
  * don't re-surface angles already in the pool.
- * Returns an empty array (non-throwing) if the response is unparseable.
+ *
+ * A malformed element in an otherwise-valid array costs only that element —
+ * see parseAspects/validateAspects. Retrying is reserved for the case where
+ * NOTHING in the reply survived validation (empty array, unparseable JSON, or
+ * every element rejected): one extra attempt, with explicit feedback, before
+ * giving up and returning []. A reply with at least one valid aspect is never
+ * retried, so a single bad element never costs a redundant LLM call.
  */
 export async function extractAspects(
   provider: ILlmProvider,
@@ -121,24 +145,17 @@ export async function extractAspects(
     "- visualConcept must be photorealistic and concrete — not abstract\n" +
     "- Return only aspects you are confident about — do NOT pad to a fixed count";
 
-  const response = await provider.generate({
-    systemPrompt,
-    userPrompt,
-    temperature: 0.5,
-    maxTokens: 600,
+  const request: LlmRequest = { systemPrompt, userPrompt, temperature: 0.5, maxTokens: 600 };
+
+  const response = await provider.generate(request);
+  const aspects = parseAspects(response.text, existingFocuses);
+  if (aspects.length > 0) return aspects;
+
+  // Zero valid aspects survived — one bounded retry with explicit feedback,
+  // never a fabricated replacement.
+  const retry = await provider.generate({
+    ...request,
+    userPrompt: userPrompt + NO_VALID_ASPECTS_FEEDBACK,
   });
-
-  const cleaned = stripFences(response.text);
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    return [];
-  }
-
-  const result = RawAspectArraySchema.safeParse(parsed);
-  if (!result.success) return [];
-
-  return validateAspects(result.data, existingFocuses);
+  return parseAspects(retry.text, existingFocuses);
 }

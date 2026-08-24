@@ -562,6 +562,153 @@ describe("extractAspects — first extraction on cache miss", async () => {
   });
 });
 
+// ─── 12b. extractAspects — tolerant of individual malformed objects ──────────
+// Reproduces the real trace: one malformed aspect object ("(title" instead of
+// "title") must cost exactly that object, never the whole pool. Uses raw JSON
+// text (not the typed `aspectsJson` helper) so the malformed shapes below can
+// be expressed at all.
+
+/** Tracks every prompt sent, so retry behavior (call count, feedback text) is observable. */
+function makeTrackedProvider(responses: string[]): { provider: ILlmProvider; prompts: string[] } {
+  const prompts: string[] = [];
+  const provider: ILlmProvider = {
+    async generate(req: LlmRequest): Promise<LlmResponse> {
+      prompts.push(req.userPrompt);
+      const text = responses[Math.min(prompts.length - 1, responses.length - 1)];
+      return { text };
+    },
+  };
+  return { provider, prompts };
+}
+
+describe("extractAspects — tolerant of individual malformed objects", () => {
+  it("keeps every aspect when all objects are well-formed", async () => {
+    const raw = [
+      { title: "A", focus: "async error handling reduces production crashes", visualConcept: "x" },
+      { title: "B", focus: "event loop model enables concurrency decisions", visualConcept: "y" },
+      { title: "C", focus: "promise chaining avoids deeply nested callbacks", visualConcept: "z" },
+    ];
+    const { provider } = makeTrackedProvider([JSON.stringify(raw)]);
+    const aspects = await extractAspects(provider, FEED_ITEMS[0], []);
+    assert.strictEqual(aspects.length, 3);
+  });
+
+  it("drops only the malformed object among otherwise-valid ones", async () => {
+    const raw = [
+      { title: "A", focus: "async error handling reduces production crashes", visualConcept: "x" },
+      { focus: "an object missing its title field entirely", visualConcept: "y" }, // malformed
+      { title: "C", focus: "promise chaining avoids deeply nested callbacks", visualConcept: "z" },
+    ];
+    const { provider, prompts } = makeTrackedProvider([JSON.stringify(raw)]);
+    const aspects = await extractAspects(provider, FEED_ITEMS[0], []);
+
+    assert.strictEqual(aspects.length, 2, "the two valid objects must survive");
+    assert.ok(aspects.some((a) => a.title === "A"));
+    assert.ok(aspects.some((a) => a.title === "C"));
+    assert.strictEqual(prompts.length, 1, "at least one valid aspect survived — no retry");
+  });
+
+  it('drops an object with a malformed title key like "(title" (no silent repair)', async () => {
+    // The exact shape from the real production trace.
+    const raw = [
+      {
+        "(title": "Cost-Effective Escapes",
+        focus: "budget travel still finds quality lodging off-season",
+        visualConcept: "a scene",
+      },
+      {
+        title: "Valid",
+        focus: "async error handling reduces production crashes",
+        visualConcept: "x",
+      },
+    ];
+    const { provider } = makeTrackedProvider([JSON.stringify(raw)]);
+    const aspects = await extractAspects(provider, FEED_ITEMS[0], []);
+
+    assert.strictEqual(
+      aspects.length,
+      1,
+      "the malformed-key object must be rejected, not repaired"
+    );
+    assert.strictEqual(aspects[0].title, "Valid");
+    assert.ok(
+      !aspects.some((a) => a.focus.includes("budget travel")),
+      'the object keyed "(title" must never surface under a repaired title'
+    );
+  });
+
+  it("drops an object missing focus", async () => {
+    const raw = [
+      { title: "No focus", visualConcept: "a scene" }, // malformed — no focus
+      {
+        title: "Valid",
+        focus: "async error handling reduces production crashes",
+        visualConcept: "x",
+      },
+    ];
+    const { provider } = makeTrackedProvider([JSON.stringify(raw)]);
+    const aspects = await extractAspects(provider, FEED_ITEMS[0], []);
+
+    assert.strictEqual(aspects.length, 1);
+    assert.strictEqual(aspects[0].title, "Valid");
+  });
+
+  it("drops an object missing visualConcept", async () => {
+    const raw = [
+      { title: "No visual", focus: "an aspect entirely missing its visual concept field" }, // malformed
+      {
+        title: "Valid",
+        focus: "async error handling reduces production crashes",
+        visualConcept: "x",
+      },
+    ];
+    const { provider } = makeTrackedProvider([JSON.stringify(raw)]);
+    const aspects = await extractAspects(provider, FEED_ITEMS[0], []);
+
+    assert.strictEqual(aspects.length, 1);
+    assert.strictEqual(aspects[0].title, "Valid");
+  });
+
+  it("retries once, with feedback, when the first reply has zero valid aspects, and keeps the retry's valid aspects", async () => {
+    const allMalformed = JSON.stringify([
+      { "(title": "junk", focus: "x", visualConcept: "y" },
+      { title: "still no focus", visualConcept: "z" },
+    ]);
+    const validOnRetry = JSON.stringify([
+      {
+        title: "Recovered",
+        focus: "async error handling reduces production crashes",
+        visualConcept: "x",
+      },
+    ]);
+    const { provider, prompts } = makeTrackedProvider([allMalformed, validOnRetry]);
+
+    const aspects = await extractAspects(provider, FEED_ITEMS[0], []);
+
+    assert.strictEqual(aspects.length, 1, "the retry's valid aspect must be returned");
+    assert.strictEqual(aspects[0].title, "Recovered");
+    assert.strictEqual(
+      prompts.length,
+      2,
+      "zero valid aspects on the first reply must trigger exactly one retry"
+    );
+    assert.ok(
+      prompts[1].includes("no valid aspect objects"),
+      "the retry prompt must explain what was wrong with the previous reply"
+    );
+  });
+
+  it("gives up and returns [] when both the original and the retry have zero valid aspects", async () => {
+    const allMalformed = JSON.stringify([{ "(title": "junk", focus: "x", visualConcept: "y" }]);
+    const { provider, prompts } = makeTrackedProvider([allMalformed, "not json either"]);
+
+    const aspects = await extractAspects(provider, FEED_ITEMS[0], []);
+
+    assert.strictEqual(aspects.length, 0);
+    assert.strictEqual(prompts.length, 2, "exactly one retry is attempted, then it gives up");
+  });
+});
+
 // ─── 13. buildSnapshotAspectFields — round-trip ───────────────────────────────
 
 describe("buildSnapshotAspectFields — stored fields are reconstructable", () => {

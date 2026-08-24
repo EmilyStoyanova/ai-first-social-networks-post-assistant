@@ -186,6 +186,31 @@ describe("resolveGenerationAspect — the aspect belongs to the primary article"
     assert.equal(resolved.aspect, undefined);
     assert.deepEqual(resolved.pool, []);
   });
+
+  it("a malformed aspect object never zeroes out the pool — the survivors still reach selection", async () => {
+    // The real production trace this guards: one object shaped like
+    // {"(title": "...", "focus": "...", "visualConcept": "..."} sat alongside
+    // otherwise-valid objects, and the pool that reached generation was empty.
+    const mixedReply = JSON.stringify([
+      {
+        "(title": "Cost-Effective Escapes",
+        focus: "budget travel still finds quality lodging off-season",
+        visualConcept: "a scene",
+      },
+      {
+        title: "Funding gap",
+        focus: "the campus closure follows a funding gap of several million",
+        visualConcept: "an empty lecture hall with chairs stacked against the wall",
+      },
+    ]);
+    const { provider } = makeProvider(mixedReply);
+
+    const resolved = await resolveGenerationAspect({ primary: CLOSURE, snapshots: [], provider });
+
+    assert.ok(resolved.pool.length > 0, "the well-formed object must survive into the pool");
+    assert.ok(resolved.aspect, "a real aspect must be selected from the surviving pool");
+    assert.ok(resolved.aspect?.focus.includes("funding gap"));
+  });
 });
 
 describe("resolveGenerationAspect — an extracted product page", () => {
