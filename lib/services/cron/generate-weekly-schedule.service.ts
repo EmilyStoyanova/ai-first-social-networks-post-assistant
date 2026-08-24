@@ -3,7 +3,11 @@ import {
   buildGenerationContextForCompany,
   type SourceScope,
 } from "@/lib/services/ai/build-generation-context.service";
-import { resolveWindowStart } from "@/lib/scheduling/posting-windows";
+import {
+  parsePostingWindows,
+  windowStartOn,
+  type PostingWindowEntry,
+} from "@/lib/scheduling/posting-windows";
 import { generatePostFromContext } from "@/lib/services/ai/generate-draft-post.service";
 import {
   COMPANY_CONTENT_SOURCE_ID,
@@ -49,6 +53,17 @@ export interface WeeklyScheduleSummary {
    * outstanding and the next run retries them once ingestion has fetched more.
    */
   shortfalls: Array<{ channel: string; posts: number; reason: "NO_ELIGIBLE_SOURCE" }>;
+  /**
+   * Enabled channels that were left out of the week because nobody configured
+   * WHEN they publish. Not a failure and not a shortfall — there is no target to
+   * fall short of, since a channel with no posting windows is not scheduled at
+   * all (see the invariant on `generateWeeklySchedule`).
+   *
+   * Reported because the alternative is a cron that silently does nothing for a
+   * channel an owner believes is switched on. This list is what an operator
+   * reads to find out that the fix is on the settings page.
+   */
+  skippedChannels: Array<{ channel: string; reason: "NO_POSTING_WINDOWS" }>;
 }
 
 /** Monday 00:00 UTC of the week after the given date. */
@@ -63,18 +78,23 @@ export function nextWeekStart(from: Date): Date {
 /**
  * Picks the scheduled time for the Nth post (0-based) of `target` posts in a
  * week: posts are spread evenly across the 7 days, at the start of the
- * channel's posting window for that day when one exists, otherwise 10:00 UTC.
+ * channel's posting window for that day.
+ *
+ * `windows` is non-empty by construction — a channel without one never reaches
+ * this function, because it is never given a share of the week in the first
+ * place. That is what removes the last place an automatic post could be dated by
+ * an hour nobody chose.
  */
 function slotFor(
   weekStart: Date,
   slotIndex: number,
   target: number,
-  postingWindows: unknown
+  windows: readonly PostingWindowEntry[]
 ): Date {
   const dayIndex = Math.min(6, Math.floor((slotIndex * 7) / Math.max(target, 1)));
 
   // weekStart is always a Monday, so the slot's DAY_ORDER index is its offset.
-  const { hour, minute } = resolveWindowStart(postingWindows, dayIndex);
+  const { hour, minute } = windowStartOn(windows, dayIndex);
 
   const slot = new Date(weekStart);
   slot.setUTCDate(slot.getUTCDate() + dayIndex);
@@ -88,6 +108,19 @@ interface ChannelConfigRow {
   // null = inherit the brand default; the generation context resolves it.
   postingLanguage: string | null;
   postingWindows: unknown;
+}
+
+/**
+ * A channel that has passed the posting-window gate, carrying its parsed
+ * schedule.
+ *
+ * The windows are parsed ONCE, at the gate, and travel with the channel from
+ * there. Re-parsing per slot would let the two questions — "may this channel be
+ * scheduled at all" and "at what time" — be answered from separate reads of the
+ * same JSON, which is precisely how a default hour creeps back in.
+ */
+interface SchedulableChannel extends ChannelConfigRow {
+  windows: PostingWindowEntry[];
 }
 
 // ─── Minimal DB interface for testability ─────────────────────────────────────
@@ -178,7 +211,7 @@ interface FillContext {
   companyId: string;
   scheduleId: string;
   weekStart: Date;
-  config: ChannelConfigRow;
+  config: SchedulableChannel;
   budget: RunBudget;
   summary: WeeklyScheduleSummary;
   buildContext: typeof buildGenerationContextForCompany;
@@ -191,6 +224,23 @@ interface FillContext {
  * Cron step 3 — ensures next week's schedule exists and incrementally fills
  * it with generated posts (pending_approval; the auto-approve step promotes
  * them for fully automated companies). Generation is budgeted per run.
+ *
+ * WHICH CHANNELS TAKE PART. Being enabled with a weekly target is necessary but
+ * not sufficient: a channel must also have posting windows an owner explicitly
+ * configured. The invariant is
+ *
+ *     no configured posting window
+ *         → no automatic generation schedule
+ *         → no automatically generated post for that channel
+ *
+ * and it holds here rather than deeper down because this is the only place that
+ * decides who gets a share of the week. Enforcing it further in — at the slot, or
+ * at the generation call — would mean a channel had already been counted into a
+ * target it can never fill, and the week would sit forever in "generating".
+ *
+ * Manual generation is untouched by this: a person naming a period and looking at
+ * a preview is not the automatic pipeline, and the whole rule is about posts
+ * nobody asked for. See lib/scheduling/bulk-schedule.ts.
  *
  * How many posts a channel gets is `ChannelConfig.postsPerWeek` on both paths
  * below, capped at MAX_POSTS_PER_CHANNEL_PER_WEEK. Only the choice of source
@@ -219,7 +269,24 @@ export async function generateWeeklySchedule(
     select: { channel: true, postsPerWeek: true, postingLanguage: true, postingWindows: true },
   });
 
-  if (channelConfigs.length === 0) {
+  // ── The posting-window gate ───────────────────────────────────────────────
+  // Applied before the schedule row is even upserted, so a company whose
+  // channels are all unscheduled leaves no weekly schedule behind at all —
+  // "skipped" here means exactly what it has always meant: this company has
+  // nothing for the cron to do this week.
+  const schedulable: SchedulableChannel[] = [];
+  const skippedChannels: WeeklyScheduleSummary["skippedChannels"] = [];
+
+  for (const config of channelConfigs) {
+    const windows = parsePostingWindows(config.postingWindows);
+    if (windows === null) {
+      skippedChannels.push({ channel: config.channel, reason: "NO_POSTING_WINDOWS" });
+      continue;
+    }
+    schedulable.push({ ...config, windows });
+  }
+
+  if (schedulable.length === 0) {
     return {
       weekStart: weekStartIso,
       scheduleId: null,
@@ -230,6 +297,7 @@ export async function generateWeeklySchedule(
       mixConfigured: false,
       exhaustedQuotas: [],
       shortfalls: [],
+      skippedChannels,
     };
   }
 
@@ -252,6 +320,7 @@ export async function generateWeeklySchedule(
       mixConfigured: false,
       exhaustedQuotas: [],
       shortfalls: [],
+      skippedChannels,
     };
   }
 
@@ -291,11 +360,12 @@ export async function generateWeeklySchedule(
     mixConfigured: quotas !== null,
     exhaustedQuotas: [],
     shortfalls: [],
+    skippedChannels,
   };
 
   const budget: RunBudget = { remaining: MAX_GENERATIONS_PER_RUN };
 
-  for (const config of channelConfigs) {
+  for (const config of schedulable) {
     const generatedBySource = new Map<string | null, number>();
     for (const row of existingPosts) {
       if (row.channel !== config.channel) continue;
@@ -368,7 +438,7 @@ async function fillChannelPooled(
       // (which already falls back to the brand default) is used.
       contentLanguage: config.postingLanguage ?? undefined,
       scheduleId,
-      scheduledFor: slotFor(weekStart, have, target, config.postingWindows),
+      scheduledFor: slotFor(weekStart, have, target, config.windows),
       initialStatus: "pending_approval",
       // Descriptive only, for the generation trace: the `scheduleId` above
       // already derives `cron`, and this adds how the article window was ordered.
@@ -494,7 +564,7 @@ async function fillChannelFromMix(
       // (which already falls back to the brand default) is used.
       contentLanguage: config.postingLanguage ?? undefined,
       scheduleId,
-      scheduledFor: slotFor(weekStart, totalGenerated(), target, config.postingWindows),
+      scheduledFor: slotFor(weekStart, totalGenerated(), target, config.windows),
       initialStatus: "pending_approval",
       contentSourceId: due.sourceId,
       // Descriptive only, for the generation trace — see the pooled path above.

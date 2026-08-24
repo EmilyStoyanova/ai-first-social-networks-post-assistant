@@ -29,14 +29,23 @@
  * "will this work?" before trying, which is exactly the question this feature
  * cannot answer in advance.
  *
- * The one database read here is the narrow exception that proves it: a content
- * mix names source IDS, and whether those ids are this company's and enabled is
- * a fact about the REQUEST, fixed before the run and not changed by it.
+ * The two database reads here are the narrow exceptions that prove it, and both
+ * qualify for the same reason — they are facts about the REQUEST, fixed before
+ * the run and not changed by it:
+ *
+ *   • a content mix names source IDS, and whether those are this company's and
+ *     enabled is settled the moment the request is written;
+ *   • an EVEN distribution is entirely a function of the channel's saved posting
+ *     windows, so a channel with none makes the request unanswerable rather than
+ *     merely unlucky. Trying cannot change that answer, and the run would have
+ *     nothing to schedule. See `NO_POSTING_WINDOWS`.
  */
 
 import { prisma } from "@/lib/db/client";
 import type { ManualContentSourceRef } from "@/lib/ai/manual-content-source";
+import type { SocialChannel } from "@prisma/client";
 import { COMPANY_CONTENT_SOURCE_ID } from "@/lib/scheduling/content-mix";
+import { hasPostingWindows } from "@/lib/scheduling/posting-windows";
 import {
   MAX_BULK_POSTS,
   MAX_BULK_RANGE_DAYS,
@@ -65,6 +74,21 @@ export type BulkRequestErrorCode =
   | "INVALID_DATE_RANGE"
   | "START_DATE_IN_PAST"
   | "INVALID_DISTRIBUTION"
+  /**
+   * An EVEN distribution was asked for over a channel that has no posting
+   * schedule, so there is no time of day to spread the posts across.
+   *
+   * A request error rather than a runtime outcome, and squarely inside this
+   * module's remit: it is fixed before the run, decided entirely by the request
+   * and the channel's saved configuration, and the answer cannot change by
+   * trying. The alternative — planning nothing and reporting a "successful batch
+   * of zero" — tells the person who clicked Generate nothing they can act on.
+   *
+   * Deliberately NOT raised for a custom distribution: there the user names every
+   * time, which is precisely the other way out of this. See
+   * lib/scheduling/bulk-schedule.ts.
+   */
+  | "NO_POSTING_WINDOWS"
   | "INVALID_SOURCE_MIX";
 
 export interface BulkRequestProblem {
@@ -75,6 +99,14 @@ export interface BulkRequestProblem {
 
 /** The parts of a bulk request these rules are about. */
 export interface BulkRequestShape {
+  /**
+   * Every channel each topic is written for.
+   *
+   * Read only by the posting-window check, which is per channel: each one plans
+   * its own slots from its own schedule, so one unconfigured channel in a
+   * multi-channel batch is enough to make the request unanswerable.
+   */
+  channels: readonly string[];
   /** How many content TOPICS to write. */
   numberOfPosts: number;
   /** Inclusive `YYYY-MM-DD`, a business-zone calendar day. */
@@ -232,16 +264,50 @@ export async function loadEnabledSourceIdsFromDb(slug: string): Promise<Set<stri
   return new Set(rows.map((r) => r.id));
 }
 
-export interface ValidateBulkRequestDeps {
-  /** The company's enabled content-source ids — what a submitted mix is checked against. */
-  loadEnabledSourceIds?: (slug: string) => Promise<Set<string>>;
+const SOCIAL_CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const;
+
+function isSocialChannel(value: string): value is SocialChannel {
+  return (SOCIAL_CHANNELS as readonly string[]).includes(value);
 }
 
 /**
- * The whole request-shape check: the pure rules, then the content mix.
+ * A channel's `postingWindows` as stored, or null when there is no such channel.
  *
- * The database is touched only when a mix was actually submitted, which is what
- * keeps the ordinary request a pure function call.
+ * Shared with `bulkGeneratePosts`, which plans the actual slots from the very
+ * same read — one answer to "when does this channel publish?", so the check that
+ * refuses the request and the planner that would have run it cannot disagree.
+ *
+ * An unknown channel is not rejected here — generation owns that answer
+ * (INVALID_CHANNEL). This only has to avoid handing Prisma a value its enum does
+ * not accept. Scoped by slug only: the value is a time of day, and the
+ * generation calls that follow are what enforce membership.
+ */
+export async function loadPostingWindowsFromDb(slug: string, channel: string): Promise<unknown> {
+  const normalized = channel.toLowerCase();
+  if (!isSocialChannel(normalized)) return null;
+
+  const config = await prisma.channelConfig.findFirst({
+    where: { company: { slug }, channel: normalized },
+    select: { postingWindows: true },
+  });
+  return config?.postingWindows ?? null;
+}
+
+export interface ValidateBulkRequestDeps {
+  /** The company's enabled content-source ids — what a submitted mix is checked against. */
+  loadEnabledSourceIds?: (slug: string) => Promise<Set<string>>;
+  /** A channel's saved posting windows — what the even-distribution check reads. */
+  loadPostingWindows?: (slug: string, channel: string) => Promise<unknown>;
+}
+
+/**
+ * The whole request-shape check: the pure rules, then the posting schedule, then
+ * the content mix.
+ *
+ * The database is touched only for the two checks that need it — an even
+ * distribution reads each channel's windows, a submitted mix reads the company's
+ * sources — so a custom-distribution request with no mix stays a pure function
+ * call.
  */
 export async function validateBulkRequest(
   slug: string,
@@ -251,6 +317,31 @@ export async function validateBulkRequest(
 ): Promise<BulkRequestProblem | null> {
   const shapeProblem = validateBulkRequestShape(input, now);
   if (shapeProblem !== null) return shapeProblem;
+
+  // Even distribution only. The channel's posting windows are the ONLY thing
+  // that decides the days and times in that mode, so a channel without any has
+  // nothing to be distributed over — and inventing an hour for it is exactly
+  // what this application no longer does, on the manual path or the automatic
+  // one. Custom mode skips this: the user has named every time already.
+  if (input.customDistribution === undefined) {
+    const loadPostingWindows = deps.loadPostingWindows ?? loadPostingWindowsFromDb;
+    const unscheduled: string[] = [];
+
+    for (const channel of input.channels) {
+      if (!hasPostingWindows(await loadPostingWindows(slug, channel))) unscheduled.push(channel);
+    }
+
+    if (unscheduled.length > 0) {
+      return {
+        code: "NO_POSTING_WINDOWS",
+        // Names the channels, because in a multi-channel batch the fix is
+        // per channel and the user cannot otherwise tell which one to open.
+        message:
+          `No publishing times are configured for ${unscheduled.join(", ")}. ` +
+          "Add a posting schedule in channel settings, or choose the date and time of each post yourself.",
+      };
+    }
+  }
 
   if (input.sourceMix === undefined) return null;
 

@@ -105,6 +105,13 @@ export function toCustomDistribution(
  * from the channel's posting windows (`defaultTimesForDay`), so a day opens on
  * plausible hours rather than on empty inputs the user has to fill before
  * anything previews.
+ *
+ * `UNSET_TIME` is what a position gets when there is nothing to seed it FROM — a
+ * channel with no posting windows, or a date too malformed to read. An empty
+ * input, not an invented hour: the picker shows it as unchosen, and the request
+ * is refused as `invalid_time` until the user picks one. Filling it in with a
+ * plausible-looking time would turn "you have not said when" into a schedule
+ * indistinguishable from one somebody actually chose.
  */
 export function syncDayTimes(
   date: string,
@@ -117,15 +124,22 @@ export function syncDayTimes(
   const seeds = defaultTimesForDay(date, count, postingWindows);
   return Array.from(
     { length: count },
-    // The last seed is the fallback for a position past the seeded list, which
-    // only an unusable date can produce — `FALLBACK_TIME` then keeps the input
-    // showing a real time instead of an empty one.
-    (_, i) => existing?.[i] ?? seeds[i] ?? seeds[seeds.length - 1] ?? FALLBACK_TIME
+    // The last seed covers a position past the seeded list; with no seeds at all
+    // the position is simply unset.
+    (_, i) => existing?.[i] ?? seeds[i] ?? seeds[seeds.length - 1] ?? UNSET_TIME
   );
 }
 
-/** Shown when a day is too malformed to seed from; the API refuses it anyway. */
-const FALLBACK_TIME = "10:00";
+/**
+ * A time input with nothing in it — the honest state for "no hour has been
+ * chosen, and none may be guessed".
+ *
+ * `TimeSlotSelect` renders it as an unchosen placeholder and
+ * `validateCustomDistribution` refuses it (`invalid_time`), so the Generate
+ * button stays disabled until every post has a real time. Empty rather than a
+ * default is the whole point — see `defaultTimesForDay`.
+ */
+export const UNSET_TIME = "";
 
 /** Total posts a custom distribution currently assigns. */
 export function customTotal(counts: Readonly<Record<string, number>>): number {

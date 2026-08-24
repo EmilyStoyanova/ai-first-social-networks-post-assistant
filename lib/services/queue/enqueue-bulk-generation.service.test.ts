@@ -39,6 +39,8 @@ function makeDeps(
     deduplicated?: boolean;
     enabledSourceIds?: string[];
     runningJobId?: string | null;
+    /** The channel's saved posting windows; configured unless a test says otherwise. */
+    postingWindows?: unknown;
   } = {}
 ): { deps: EnqueueBulkGenerationDeps; enqueues: () => RecordedEnqueue[] } {
   const enqueues: RecordedEnqueue[] = [];
@@ -52,6 +54,13 @@ function makeDeps(
       newBatchId: () => "batch-fixed",
       newContentGroupId: () => `group-${++n}`,
       loadEnabledSourceIds: async () => new Set(options.enabledSourceIds ?? ["source-a"]),
+      // An even distribution is refused for a channel with no schedule, so the
+      // default here is a configured one — otherwise every request below would
+      // be rejected before reaching the rule it is actually about.
+      loadPostingWindows: async () =>
+        "postingWindows" in options
+          ? options.postingWindows
+          : [{ day: "MONDAY", start: "09:00", end: "17:00" }],
       findRunningJob: async () =>
         options.runningJobId === undefined
           ? { id: "job-running" }
@@ -308,6 +317,46 @@ describe("enqueueBulkGeneration — request rejections, answered before queueing
       assert.equal(enqueues().length, 0);
     });
   }
+
+  it("refuses an even spread over a channel with no posting schedule", async () => {
+    // Answered here, synchronously, rather than becoming a job that plans no
+    // slots and reports a batch of zero. Nothing about this request can be
+    // fixed by running it.
+    for (const windows of [null, [], "nonsense"]) {
+      const { deps, enqueues } = makeDeps({ postingWindows: windows });
+
+      const result = await enqueueBulkGeneration(SLUG, USER_ID, false, makeRequest(), deps);
+
+      assert.equal(result.success, false);
+      if (result.success) return;
+      assert.equal(result.code, "NO_POSTING_WINDOWS", `for ${JSON.stringify(windows)}`);
+      assert.equal(enqueues().length, 0);
+    }
+  });
+
+  it("queues a CUSTOM distribution for a channel with no posting schedule", async () => {
+    // The other half of the same rule, and the reason the check is scoped to
+    // even distributions: the user named every date and time, so a channel
+    // without a schedule of its own is no obstacle at all.
+    const { deps, enqueues } = makeDeps({ postingWindows: null });
+
+    const result = await enqueueBulkGeneration(
+      SLUG,
+      USER_ID,
+      false,
+      makeRequest({
+        numberOfPosts: 2,
+        distribution: [
+          { date: "2026-08-18", count: 1, times: ["11:30"] },
+          { date: "2026-08-20", count: 1, times: ["14:30"] },
+        ],
+      }),
+      deps
+    );
+
+    assert.equal(result.success, true);
+    assert.equal(enqueues().length, 1);
+  });
 
   it("queues a valid request that uses every optional field", async () => {
     const { deps, enqueues } = makeDeps();

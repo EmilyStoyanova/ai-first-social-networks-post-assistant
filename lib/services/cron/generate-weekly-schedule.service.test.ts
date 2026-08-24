@@ -34,9 +34,27 @@ interface FakeSource {
   articles: number;
 }
 
+/**
+ * Every weekday at 09:00 — the schedule a channel needs before the cron will
+ * give it any part of a week.
+ *
+ * Every existing test here is about DISTRIBUTION (how many posts, from which
+ * source), so they all run on a channel that is properly scheduled; the
+ * posting-window gate has its own describe block below.
+ */
+const WEEKDAYS_9AM = [
+  { day: "MONDAY", start: "09:00", end: "17:00" },
+  { day: "TUESDAY", start: "09:00", end: "17:00" },
+  { day: "WEDNESDAY", start: "09:00", end: "17:00" },
+  { day: "THURSDAY", start: "09:00", end: "17:00" },
+  { day: "FRIDAY", start: "09:00", end: "17:00" },
+];
+
 interface FakeChannel {
   channel: string;
   postsPerWeek: number;
+  /** Omitted = WEEKDAYS_9AM. Pass null or [] for a channel nobody scheduled. */
+  postingWindows?: unknown;
 }
 
 interface RecordedPost {
@@ -49,6 +67,8 @@ class Harness {
   posts: RecordedPost[] = [];
   scheduleStatus = "generating";
   generatedAt: Date | null = null;
+  /** How many times a weekly schedule row was created or touched. */
+  upserts = 0;
   /** Every scope the scheduler asked a context for, in order. */
   scopes: Array<SourceScope | undefined> = [];
   /** Forces generation to fail with this code once, then clears. */
@@ -71,11 +91,14 @@ class Harness {
           channel: c.channel,
           postsPerWeek: c.postsPerWeek,
           postingLanguage: "en",
-          postingWindows: null,
+          postingWindows: "postingWindows" in c ? c.postingWindows : WEEKDAYS_9AM,
         })),
     },
     weeklySchedule: {
-      upsert: async () => ({ id: SCHEDULE_ID, status: this.scheduleStatus }),
+      upsert: async () => {
+        this.upserts++;
+        return { id: SCHEDULE_ID, status: this.scheduleStatus };
+      },
       update: async (args) => {
         this.scheduleStatus = args.data.status;
         this.generatedAt = args.data.generatedAt;
@@ -887,6 +910,125 @@ describe("generateWeeklySchedule — failures", () => {
     assert.equal(summary.failures.length, 1);
     assert.equal(summary.failures[0].message, "provider exploded");
     assert.equal(summary.scheduleStatus, "generating", "a failed run never marks the week ready");
+  });
+});
+
+// ─── The posting-window gate ──────────────────────────────────────────────────
+//
+//     no configured posting window
+//         → no automatic generation schedule
+//         → no automatically generated post for that channel
+//
+// Being enabled with a weekly target is not enough. Before this rule, a channel
+// with no windows was scheduled at a 10:00 default nobody had chosen, which meant
+// switching a channel on was by itself enough to start producing posts.
+
+describe("generateWeeklySchedule — posting-window gate", () => {
+  /** One channel, five posts a week, entirely from company content. */
+  function gateHarness(postingWindows: unknown) {
+    return new Harness([], 5, [{ channel: "facebook", postsPerWeek: 5, postingWindows }]);
+  }
+
+  it("generates nothing for a channel with no posting windows", async () => {
+    const harness = gateHarness(null);
+    const summary = await runUntilSettled(harness);
+
+    assert.equal(harness.posts.length, 0, "no automatically generated post");
+    assert.equal(summary.postsGenerated, 0);
+    assert.equal(summary.scheduleStatus, "skipped");
+  });
+
+  it("treats an empty window list the same as none at all", async () => {
+    const harness = gateHarness([]);
+    await runUntilSettled(harness);
+    assert.equal(harness.posts.length, 0);
+  });
+
+  it("treats unparseable window JSON as no schedule, not as a default hour", async () => {
+    const harness = gateHarness([{ day: "SOMEDAY", start: "9", end: "5" }]);
+    await runUntilSettled(harness);
+    assert.equal(harness.posts.length, 0);
+  });
+
+  it("creates no weekly schedule row at all when no channel is scheduled", async () => {
+    // The gate runs before the upsert, so an unscheduled company leaves nothing
+    // behind — no half-built week for a later run to find and try to finish.
+    const harness = gateHarness(null);
+    const summary = await runUntilSettled(harness);
+
+    assert.equal(harness.upserts, 0);
+    assert.equal(summary.scheduleId, null);
+  });
+
+  it("says which channels it skipped and why", async () => {
+    const harness = gateHarness(null);
+    const summary = await runUntilSettled(harness);
+
+    assert.deepEqual(summary.skippedChannels, [
+      { channel: "facebook", reason: "NO_POSTING_WINDOWS" },
+    ]);
+    assert.deepEqual(summary.failures, [], "not scheduled is not a failure");
+    assert.deepEqual(summary.shortfalls, [], "and there is no target to fall short of");
+  });
+
+  it("still schedules the channels that DO have windows", async () => {
+    const harness = new Harness([], 10, [
+      { channel: "facebook", postsPerWeek: 3 },
+      { channel: "linkedin", postsPerWeek: 3, postingWindows: null },
+    ]);
+    const summary = await runUntilSettled(harness, 10);
+
+    assert.equal(harness.posts.filter((p) => p.channel === "facebook").length, 3);
+    assert.equal(harness.posts.filter((p) => p.channel === "linkedin").length, 0);
+    assert.deepEqual(summary.skippedChannels, [
+      { channel: "linkedin", reason: "NO_POSTING_WINDOWS" },
+    ]);
+    assert.equal(summary.postsRemaining, 0, "the skipped channel owes nothing");
+    assert.equal(summary.scheduleStatus, "ready");
+  });
+
+  it("schedules posts at the channel's configured hour", async () => {
+    // The other half of the rule: when a schedule exists it is what decides the
+    // time, so a channel configured for 07:15 is never dated 10:00.
+    const harness = new Harness([], 3, [
+      {
+        channel: "facebook",
+        postsPerWeek: 3,
+        postingWindows: [
+          { day: "MONDAY", start: "07:15", end: "09:00" },
+          { day: "WEDNESDAY", start: "07:15", end: "09:00" },
+          { day: "FRIDAY", start: "07:15", end: "09:00" },
+        ],
+      },
+    ]);
+    await runUntilSettled(harness);
+
+    assert.equal(harness.posts.length, 3);
+    for (const post of harness.posts) {
+      assert.ok(post.scheduledFor, "every post carries a slot");
+      assert.equal(post.scheduledFor.getUTCHours(), 7);
+      assert.equal(post.scheduledFor.getUTCMinutes(), 15);
+    }
+  });
+
+  it("keeps a channel's own hour on a weekday it did not configure", async () => {
+    // Monday-only windows on a channel posting 7× a week: the days it never
+    // named still take its usual hour. That is a fallback inside a schedule the
+    // owner authored — not the invented default the gate exists to remove.
+    const harness = new Harness([], 7, [
+      {
+        channel: "facebook",
+        postsPerWeek: 7,
+        postingWindows: [{ day: "MONDAY", start: "16:45", end: "18:00" }],
+      },
+    ]);
+    await runUntilSettled(harness, 12);
+
+    assert.equal(harness.posts.length, 7);
+    assert.equal(
+      harness.posts.every((p) => p.scheduledFor?.getUTCHours() === 16),
+      true
+    );
   });
 });
 

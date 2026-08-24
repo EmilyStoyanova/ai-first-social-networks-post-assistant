@@ -45,8 +45,6 @@
  * BULK_SOFT_BUDGET_MS.
  */
 
-import { prisma } from "@/lib/db/client";
-import type { SocialChannel } from "@prisma/client";
 import {
   generateDraftPost,
   type GenerateDraftPostErrorCode,
@@ -72,6 +70,7 @@ import {
 } from "@/lib/http/request-deadline";
 import { planBulkSlots, planCustomSlots, type BulkCustomDay } from "@/lib/scheduling/bulk-schedule";
 import {
+  loadPostingWindowsFromDb,
   validateBulkRequest,
   type BulkRequestErrorCode,
   type BulkSourceQuota,
@@ -308,6 +307,9 @@ export type BulkGeneratePostsResult =
   | { success: false; code: "INVALID_DATE_RANGE"; message: string }
   | { success: false; code: "START_DATE_IN_PAST"; message: string }
   | { success: false; code: "INVALID_DISTRIBUTION"; message: string }
+  // An even spread was asked for over a channel with no posting schedule, so
+  // there is no time of day to spread across and none is invented.
+  | { success: false; code: "NO_POSTING_WINDOWS"; message: string }
   | { success: false; code: "INVALID_SOURCE_MIX"; message: string }
   | GenerateDraftPostFailure;
 
@@ -370,7 +372,11 @@ export interface BulkGeneratePostsDeps {
   onProgress?: (summary: BulkGenerationSummary) => Promise<void>;
   /** What an earlier attempt of this batch already wrote. */
   resume?: BulkResumeState;
-  /** Reads the channel's posting windows so slots land at its usual hour. */
+  /**
+   * Reads the channel's posting windows so slots land at its usual hour — and so
+   * a channel with none is refused as `NO_POSTING_WINDOWS` rather than scheduled
+   * at an hour nobody chose. Both the check and the plan use this one reader.
+   */
   loadPostingWindows?: (slug: string, channel: string) => Promise<unknown>;
   /** The company's enabled content-source ids — what a submitted mix is checked against. */
   loadEnabledSourceIds?: (slug: string) => Promise<Set<string>>;
@@ -507,29 +513,6 @@ const DEFAULT_MESSAGES: Record<BulkFailureReason, string> = {
 
 // ─── Service ───────────────────────────────────────────────────────────────────
 
-async function loadPostingWindowsFromDb(slug: string, channel: string): Promise<unknown> {
-  // An unknown channel is not rejected here — generation is what owns that
-  // answer (INVALID_CHANNEL), and it is reached one line later. This only has
-  // to avoid handing Prisma a value its enum does not accept.
-  const normalized = channel.toLowerCase();
-  if (!isSocialChannel(normalized)) return null;
-
-  // Scoped by slug only: the value is a time of day, and the generation call
-  // right after this one is what enforces membership. A wrong answer here could
-  // only mis-time posts that were never allowed to exist in the first place.
-  const config = await prisma.channelConfig.findFirst({
-    where: { company: { slug }, channel: normalized },
-    select: { postingWindows: true },
-  });
-  return config?.postingWindows ?? null;
-}
-
-const SOCIAL_CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const;
-
-function isSocialChannel(value: string): value is SocialChannel {
-  return (SOCIAL_CHANNELS as readonly string[]).includes(value);
-}
-
 /**
  * The content-source choice a mix quota stands for.
  *
@@ -584,8 +567,29 @@ export async function bulkGeneratePosts(
   // because this service is reachable from the worker, and a payload that got
   // there by any other route must not be able to spend anything unchecked.
   const custom = input.customDistribution;
+
+  /**
+   * A channel's posting windows, read at most once per run.
+   *
+   * The check below and the planner further down both need them, and they must
+   * agree: a request refused for having no schedule and a plan built from one
+   * would be two answers to the same question. Memoising also keeps an even
+   * spread at one query per channel rather than two.
+   *
+   * Never called in custom mode — neither caller asks — so that path still
+   * touches the windows not at all.
+   */
+  const channelWindows = new Map<string, unknown>();
+  const readPostingWindows = async (forSlug: string, channel: string): Promise<unknown> => {
+    if (!channelWindows.has(channel)) {
+      channelWindows.set(channel, await loadPostingWindows(forSlug, channel));
+    }
+    return channelWindows.get(channel);
+  };
+
   const problem = await validateBulkRequest(slug, input, new Date(now()), {
     loadEnabledSourceIds: deps.loadEnabledSourceIds,
+    loadPostingWindows: readPostingWindows,
   });
   if (problem !== null) return asRequestFailure(problem);
 
@@ -625,7 +629,7 @@ export async function bulkGeneratePosts(
           startDate: input.startDate,
           endDate: input.endDate,
           count: input.numberOfPosts,
-          postingWindows: await loadPostingWindows(slug, channel),
+          postingWindows: await readPostingWindows(slug, channel),
         })
       );
     }

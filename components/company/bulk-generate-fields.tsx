@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useTranslations } from "next-intl";
 import { CalendarClock } from "lucide-react";
 import { Alert } from "@/components/ui/Alert";
@@ -65,9 +66,24 @@ interface Props {
   /**
    * The selected channel's posting windows, used only to SEED a day's time
    * inputs. Nothing here reads them to schedule with — in custom mode the times
-   * on screen are the times that get sent.
+   * on screen are the times that get sent. With no windows there is nothing to
+   * seed from, and the inputs open empty rather than at an invented hour.
    */
   postingWindows: unknown;
+  /**
+   * Selected channels that have no publishing times configured, by label.
+   *
+   * Even distribution is entirely a function of those times, so this list being
+   * non-empty means the batch cannot be planned at all — the parent disables the
+   * Generate button on the same condition, and the API refuses the request with
+   * `NO_POSTING_WINDOWS` if it is made anyway. Custom mode is unaffected: there
+   * the user names every time.
+   */
+  channelsWithoutWindows: string[];
+  /** Channel settings, where the missing schedule is configured. */
+  channelSettingsHref: string;
+  /** Saves the half-filled batch before the CTA above navigates away from it. */
+  onLeaveForSettings?: () => void;
   disabled: boolean;
   locale: string;
 }
@@ -97,10 +113,19 @@ export function BulkGenerateFields({
   minDate,
   now,
   postingWindows,
+  channelsWithoutWindows,
+  channelSettingsHref,
+  onLeaveForSettings,
   disabled,
   locale,
 }: Props) {
   const t = useTranslations("posts.generate.bulk");
+
+  /**
+   * Even distribution has no times to work from. Shown INSTEAD of the ordinary
+   * even-mode hint, because that hint describes something this batch cannot do.
+   */
+  const evenUnplannable = plan.distribution === "even" && channelsWithoutWindows.length > 0;
 
   const days = enumerateDays(plan.startDate, plan.endDate);
   const assigned = customTotal(plan.counts);
@@ -254,11 +279,42 @@ export function BulkGenerateFields({
       {/* The custom hint carries the slot rule with it: it is only in that mode
           that anyone picks a time, so it is only there that the half hours the
           pickers offer need explaining. */}
-      <p className="text-fg-faint mt-2 text-xs">
-        {plan.distribution === "even"
-          ? t("evenHint")
-          : `${t("customHint")} ${t("slotHint", { minutes: SLOT_MINUTES })}`}
-      </p>
+      {!evenUnplannable && (
+        <p className="text-fg-faint mt-2 text-xs">
+          {plan.distribution === "even"
+            ? t("evenHint")
+            : `${t("customHint")} ${t("slotHint", { minutes: SLOT_MINUTES })}`}
+        </p>
+      )}
+
+      {/* No posting schedule, so an even spread has no hours to spread over —
+          and none is invented. Both ways out are offered: configure the channel,
+          or switch to custom and name the times here. Not a validation error
+          under a field, because nothing on this form is wrong — the channel is
+          simply not set up for this mode yet. */}
+      {evenUnplannable && (
+        <Alert variant="warning" className="mt-3">
+          <p>{t("noPostingWindows", { channels: channelsWithoutWindows.join(", ") })}</p>
+          <p className="mt-1.5">
+            <Link
+              href={channelSettingsHref}
+              onClick={onLeaveForSettings}
+              className="text-accent font-medium underline underline-offset-2"
+            >
+              {t("noPostingWindowsSettings")}
+            </Link>
+            {" · "}
+            <button
+              type="button"
+              onClick={() => update({ distribution: "custom" })}
+              disabled={disabled}
+              className="text-accent font-medium underline underline-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {t("noPostingWindowsCustom")}
+            </button>
+          </p>
+        </Alert>
+      )}
 
       {plan.distribution === "custom" && (
         <div className="mt-4">
@@ -309,7 +365,12 @@ export function BulkGenerateFields({
                     {/* One time input per post assigned to this day — the whole
                         point of the mode. Seeded from the channel's windows and
                         then entirely the user's: these values are what the
-                        request carries and what gets scheduled. */}
+                        request carries and what gets scheduled.
+
+                        A channel with no windows seeds nothing, so these open
+                        EMPTY and are marked as such. That is the mode working as
+                        intended — the user names the times — rather than a form
+                        that failed to fill itself in. */}
                     {count > 0 && (
                       <div className="mt-2 flex flex-wrap items-center gap-2 pl-1">
                         {times.map((time, i) => (
@@ -319,7 +380,8 @@ export function BulkGenerateFields({
                               value={time}
                               onChange={(value) => updateDayTime(date, i, value)}
                               disabled={disabled}
-                              invalid={isPastTime(date, time)}
+                              invalid={time === "" || isPastTime(date, time)}
+                              placeholder={t("timeUnset")}
                               aria-label={t("timeForPost", { index: i + 1, date })}
                               className="w-24 px-2 py-1 text-sm"
                             />

@@ -34,6 +34,24 @@ const BATCH_ID = "batch-fixed";
 const START = "2026-08-17";
 const END = "2026-08-30";
 
+/**
+ * The harness's default channel schedule: every day at 10:00.
+ *
+ * An even spread is refused outright for a channel with no posting windows, so
+ * the tests below that are about ORCHESTRATION — the loop, the budget, the
+ * content mix, the failure handling — need a configured channel to be about
+ * anything at all. A slot on every day also keeps the planned dates legible.
+ */
+const EVERY_DAY_10 = [
+  "MONDAY",
+  "TUESDAY",
+  "WEDNESDAY",
+  "THURSDAY",
+  "FRIDAY",
+  "SATURDAY",
+  "SUNDAY",
+].map((day) => ({ day, start: "10:00", end: "12:00" }));
+
 /** Everything the bulk service passes to ONE generation, as it received it. */
 interface RecordedCall {
   slug: string;
@@ -160,7 +178,8 @@ function makeDeps(
         },
       };
     },
-    loadPostingWindows: async () => options.postingWindows ?? null,
+    loadPostingWindows: async () =>
+      "postingWindows" in options ? options.postingWindows : EVERY_DAY_10,
     newBatchId: () => BATCH_ID,
     // Recorded rather than written: the real one talks to Prisma, and these
     // tests are about orchestration, not storage.
@@ -701,9 +720,54 @@ describe("bulkGeneratePosts — a user-authored schedule", () => {
     assert.equal(loads, 0);
   });
 
-  it("still loads the windows for an even spread", async () => {
+  it("generates by hand for a channel that has no posting windows at all", async () => {
+    // The escape hatch, and the reason the even-spread refusal is not a ban on
+    // generating for an unscheduled channel. The user named every date and time,
+    // so there is nothing left for the channel's own schedule to contribute and
+    // its absence blocks nothing. Every post is written, at exactly the times
+    // that were asked for.
+    const { deps, calls } = makeDeps({ postingWindows: null });
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({
+        numberOfPosts: 5,
+        customDistribution: [
+          { date: "2026-08-18", count: 2, times: ["09:00", "13:00"] },
+          { date: "2026-08-19", count: 1, times: ["11:30"] },
+          { date: "2026-08-20", count: 2, times: ["08:15", "19:45"] },
+        ],
+      }),
+      deps
+    );
+
+    assert.equal(result.success, true);
+    if (!result.success) return;
+    assert.equal(result.data.generated, 5, "every requested post was written");
+    assert.deepEqual(
+      calls().map((c) => slotStamp(c.options.scheduledFor as Date)),
+      [
+        "2026-08-18T09:00",
+        "2026-08-18T13:00",
+        "2026-08-19T11:30",
+        "2026-08-20T08:15",
+        "2026-08-20T19:45",
+      ]
+    );
+    assert.equal(
+      calls().every((c) => c.options.scheduledFor instanceof Date),
+      true,
+      "and every one of them was given a real slot"
+    );
+  });
+
+  it("still loads the windows for an even spread, and only once", async () => {
     // The other half of the previous test: even distribution is unchanged and
     // depends on them, so a skipped load there would be a silent regression.
+    // Once, because the eligibility check and the planner share the read — two
+    // reads would be two chances to disagree, as well as a wasted query.
     let loads = 0;
     const { deps } = makeDeps();
 
@@ -716,6 +780,74 @@ describe("bulkGeneratePosts — a user-authored schedule", () => {
     });
 
     assert.equal(loads, 1);
+  });
+});
+
+// ─── No posting windows ───────────────────────────────────────────────────────
+
+describe("bulkGeneratePosts — a channel with no posting schedule", () => {
+  it("refuses an even spread rather than writing posts at an invented hour", async () => {
+    // What this whole rule exists to stop. There is no configured time of day,
+    // so no time of day is chosen — and the caller is told why, instead of being
+    // handed a batch dated at a default nobody picked (the old behaviour) or a
+    // "successful" batch of zero posts (what removing the default alone gives).
+    for (const windows of [null, undefined, [], "nonsense", [{ day: "FUNDAY" }]]) {
+      const { deps, calls } = makeDeps({ postingWindows: windows });
+
+      const result = await bulkGeneratePosts(SLUG, USER_ID, false, makeInput(), deps);
+
+      assert.equal(result.success, false, `for ${JSON.stringify(windows)}`);
+      if (result.success) return;
+      assert.equal(result.code, "NO_POSTING_WINDOWS");
+      assert.ok((result as { message: string }).message.length > 0);
+      // Nothing was generated, so nothing was spent.
+      assert.equal(calls().length, 0);
+    }
+  });
+
+  it("refuses when only ONE channel of a multi-channel batch is unscheduled", async () => {
+    // Each channel plans its own slots from its own windows, so an unscheduled
+    // one has no hour for its share of the topic. Refused as a whole rather than
+    // silently written for two channels out of three.
+    const { deps, calls } = makeDeps();
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ channels: ["facebook", "linkedin"] }),
+      {
+        ...deps,
+        loadPostingWindows: async (_slug, channel) =>
+          channel === "linkedin" ? null : EVERY_DAY_10,
+      }
+    );
+
+    assert.equal(result.success, false);
+    if (result.success) return;
+    assert.equal(result.code, "NO_POSTING_WINDOWS");
+    assert.match((result as { message: string }).message, /linkedin/);
+    assert.equal(calls().length, 0);
+  });
+
+  it("refuses before spending anything, whatever else the request also asks for", async () => {
+    // The refusal is about scheduling, so it lands before the content mix is
+    // even looked at — there is no useful advice about sources for a batch that
+    // cannot be placed on a calendar at all.
+    const { deps, calls } = makeDeps({ postingWindows: null });
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ numberOfPosts: 2, sourceMix: [{ sourceId: "source-a", posts: 2 }] }),
+      { ...deps, loadEnabledSourceIds: async () => new Set(["source-a"]) }
+    );
+
+    assert.equal(result.success, false);
+    if (result.success) return;
+    assert.equal(result.code, "NO_POSTING_WINDOWS");
+    assert.equal(calls().length, 0);
   });
 
   it("rejects a distribution whose counts do not add up to the request", async () => {
@@ -1254,7 +1386,7 @@ function makeMixDeps(
         },
       };
     },
-    loadPostingWindows: async () => null,
+    loadPostingWindows: async () => EVERY_DAY_10,
     newBatchId: () => BATCH_ID,
     auditLog: async (entry) => {
       audits.push(entry);

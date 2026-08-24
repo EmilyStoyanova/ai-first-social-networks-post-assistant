@@ -13,8 +13,20 @@ const NOW = new Date("2026-08-10T09:00:00.000Z");
 const START = "2026-08-17";
 const END = "2026-08-30";
 
+/** A channel whose owner has said when it publishes. */
+const CONFIGURED = [
+  { day: "MONDAY", start: "09:00", end: "17:00" },
+  { day: "THURSDAY", start: "18:30", end: "20:00" },
+];
+
 function makeRequest(overrides: Partial<BulkRequestShape> = {}): BulkRequestShape {
-  return { numberOfPosts: 2, startDate: START, endDate: END, ...overrides };
+  return {
+    channels: ["facebook"],
+    numberOfPosts: 2,
+    startDate: START,
+    endDate: END,
+    ...overrides,
+  };
 }
 
 // ─── The pure rules ───────────────────────────────────────────────────────────
@@ -207,10 +219,21 @@ describe("validateSourceMix", () => {
 
 describe("validateBulkRequest", () => {
   const loadEnabledSourceIds = async () => new Set(["source-a"]);
+  const loadPostingWindows = async () => CONFIGURED;
 
-  it("accepts a valid request without reading the database", async () => {
+  it("accepts a valid request", async () => {
+    const problem = await validateBulkRequest("acme", makeRequest(), NOW, {
+      loadEnabledSourceIds,
+      loadPostingWindows,
+    });
+
+    assert.equal(problem, null);
+  });
+
+  it("does not read the content sources when no mix was submitted", async () => {
     let reads = 0;
     const problem = await validateBulkRequest("acme", makeRequest(), NOW, {
+      loadPostingWindows,
       loadEnabledSourceIds: async () => {
         reads += 1;
         return new Set<string>();
@@ -218,20 +241,25 @@ describe("validateBulkRequest", () => {
     });
 
     assert.equal(problem, null);
-    // No mix was submitted, so the ordinary request stays a pure function call.
     assert.equal(reads, 0);
   });
 
   it("answers a shape problem before reading the database", async () => {
     let reads = 0;
+    const countingRead = async () => {
+      reads += 1;
+      return new Set<string>();
+    };
+
     const problem = await validateBulkRequest(
       "acme",
       makeRequest({ numberOfPosts: 99, sourceMix: [{ sourceId: "source-a", posts: 99 }] }),
       NOW,
       {
-        loadEnabledSourceIds: async () => {
+        loadEnabledSourceIds: countingRead,
+        loadPostingWindows: async () => {
           reads += 1;
-          return new Set<string>();
+          return CONFIGURED;
         },
       }
     );
@@ -245,7 +273,7 @@ describe("validateBulkRequest", () => {
       "acme",
       makeRequest({ sourceMix: [{ sourceId: "source-nope", posts: 2 }] }),
       NOW,
-      { loadEnabledSourceIds }
+      { loadEnabledSourceIds, loadPostingWindows }
     );
 
     assert.equal(problem?.code, "INVALID_SOURCE_MIX");
@@ -256,9 +284,136 @@ describe("validateBulkRequest", () => {
       "acme",
       makeRequest({ sourceMix: [{ sourceId: "source-a", posts: 2 }] }),
       NOW,
-      { loadEnabledSourceIds }
+      { loadEnabledSourceIds, loadPostingWindows }
     );
 
     assert.equal(problem, null);
+  });
+});
+
+// ─── No posting windows, even distribution ────────────────────────────────────
+//
+// The manual half of "the system never invents an hour". An even spread is
+// derived entirely from the channel's configured times, so a channel with none
+// cannot be planned for — and is told so, rather than being given a default hour
+// (which is what used to happen) or being handed a silent batch of zero (which
+// is what removing the default alone would have produced).
+
+describe("validateBulkRequest — the posting-window requirement", () => {
+  const loadEnabledSourceIds = async () => new Set(["source-a"]);
+
+  /** Every shape a channel with nothing configured can arrive in. */
+  const NOTHING_CONFIGURED = [null, undefined, [], {}, "windows", 0, [{ day: "FUNDAY" }]];
+
+  it("refuses an even distribution over a channel with no windows", async () => {
+    for (const windows of NOTHING_CONFIGURED) {
+      const problem = await validateBulkRequest("acme", makeRequest(), NOW, {
+        loadEnabledSourceIds,
+        loadPostingWindows: async () => windows,
+      });
+
+      assert.equal(problem?.code, "NO_POSTING_WINDOWS", `for ${JSON.stringify(windows)}`);
+    }
+  });
+
+  it("names the channels that need configuring", async () => {
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({ channels: ["facebook", "linkedin"] }),
+      NOW,
+      {
+        loadEnabledSourceIds,
+        // LinkedIn is set up; Facebook is not. The message has to say which.
+        loadPostingWindows: async (_slug, channel) => (channel === "linkedin" ? CONFIGURED : null),
+      }
+    );
+
+    assert.equal(problem?.code, "NO_POSTING_WINDOWS");
+    assert.match(problem.message, /facebook/);
+    assert.doesNotMatch(problem.message, /linkedin/);
+  });
+
+  it("refuses when ONE channel of a multi-channel batch is unconfigured", async () => {
+    // Each channel plans its own slots from its own windows, so one without any
+    // is enough — there is no hour for its share of the batch.
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({ channels: ["facebook", "linkedin", "instagram"] }),
+      NOW,
+      {
+        loadEnabledSourceIds,
+        loadPostingWindows: async (_slug, channel) => (channel === "instagram" ? [] : CONFIGURED),
+      }
+    );
+
+    assert.equal(problem?.code, "NO_POSTING_WINDOWS");
+  });
+
+  it("accepts an even distribution when every channel has windows", async () => {
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({ channels: ["facebook", "linkedin"] }),
+      NOW,
+      { loadEnabledSourceIds, loadPostingWindows: async () => CONFIGURED }
+    );
+
+    assert.equal(problem, null);
+  });
+
+  it("does not require windows for a CUSTOM distribution", async () => {
+    // The other way out: the user names every date and time, so the channel's
+    // schedule has nothing to contribute and its absence cannot block anything.
+    let reads = 0;
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({
+        numberOfPosts: 2,
+        customDistribution: [
+          { date: "2026-08-18", count: 1, times: ["11:30"] },
+          { date: "2026-08-20", count: 1, times: ["14:30"] },
+        ],
+      }),
+      NOW,
+      {
+        loadEnabledSourceIds,
+        loadPostingWindows: async () => {
+          reads += 1;
+          return null;
+        },
+      }
+    );
+
+    assert.equal(problem, null);
+    // Not merely tolerated — never asked about.
+    assert.equal(reads, 0);
+  });
+
+  it("still refuses a custom distribution with an unfilled time, without inventing one", async () => {
+    // The empty string is what an unseeded time input sends. It must come back
+    // as a validation error, NOT as a post quietly scheduled at some default.
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({
+        numberOfPosts: 1,
+        customDistribution: [{ date: "2026-08-18", count: 1, times: [""] }],
+      }),
+      NOW,
+      { loadEnabledSourceIds, loadPostingWindows: async () => null }
+    );
+
+    assert.equal(problem?.code, "INVALID_DISTRIBUTION");
+  });
+
+  it("answers the window problem before the content mix", async () => {
+    // Ordering is contract, as it is for the pure rules: a batch that cannot be
+    // scheduled at all is not usefully told about its content mix first.
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({ sourceMix: [{ sourceId: "source-nope", posts: 2 }] }),
+      NOW,
+      { loadEnabledSourceIds, loadPostingWindows: async () => null }
+    );
+
+    assert.equal(problem?.code, "NO_POSTING_WINDOWS");
   });
 });

@@ -271,6 +271,10 @@ export function ChannelConfigForm({
             {t("postingWindowsInvalid", { lines: invalidWindowLines.join(", ") })}
           </p>
         )}
+        {/* The windows are no longer only a time of day — an empty list now
+            means the channel is left out of the weekly cron entirely. Said here
+            because this field is the only place that decision is made. */}
+        <p className="text-fg-faint mt-1.5 text-xs">{t("postingWindowsAutomationHelp")}</p>
       </div>
 
       {/* Actions */}

@@ -4,13 +4,22 @@ import { slotOptions } from "@/lib/scheduling/time-slots";
 
 interface Props {
   id?: string;
-  /** `HH:mm`, business-zone wall clock. */
+  /** `HH:mm`, business-zone wall clock. Empty when no time has been chosen yet. */
   value: string;
   /** Called with the chosen `HH:mm` — always one of the offered slots. */
   onChange: (value: string) => void;
   disabled?: boolean;
   /** Marks the field when the time it holds is not usable, e.g. already past. */
   invalid?: boolean;
+  /**
+   * Shown while `value` is empty — the label for "no time chosen yet".
+   *
+   * Only the bulk editor needs it, and only for a channel with no posting
+   * windows to seed from: there is no hour to pre-fill and the app will not
+   * invent one, so the picker has to be able to say so. Callers that always hold
+   * a real time leave it out and the option is never rendered.
+   */
+  placeholder?: string;
   "aria-label"?: string;
   /** Class for the `<select>` itself — its padding, text size and width. */
   className?: string;
@@ -28,6 +37,11 @@ interface Props {
  * An off-slot `value` — a post scheduled before this existed — is still shown as
  * itself rather than snapped or dropped, so nothing rewrites a time behind the
  * user's back. Whatever they pick instead is a slot.
+ *
+ * An EMPTY `value` is the other case the list has to be able to show: no time has
+ * been chosen and the app has none to suggest. It renders as a disabled
+ * placeholder — pickable out of, never back into, because "unset" is a state to
+ * leave rather than a choice to make.
  */
 export function TimeSlotSelect({
   id,
@@ -35,6 +49,7 @@ export function TimeSlotSelect({
   onChange,
   disabled,
   invalid,
+  placeholder,
   "aria-label": ariaLabel,
   className = "",
 }: Props) {
@@ -60,6 +75,11 @@ export function TimeSlotSelect({
         .filter(Boolean)
         .join(" ")}
     >
+      {value === "" && (
+        <option value="" disabled>
+          {placeholder ?? "--:--"}
+        </option>
+      )}
       {slotOptions(value).map((slot) => (
         <option key={slot} value={slot}>
           {slot}

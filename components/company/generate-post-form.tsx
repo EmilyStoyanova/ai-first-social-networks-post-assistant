@@ -75,6 +75,7 @@ import {
   planCustomSlots,
   validateCustomDistribution,
 } from "@/lib/scheduling/bulk-schedule";
+import { hasPostingWindows } from "@/lib/scheduling/posting-windows";
 import { appZoneToday, fromAppDateTimeLocal } from "@/lib/scheduling/app-datetime-local";
 import { refuseScheduleTime } from "@/lib/scheduling/reschedule-policy";
 import { SLOT_MINUTES } from "@/lib/scheduling/time-slots";
@@ -360,6 +361,24 @@ export function GeneratePostForm({
   const postingWindows = primaryChannel?.config.postingWindows ?? [];
 
   /**
+   * Selected channels with no publishing times configured, by label.
+   *
+   * An even distribution is derived entirely from those times, so a channel
+   * without any cannot be planned for — and the app will not pick an hour on its
+   * owner's behalf. Every selected channel is checked, not just the previewed
+   * one: each plans its own slots server-side, so one unconfigured channel is
+   * enough to make the request unanswerable, and the API refuses it with
+   * `NO_POSTING_WINDOWS`. Custom mode is exempt — there the user names the times.
+   */
+  const channelsWithoutWindows = useMemo(
+    () =>
+      channelOptions
+        .filter((c) => channels.includes(c.value) && !hasPostingWindows(c.config.postingWindows))
+        .map((c) => c.label),
+    [channelOptions, channels]
+  );
+
+  /**
    * The custom distribution exactly as it will be sent: the days, their counts,
    * and the times the user chose for each post. This one object is what gets
    * validated, what gets previewed, and what goes in the request body — the
@@ -490,6 +509,11 @@ export function GeneratePostForm({
     // begun is refused there, so the button must not offer it here.
     !isStartDateInPast(plan.startDate, openedAt) &&
     slots.length > 0 &&
+    // An even spread needs every selected channel to have publishing times —
+    // each plans its own slots server-side, and the preview above only shows the
+    // first one's. The API refuses the request for the same reason
+    // (NO_POSTING_WINDOWS); this is what stops it being made at all.
+    (plan.distribution === "custom" || channelsWithoutWindows.length === 0) &&
     // The mix IS the batch when it applies, so one that does not add up would
     // ask for a different number of posts than the button promises. The service
     // refuses it too; this is what stops the request being made at all.
@@ -1550,6 +1574,9 @@ export function GeneratePostForm({
           minDate={minDate}
           now={openedAt}
           postingWindows={postingWindows}
+          channelsWithoutWindows={channelsWithoutWindows}
+          channelSettingsHref={`/companies/${slug}/settings/channels`}
+          onLeaveForSettings={rememberDraft}
           disabled={generating || bulkRunning || topicRunning || noChannels}
           locale={locale}
         />

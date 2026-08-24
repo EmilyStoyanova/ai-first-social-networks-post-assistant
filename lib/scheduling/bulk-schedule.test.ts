@@ -44,6 +44,25 @@ const MON_WED = [
   { day: "WEDNESDAY", start: "09:00", end: "11:00" },
 ];
 
+/**
+ * Every day at 10:00 — a channel whose owner said "post daily, mid-morning".
+ *
+ * Used by the tests below that are about the SPREAD rather than about which days
+ * a channel posts on: a slot on every day of the period is what makes the
+ * stratified-sampling arithmetic legible. It is a configured schedule like any
+ * other, and it is spelled out here precisely because nothing in this module
+ * produces one by itself any more — a channel with no windows plans nothing.
+ */
+const EVERY_DAY_10 = [
+  "MONDAY",
+  "TUESDAY",
+  "WEDNESDAY",
+  "THURSDAY",
+  "FRIDAY",
+  "SATURDAY",
+  "SUNDAY",
+].map((day) => ({ day, start: "10:00", end: "12:00" }));
+
 describe("parseIsoDate", () => {
   it("reads a plain day as UTC midnight", () => {
     assert.equal(parseIsoDate("2026-08-17")?.toISOString(), "2026-08-17T00:00:00.000Z");
@@ -103,8 +122,13 @@ describe("the times are business-zone wall clock, not UTC", () => {
     assert.deepEqual(winter.map(whenUtc), ["2026-01-19T16:30:00.000Z"]);
   });
 
-  it("puts the default 10:00 on the business clock too", () => {
-    const slots = planBulkSlots({ startDate: START, endDate: START, count: 1 });
+  it("puts an even-spread slot on the business clock too", () => {
+    const slots = planBulkSlots({
+      startDate: START,
+      endDate: START,
+      count: 1,
+      postingWindows: EVERY_DAY_10,
+    });
     assert.deepEqual(slots.map(stamp), ["2026-08-17T10:00"]);
     assert.deepEqual(slots.map(whenUtc), ["2026-08-17T07:00:00.000Z"]);
   });
@@ -117,12 +141,14 @@ describe("the times are business-zone wall clock, not UTC", () => {
     assert.deepEqual(slots.map(whenUtc), ["2026-08-16T21:30:00.000Z"]);
   });
 
-  it("seeds from a window time that is not a real clock time as if unconfigured", () => {
+  it("seeds nothing from a window time that is not a real clock time", () => {
     // postingWindows is shape-checked, never range-checked. A "25:00" must not
-    // become a seeded input the API then refuses as invalid_time.
+    // become a seeded input the API then refuses as invalid_time — and it must
+    // not be quietly swapped for some other hour either. It is the same answer
+    // as "never configured": there is nothing here to seed from.
     assert.deepEqual(
       defaultTimesForDay("2026-08-17", 1, [{ day: "MONDAY", start: "25:00", end: "26:00" }]),
-      ["10:00"]
+      []
     );
   });
 
@@ -218,26 +244,56 @@ describe("deriveEligibleSlots — the channel's own posting days decide", () => 
     assert.deepEqual(slots.map(stamp), ["2026-08-17T09:00"]);
   });
 
-  it("falls back to every day at 10:00 when nothing is configured", () => {
-    for (const windows of [undefined, [], { nonsense: true }]) {
-      const slots = deriveEligibleSlots({
-        startDate: START,
-        endDate: "2026-08-19",
-        count: 1,
-        postingWindows: windows,
-      });
-      assert.deepEqual(slots.map(stamp), [
-        "2026-08-17T10:00",
-        "2026-08-18T10:00",
-        "2026-08-19T10:00",
-      ]);
+  it("plans nothing for a channel with no posting windows", () => {
+    // The core of the rule. There is no configured time of day, so there is no
+    // time of day — an even spread cannot be planned and no hour is substituted
+    // to make it look as though it could. The caller reports NO_POSTING_WINDOWS
+    // and offers custom mode, where the user names the times.
+    //
+    // Every shape "nothing configured" arrives in gets the same answer: never
+    // saved, saved empty, saved as something that does not parse, and saved with
+    // a start no clock can show.
+    for (const windows of [
+      undefined,
+      null,
+      [],
+      { nonsense: true },
+      "windows",
+      [{ day: "FUNDAY", start: "09:00", end: "11:00" }],
+      [{ day: "MONDAY", start: "25:00", end: "26:00" }],
+    ]) {
+      assert.deepEqual(
+        deriveEligibleSlots({
+          startDate: START,
+          endDate: "2026-08-19",
+          count: 1,
+          postingWindows: windows,
+        }),
+        [],
+        `for ${JSON.stringify(windows)}`
+      );
     }
+  });
+
+  it("keeps the usable windows when only some of them are unusable", () => {
+    // One bad entry is not a reason to treat the whole channel as unconfigured —
+    // the owner did say when it publishes, just not legibly in one place.
+    const slots = deriveEligibleSlots({
+      startDate: START,
+      endDate: "2026-08-19",
+      count: 1,
+      postingWindows: [
+        { day: "MONDAY", start: "25:00", end: "26:00" },
+        { day: "TUESDAY", start: "08:45", end: "10:00" },
+      ],
+    });
+    assert.deepEqual(slots.map(stamp), ["2026-08-18T08:45"]);
   });
 
   it("falls back to every day at the configured hour when no configured day occurs", () => {
     // A Monday-only channel asked for Tue–Thu. Generating nothing would be a
     // worse answer than posting off-schedule, so every day becomes eligible —
-    // but at the channel's own 09:00, not at the 10:00 default.
+    // but at the channel's own 09:00, not at the manual fallback hour.
     const slots = deriveEligibleSlots({
       startDate: "2026-08-18",
       endDate: "2026-08-20",
@@ -251,15 +307,21 @@ describe("deriveEligibleSlots — the channel's own posting days decide", () => 
     ]);
   });
 
-  it("is empty only when the range itself is unusable", () => {
-    assert.deepEqual(deriveEligibleSlots({ startDate: END, endDate: START, count: 1 }), []);
-    assert.deepEqual(deriveEligibleSlots({ startDate: "nope", endDate: END, count: 1 }), []);
+  it("is empty when the range itself is unusable", () => {
+    const plan = { count: 1, postingWindows: EVERY_DAY_10 };
+    assert.deepEqual(deriveEligibleSlots({ ...plan, startDate: END, endDate: START }), []);
+    assert.deepEqual(deriveEligibleSlots({ ...plan, startDate: "nope", endDate: END }), []);
   });
 });
 
 describe("planBulkSlots — even spread, boundaries not pinned", () => {
   it("does not place posts on the start and end dates just to reach them", () => {
-    const slots = planBulkSlots({ startDate: START, endDate: END, count: 5 });
+    const slots = planBulkSlots({
+      startDate: START,
+      endDate: END,
+      count: 5,
+      postingWindows: EVERY_DAY_10,
+    });
 
     assert.equal(slots.length, 5);
     // 14 daily slots cut into 5 shares; each post takes its share's centre. The
@@ -310,7 +372,12 @@ describe("planBulkSlots — even spread, boundaries not pinned", () => {
   });
 
   it("puts a single post inside the period, not on its first day", () => {
-    const slots = planBulkSlots({ startDate: START, endDate: END, count: 1 });
+    const slots = planBulkSlots({
+      startDate: START,
+      endDate: END,
+      count: 1,
+      postingWindows: EVERY_DAY_10,
+    });
     // The centre of the one and only share — the middle of the period.
     assert.deepEqual(slots.map(stamp), ["2026-08-24T10:00"]);
   });
@@ -332,7 +399,7 @@ describe("planBulkSlots — even spread, boundaries not pinned", () => {
   });
 
   it("returns slots in ascending order", () => {
-    for (const windows of [undefined, MON_WED]) {
+    for (const windows of [EVERY_DAY_10, MON_WED]) {
       const slots = planBulkSlots({
         startDate: START,
         endDate: END,
@@ -348,7 +415,12 @@ describe("planBulkSlots — even spread, boundaries not pinned", () => {
   describe("fallback — more posts than eligible slots", () => {
     it("stacks the extras an hour apart on the configured slots", () => {
       // One eligible slot in the whole period; three posts asked for.
-      const slots = planBulkSlots({ startDate: START, endDate: START, count: 3 });
+      const slots = planBulkSlots({
+        startDate: START,
+        endDate: START,
+        count: 3,
+        postingWindows: EVERY_DAY_10,
+      });
       assert.deepEqual(slots.map(stamp), [
         "2026-08-17T10:00",
         "2026-08-17T11:00",
@@ -397,13 +469,41 @@ describe("planBulkSlots — even spread, boundaries not pinned", () => {
   });
 
   it("returns nothing for an invalid request rather than guessing", () => {
-    assert.deepEqual(planBulkSlots({ startDate: START, endDate: END, count: 0 }), []);
-    assert.deepEqual(planBulkSlots({ startDate: END, endDate: START, count: 3 }), []);
-    assert.deepEqual(planBulkSlots({ startDate: "nope", endDate: END, count: 3 }), []);
+    const windows = EVERY_DAY_10;
     assert.deepEqual(
-      planBulkSlots({ startDate: "2026-01-01", endDate: "2027-06-01", count: 3 }),
+      planBulkSlots({ startDate: START, endDate: END, count: 0, postingWindows: windows }),
       []
     );
+    assert.deepEqual(
+      planBulkSlots({ startDate: END, endDate: START, count: 3, postingWindows: windows }),
+      []
+    );
+    assert.deepEqual(
+      planBulkSlots({ startDate: "nope", endDate: END, count: 3, postingWindows: windows }),
+      []
+    );
+    assert.deepEqual(
+      planBulkSlots({
+        startDate: "2026-01-01",
+        endDate: "2027-06-01",
+        count: 3,
+        postingWindows: windows,
+      }),
+      []
+    );
+  });
+
+  it("plans nothing at all for a channel with no posting windows", () => {
+    // The invariant this whole change exists for, at the planner's own level:
+    // no configured hour in, no schedule out. Previously this produced a full
+    // batch dated 10:00 — a schedule indistinguishable from one somebody chose.
+    for (const windows of [undefined, null, [], "nope"]) {
+      assert.deepEqual(
+        planBulkSlots({ startDate: START, endDate: END, count: 5, postingWindows: windows }),
+        [],
+        `for ${JSON.stringify(windows)}`
+      );
+    }
   });
 });
 
@@ -435,7 +535,7 @@ describe("validateCustomDistribution", () => {
 
   /** A day with `count` posts at plausible distinct times. */
   function day(date: string, count: number) {
-    return { date, count, times: defaultTimesForDay(date, count) };
+    return { date, count, times: defaultTimesForDay(date, count, EVERY_DAY_10) };
   }
 
   it("accepts days inside the period whose counts add up and whose times are real", () => {
@@ -782,9 +882,23 @@ describe("defaultTimesForDay — seeding the editor's inputs", () => {
     assert.deepEqual(defaultTimesForDay("2026-08-23", 1, MON_WED), ["09:00"]);
   });
 
-  it("falls back to 10:00 with nothing usable configured", () => {
-    for (const windows of [undefined, [], { nonsense: true }]) {
-      assert.deepEqual(defaultTimesForDay("2026-08-18", 2, windows), ["10:00", "10:30"]);
+  it("seeds NOTHING when the channel has no usable window", () => {
+    // The editor opens on empty time inputs and the user picks. Seeding a
+    // plausible hour here would put a time on screen that nobody chose, and the
+    // request that followed would be indistinguishable from a deliberate one.
+    for (const windows of [
+      undefined,
+      null,
+      [],
+      { nonsense: true },
+      "nope",
+      [{ day: "MONDAY", start: "25:00", end: "26:00" }],
+    ]) {
+      assert.deepEqual(
+        defaultTimesForDay("2026-08-18", 2, windows),
+        [],
+        `for ${JSON.stringify(windows)}`
+      );
     }
   });
 
@@ -808,7 +922,11 @@ describe("defaultTimesForDay — seeding the editor's inputs", () => {
   });
 
   it("gives every position a real time of day, up to a full batch", () => {
-    for (const windows of [undefined, MON_WED, [{ day: "MONDAY", start: "23:30", end: "23:59" }]]) {
+    for (const windows of [
+      EVERY_DAY_10,
+      MON_WED,
+      [{ day: "MONDAY", start: "23:30", end: "23:59" }],
+    ]) {
       const times = defaultTimesForDay("2026-08-17", MAX_BULK_POSTS, windows);
       assert.equal(times.length, MAX_BULK_POSTS);
       for (const time of times) assert.notEqual(parseTimeOfDay(time), null, time);
@@ -819,22 +937,23 @@ describe("defaultTimesForDay — seeding the editor's inputs", () => {
     // Every seed is a starting value in a slot picker, so every seed has to be a
     // slot — including the ones produced by the overflow and clamp branches.
     for (const windows of [
-      undefined,
+      EVERY_DAY_10,
       MON_WED,
       [{ day: "MONDAY", start: "09:15", end: "11:00" }],
       [{ day: "MONDAY", start: "22:47", end: "23:59" }],
-      [{ day: "MONDAY", start: "25:00", end: "26:00" }],
     ]) {
-      for (const time of defaultTimesForDay("2026-08-17", MAX_BULK_POSTS, windows)) {
-        assert.equal(isSlotAligned(time), true, `${time} is not a slot`);
-      }
+      const times = defaultTimesForDay("2026-08-17", MAX_BULK_POSTS, windows);
+      assert.equal(times.length, MAX_BULK_POSTS);
+      for (const time of times) assert.equal(isSlotAligned(time), true, `${time} is not a slot`);
     }
   });
 
   it("returns nothing for a day or a count it cannot seed", () => {
-    assert.deepEqual(defaultTimesForDay("not-a-date", 2), []);
-    assert.deepEqual(defaultTimesForDay("2026-02-30", 2), []);
-    assert.deepEqual(defaultTimesForDay("2026-08-17", 0), []);
-    assert.deepEqual(defaultTimesForDay("2026-08-17", 1.5), []);
+    // Windows supplied throughout, so each of these fails on the day or the
+    // count — not on having nothing to seed from, which is its own case above.
+    assert.deepEqual(defaultTimesForDay("not-a-date", 2, EVERY_DAY_10), []);
+    assert.deepEqual(defaultTimesForDay("2026-02-30", 2, EVERY_DAY_10), []);
+    assert.deepEqual(defaultTimesForDay("2026-08-17", 0, EVERY_DAY_10), []);
+    assert.deepEqual(defaultTimesForDay("2026-08-17", 1.5, EVERY_DAY_10), []);
   });
 });

@@ -15,6 +15,7 @@ import {
   toCustomDistribution,
   toIsoDate,
   toSourceMixPayload,
+  UNSET_TIME,
   type BulkBatchResponse,
 } from "./bulk-form";
 import { MAX_BULK_POSTS, type CustomDistributionError } from "@/lib/scheduling/bulk-schedule";
@@ -211,10 +212,36 @@ describe("syncDayTimes", () => {
     }
   });
 
-  it("still shows a real time for a day it cannot seed", () => {
-    // An unusable date seeds nothing, and an empty time input would read as a
-    // bug; the API refuses the date either way.
-    assert.deepEqual(syncDayTimes("not-a-date", 2, undefined, MON_WED), ["10:00", "10:00"]);
+  it("leaves the inputs unset for a day it cannot seed", () => {
+    // An unusable date seeds nothing, so the positions come back empty rather
+    // than pre-filled with an hour nobody chose. The API refuses the date
+    // either way; what matters is that the form never shows a time that was
+    // invented to fill a gap.
+    assert.deepEqual(syncDayTimes("not-a-date", 2, undefined, MON_WED), [UNSET_TIME, UNSET_TIME]);
+  });
+
+  it("leaves the inputs unset for a channel with no posting windows", () => {
+    // The manual half of "no configured hour, no invented hour". Custom mode is
+    // exactly where a channel without a schedule is still generated for — the
+    // user names the times, and until they do, the fields are empty and
+    // validateCustomDistribution refuses the request as invalid_time.
+    for (const windows of [undefined, null, [], "nope"]) {
+      assert.deepEqual(
+        syncDayTimes("2026-08-17", 3, undefined, windows),
+        [UNSET_TIME, UNSET_TIME, UNSET_TIME],
+        `for ${JSON.stringify(windows)}`
+      );
+    }
+  });
+
+  it("keeps a time the user has already chosen for an unseedable channel", () => {
+    // Unset is a starting state, not a rule: once a time is picked it survives a
+    // resize exactly as it does for a configured channel.
+    assert.deepEqual(syncDayTimes("2026-08-17", 3, ["07:30", "16:45"], []), [
+      "07:30",
+      "16:45",
+      UNSET_TIME,
+    ]);
   });
 });
 

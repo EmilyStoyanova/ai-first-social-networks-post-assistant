@@ -18,9 +18,19 @@
  *
  * So a channel configured for Tuesdays and Thursdays at 08:30 gets posts on
  * Tuesdays and Thursdays at 08:30 — never on the Sunday the range happens to
- * start on. See `deriveEligibleSlots` for the two fallbacks (no windows at all,
- * and windows whose days never occur in the period) and `planBulkSlots` for the
- * one used when there are fewer eligible slots than requested posts.
+ * start on. See `deriveEligibleSlots` for what happens when the configured days
+ * never occur in the period, and `planBulkSlots` for the fallback used when
+ * there are fewer eligible slots than requested posts.
+ *
+ * NO INVENTED HOUR, ANYWHERE. Nothing in this module answers "when does this
+ * channel publish?" with a time nobody chose. A channel with no usable posting
+ * window plans NO eligible slots, and an even distribution over it comes back
+ * empty — the caller reports that as `NO_POSTING_WINDOWS`
+ * (lib/services/ai/validate-bulk-request.service.ts) so the user is told to
+ * configure a schedule or to name the times themselves in custom mode. This is
+ * the manual half of the same rule the weekly cron follows by skipping such a
+ * channel; the two paths differ in what they DO about it, never in whether a
+ * time gets made up.
  *
  * `planCustomSlots` is the other mode entirely, and the channel's windows have
  * no say in it: the user holds the calendar AND the clock, naming a time for
@@ -28,7 +38,9 @@
  * turn the wall clocks the user typed into instants, in order. The windows are
  * still used to SEED those inputs (`defaultTimesForDay`), so the editor opens on
  * the channel's usual hours rather than on empty fields, but a seed is a starting
- * value the user can overwrite, not a schedule. Both planners run unchanged in
+ * value the user can overwrite, not a schedule — and a channel with no windows
+ * is seeded with nothing at all, leaving the inputs empty for the user to fill
+ * rather than pre-filled with an hour the app chose. Both planners run unchanged in
  * the browser (to preview the dates before generating) and on the server (to
  * schedule them), which is why this module stays pure — a second implementation
  * in the form is exactly how a preview starts lying.
@@ -43,14 +55,8 @@
  * Pure: no Prisma, no clock, no LLM.
  */
 
-import {
-  DAY_ORDER,
-  postingWindowsSchema,
-  resolveWindowStart,
-  utcDayIndex,
-  DEFAULT_POSTING_HOUR,
-} from "./posting-windows";
-import type { TimeOfDay } from "./posting-windows";
+import { DAY_ORDER, parsePostingWindows, utcDayIndex, windowStartOn } from "./posting-windows";
+import type { PostingWindowEntry, TimeOfDay } from "./posting-windows";
 import { appZoneClock, appZoneInstant, appZoneToday } from "./app-datetime-local";
 import {
   LAST_SLOT_MINUTES,
@@ -87,7 +93,14 @@ export interface BulkSlotPlan {
   /** Inclusive, `YYYY-MM-DD`, read as UTC. */
   endDate: string;
   count: number;
-  /** `ChannelConfig.postingWindows` as stored; anything unparseable means 10:00. */
+  /**
+   * `ChannelConfig.postingWindows` as stored.
+   *
+   * Absent, unparseable, or holding no usable time plans NOTHING: an even
+   * distribution has no hour to distribute over, and one is not invented. The
+   * caller turns the empty plan into `NO_POSTING_WINDOWS` rather than a batch
+   * scheduled at a time nobody chose.
+   */
   postingWindows?: unknown;
 }
 
@@ -167,21 +180,46 @@ export function isStartDateInPast(startDate: string, now: Date): boolean {
   return startDate < appZoneToday(now);
 }
 
+/** A window's start as a time of day. Shape-checked already; range-checked below. */
+function windowStart(window: PostingWindowEntry): TimeOfDay {
+  const [hour, minute] = window.start.split(":").map(Number);
+  return { hour, minute };
+}
+
+/**
+ * The channel's windows, keeping only the ones whose start is a real time of
+ * day. Null when nothing usable is left.
+ *
+ * `postingWindowsSchema` checks the SHAPE of a stored window, not its range, so
+ * a `"25:00"` parses and is not a time. Dropping those here means the rest of
+ * the module works from times that exist, and — crucially — that a channel whose
+ * only window is unusable gets the SAME answer as one that was never configured:
+ * null. Neither is an hour a person can be said to have chosen, so neither may
+ * be turned into one.
+ */
+function usableWindows(postingWindows: unknown): PostingWindowEntry[] | null {
+  const parsed = parsePostingWindows(postingWindows);
+  if (parsed === null) return null;
+
+  const usable = parsed.filter((window) => isRealTimeOfDay(windowStart(window)));
+  return usable.length > 0 ? usable : null;
+}
+
 /**
  * The channel's posting times grouped by weekday, indexed by DAY_ORDER position
- * (0 = Monday). Null when nothing usable is configured.
+ * (0 = Monday).
  *
  * A day may carry several windows (morning and evening, say); each becomes its
  * own eligible slot. Exact repeats are dropped so a duplicated window entry
  * cannot make one time of day look twice as available as it is.
+ *
+ * Takes windows already filtered by `usableWindows`, so every time it returns is
+ * one a clock can show and every empty day genuinely has no window.
  */
-function windowsByWeekday(postingWindows: unknown): TimeOfDay[][] | null {
-  const parsed = postingWindowsSchema.safeParse(postingWindows);
-  if (!parsed.success || parsed.data.length === 0) return null;
-
+function windowsByWeekday(windows: readonly PostingWindowEntry[]): TimeOfDay[][] {
   const byDay: TimeOfDay[][] = DAY_ORDER.map(() => []);
-  for (const window of parsed.data) {
-    const [hour, minute] = window.start.split(":").map(Number);
+  for (const window of windows) {
+    const { hour, minute } = windowStart(window);
     const times = byDay[DAY_ORDER.indexOf(window.day)];
     if (!times.some((t) => t.hour === hour && t.minute === minute)) times.push({ hour, minute });
   }
@@ -197,24 +235,30 @@ function windowsByWeekday(postingWindows: unknown): TimeOfDay[][] | null {
  * wall clock, because that is what a person configuring "18:30" means and what
  * every screen in the app renders. Assembling it with `setUTCHours` instead
  * would publish three hours late all summer.
+ *
+ * Null when the pair names no instant. Unreachable in practice — the day comes
+ * from `parseIsoDate` and the time from `usableWindows` — and deliberately not
+ * papered over with a substitute hour, because the only honest thing to do with
+ * a slot that has no time is to not have the slot.
  */
-function slotInstant(day: Date, time: TimeOfDay): Date {
-  const iso = day.toISOString().slice(0, 10);
-  const at = appZoneInstant(iso, time.hour, time.minute);
-  if (at !== null) return at;
-
-  // The stored windows are shape-checked, not range-checked, so a `"25:00"` is
-  // possible. Treat it as unconfigured — a slot at the channel's default hour —
-  // rather than silently moving the post onto the following day.
-  return appZoneInstant(iso, DEFAULT_POSTING_HOUR, 0) ?? new Date(day);
+function slotInstant(day: Date, time: TimeOfDay): Date | null {
+  return appZoneInstant(day.toISOString().slice(0, 10), time.hour, time.minute);
 }
 
-/** Every day in the period at the time `resolveWindowStart` gives that weekday. */
-function everyDayInPeriod(start: Date, days: number, postingWindows: unknown): Date[] {
+/**
+ * Every day in the period at that weekday's start time, falling back WITHIN the
+ * channel's own schedule to its first configured window for a day that has none.
+ */
+function everyDayInPeriod(
+  start: Date,
+  days: number,
+  windows: readonly PostingWindowEntry[]
+): Date[] {
   const slots: Date[] = [];
   for (let offset = 0; offset < days; offset++) {
     const day = new Date(start.getTime() + offset * DAY_MS);
-    slots.push(slotInstant(day, resolveWindowStart(postingWindows, utcDayIndex(day))));
+    const at = slotInstant(day, windowStartOn(windows, utcDayIndex(day)));
+    if (at !== null) slots.push(at);
   }
   return slots;
 }
@@ -227,36 +271,42 @@ function everyDayInPeriod(start: Date, days: number, postingWindows: unknown): D
  * "prefer the channel's configured posting days and times" actually means. One
  * slot per configured window per matching day.
  *
- * Two fallbacks, both giving every day in the period rather than refusing to
- * plan (a bulk request must not fail because of how a channel was configured):
+ * EMPTY WHEN THE CHANNEL HAS NO USABLE WINDOW, and that is the point. There is
+ * no time to spread posts over, so none is chosen: the caller reports
+ * `NO_POSTING_WINDOWS` and the user either configures a schedule or names the
+ * times themselves in custom mode. This used to fall back to a fixed hour, which
+ * meant a batch could be scheduled entirely at a time nobody had picked.
  *
- *   • No windows configured, or unparseable JSON — every day at 10:00, the same
- *     default the weekly scheduler uses.
- *   • Windows configured, but none of their weekdays occur in this period (a
- *     Monday-only channel asked for a Tue–Thu range) — every day at the first
- *     configured window's time, so the channel at least keeps its usual hour.
- *     Honouring the days here would mean generating nothing at all, which is a
- *     worse answer to "give me 5 posts next week" than posting off-schedule.
+ * One fallback remains, and it stays inside a schedule the user authored:
+ * windows configured, but none of their weekdays occur in this period (a
+ * Monday-only channel asked for a Tue–Thu range) — every day at the first
+ * configured window's time, so the channel at least keeps its usual hour.
+ * Honouring the days here would mean generating nothing at all, which is a worse
+ * answer to "give me 5 posts next week" than posting off-schedule.
  *
- * Empty only when the range itself is unusable.
+ * Also empty when the range itself is unusable.
  */
 export function deriveEligibleSlots(plan: BulkSlotPlan): Date[] {
   const days = inclusiveDayCount(plan.startDate, plan.endDate);
   const start = parseIsoDate(plan.startDate);
   if (days === null || start === null) return [];
 
-  const byDay = windowsByWeekday(plan.postingWindows);
-  if (byDay === null) return everyDayInPeriod(start, days, plan.postingWindows);
+  const windows = usableWindows(plan.postingWindows);
+  if (windows === null) return [];
 
   // Days ascending, and each day's times already sorted — so this comes out
   // chronological without a second sort.
+  const byDay = windowsByWeekday(windows);
   const configured: Date[] = [];
   for (let offset = 0; offset < days; offset++) {
     const day = new Date(start.getTime() + offset * DAY_MS);
-    for (const time of byDay[utcDayIndex(day)]) configured.push(slotInstant(day, time));
+    for (const time of byDay[utcDayIndex(day)]) {
+      const at = slotInstant(day, time);
+      if (at !== null) configured.push(at);
+    }
   }
 
-  return configured.length > 0 ? configured : everyDayInPeriod(start, days, plan.postingWindows);
+  return configured.length > 0 ? configured : everyDayInPeriod(start, days, windows);
 }
 
 /**
@@ -278,8 +328,10 @@ export function deriveEligibleSlots(plan: BulkSlotPlan): Date[] {
  * already late in the evening plus a period short enough to pile the whole
  * batch onto it, and nothing is silently lost when it happens.
  *
- * Returns an empty array for a non-positive count or an unusable range; callers
- * validate first and report a proper error code, so this only has to be safe.
+ * Returns an empty array for a non-positive count, an unusable range, or a
+ * channel with no usable posting window. Callers validate first and report a
+ * proper error code — `NO_POSTING_WINDOWS` for the last of those — so this only
+ * has to be safe, and never has to guess an hour to avoid coming back empty.
  */
 export function planBulkSlots(plan: BulkSlotPlan): Date[] {
   if (plan.count < 1) return [];
@@ -515,8 +567,16 @@ export function planCustomSlots(days: readonly BulkCustomDay[]): Date[] {
  * So a day's posts take that weekday's configured windows in order, and anything
  * past the last one steps on to the next slot — clamped at 23:30, because a
  * seeded time must not land on a day the user did not choose. A day with no
- * window of its own falls back to the channel's usual hour via
- * `resolveWindowStart`, or 10:00 with nothing configured.
+ * window of its own falls back to the channel's usual hour, which is still a
+ * time out of the schedule its owner wrote.
+ *
+ * NOTHING TO SEED FROM IS AN EMPTY LIST, not a made-up hour. A channel with no
+ * usable window returns `[]`, the editor's time inputs open EMPTY, and the user
+ * picks. That is the whole difference between a seed and a default: a seed says
+ * "this is probably what you want", and there is nothing to say that from here.
+ * The request carrying an unfilled time is refused as `invalid_time`, by the
+ * form and by the API alike, rather than quietly becoming a valid-looking
+ * schedule at an hour nobody chose.
  *
  * EVERY SEED IS SLOT-ALIGNED (lib/scheduling/time-slots.ts), including one taken
  * from a window configured at 09:15: the editor's pickers offer only slots, so a
@@ -540,14 +600,14 @@ export function defaultTimesForDay(
   const day = parseIsoDate(date);
   if (day === null || !Number.isInteger(count) || count < 1) return [];
 
-  const configured = windowsByWeekday(postingWindows)?.[utcDayIndex(day)] ?? [];
-  const seeds = (
-    configured.length > 0 ? configured : [resolveWindowStart(postingWindows, utcDayIndex(day))]
-  )
-    // The stored windows are shape-checked, not range-checked, so a `"25:00"` is
-    // possible and would seed an input the API then refuses as `invalid_time`.
-    // Treated as unconfigured instead — the same answer `slotInstant` gives it.
-    .map((time) => (isRealTimeOfDay(time) ? time : { hour: DEFAULT_POSTING_HOUR, minute: 0 }));
+  // Nothing configured — or nothing configured that is a real time of day — so
+  // there is no starting value to offer. The inputs open empty.
+  const windows = usableWindows(postingWindows);
+  if (windows === null) return [];
+
+  const dayIndex = utcDayIndex(day);
+  const configured = windowsByWeekday(windows)[dayIndex];
+  const seeds = configured.length > 0 ? configured : [windowStartOn(windows, dayIndex)];
 
   const times: string[] = [];
   let previous = -1;

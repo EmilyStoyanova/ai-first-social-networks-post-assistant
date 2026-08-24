@@ -98,6 +98,8 @@ export interface EnqueueBulkGenerationDeps {
   newContentGroupId?: () => string;
   /** The company's enabled content-source ids, for a submitted mix. */
   loadEnabledSourceIds?: (slug: string) => Promise<Set<string>>;
+  /** A channel's saved posting windows, for an even distribution. */
+  loadPostingWindows?: (slug: string, channel: string) => Promise<unknown>;
   /** Finds the non-terminal run this company already has, for a collision. */
   findRunningJob?: (companyId: string) => Promise<{ id: string } | null>;
   /** Wall clock, injected so "is the start date in the past" is fixed in tests. */
@@ -174,6 +176,9 @@ export async function enqueueBulkGeneration(
   const problem = await validateBulkRequest(
     slug,
     {
+      // Read by the posting-window check: an even spread over a channel with no
+      // schedule has no times to spread across, and that is answerable now.
+      channels: request.channels,
       numberOfPosts: request.numberOfPosts,
       startDate: request.startDate,
       endDate: request.endDate,
@@ -184,7 +189,10 @@ export async function enqueueBulkGeneration(
       sourceMix: request.sourceMix,
     },
     new Date(now()),
-    { loadEnabledSourceIds: deps.loadEnabledSourceIds }
+    {
+      loadEnabledSourceIds: deps.loadEnabledSourceIds,
+      loadPostingWindows: deps.loadPostingWindows,
+    }
   );
   if (problem !== null) return { success: false, ...problem };
 

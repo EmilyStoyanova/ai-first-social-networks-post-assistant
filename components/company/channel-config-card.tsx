@@ -7,6 +7,7 @@ import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { postingWindowLines } from "@/lib/channels/posting-window-label";
 import { ChannelConfigForm } from "./channel-config-form";
 import type { ChannelConfigItem } from "@/lib/services/company/list-channel-configs.service";
 import type { ChannelFormPayload } from "./channel-config-form";
@@ -88,6 +89,13 @@ export function ChannelConfigCard({
     semi_automated: t("semiAutomated"),
     fully_automated: t("fullyAutomated"),
   };
+
+  // The saved schedule as the lines the summary shows. A day token this locale
+  // has no name for falls through unchanged rather than throwing MISSING_MESSAGE
+  // in place of the row.
+  const windowLines = postingWindowLines(config.postingWindows, (day) =>
+    t.has(`days.${day}`) ? t(`days.${day}`) : day
+  );
 
   const meta = CHANNEL_META[config.channel] ?? {
     label: config.channel,
@@ -221,21 +229,26 @@ export function ChannelConfigCard({
                 belong in the summary rather than only behind the Edit button —
                 an owner has to be able to read back what the channel is set to
                 without entering edit mode. Days are localised here; the editor
-                still speaks the MONDAY tokens the stored JSON uses. */}
-            <div className="flex items-start justify-between gap-3">
-              <dt className="text-fg-muted shrink-0">{t("postingWindows")}</dt>
-              <dd className="text-fg text-right font-medium">
-                {config.postingWindows.length === 0 ? (
-                  <span className="text-fg-faint font-normal">{t("postingWindowsNone")}</span>
-                ) : (
-                  config.postingWindows.map((w, i) => (
-                    <span key={`${w.day}-${w.start}-${w.end}-${i}`} className="block tabular-nums">
-                      {t.has(`days.${w.day}`) ? t(`days.${w.day}`) : w.day} {w.start}–{w.end}
+                still speaks the MONDAY tokens the stored JSON uses.
+
+                Shown only when a schedule is actually saved — a permanent "not
+                set" row would be a line of noise on every card that never
+                configured one. The absence of the row is itself the answer: a
+                channel with no windows takes no part in automatic generation
+                (lib/services/cron/generate-weekly-schedule.service.ts), which
+                the edit form says in words. */}
+            {windowLines.length > 0 && (
+              <div className="flex items-start justify-between gap-3">
+                <dt className="text-fg-muted shrink-0">{t("postingWindows")}</dt>
+                <dd className="text-fg text-right font-medium">
+                  {windowLines.map((line, i) => (
+                    <span key={`${line}-${i}`} className="block tabular-nums">
+                      {line}
                     </span>
-                  ))
-                )}
-              </dd>
-            </div>
+                  ))}
+                </dd>
+              </div>
+            )}
             <div className="flex items-start justify-between">
               <dt className="text-fg-muted">{t("automation")}</dt>
               <dd className="text-fg text-right font-medium">

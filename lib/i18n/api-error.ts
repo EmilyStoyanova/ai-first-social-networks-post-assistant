@@ -75,6 +75,9 @@ export const API_ERROR_CODES = [
   "INVALID_POST_COUNT",
   "INVALID_DATE_RANGE",
   "INVALID_DISTRIBUTION",
+  // …or it asks for an even spread over a channel that has no posting schedule,
+  // so there is no time of day to spread the posts across.
+  "NO_POSTING_WINDOWS",
   // …and its content mix names a source this company does not have, or does not
   // add up to the number of posts asked for.
   "INVALID_SOURCE_MIX",
