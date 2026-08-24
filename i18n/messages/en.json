@@ -490,6 +490,17 @@
     "effectiveLanguage": "Current effective language: {language}",
     "postingWindows": "Posting windows",
     "postingWindowsHint": "(one per line: MONDAY 09:00-17:00)",
+    "postingWindowsNone": "Not set",
+    "postingWindowsInvalid": "These lines are not in the right format: {lines}. Use MONDAY 09:00-17:00, with the end after the start.",
+    "days": {
+      "MONDAY": "Monday",
+      "TUESDAY": "Tuesday",
+      "WEDNESDAY": "Wednesday",
+      "THURSDAY": "Thursday",
+      "FRIDAY": "Friday",
+      "SATURDAY": "Saturday",
+      "SUNDAY": "Sunday"
+    },
     "save": "Save",
     "postsPerDayLabel": "Posts per day",
     "postsPerWeekLabel": "Posts per week",

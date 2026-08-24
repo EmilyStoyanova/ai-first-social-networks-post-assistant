@@ -217,6 +217,25 @@ export function ChannelConfigCard({
                 {config.autoGenerateImage ? t("yes") : t("no")}
               </dd>
             </div>
+            {/* The windows decide when automated posts actually go out, so they
+                belong in the summary rather than only behind the Edit button —
+                an owner has to be able to read back what the channel is set to
+                without entering edit mode. Days are localised here; the editor
+                still speaks the MONDAY tokens the stored JSON uses. */}
+            <div className="flex items-start justify-between gap-3">
+              <dt className="text-fg-muted shrink-0">{t("postingWindows")}</dt>
+              <dd className="text-fg text-right font-medium">
+                {config.postingWindows.length === 0 ? (
+                  <span className="text-fg-faint font-normal">{t("postingWindowsNone")}</span>
+                ) : (
+                  config.postingWindows.map((w, i) => (
+                    <span key={`${w.day}-${w.start}-${w.end}-${i}`} className="block tabular-nums">
+                      {t.has(`days.${w.day}`) ? t(`days.${w.day}`) : w.day} {w.start}–{w.end}
+                    </span>
+                  ))
+                )}
+              </dd>
+            </div>
             <div className="flex items-start justify-between">
               <dt className="text-fg-muted">{t("automation")}</dt>
               <dd className="text-fg text-right font-medium">

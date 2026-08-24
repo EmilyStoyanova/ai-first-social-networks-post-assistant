@@ -490,6 +490,17 @@
     "effectiveLanguage": "Текущ ефективен език: {language}",
     "postingWindows": "Прозорци за публикуване",
     "postingWindowsHint": "(по един на ред: MONDAY 09:00-17:00)",
+    "postingWindowsNone": "Няма зададени",
+    "postingWindowsInvalid": "Тези редове не са в правилен формат: {lines}. Използвайте MONDAY 09:00-17:00, като краят е след началото.",
+    "days": {
+      "MONDAY": "Понеделник",
+      "TUESDAY": "Вторник",
+      "WEDNESDAY": "Сряда",
+      "THURSDAY": "Четвъртък",
+      "FRIDAY": "Петък",
+      "SATURDAY": "Събота",
+      "SUNDAY": "Неделя"
+    },
     "save": "Запази",
     "postsPerDayLabel": "Публикации на ден",
     "postsPerWeekLabel": "Публикации на седмица",

@@ -37,20 +37,35 @@ function formatWindows(windows: PostingWindow[]): string {
   return windows.map((w) => `${w.day} ${w.start}-${w.end}`).join("\n");
 }
 
-function parseWindows(text: string): PostingWindow[] {
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .flatMap((line) => {
-      const m = line
-        .toUpperCase()
-        .match(
-          /^(MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY)\s+(\d{2}:\d{2})-(\d{2}:\d{2})$/
-        );
-      if (!m) return [];
-      return [{ day: m[1], start: m[2], end: m[3] }];
-    });
+/**
+ * Read the textarea back into windows, keeping the lines that did not parse.
+ *
+ * The invalid ones used to be dropped on the floor: a typo such as "MONDAY
+ * 9:00-17:00" saved as *no* windows at all, and the field came back empty on the
+ * next edit with nothing said about why. They are returned instead so the form
+ * can refuse to submit and name them.
+ *
+ * `start < end` is checked here too because the API enforces it (see
+ * upsertChannelConfigSchema) — without it the only feedback is a generic 400.
+ */
+function parseWindows(text: string): { windows: PostingWindow[]; invalid: string[] } {
+  const windows: PostingWindow[] = [];
+  const invalid: string[] = [];
+
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    const m = line
+      .toUpperCase()
+      .match(
+        /^(MONDAY|TUESDAY|WEDNESDAY|THURSDAY|FRIDAY|SATURDAY|SUNDAY)\s+(\d{2}:\d{2})-(\d{2}:\d{2})$/
+      );
+    if (!m || m[2] >= m[3]) invalid.push(line);
+    else windows.push({ day: m[1], start: m[2], end: m[3] });
+  }
+
+  return { windows, invalid };
 }
 
 export function ChannelConfigForm({
@@ -82,8 +97,13 @@ export function ChannelConfigForm({
   );
   const [windowsText, setWindowsText] = useState(formatWindows(initialConfig.postingWindows));
 
+  const { windows, invalid: invalidWindowLines } = parseWindows(windowsText);
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // Saving here would silently store fewer windows than are on screen.
+    if (invalidWindowLines.length > 0) return;
+
     onSave({
       enabled,
       postsPerDay: Math.max(0, Math.min(20, parseInt(postsPerDay, 10) || 0)),
@@ -96,7 +116,7 @@ export function ChannelConfigForm({
         automationOverride === "semi_automated" || automationOverride === "fully_automated"
           ? automationOverride
           : null,
-      postingWindows: parseWindows(windowsText),
+      postingWindows: windows,
     });
   }
 
@@ -243,13 +263,25 @@ export function ChannelConfigForm({
           value={windowsText}
           onChange={(e) => setWindowsText(e.target.value)}
           placeholder={"MONDAY 09:00-17:00\nTUESDAY 09:00-17:00"}
+          aria-invalid={invalidWindowLines.length > 0 || undefined}
           className={`${BASE} ${NORMAL} resize-none`}
         />
+        {invalidWindowLines.length > 0 && (
+          <p className="text-status-danger-fg mt-1.5 text-xs">
+            {t("postingWindowsInvalid", { lines: invalidWindowLines.join(", ") })}
+          </p>
+        )}
       </div>
 
       {/* Actions */}
       <div className="flex items-center gap-3 pt-1">
-        <Button type="submit" variant="primary" size="sm" loading={saving}>
+        <Button
+          type="submit"
+          variant="primary"
+          size="sm"
+          loading={saving}
+          disabled={invalidWindowLines.length > 0}
+        >
           {saving ? tCommon("saving") : t("save")}
         </Button>
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
