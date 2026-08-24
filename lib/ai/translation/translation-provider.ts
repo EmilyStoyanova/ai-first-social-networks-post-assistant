@@ -79,6 +79,56 @@ export interface ArticleTranslationContext {
    * return value cannot answer it. Optional so a test can ignore it.
    */
   reportTry?: (tries: number) => void;
+  /**
+   * MADLAD-only: caps how many NEW HTTP batches this call may start before it must
+   * stop and report partial progress (see {@link MadladPartialProgressError}) instead
+   * of continuing to the next batch. `undefined` means "no cap" — the original,
+   * single-call-to-completion behaviour, unchanged for every article whose estimated
+   * cost fits inside one item budget. Every other engine ignores this field entirely.
+   */
+  maxBatchesThisCall?: number;
+  /**
+   * MADLAD-only: raw (pre-restoration) segment translations already banked by an
+   * earlier, capped call for this same article, keyed by the segment's ARTICLE
+   * index. `undefined`/empty means starting fresh. Restoration, repair and the
+   * quality gate all run exactly once, only after every segment has a raw reply —
+   * whether that reply came from this call or an earlier one is invisible to them.
+   * Every other engine ignores this field entirely.
+   */
+  resumeSegments?: Record<string, string>;
+}
+
+/**
+ * Thrown by MADLAD instead of returning an {@link ArticleTranslation} when
+ * `context.maxBatchesThisCall` stopped it before every segment had a translation.
+ *
+ * This is NOT a failure: the batches that did run succeeded, and `translatedSegments`
+ * is exactly what a follow-up call's `resumeSegments` needs to pick up where this one
+ * left off. It is a distinct type from every other translation error specifically so
+ * the caller can tell "made bounded progress, come back for the rest" apart from
+ * "something went wrong" — conflating the two would make a healthy, expected pause in
+ * an oversized article's translation look like a fault to retry-with-backoff.
+ *
+ * Deliberately thrown rather than returned: `ArticleTranslation` is the shared
+ * "translation accepted" contract both engines return through, and a partial result
+ * must never satisfy a caller that only checks "did translate() resolve" — the
+ * existing quality gate, repair and reassembly logic must stay completely unaware
+ * that partial progress exists at all, which throwing (instead of adding a variant to
+ * the success type) guarantees by construction.
+ */
+export class MadladPartialProgressError extends Error {
+  constructor(
+    message: string,
+    /** Raw (pre-restoration) reply for every segment translated so far, keyed by article index. */
+    readonly translatedSegments: Record<string, string>,
+    /** HTTP batches completed across every call for this article so far, including this one. */
+    readonly processedBatchCount: number,
+    /** Total HTTP batches this article needs — `processedBatchCount` reaches this when done. */
+    readonly totalBatchCount: number
+  ) {
+    super(message);
+    this.name = "MadladPartialProgressError";
+  }
 }
 
 /** What an engine returns when it has produced an acceptable translation. */
