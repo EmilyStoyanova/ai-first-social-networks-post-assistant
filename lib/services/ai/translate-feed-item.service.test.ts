@@ -459,7 +459,12 @@ function captureConsole() {
 }
 
 describe("translateFeedItem — diagnostics", () => {
-  const SECRET_BODY = "SUPER_SECRET_ARTICLE_BODY_9182_should_never_be_logged";
+  // Plain, space-separated prose: a single underscore-joined token here would be
+  // classified as a protected identifier (see protected-tokens.ts's isIdentifier) and
+  // get swapped for a `[[n]]` placeholder that GOOD_RESPONSE's fixed mock reply does not
+  // carry, which would fail the translation for a reason unrelated to what this test
+  // checks (that the body never leaks into a log line).
+  const SECRET_BODY = "Super secret article body 9182 should never be logged";
 
   it("logs id, title, source URL, prompt length, article length, and elapsed — never the body", async () => {
     const db = makeDb();

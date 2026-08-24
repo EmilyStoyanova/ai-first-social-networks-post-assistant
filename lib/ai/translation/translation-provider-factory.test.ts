@@ -142,41 +142,67 @@ describe("buildTranslationProvider — MADLAD", () => {
   });
 });
 
-describe("buildTranslationProvider — the Ollama model override", () => {
-  it("is ignored when it matches what the admin default already resolves to", async () => {
+describe("buildTranslationProvider — TRANSLATION_OLLAMA_MODEL selects deterministically", () => {
+  it("switches the text worker to a different installed model (e.g. Qwen3.5) when set", async () => {
     const result = await buildTranslationProvider({
       resolveLlm: llm,
-      env: { TRANSLATION_OLLAMA_MODEL: "qwen3:8b" },
+      env: { ...WORKER_ENV, TRANSLATION_OLLAMA_MODEL: "qwen3.5:35b-a3b-q4_K_M" },
     });
     assert.ok(result.ok);
-    assert.equal(result.provider.model, "qwen3:8b");
+    assert.equal(result.provider.kind, "ollama");
+    // Provenance stays TEXT_WORKER — same service, different tag.
+    assert.equal(result.provider.providerLabel, "TEXT_WORKER");
+    assert.equal(result.provider.model, "qwen3.5:35b-a3b-q4_K_M");
   });
 
-  it("refuses to override the model of a provider that was never asked for", async () => {
-    const warnings: string[] = [];
-    const original = console.warn;
-    console.warn = (...args: unknown[]) => void warnings.push(String(args[0]));
-    let result;
-    try {
-      result = await buildTranslationProvider({
-        // The admin default is Groq, not the text worker.
-        resolveLlm: async () => ({
+  it("never calls resolveLlm — the choice does not depend on the admin default at all", async () => {
+    let asked = false;
+    await buildTranslationProvider({
+      resolveLlm: async () => {
+        asked = true;
+        return {
           ok: true,
           instance: { generate: async () => ({ text: "{}" }) },
           provider: "GROQ",
-          model: "llama-3.3-70b-versatile",
-        }),
-        env: { TRANSLATION_OLLAMA_MODEL: "qwen3:8b" },
-      });
-    } finally {
-      console.warn = original;
-    }
+          model: "x",
+        };
+      },
+      env: { ...WORKER_ENV, TRANSLATION_OLLAMA_MODEL: "qwen3.5:35b-a3b-q4_K_M" },
+    });
+    assert.equal(asked, false, "an explicit translation model must not consult the admin default");
+  });
+
+  it("selects the text worker regardless of what the admin's general-purpose default is set to", async () => {
+    const result = await buildTranslationProvider({
+      // The admin default is Groq — irrelevant once a translation model is named.
+      resolveLlm: async () => ({
+        ok: true,
+        instance: { generate: async () => ({ text: "{}" }) },
+        provider: "GROQ",
+        model: "llama-3.3-70b-versatile",
+      }),
+      env: { ...WORKER_ENV, TRANSLATION_OLLAMA_MODEL: "qwen3.5:35b-a3b-q4_K_M" },
+    });
     assert.ok(result.ok);
-    // Swapping a cloud provider's model behind the admin's back would be a silent
-    // provider swap — the one thing this pipeline refuses everywhere.
-    assert.equal(result.provider.model, "llama-3.3-70b-versatile");
-    assert.equal(warnings.length, 1);
-    assert.match(warnings[0], /ignored/);
+    assert.equal(result.provider.providerLabel, "TEXT_WORKER");
+    assert.equal(result.provider.model, "qwen3.5:35b-a3b-q4_K_M");
+  });
+
+  it("reports a clear configuration error when the worker URL/key are missing", async () => {
+    const result = await buildTranslationProvider({
+      resolveLlm: llm,
+      // No WORKER_ENV here — TEXT_WORKER_URL/TEXT_WORKER_API_KEY are unset.
+      env: { TRANSLATION_OLLAMA_MODEL: "qwen3.5:35b-a3b-q4_K_M" },
+    });
+    assert.equal(result.ok, false);
+    assert.ok(!result.ok && /TEXT_WORKER_URL/.test(result.reason));
+  });
+
+  it("falls back to the admin default only when NO translation model is explicitly set", async () => {
+    const result = await buildTranslationProvider({ resolveLlm: llm, env: {} });
+    assert.ok(result.ok);
+    assert.equal(result.provider.providerLabel, "TEXT_WORKER");
+    assert.equal(result.provider.model, "qwen3:8b");
   });
 });
 

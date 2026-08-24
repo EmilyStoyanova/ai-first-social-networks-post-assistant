@@ -62,6 +62,7 @@ async function main(): Promise<void> {
 
   console.log("Environment");
   console.log(`  TRANSLATION_PROVIDER        ${process.env.TRANSLATION_PROVIDER ?? "(unset)"}`);
+  console.log(`  TRANSLATION_OLLAMA_MODEL    ${process.env.TRANSLATION_OLLAMA_MODEL ?? "(unset)"}`);
   console.log(`  TRANSLATION_MADLAD_MODEL    ${process.env.TRANSLATION_MADLAD_MODEL ?? "(unset)"}`);
   console.log(
     `  TRANSLATION_MADLAD_FALLBACK ${process.env.TRANSLATION_MADLAD_FALLBACK || "(empty — off)"}`
@@ -124,7 +125,10 @@ async function main(): Promise<void> {
   console.log(`  -> ${result.translatedTitle}`);
   console.log(`  ${Date.now() - startedAt} ms, ${result.modelCalls ?? result.tries} call(s)`);
   console.log("");
-  console.log("MADLAD is selected, reachable, and returning Bulgarian. No database was touched.");
+  console.log(
+    `${built.provider.kind} (${built.provider.model}) is selected, reachable, and returning ` +
+      "Bulgarian. No database was touched."
+  );
 }
 
 main().catch((err) => {

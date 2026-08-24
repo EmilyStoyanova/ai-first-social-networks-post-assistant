@@ -20,6 +20,7 @@ import type {
   TranslationProvider,
 } from "./translation-provider";
 import { TranslationTimeoutError, withTranslationTimeout } from "./translation-timeout";
+import { restoreTokens, type ProtectedValue } from "./protected-tokens";
 
 /**
  * The prompt-based translation engine — the one this pipeline has always used.
@@ -32,7 +33,10 @@ import { TranslationTimeoutError, withTranslationTimeout } from "./translation-t
  *
  * It is called "ollama" after the engine class, not the transport: whichever LLM
  * provider the admin default resolves to is what runs here, which today is the
- * self-hosted text worker fronting Ollama (`qwen3:8b`).
+ * self-hosted text worker fronting Ollama. The exact model is a deployment choice —
+ * `TEXT_WORKER_MODEL` for every text-worker call, or `TRANSLATION_OLLAMA_MODEL` to
+ * override it for translation alone (see translation-provider-config.ts) — never
+ * assumed or hardcoded here.
  */
 export class OllamaTranslationProvider implements TranslationProvider {
   readonly kind = "ollama" as const;
@@ -76,6 +80,14 @@ export class OllamaTranslationProvider implements TranslationProvider {
     let contentBudget = MAX_TRANSLATION_CONTENT_CHARS;
     /** Declared outside the loop so a thrown failure still reports the calls it spent. */
     let tries = 0;
+    /**
+     * The protected values `currentUserPrompt` actually carries `[[n]]` placeholders for,
+     * refreshed alongside it whenever a truncation rebuilds the prompt (see below) — the
+     * restoration after parsing must always check against the SAME source text that was
+     * just sent, not the article's original, unshrunk one.
+     */
+    let currentTitleValues: readonly ProtectedValue[] = request.prompts.titleProtectedValues;
+    let currentContentValues: readonly ProtectedValue[] = request.prompts.contentProtectedValues;
 
     // In-request regeneration loop. A bad reply from the self-hosted model (invalid JSON, a
     // decoding loop, drifted language) is usually transient, and a fresh sample seconds later
@@ -158,8 +170,23 @@ export class OllamaTranslationProvider implements TranslationProvider {
 
       try {
         const parsedReply = parseTranslationResponse(response.text, request.targetLang, { mode });
-        translatedTitle = parsedReply.translatedTitle;
-        translatedContent = parsedReply.translatedContent;
+        // The reply still carries `[[n]]` placeholders wherever a URL, identifier, SKU, or
+        // version string was held out of the decoder (see buildTranslationPrompts). Restoring
+        // them is not optional cleanup — it is the programmatic check that the model actually
+        // preserved these values, byte-exact, rather than trusting the prompt instructions
+        // alone: a reply that dropped, duplicated, or invented a placeholder is rejected here
+        // exactly as MADLAD's own segment restoration rejects one (see protected-tokens.ts),
+        // and funnels into the SAME retry loop below via the `protected_token` reason.
+        const restoredTitle =
+          parsedReply.translatedTitle !== null
+            ? restoreTokens(parsedReply.translatedTitle, currentTitleValues, "title")
+            : null;
+        const restoredContent =
+          parsedReply.translatedContent !== null
+            ? restoreTokens(parsedReply.translatedContent, currentContentValues, "content")
+            : null;
+        translatedTitle = restoredTitle;
+        translatedContent = restoredContent;
         usedRepair = parsedReply.usedRepair;
         repairs = parsedReply.repairs;
         lastResponseRaw = response.raw;
@@ -236,6 +263,10 @@ export class OllamaTranslationProvider implements TranslationProvider {
             { maxContentChars: contentBudget }
           );
           baseUserPrompt = shorter.userPrompt;
+          // A smaller body is re-protected from scratch, so a later restore must check
+          // against THESE values, not the ones the original (larger) prompt carried.
+          currentTitleValues = shorter.titleProtectedValues;
+          currentContentValues = shorter.contentProtectedValues;
           console.info("[rss-translation] shrinking article for the next try", {
             feedItemId: request.feedItemId,
             try: tries,

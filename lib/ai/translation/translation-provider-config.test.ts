@@ -85,6 +85,14 @@ describe("resolveTranslationProviderConfig — explicit selection", () => {
     assert.equal(config.madladModel, "google/madlad400-10b-mt");
   });
 
+  it("accepts any installed Ollama tag as the model override, e.g. Qwen3.5", () => {
+    const config = resolveTranslationProviderConfig({
+      TRANSLATION_OLLAMA_MODEL: "qwen3.5:35b-a3b-q4_K_M",
+    });
+    assert.equal(config.kind, "ollama");
+    assert.equal(config.ollamaModel, "qwen3.5:35b-a3b-q4_K_M");
+  });
+
   it("enables the fallback only for the exact opt-in value", () => {
     assert.equal(
       resolveTranslationProviderConfig({ TRANSLATION_MADLAD_FALLBACK: "ollama" })

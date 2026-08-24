@@ -8,6 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { protectTokens, type ProtectedValue } from "./translation/protected-tokens";
 
 /** Attempts beyond this are never retried; the item stays "failed". */
 export const MAX_TRANSLATION_ATTEMPTS = 5;
@@ -959,6 +960,15 @@ export interface TranslationPrompts {
   contentChars: number;
   /** True when the source had no title and the model was asked to derive one from the body. */
   derivedTitle: boolean;
+  /**
+   * Values held out of the title/content before this prompt was built — URLs, e-mail
+   * addresses, and identifiers (model names, SKUs, version strings) — each replaced by
+   * a `[[n]]` placeholder in `userPrompt`. Empty when that field carried none. The
+   * engine restores them after parsing and rejects the reply if one did not survive
+   * intact; see `restoreTokens` in protected-tokens.ts.
+   */
+  titleProtectedValues: ProtectedValue[];
+  contentProtectedValues: ProtectedValue[];
 }
 
 export interface BuildTranslationPromptsOptions {
@@ -996,15 +1006,34 @@ export function buildTranslationPrompts(
   // A "full" item whose article has no title of its own — the `(untitled)` rows in the logs.
   const derivedTitle = mode === "full" && isBlank(title);
 
+  // Values that are DATA rather than language — URLs, e-mail addresses, model codes,
+  // SKUs, version strings — are swapped for `[[n]]` placeholders before the call and
+  // swapped back after it, exactly as MADLAD's segment translation already does (see
+  // protected-tokens.ts). Unprotected, a prompt-based model can still silently drop,
+  // mistranslate, or "helpfully" reformat one of these even when told in prose to leave
+  // it alone; the placeholder plus a programmatic restore-or-reject check afterwards
+  // (see OllamaTranslationProvider) does not rely on the model's cooperation for
+  // correctness, only for convenience.
+  const cappedContent = capTranslationContent(
+    cleanContent,
+    options.maxContentChars ?? MAX_TRANSLATION_CONTENT_CHARS
+  );
+  const titleProtection = title ? protectTokens(title) : null;
+  const contentProtection = cappedContent ? protectTokens(cappedContent) : null;
+  const hasProtectedValues =
+    (titleProtection?.values.length ?? 0) > 0 || (contentProtection?.values.length ?? 0) > 0;
+
   const lines =
     mode === "full"
       ? [
           `You are a professional translator. Translate the article title and body into ${language}.`,
-          "Preserve meaning exactly. Keep proper names, URLs, brand names, and facts unchanged.",
+          "Preserve meaning exactly. Keep proper names, URLs, brand names, model names, identifiers, SKUs, version numbers, code, and commands unchanged, exactly as written.",
+          "Do not summarize, condense, expand, explain, or omit any information, and do not add anything that is not in the source. Translate only.",
         ]
       : [
           `You are a professional translator. Translate the article title into ${language}.`,
-          "Preserve meaning exactly. Keep proper names, URLs, brand names, and facts unchanged.",
+          "Preserve meaning exactly. Keep proper names, URLs, brand names, model names, identifiers, SKUs, version numbers, code, and commands unchanged, exactly as written.",
+          "Do not summarize, condense, expand, explain, or omit any information, and do not add anything that is not in the source. Translate only.",
         ];
 
   if (isBulgarianTarget(targetLang)) {
@@ -1014,6 +1043,13 @@ export function buildTranslationPrompts(
       // The extracted page can still carry a stray language-switcher phrase past sanitising.
       // Saying so explicitly stops it being copied through as if it were article text.
       "If the text contains words in Chinese, Japanese, Korean or any other language, do NOT copy them — translate their meaning into Bulgarian or leave them out."
+    );
+  }
+
+  if (hasProtectedValues) {
+    lines.push(
+      "The text below contains placeholders of the exact form [[0]], [[1]], [[2]], etc., marking values that must not be touched — URLs, identifiers, model names, SKUs, version numbers, and similar.",
+      "Copy every such placeholder through EXACTLY as written, including both square brackets and the number inside, once each, in the same position relative to the surrounding words. Never translate, alter, remove, duplicate, reorder, or explain a placeholder — translate only the ordinary words around it."
     );
   }
 
@@ -1040,14 +1076,12 @@ export function buildTranslationPrompts(
   }
 
   const systemPrompt = lines.join("\n");
-  const cappedContent = capTranslationContent(
-    cleanContent,
-    options.maxContentChars ?? MAX_TRANSLATION_CONTENT_CHARS
-  );
+  const protectedTitleText = titleProtection?.text ?? title ?? "";
+  const protectedContentText = contentProtection?.text ?? cappedContent ?? "";
   const userPrompt =
     mode === "full"
-      ? [`Title: ${title ?? ""}`, `Content: ${cappedContent ?? ""}`].join("\n")
-      : `Title: ${title ?? ""}`;
+      ? [`Title: ${protectedTitleText}`, `Content: ${protectedContentText}`].join("\n")
+      : `Title: ${protectedTitleText}`;
 
   return {
     systemPrompt,
@@ -1056,6 +1090,8 @@ export function buildTranslationPrompts(
     schema: mode === "full" ? TRANSLATION_JSON_SCHEMA : TRANSLATION_TITLE_JSON_SCHEMA,
     contentChars: cappedContent?.length ?? 0,
     derivedTitle,
+    titleProtectedValues: titleProtection?.values ?? [],
+    contentProtectedValues: contentProtection?.values ?? [],
   };
 }
 
@@ -1101,8 +1137,10 @@ export type TranslationParseFailure =
   /**
    * A value that was held OUT of the decoder — a URL, an e-mail address, a model
    * code — did not come back intact, so the translation cannot be reassembled without
-   * guessing. Raised only by the NMT engine (see lib/ai/translation/protected-tokens.ts);
-   * the prompt-based engine sends no placeholders and can never produce it.
+   * guessing. Raised by the NMT engine's per-segment restoration, and by the
+   * prompt-based engine's own restoration of the whole title/content (see
+   * lib/ai/translation/protected-tokens.ts and OllamaTranslationProvider) — both send
+   * `[[n]]` placeholders and both reject a reply that did not carry them through intact.
    */
   | "protected_token";
 
@@ -1158,9 +1196,12 @@ export class TranslationParseError extends Error {
  * MODEL-output defect of the prompt-based engine — a different sample of the same prompt,
  * with the defect named back to it, can come out clean.
  *
- * `protected_token` is deliberately absent: it can only be raised by the NMT engine, whose
- * decoding is deterministic, so re-sending the same segments would reproduce the same
- * dropped placeholder and spend the budget doing it.
+ * `protected_token` IS on this list for this engine, unlike MADLAD's own use of the same
+ * reason: this function is consulted only by the prompt-based engine (MADLAD's segment
+ * repair has its own, separate accept/keep-original logic and never calls it — see
+ * segment-repair.ts), whose sampling is NOT deterministic — `samplingForTry` raises the
+ * temperature on every retry, so a fresh sample naming the dropped placeholder back to the
+ * model is a real chance at a clean reply, not a guaranteed repeat of the same defect.
  *
  * Note what is NOT on this list, because that is the point: a source article with no body is
  * not a parse failure at all. It never reaches the model (see
@@ -1173,7 +1214,8 @@ export function isRetriableParseFailure(reason: TranslationParseFailure): boolea
     reason === "schema_validation" ||
     reason === "empty_translation" ||
     reason === "wrong_language" ||
-    reason === "repetition"
+    reason === "repetition" ||
+    reason === "protected_token"
   );
 }
 

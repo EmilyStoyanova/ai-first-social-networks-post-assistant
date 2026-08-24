@@ -505,6 +505,26 @@ describe("buildTranslationPrompts", () => {
     assert.match(systemPrompt, /Keep proper names, URLs, brand names/);
   });
 
+  it("names every protected identifier category and forbids summarising, expanding, or adding content", () => {
+    const { systemPrompt } = buildTranslationPrompts("T", "C", "bg");
+    assert.match(
+      systemPrompt,
+      /model names, identifiers, SKUs, version numbers, code, and commands/
+    );
+    assert.match(systemPrompt, /unchanged, exactly as written/);
+    assert.match(systemPrompt, /Do not summarize, condense, expand, explain, or omit/);
+    assert.match(systemPrompt, /do not add anything that is not in the source/);
+  });
+
+  it("names every protected identifier category in title-only mode too", () => {
+    const { systemPrompt } = buildTranslationPrompts("T", null, "bg");
+    assert.match(
+      systemPrompt,
+      /model names, identifiers, SKUs, version numbers, code, and commands/
+    );
+    assert.match(systemPrompt, /Do not summarize, condense, expand, explain, or omit/);
+  });
+
   it("omits the Bulgarian-specific guardrails for a non-Bulgarian target", () => {
     const { systemPrompt } = buildTranslationPrompts("T", "C", "en");
     assert.match(systemPrompt, /into English/);
@@ -533,6 +553,64 @@ describe("buildTranslationPrompts", () => {
     const { userPrompt } = buildTranslationPrompts("T", body, "bg");
     assert.match(userPrompt, new RegExp(`Content: ${body}$`));
     assert.ok(!userPrompt.includes("[…]"));
+  });
+});
+
+// ─── buildTranslationPrompts — protected-token placeholders ────────────────────
+
+describe("buildTranslationPrompts — protecting URLs and identifiers before the call", () => {
+  it("swaps a URL and an identifier in the content for [[n]] placeholders", () => {
+    const content = "The DCD-800 is documented at https://example.com/dcd-800 for reference.";
+    const { userPrompt, contentProtectedValues } = buildTranslationPrompts("T", content, "bg");
+
+    assert.match(userPrompt, /Content: The \[\[0\]\] is documented at \[\[1\]\] for reference\./);
+    assert.deepEqual(
+      contentProtectedValues.map((v) => v.value),
+      ["DCD-800", "https://example.com/dcd-800"]
+    );
+  });
+
+  it("protects the title independently of the content", () => {
+    const { userPrompt, titleProtectedValues } = buildTranslationPrompts(
+      "Review: DCD-800",
+      "Plain prose with nothing to protect.",
+      "bg"
+    );
+    assert.match(userPrompt, /Title: Review: \[\[0\]\]/);
+    assert.deepEqual(
+      titleProtectedValues.map((v) => v.value),
+      ["DCD-800"]
+    );
+  });
+
+  it("adds placeholder-preservation instructions only when there is something to protect", () => {
+    const withValue = buildTranslationPrompts("T", "See DCD-800 for specs.", "bg");
+    assert.match(withValue.systemPrompt, /\[\[0\]\], \[\[1\]\]/);
+    assert.match(withValue.systemPrompt, /EXACTLY as written/);
+
+    const withoutValue = buildTranslationPrompts("T", "Just ordinary prose.", "bg");
+    assert.ok(!/placeholder/i.test(withoutValue.systemPrompt));
+  });
+
+  it("returns no protected values, and adds no instructions, for a title/content with nothing to protect", () => {
+    const { titleProtectedValues, contentProtectedValues } = buildTranslationPrompts(
+      "An ordinary headline",
+      "Ordinary prose, a price of $199, and a measurement of 15 minutes.",
+      "bg"
+    );
+    assert.deepEqual(titleProtectedValues, []);
+    assert.deepEqual(contentProtectedValues, []);
+  });
+
+  it("collapses a title that is entirely a protected identifier to a bare placeholder", () => {
+    const { userPrompt, titleProtectedValues } = buildTranslationPrompts(
+      "DCD-800",
+      "This tool works outdoors.",
+      "bg"
+    );
+    assert.match(userPrompt, /Title: \[\[0\]\]\n/);
+    assert.equal(titleProtectedValues.length, 1);
+    assert.equal(titleProtectedValues[0].value, "DCD-800");
   });
 });
 
