@@ -11,6 +11,7 @@ import { ChannelChip, type ChannelValue } from "@/components/ui/ChannelChip";
 import { GeneratedPostCard } from "./generated-post-card";
 import { groupEntriesByDay, type CalendarEntry } from "@/lib/calendar/calendar-entries";
 import { isSameMonth, type CalendarView } from "@/lib/calendar/calendar-range";
+import { usePostsLiveRefresh } from "@/lib/posts/use-posts-live-refresh";
 import { dateLocaleFor, formatWeekdayShort } from "@/lib/i18n/format-date";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { PostRole } from "@/lib/posts/post-actions";
@@ -90,6 +91,13 @@ export function PostCalendar({
 
   const [openPostId, setOpenPostId] = useState<string | null>(null);
   const [expandedDays, setExpandedDays] = useState<ReadonlySet<string>>(new Set());
+
+  // Same live-refresh mechanism as GeneratedPostsSection — see its comment.
+  // This view holds no post state of its own (`entries` is server-driven all
+  // the way down), so a refresh landing is simply a fresh `entries` prop; the
+  // open card underneath the modal reconciles itself the same way it always
+  // has, from its own `post` prop.
+  usePostsLiveRefresh(() => router.refresh());
 
   const byDay = useMemo(() => groupEntriesByDay(entries, days), [entries, days]);
 

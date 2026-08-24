@@ -41,7 +41,8 @@ export type ReschedulePostResult =
   | { success: true; scheduledFor: string }
   | { success: false; code: "NOT_FOUND" }
   | { success: false; code: "FORBIDDEN" }
-  | { success: false; code: "POST_LOCKED"; message: string }
+  /** `status` is what the post actually is now — see RescheduleRefusal. */
+  | { success: false; code: "SCHEDULE_LOCKED"; message: string; status: string }
   | { success: false; code: "INVALID_SCHEDULE"; message: string };
 
 interface PostContext {

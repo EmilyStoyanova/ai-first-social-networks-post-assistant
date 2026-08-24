@@ -83,6 +83,10 @@ export const API_ERROR_CODES = [
   "INVALID_SOURCE_MIX",
   // Rescheduling — the requested publish time is not one a post can be given.
   "INVALID_SCHEDULE",
+  // …or the post itself is past the point of having a publish time to change,
+  // which in practice means it has already gone to Buffer. Distinct from
+  // POST_LOCKED, whose wording is about editing.
+  "SCHEDULE_LOCKED",
   // Approval — the post's own hand-chosen time went by before anybody approved
   // it, so a new one has to be picked first.
   "SCHEDULE_MISSED",

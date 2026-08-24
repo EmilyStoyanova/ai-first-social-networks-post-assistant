@@ -300,6 +300,49 @@ function GeneratedPostCardBody({
     post.publishedPostUrl ?? null
   );
 
+  // ── Reconciling with the server ───────────────────────────────────────────
+  // Everything above is seeded from `post` ONCE, at mount, and this component
+  // does not remount when the list refreshes — it is keyed on `selected.id`
+  // (GeneratedPostCard, above), which does not change just because a post's
+  // status did. So a fresh `post` prop landing after a background refresh
+  // (lib/posts/use-posts-live-refresh.ts, or the explicit refresh every action
+  // already triggers) would otherwise sit unread: the badge, the schedule line
+  // and the published block would keep showing whatever was true when the page
+  // was opened, however many times the sweep moved the post along underneath.
+  //
+  // Adjusted DURING RENDER, not in an effect — the same pattern (and the same
+  // reason) `GeneratedPostsSection` and `ChannelPostsSection` already use to
+  // pick up a fresh `initialPosts` prop: `post` is a new object every time the
+  // list refreshes (each server read maps fresh rows), so comparing it by
+  // reference against the last one this card reconciled is exactly "did the
+  // server send something new", and reacting to that inside render lets React
+  // fold it into the render already in progress instead of committing stale
+  // values and immediately re-rendering to fix them.
+  //
+  // Limited to the fields the SERVER moves on its own — status, the schedule,
+  // and the published record — and none of the fields a person is mid-typing
+  // into a form (text, hashtags, image). Those stay one-way, written back to
+  // the list only through `onEdited` when a save actually commits, exactly as
+  // today; reconciling them here would mean a background refresh landing
+  // mid-edit silently overwriting a draft, which is precisely what this must
+  // not do.
+  //
+  // A no-op whenever the fresh prop only confirms what an action on THIS card
+  // already set locally (an approve/publish/reschedule this card just
+  // performed, echoed back once its own `router.refresh()` resolves) — React
+  // bails out of re-rendering on a `setState` call that does not change a
+  // primitive's value. It only produces a visible change for a transition
+  // nothing on this card initiated, which is the case this exists for.
+  const [lastReconciledPost, setLastReconciledPost] = useState(post);
+  if (post !== lastReconciledPost) {
+    setLastReconciledPost(post);
+    setLocalStatus(post.status);
+    setScheduledFor(post.scheduledFor);
+    setManuallyScheduled(post.manuallyScheduled);
+    setPublishedAt(post.publishedAt);
+    setPublishedPostUrl(post.publishedPostUrl ?? null);
+  }
+
   const channelMeta = channelMetaFor(post.channel);
 
   // Origin badge — "RSS · TechPowerUp" for a post written from an article,
@@ -694,6 +737,19 @@ function GeneratedPostCardBody({
           // What the server just wrote: a time a person picked is a promise,
           // whatever the post's schedule was before.
           setManuallyScheduled(true);
+        }}
+        // The post is further along than this card thought — the publishing
+        // sweep sent it while the page was open. Repaint from what the server
+        // says it is, so the badge tells the truth and the Reschedule button
+        // stops being offered for a post that has already gone out. The list
+        // owner is told too: this card can remount and re-seed from its record.
+        // Deliberately NOT closing the editor: the explanation lives inside it,
+        // and closing would repaint the card correctly while taking away the
+        // sentence that says why. It closes when the user dismisses it, and the
+        // button does not come back — `scheduleAllowed` is false by then.
+        onLocked={(status) => {
+          setLocalStatus(status);
+          onStatusChange?.(post.id, status);
         }}
       />
 

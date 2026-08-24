@@ -51,9 +51,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           },
           { status: 403 }
         );
-      case "POST_LOCKED":
+      // 409, with the post's REAL status alongside. The caller almost always
+      // got here by holding a stale card — the publishing sweep moved the post
+      // to `sent_to_buffer` while the page sat open — so answering with the
+      // current status is what lets the card repaint and stop offering a
+      // control that can no longer succeed. Without it the only way out is a
+      // page reload, which is not something an error message can ask for.
+      case "SCHEDULE_LOCKED":
         return NextResponse.json(
-          { error: { code: "POST_LOCKED", message: result.message } },
+          {
+            error: { code: "SCHEDULE_LOCKED", message: result.message, status: result.status },
+          },
           { status: 409 }
         );
       case "INVALID_SCHEDULE":

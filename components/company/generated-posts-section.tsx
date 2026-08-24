@@ -20,6 +20,7 @@ import {
 } from "@/lib/posts/post-status-filter";
 import { groupPostsByTopic } from "@/lib/posts/post-groups";
 import { applyPostEdit } from "@/lib/posts/apply-post-edit";
+import { usePostsLiveRefresh } from "@/lib/posts/use-posts-live-refresh";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
 import type { GenerationChannelOption } from "@/lib/posts/generation-channels";
@@ -79,6 +80,13 @@ export function GeneratedPostsSection({
   const [statusFilter, setStatusFilter] = useState<PostStatusFilter>(initialStatusFilter);
   const [lastUrlFilter, setLastUrlFilter] = useState<PostStatusFilter>(initialStatusFilter);
   const [lastServerPosts, setLastServerPosts] = useState<PostItem[]>(initialPosts);
+
+  // Keeps this grid in step with the publish sweep and the like — a post
+  // approved when the page loaded can become SENT_TO_BUFFER or PUBLISHED with
+  // nobody here having clicked anything. `router.refresh()` is the exact call
+  // every explicit action already makes below (handleStatusChange,
+  // handleBulkGenerated); this only adds a second reason to make it.
+  usePostsLiveRefresh(() => router.refresh());
 
   // A fresh list from the server replaces the local one.
   //

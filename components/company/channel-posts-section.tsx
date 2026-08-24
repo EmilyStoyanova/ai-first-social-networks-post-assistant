@@ -18,6 +18,7 @@ import {
 } from "@/lib/posts/post-status-filter";
 import { groupPostsByTopic } from "@/lib/posts/post-groups";
 import { applyPostEdit } from "@/lib/posts/apply-post-edit";
+import { usePostsLiveRefresh } from "@/lib/posts/use-posts-live-refresh";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
 import type { PostRole } from "@/lib/posts/post-actions";
 
@@ -68,6 +69,9 @@ export function ChannelPostsSection({
   const [statusFilter, setStatusFilter] = useState<PostStatusFilter>(initialStatusFilter);
   const [lastServerPosts, setLastServerPosts] = useState<PostItem[]>(initialPosts);
   const [lastUrlFilter, setLastUrlFilter] = useState<PostStatusFilter>(initialStatusFilter);
+
+  // Same live-refresh mechanism as GeneratedPostsSection — see its comment.
+  usePostsLiveRefresh(() => router.refresh());
 
   // A fresh list from the server replaces the local one — same adjust-during-
   // render pattern, and same reason, as GeneratedPostsSection: a `useState`

@@ -32,17 +32,51 @@ describe("refuseReschedule — which posts may be moved", () => {
 
   it("refuses a post that has already reached Buffer", () => {
     const refusal = refuseReschedule({ status: "sent_to_buffer" }, true, FUTURE, NOW);
-    assert.equal(refusal?.code, "POST_LOCKED");
+    assert.equal(refusal?.code, "SCHEDULE_LOCKED");
   });
 
   it("refuses a published post", () => {
-    assert.equal(refuseReschedule({ status: "published" }, true, FUTURE, NOW)?.code, "POST_LOCKED");
+    assert.equal(
+      refuseReschedule({ status: "published" }, true, FUTURE, NOW)?.code,
+      "SCHEDULE_LOCKED"
+    );
   });
 
   it("refuses a failed post, whose retry budget owns it", () => {
     // Rescheduling a failed post would not re-attempt delivery anyway — the
     // retry step keys off status, not time — so offering it would only mislead.
-    assert.equal(refuseReschedule({ status: "failed" }, true, FUTURE, NOW)?.code, "POST_LOCKED");
+    assert.equal(
+      refuseReschedule({ status: "failed" }, true, FUTURE, NOW)?.code,
+      "SCHEDULE_LOCKED"
+    );
+  });
+
+  it("reports what the post actually is, so a stale card can repaint", () => {
+    // The half that ends the retry loop. This refusal is normally reached by a
+    // card that has gone stale — the publishing sweep moved the post while the
+    // page sat open — so the answer has to carry enough for the client to stop
+    // offering the control, not merely to refuse this one attempt.
+    //
+    // Uppercase, matching `PostItem.status`, which is what the card compares
+    // against; the database's own value is lowercase.
+    for (const [stored, expected] of [
+      ["sent_to_buffer", "SENT_TO_BUFFER"],
+      ["published", "PUBLISHED"],
+      ["failed", "FAILED"],
+    ]) {
+      const refusal = refuseReschedule({ status: stored }, true, FUTURE, NOW);
+      assert.equal(refusal?.code, "SCHEDULE_LOCKED", stored);
+      assert.equal(refusal.code === "SCHEDULE_LOCKED" && refusal.status, expected);
+    }
+  });
+
+  it("says rescheduling, not editing", () => {
+    // Why this is not the shared POST_LOCKED: that code's translation reads
+    // "this post is locked and cannot be edited", which is true for the edit and
+    // restore routes and simply wrong for someone moving a publish time.
+    const refusal = refuseReschedule({ status: "sent_to_buffer" }, true, FUTURE, NOW);
+    assert.equal(refusal?.code, "SCHEDULE_LOCKED");
+    assert.match(refusal?.code === "SCHEDULE_LOCKED" ? refusal.message : "", /rescheduled/);
   });
 });
 
@@ -79,7 +113,10 @@ describe("refuseReschedule — the order of the checks", () => {
   it("reports the lock, not the date, for a post nobody may move", () => {
     // "You cannot touch this post" is a truer answer than "pick a later time"
     // for something already published.
-    assert.equal(refuseReschedule({ status: "published" }, true, PAST, NOW)?.code, "POST_LOCKED");
+    assert.equal(
+      refuseReschedule({ status: "published" }, true, PAST, NOW)?.code,
+      "SCHEDULE_LOCKED"
+    );
   });
 
   it("reports permission before the date for an editor on an approved post", () => {

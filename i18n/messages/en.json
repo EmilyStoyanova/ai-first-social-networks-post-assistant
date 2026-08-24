@@ -80,6 +80,7 @@
     "NO_POSTING_WINDOWS": "This channel has no publishing times configured. Add a posting schedule in channel settings, or choose the date and time of each post yourself.",
     "INVALID_SOURCE_MIX": "Check the content mix — every source must be one of this company's enabled sources, and the posts must add up to the number requested.",
     "INVALID_SCHEDULE": "Pick a publish time in the future.",
+    "SCHEDULE_LOCKED": "This post has already been sent for publishing, so its time can no longer be changed.",
     "SCHEDULE_MISSED": "The scheduled publication time has passed. Choose a new time before approving this post.",
     "SERVER_UNREACHABLE": "The server did not respond properly. Try again in a moment.",
     "REQUEST_TIMED_OUT": "This took too long and was stopped by the server. Try fewer channels at once, or generate them one at a time."

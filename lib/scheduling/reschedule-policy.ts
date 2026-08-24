@@ -22,7 +22,22 @@ const OWNER_ONLY_STATUSES = new Set(["approved"]);
 
 /** Why a reschedule was refused, or null when it is allowed. */
 export type RescheduleRefusal =
-  | { code: "POST_LOCKED"; message: string }
+  /**
+   * The post has moved past the point where its time still means anything —
+   * almost always because it has already been handed to Buffer.
+   *
+   * Carries the STATUS that refused it, and that is the load-bearing part. This
+   * refusal is reached mostly by a card that has gone stale: the publishing
+   * sweep moves an approved post to `sent_to_buffer` behind an open page, so the
+   * card is still offering a control the server will now always refuse. Telling
+   * the client only "no" leaves it offering that control forever, and every
+   * retry fails the same way. Telling it WHAT the post is now lets it repaint
+   * and stop asking.
+   *
+   * Its own code rather than the shared `POST_LOCKED`, whose message is about
+   * editing — true where it is used (edit, restore), wrong here.
+   */
+  | { code: "SCHEDULE_LOCKED"; message: string; status: string }
   | { code: "FORBIDDEN" }
   | { code: "INVALID_SCHEDULE"; message: string };
 
@@ -74,8 +89,11 @@ export function refuseReschedule(
 
   if (!RESCHEDULABLE_STATUSES.has(post.status)) {
     return {
-      code: "POST_LOCKED",
+      code: "SCHEDULE_LOCKED",
       message: `Posts with status ${post.status.toUpperCase()} cannot be rescheduled.`,
+      // Uppercase, matching `PostItem.status` — this value is handed straight to
+      // a card that is about to repaint from it, and the client speaks uppercase.
+      status: post.status.toUpperCase(),
     };
   }
 

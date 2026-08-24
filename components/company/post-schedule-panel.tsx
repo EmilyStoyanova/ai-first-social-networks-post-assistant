@@ -34,6 +34,18 @@ interface Props {
   onClose: () => void;
   /** The saved instant, ISO. The card is the one holding the post's schedule. */
   onScheduled: (scheduledFor: string) => void;
+  /**
+   * The server refused because the post is no longer reschedulable, and this is
+   * what it actually is now (uppercase, as `PostItem.status`).
+   *
+   * Reaching this means the card was stale: the publishing sweep moves an
+   * approved post to SENT_TO_BUFFER without anything on an open page knowing, so
+   * the Reschedule button was being offered for a post that had already gone
+   * out. Handing the real status up is what closes that loop — the card
+   * repaints, the button disappears, and the user stops retrying a request that
+   * can never succeed.
+   */
+  onLocked?: (status: string) => void;
 }
 
 /**
@@ -67,6 +79,7 @@ export function PostSchedulePanel({
   open,
   onClose,
   onScheduled,
+  onLocked,
 }: Props) {
   const t = useTranslations("posts.schedule");
   const tCommon = useTranslations("common");
@@ -127,7 +140,16 @@ export function PostSchedulePanel({
         body: JSON.stringify({ scheduledFor: instant }),
       });
       if (!res.ok) {
-        const json = (await res.json()) as { error?: { code?: string; message?: string } };
+        const json = (await res.json()) as {
+          error?: { code?: string; message?: string; status?: string };
+        };
+        // The post moved on while this page was open. Reporting the status the
+        // server just gave us is the only thing that ends the loop: the card
+        // repaints, this panel's own button goes away with it, and the message
+        // below explains why rather than inviting another attempt.
+        if (json.error?.code === "SCHEDULE_LOCKED" && typeof json.error.status === "string") {
+          onLocked?.(json.error.status);
+        }
         throw new Error(apiError(json.error));
       }
       const json = (await res.json()) as { scheduledFor: string };
