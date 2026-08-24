@@ -437,6 +437,15 @@ model FeedItem {
   /// Set while a run holds an atomic claim (status = 'translating'). An expired
   /// lease means the worker died mid-translation and the item is reclaimable.
   translationLeaseExpiresAt DateTime? @map("translation_lease_expires_at")
+  /// Raw (pre-restoration) MADLAD segment translations already banked for an
+  /// oversized article that cannot finish all its HTTP batches inside one item
+  /// budget — `{ "<segmentIndex>": "<raw MADLAD reply>", ... }`. NULL for every
+  /// item that has never been capped mid-translation. Cleared back to NULL once
+  /// the item reaches a terminal state (completed or failed), so a resumed
+  /// article never leaks stale progress into an unrelated future retranslation.
+  /// See maxBatchesFittingBudget (feed-item-translation.ts) and the resumable
+  /// batch loop in madlad-translation.provider.ts.
+  translationProgress Json? @map("translation_progress")
 
   // Product-page extraction. Written only for `product_page` sources whose config
   // carries `extractionInstructions` — the owner's own description of what a post

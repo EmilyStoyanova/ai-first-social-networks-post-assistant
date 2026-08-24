@@ -6,7 +6,7 @@ import type {
   ArticleTranslationRequest,
   TranslationProvider,
 } from "./translation-provider";
-import { TranslationTransportError } from "./translation-provider";
+import { MadladPartialProgressError, TranslationTransportError } from "./translation-provider";
 import { TranslationTimeoutError, withTranslationTimeout } from "./translation-timeout";
 import { reassembleArticle, segmentArticle } from "./madlad-segmentation";
 import { assertUsableTranslation } from "./translated-text-validation";
@@ -228,11 +228,34 @@ export class MadladTranslationProvider implements TranslationProvider {
       );
     }
 
-    // HTTP batches — see DEFAULT_MADLAD_HTTP_BATCH_SIZE. Computed up front: chunking
-    // is deterministic, so the planned request count is known before the first call.
+    // ── Resumption ────────────────────────────────────────────────────────────
+    // Segments an EARLIER, capped call for this same article already translated (raw,
+    // pre-restoration). Empty on a first call and on every article whose estimate fits
+    // one item budget — see ArticleTranslationContext.resumeSegments.
+    const resumeSegments = context.resumeSegments ?? {};
+    const pendingIndices = sendIndices.filter((i) => !(i in resumeSegments));
+
+    // HTTP batches — see DEFAULT_MADLAD_HTTP_BATCH_SIZE. Computed up front: chunking is
+    // deterministic, so the planned request count is known before the first call.
     // Batches carry ARTICLE indices, so a batch knows which segment each entry is and
     // every diagnostic stays article-level even though the bypassed ones are absent.
-    const batches = chunkIntoBatches(sendIndices, this.httpBatchSize);
+    // `totalBatches` is the whole article's plan (diagnostics + the "is this article
+    // done yet" check below); `pendingBatches` is what THIS attempt still needs to run.
+    const totalBatches = chunkIntoBatches(sendIndices, this.httpBatchSize);
+    const pendingBatches = chunkIntoBatches(pendingIndices, this.httpBatchSize);
+    const processedBatchCountBefore = totalBatches.length - pendingBatches.length;
+
+    // `maxBatchesThisCall` caps how many of the PENDING batches this call may start —
+    // see ArticleTranslationContext.maxBatchesThisCall. Floored at 1 defensively: this
+    // provider must never itself be the source of a zero-progress call, regardless of
+    // what a caller passes, because a call that starts zero batches would throw
+    // MadladPartialProgressError below reporting no progress at all.
+    const batchCap =
+      context.maxBatchesThisCall === undefined
+        ? undefined
+        : Math.max(1, context.maxBatchesThisCall);
+    const batchesToRun =
+      batchCap === undefined ? pendingBatches : pendingBatches.slice(0, batchCap);
 
     context.reportTry?.(1);
     console.info("[rss-translation] attempt", {
@@ -245,12 +268,17 @@ export class MadladTranslationProvider implements TranslationProvider {
       segmentsSent: sendIndices.length,
       bypassedDataOnlySegments: dataOnlyIndices.length,
       httpBatchSize: this.httpBatchSize,
-      httpBatchCount: batches.length,
+      httpBatchCount: totalBatches.length,
+      batchesThisCall: batchesToRun.length,
+      processedBatchCount: processedBatchCountBefore,
+      remainingBatchCount: pendingBatches.length,
       protectedTokens: protectedCount,
     });
 
     // The "prompt" for an NMT engine is the batch itself — recorded under the same step
     // type so a MADLAD run reads in the trace timeline exactly where an Ollama one does.
+    // Reflects only what THIS call actually sends — a resumed article's earlier batches
+    // were traced by the call that ran them.
     tracer.step({
       type: "prompt",
       label: "Segments sent to MADLAD",
@@ -261,7 +289,7 @@ export class MadladTranslationProvider implements TranslationProvider {
         // What actually goes on the wire, placeholders and all — so a trace shows the
         // request as sent rather than a tidied-up version of it. Bypassed data-only
         // segments are absent here because they are genuinely never sent.
-        segments: sendIndices.map((i) => protectedSegments[i].text),
+        segments: batchesToRun.flat().map((i) => protectedSegments[i].text),
       },
       metadata: {
         engine: "madlad",
@@ -269,7 +297,8 @@ export class MadladTranslationProvider implements TranslationProvider {
         segmentCount: segments.length,
         segmentsSent: sendIndices.length,
         httpBatchSize: this.httpBatchSize,
-        httpBatchCount: batches.length,
+        httpBatchCount: totalBatches.length,
+        batchesThisCall: batchesToRun.length,
         contentChars,
         pieces: plan.body.length,
         hasTitle: plan.titleIndex !== null,
@@ -314,11 +343,11 @@ export class MadladTranslationProvider implements TranslationProvider {
     // `budgetMs` can never exceed `remainingMs`, so the TOTAL across every batch
     // can never exceed the article's own item deadline either.
     const batchReplies: BatchReply[] = [];
-    for (const batch of batches) {
+    for (const batch of batchesToRun) {
       const remainingMs = context.itemDeadlineMs - now().getTime();
       if (remainingMs <= 0) throw new TranslationTimeoutError(context.itemTimeoutMs, "item");
-      const remainingBatches = batches.length - batchReplies.length;
-      const budgetMs = Math.max(1, Math.floor(remainingMs / remainingBatches));
+      const remainingBatchesThisCall = batchesToRun.length - batchReplies.length;
+      const budgetMs = Math.max(1, Math.floor(remainingMs / remainingBatchesThisCall));
 
       const reply = await withTranslationTimeout(
         this.callWorkerBatch(
@@ -328,8 +357,11 @@ export class MadladTranslationProvider implements TranslationProvider {
           // Article-level indices, so an error names the segment the ARTICLE has even
           // though bypassed segments were never in the batch.
           batch,
-          batchReplies.length,
-          batches.length,
+          // ARTICLE-level batch position (accounts for batches an earlier, capped call
+          // already ran), so a resumed article's error messages still read "batch 7/10"
+          // rather than restarting the count at 1 for every call.
+          processedBatchCountBefore + batchReplies.length,
+          totalBatches.length,
           segments.length
         ),
         budgetMs,
@@ -338,18 +370,58 @@ export class MadladTranslationProvider implements TranslationProvider {
       batchReplies.push(reply);
     }
 
+    // Raw (pre-restoration) reply for every segment translated so far, ARTICLE-indexed —
+    // whatever an earlier call banked, plus what THIS call just produced.
+    const rawBySegment: Record<string, string> = { ...resumeSegments };
+    batchesToRun.forEach((batch, bi) => {
+      batch.forEach((articleIndex, pos) => {
+        rawBySegment[articleIndex] = batchReplies[bi].texts[pos];
+      });
+    });
+    const processedBatchCount = processedBatchCountBefore + batchesToRun.length;
+
+    if (batchesToRun.length < pendingBatches.length) {
+      // The cap stopped us before every PENDING batch ran. What did run is banked, not
+      // reassembled or validated — see MadladPartialProgressError's own comment for why
+      // this must never reach the quality gate. The caller persists `translatedSegments`
+      // and this same article resumes from here on its next claim, which is what makes
+      // this progress rather than a re-run of the same doomed calculation.
+      const remainingBatchCount = totalBatches.length - processedBatchCount;
+      console.info(
+        "[rss-translation] MADLAD batch progress banked — article too large for one call",
+        {
+          feedItemId: request.feedItemId,
+          segments: segments.length,
+          httpBatchCount: totalBatches.length,
+          processedBatchCount,
+          remainingBatchCount,
+          progressMade: batchesToRun.length > 0,
+          continuationReason: "batch_cap_reached",
+        }
+      );
+      throw new MadladPartialProgressError(
+        `MADLAD article ${request.feedItemId} needs ${totalBatches.length} HTTP batch(es); ` +
+          `${processedBatchCount} done, ${remainingBatchCount} remaining.`,
+        rawBySegment,
+        processedBatchCount,
+        totalBatches.length
+      );
+    }
+
+    // Every pending batch ran (this call or an earlier one) — the article is complete.
     // Back to ARTICLE order and ARTICLE length. A bypassed segment takes its own source
-    // text verbatim; everything else takes the worker's answer, in the order it was sent.
-    const sentTexts = batchReplies.flatMap((reply) => reply.texts);
+    // text verbatim; everything else takes whichever call's answer translated it.
     const translations: string[] = segments.slice();
-    sendIndices.forEach((articleIndex, sentPosition) => {
-      translations[articleIndex] = sentTexts[sentPosition];
+    sendIndices.forEach((articleIndex) => {
+      translations[articleIndex] = rawBySegment[articleIndex];
     });
     const batchDurations = batchReplies
       .map((reply) => reply.durationMs)
       .filter((ms): ms is number => ms !== null);
     // Sourced from the first batch's own reply rather than a "first to resolve"
-    // race, so the reported model/device never depends on completion order.
+    // race, so the reported model/device never depends on completion order. On a
+    // resumed article this describes only the FINAL call — earlier calls' replies
+    // were not persisted beyond their translated text, only its provenance is lost.
     const workerModel = batchReplies[0]?.model ?? null;
     const workerDevice = batchReplies[0]?.device ?? null;
 
@@ -359,7 +431,7 @@ export class MadladTranslationProvider implements TranslationProvider {
       type: "llm_call",
       label:
         `MADLAD translate — ${segments.length} segment${segments.length === 1 ? "" : "s"}` +
-        ` in ${batches.length} HTTP batch${batches.length === 1 ? "" : "es"}`,
+        ` in ${totalBatches.length} HTTP batch${totalBatches.length === 1 ? "" : "es"}`,
       attempt: 1,
       startedAt: callStartedAt,
       completedAt: new Date(),
@@ -379,10 +451,11 @@ export class MadladTranslationProvider implements TranslationProvider {
         },
         // What did this article cost: how many segments were translated, in how many
         // ACTUAL HTTP requests (batched, so no longer one-to-one with segment count),
-        // and at what configured batch size.
+        // and at what configured batch size. `workerRequests` counts every batch the
+        // article needed, including ones an earlier, capped call already ran.
         segmentCount: segments.length,
         httpBatchSize: this.httpBatchSize,
-        workerRequests: batches.length,
+        workerRequests: totalBatches.length,
         batchDurationsMs: batchDurations,
         elapsedMs: now().getTime() - callStartedAt.getTime(),
       },
@@ -464,7 +537,7 @@ export class MadladTranslationProvider implements TranslationProvider {
         engine: "madlad",
         willRetry: false,
         translatedSegments: segments.length,
-        workerRequests: batches.length,
+        workerRequests: totalBatches.length,
         // Reported on the FAILURE path too: "how far did repair get before the article
         // was failed" is the first question asked of an article that hit the cap.
         repairedSegments: repairedSegments(repairReport).length,
@@ -526,7 +599,7 @@ export class MadladTranslationProvider implements TranslationProvider {
       metadata: {
         segmentCount: translations.length,
         httpBatchSize: this.httpBatchSize,
-        workerRequests: batches.length,
+        workerRequests: totalBatches.length,
         protectedTokens: protectedCount,
         urls: extractUrls(segments.join("\n")).length,
         ...repairMetadata(repairReport),
@@ -542,7 +615,7 @@ export class MadladTranslationProvider implements TranslationProvider {
       // See `translatedSegments`/`httpBatchSize` on `raw` for the segment-level counts.
       // Batch calls PLUS the repair calls — an article that needed repairs cost more
       // than its batches, and reporting only the batches would understate it.
-      modelCalls: batches.length + repairReport.records.length,
+      modelCalls: totalBatches.length + repairReport.records.length,
       // `usedRepair`/`repairs` are the JSON-SALVAGE fields of the prompt-based engine
       // (a truncated reply patched back into valid JSON). An NMT engine has no JSON to
       // salvage, so they stay false/empty here — segment repair is a different thing
@@ -558,7 +631,7 @@ export class MadladTranslationProvider implements TranslationProvider {
         durationMs: workerDurationMs || null,
         translatedSegments: translations.length,
         httpBatchSize: this.httpBatchSize,
-        workerRequests: batches.length,
+        workerRequests: totalBatches.length,
         protectedTokens: protectedCount,
         ...repairMetadata(repairReport),
         ...dataOnlyMetadata(dataOnlyIndices),

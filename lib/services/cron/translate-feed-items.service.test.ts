@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { translateFeedItems, type TranslateFeedItemsDeps } from "./translate-feed-items.service";
 import type { TranslateFeedItemOutcome } from "@/lib/services/ai/translate-feed-item.service";
 import {
+  maxBatchesFittingBudget,
   MIN_TRANSLATION_ITEM_BUDGET_MS,
   TRANSLATION_BATCH_SIZE,
   TRANSLATION_ITEM_TIMEOUT_MS,
@@ -42,6 +43,7 @@ interface DispatchedCall {
   id: string;
   lang: string;
   itemTimeoutMs?: number;
+  maxBatchesThisCall?: number;
 }
 
 /** Captures the calls the batch dispatched. */
@@ -65,8 +67,17 @@ function makeDeps(
       return candidates.slice(0, limit);
     },
     loadCompanyLang: async () => companyLang,
-    translate: (async (item: Candidate, lang: string, deps?: { itemTimeoutMs?: number }) => {
-      calls.push({ id: item.id, lang, itemTimeoutMs: deps?.itemTimeoutMs });
+    translate: (async (
+      item: Candidate,
+      lang: string,
+      deps?: { itemTimeoutMs?: number; maxBatchesThisCall?: number }
+    ) => {
+      calls.push({
+        id: item.id,
+        lang,
+        itemTimeoutMs: deps?.itemTimeoutMs,
+        maxBatchesThisCall: deps?.maxBatchesThisCall,
+      });
       return outcome(item);
     }) as unknown as TranslateFeedItemsDeps["translate"],
   };
@@ -77,7 +88,14 @@ describe("translateFeedItems", () => {
     const deps = makeDeps([makeCandidate("a"), makeCandidate("b")]);
     const summary = await translateFeedItems({ companyId: "c1" }, deps);
 
-    assert.deepEqual(summary, { scanned: 2, translated: 2, failed: 0, skipped: 0, deferred: 0 });
+    assert.deepEqual(summary, {
+      scanned: 2,
+      translated: 2,
+      failed: 0,
+      skipped: 0,
+      deferred: 0,
+      partial: 0,
+    });
     assert.deepEqual(
       deps.calls.map((c) => c.id),
       ["a", "b"]
@@ -163,7 +181,14 @@ describe("translateFeedItems", () => {
   it("does nothing when there is no backlog", async () => {
     const deps = makeDeps([]);
     const summary = await translateFeedItems({ companyId: "c1" }, deps);
-    assert.deepEqual(summary, { scanned: 0, translated: 0, failed: 0, skipped: 0, deferred: 0 });
+    assert.deepEqual(summary, {
+      scanned: 0,
+      translated: 0,
+      failed: 0,
+      skipped: 0,
+      deferred: 0,
+      partial: 0,
+    });
   });
 
   it("squeezes each item's own budget down to what the run has left", async () => {
@@ -199,7 +224,14 @@ describe("translateFeedItems", () => {
     );
 
     assert.equal(deps.calls.length, 0, "no item may start on an unusable budget");
-    assert.deepEqual(summary, { scanned: 0, translated: 0, failed: 0, skipped: 0, deferred: 0 });
+    assert.deepEqual(summary, {
+      scanned: 0,
+      translated: 0,
+      failed: 0,
+      skipped: 0,
+      deferred: 0,
+      partial: 0,
+    });
   });
 
   it("counts an item skipped for having no source text, without stopping the batch", async () => {
@@ -363,6 +395,103 @@ describe("translateFeedItems — size-aware admission", () => {
 
     assert.equal(deps.calls.length, 1);
     assert.equal(deps.calls[0].itemTimeoutMs, undefined, "no budget means no squeeze, as before");
+    assert.equal(summary.deferred, 0);
+  });
+});
+
+// ─── Oversized articles: bounded progress instead of an infinite defer loop ────
+
+/**
+ * Regression coverage for the reported bug: a feed item whose ESTIMATE exceeds
+ * TRANSLATION_ITEM_TIMEOUT_MS (210_000ms) — the true ceiling ANY fresh run's item is
+ * ever given, since `itemTimeoutMs` downstream is `min(TRANSLATION_ITEM_TIMEOUT_MS,
+ * remaining)` — can NEVER be satisfied by "wait for a run with more budget", because no
+ * run ever has more than that ceiling. The old admission gate compared only against
+ * `remaining` and deferred such an item identically forever. These tests assert the new
+ * gate recognises the distinct case and claims the item instead, with a batch cap.
+ */
+describe("translateFeedItems — oversized article (the reported infinite-loop bug)", () => {
+  it("claims — never defers — the exact reported 289-segment article on a fresh run", async () => {
+    // 289 segments / batch size 30 → 10 batches → requiredBudgetMs 250_000ms, which
+    // exceeds TRANSLATION_ITEM_TIMEOUT_MS (210_000ms) — this is the exact bug.
+    const deps = makeDeps([longCandidate("oversized", 288)]); // +1 for the title segment = 289
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => 239_777 }, // the reported remainingRunBudgetMs
+      { ...deps, env: MADLAD_ENV }
+    );
+
+    assert.equal(deps.calls.length, 1, "the article must be claimed, not deferred again");
+    assert.equal(
+      summary.deferred,
+      0,
+      "this is not the 'wait for a bigger run' case — there is none"
+    );
+    assert.equal(
+      deps.calls[0].maxBatchesThisCall,
+      maxBatchesFittingBudget(Math.min(239_777, TRANSLATION_ITEM_TIMEOUT_MS)),
+      "capped to what safely fits the true per-item ceiling, not the raw run remainder"
+    );
+  });
+
+  it("re-runs of the SAME scenario keep claiming, never fall back to deferring", async () => {
+    // The old bug reproduced on every subsequent tick with identical numbers. Running
+    // the same admission decision several times must behave identically each time —
+    // always claim, never revert to deferring — which is what actually breaks the loop.
+    const deps = makeDeps([longCandidate("oversized", 288)]);
+    for (let tick = 0; tick < 4; tick += 1) {
+      const summary = await translateFeedItems(
+        { companyId: "c1", remainingMs: () => 239_777 },
+        { ...deps, env: MADLAD_ENV }
+      );
+      assert.equal(summary.deferred, 0, `tick ${tick}: still must not defer`);
+    }
+    assert.equal(deps.calls.length, 4, "every tick claimed the item exactly once");
+  });
+
+  it("does not claim a normal-sized article via the oversized path", async () => {
+    // 99 segments / 4 batches → 100_000ms required, well under the 210_000ms ceiling —
+    // must take the EXISTING defer-if-tight-this-run path, unaffected by this change.
+    const deps = makeDeps([longCandidate("normal", 99)]);
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => 33_340 },
+      { ...deps, env: MADLAD_ENV }
+    );
+
+    assert.equal(deps.calls.length, 0, "still deferred — this article DOES fit a fresh run");
+    assert.equal(summary.deferred, 1);
+  });
+
+  it("caps at least one batch even when the run is nearly spent", async () => {
+    // Just above the MIN_TRANSLATION_ITEM_BUDGET_MS floor: still claims, still makes
+    // real progress — never zero, which is what a defer-without-claim would risk here.
+    const deps = makeDeps([longCandidate("oversized", 288)]);
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => MIN_TRANSLATION_ITEM_BUDGET_MS + 1 },
+      { ...deps, env: MADLAD_ENV }
+    );
+
+    assert.equal(deps.calls.length, 1);
+    assert.equal(summary.deferred, 0);
+    assert.ok(
+      (deps.calls[0].maxBatchesThisCall ?? 0) >= 1,
+      "must attempt at least one batch — zero would burn an attempt for nothing"
+    );
+  });
+
+  it("counts a partial outcome distinctly from translated/failed/deferred", async () => {
+    const deps = makeDeps([longCandidate("oversized", 288)], () => ({
+      status: "partial",
+      processedBatchCount: 8,
+      totalBatchCount: 10,
+    }));
+    const summary = await translateFeedItems(
+      { companyId: "c1", remainingMs: () => 239_777 },
+      { ...deps, env: MADLAD_ENV }
+    );
+
+    assert.equal(summary.partial, 1);
+    assert.equal(summary.translated, 0);
+    assert.equal(summary.failed, 0);
     assert.equal(summary.deferred, 0);
   });
 });

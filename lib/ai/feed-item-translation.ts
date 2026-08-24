@@ -328,6 +328,22 @@ export function estimatedTranslationBudgetMs(segmentCount: number, httpBatchSize
 }
 
 /**
+ * How many MADLAD HTTP batches can safely be STARTED with `availableMs` left,
+ * using the same conservative per-batch estimate as {@link estimatedTranslationBudgetMs}.
+ *
+ * Floors at 1 rather than 0: this is only ever called once the caller has already
+ * decided an item is worth claiming this tick (see `translate-feed-items.service.ts`'s
+ * oversized-article branch), and claiming an item to attempt zero batches would burn
+ * one of its five cross-run attempts for no progress at all — exactly the outcome the
+ * whole mechanism exists to prevent. Attempting one batch on a tight remainder can
+ * still time out, but a timeout is a normal, bounded, explicitly-logged failure with
+ * its own backoff; it is not a loop.
+ */
+export function maxBatchesFittingBudget(availableMs: number): number {
+  return Math.max(1, Math.floor(availableMs / ESTIMATED_MADLAD_BATCH_MS));
+}
+
+/**
  * Rough token estimate for DIAGNOSTICS ONLY (~4 chars/token). Cyrillic tokenises higher than
  * Latin, so treat this as a lower bound. It exists to correlate slow or timed-out
  * translations with input/output size when the worker does not forward Ollama's exact token

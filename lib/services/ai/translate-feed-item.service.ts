@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db/client";
+import { Prisma } from "@prisma/client";
 import type { ILlmProvider } from "@/lib/ai/types";
 import type { TranslationReplyMode } from "@/lib/ai/feed-item-translation";
 import {
@@ -24,7 +25,10 @@ import type {
   ArticleTranslationContext,
   TranslationProvider,
 } from "@/lib/ai/translation/translation-provider";
-import { TranslationTransportError } from "@/lib/ai/translation/translation-provider";
+import {
+  MadladPartialProgressError,
+  TranslationTransportError,
+} from "@/lib/ai/translation/translation-provider";
 import {
   buildOllamaTranslationProvider,
   buildTranslationProvider,
@@ -58,6 +62,13 @@ export type TranslateFeedItemOutcome =
       mode: TranslationReplyMode;
     }
   /**
+   * MADLAD stopped after `processedBatchCount` of `totalBatchCount` HTTP batches — an
+   * article too large for one item budget. NOT a failure: real progress was banked and
+   * the claim was released back to `pending` (no backoff) so the very next selection
+   * resumes exactly here. See MadladPartialProgressError and `translationProgress`.
+   */
+  | { status: "partial"; processedBatchCount: number; totalBatchCount: number }
+  /**
    * No LLM call was made:
    *   • "unchanged"    — hash matches an already-completed translation;
    *   • "empty_source" — the item has neither a title nor an article body to translate;
@@ -89,6 +100,13 @@ export interface TranslatableItem {
   translationStatus: string | null;
   translationHash: string | null;
   translationAttemptCount: number;
+  /**
+   * Raw MADLAD batch progress banked by an earlier, capped call for THIS attempt
+   * sequence — see the schema comment on FeedItem.translationProgress. `null`/absent
+   * for every item that has never been capped mid-translation (i.e. almost all of
+   * them), in which case translation proceeds exactly as it always has.
+   */
+  translationProgress?: Record<string, string> | null;
 }
 
 /** Narrow DB surface — real Prisma satisfies it; tests inject a fake. */
@@ -131,6 +149,13 @@ export interface TranslateFeedItemDeps {
    * running beside it.
    */
   env?: EnvLike;
+  /**
+   * MADLAD-only: caps how many NEW HTTP batches this call may start — see
+   * ArticleTranslationContext.maxBatchesThisCall. Set by `translate-feed-items.service.ts`
+   * for an article whose estimate exceeds one item budget; `undefined` for every other
+   * article, which behaves exactly as before.
+   */
+  maxBatchesThisCall?: number;
 }
 
 // Moved to lib/ai/translation/translation-timeout.ts so a provider can enforce its own
@@ -435,6 +460,8 @@ export async function translateFeedItem(
       reportTry: (n: number) => {
         tries = n;
       },
+      maxBatchesThisCall: deps.maxBatchesThisCall,
+      resumeSegments: item.translationProgress ?? undefined,
     });
 
     let result: ArticleTranslation;
@@ -569,6 +596,96 @@ export async function translateFeedItem(
       mode,
     };
   } catch (err) {
+    if (err instanceof MadladPartialProgressError) {
+      // NOT a failure — see MadladPartialProgressError's own comment. The batches that
+      // ran succeeded; what happens next depends only on whether this claim's attempt
+      // was the item's last one.
+      const elapsedMs = now().getTime() - startedAtMs;
+      const remainingBatchCount = err.totalBatchCount - err.processedBatchCount;
+      const isFinalAttempt = attempt >= MAX_TRANSLATION_ATTEMPTS;
+
+      if (isFinalAttempt) {
+        // Exhausted its cross-run attempt budget before every batch ran — a genuinely
+        // oversized article, not a loop: this is the EXPLICIT failure the invariant
+        // requires instead of banking progress forever. `translationProgress` is
+        // cleared so a future re-translation of this exact item (e.g. after the
+        // worker's batch size or timeout budget changes) starts clean rather than
+        // resuming from a stale, possibly-mismatched partial state.
+        const failMessage =
+          `Oversized article: needed ${err.totalBatchCount} MADLAD HTTP batch(es), only ` +
+          `${err.processedBatchCount} completed across ${MAX_TRANSLATION_ATTEMPTS} attempts.`;
+        console.warn("[rss-translation] oversized article FAILED — attempt budget exhausted", {
+          ...diag,
+          elapsedMs,
+          attempt,
+          maxAttempts: MAX_TRANSLATION_ATTEMPTS,
+          batchCount: err.totalBatchCount,
+          processedBatchCount: err.processedBatchCount,
+          remainingBatchCount,
+          progressMade: true,
+          continuationReason: "attempt_budget_exhausted",
+        });
+        tracer.fail("TRANSLATION_TIMEOUT", failMessage);
+        const nextRetryAt = computeTranslationBackoff(attempt, now());
+        const written = await db.feedItem.updateMany({
+          where: {
+            id: item.id,
+            translationStatus: "translating",
+            translationLeaseExpiresAt: leaseExpiresAt,
+          },
+          data: {
+            translationStatus: "failed",
+            translationError: failMessage,
+            translationNextRetryAt: nextRetryAt,
+            translationLeaseExpiresAt: null,
+            translationProgress: Prisma.JsonNull,
+          },
+        });
+        if (written.count === 0) {
+          console.info("[rss-translation] failure superseded by a concurrent run", { ...diag });
+          return { status: "skipped", reason: "superseded" };
+        }
+        return { status: "failed", error: failMessage, nextRetryAt };
+      }
+
+      // More attempts remain — bank progress and release the claim immediately (no
+      // backoff: this is not a fault) so the very next selection resumes right where
+      // this call stopped instead of re-translating batches that already succeeded.
+      console.info("[rss-translation] MADLAD article progressing — resuming next run", {
+        ...diag,
+        elapsedMs,
+        attempt,
+        maxAttempts: MAX_TRANSLATION_ATTEMPTS,
+        batchCount: err.totalBatchCount,
+        processedBatchCount: err.processedBatchCount,
+        remainingBatchCount,
+        progressMade: true,
+        continuationReason: "batch_cap_reached",
+      });
+      const written = await db.feedItem.updateMany({
+        where: {
+          id: item.id,
+          translationStatus: "translating",
+          translationLeaseExpiresAt: leaseExpiresAt,
+        },
+        data: {
+          translationStatus: "pending",
+          translationProgress: err.translatedSegments,
+          translationNextRetryAt: null,
+          translationLeaseExpiresAt: null,
+        },
+      });
+      if (written.count === 0) {
+        console.info("[rss-translation] progress superseded by a concurrent run", { ...diag });
+        return { status: "skipped", reason: "superseded" };
+      }
+      return {
+        status: "partial",
+        processedBatchCount: err.processedBatchCount,
+        totalBatchCount: err.totalBatchCount,
+      };
+    }
+
     const error = err instanceof Error ? err.message : "Unknown translation error.";
     tracer.fail(
       err instanceof TranslationTimeoutError

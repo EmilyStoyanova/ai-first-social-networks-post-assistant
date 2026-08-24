@@ -62,6 +62,7 @@ function makeDeps(item: FeedItemForRetry | null, selectable: boolean) {
       failed: 0,
       skipped: 0,
       deferred: 0,
+      partial: 0,
     })
   );
   const isSelectable = mock.fn(async () => selectable);
