@@ -12,6 +12,7 @@ import {
   validateGenerationCompliance,
   NO_COMPLIANCE_CHECK,
   type ComplianceResult,
+  type ComplianceDimension,
 } from "./quality/generation-compliance";
 import { buildRetryUserPrompt } from "./prompt-builder";
 import { type ContentAngle, selectRetryAngle } from "./content-angle";
@@ -260,7 +261,7 @@ export async function generateWithRetry(
       // which requirements it missed so the model can fix them directly.
       const complianceFailure =
         lastComplianceResult.status === "failed"
-          ? { reasons: lastComplianceResult.reasons }
+          ? { reasons: lastComplianceResult.reasons, failures: lastComplianceResult.failures }
           : undefined;
 
       userPrompt = buildRetryUserPrompt(baseUserPrompt, {
@@ -375,6 +376,28 @@ export async function generateWithRetry(
       angle: currentAngle,
       pattern: currentPattern,
     });
+
+    // Diagnostic compliance logging: log which dimensions were checked and which failed.
+    if (lastComplianceResult.evaluated) {
+      const checkedDimensions = (
+        Object.entries(lastComplianceResult.checked) as Array<[ComplianceDimension, boolean]>
+      )
+        .filter(([, wasChecked]) => wasChecked)
+        .map(([dim]) => dim)
+        .join(",");
+      const failedDimensions =
+        lastComplianceResult.failures.length > 0
+          ? lastComplianceResult.failures.map((f) => f.dimension).join(",")
+          : "none";
+      console.info(
+        `[generation-compliance] attempt=${attempt} checked=${checkedDimensions || "none"} failed=${failedDimensions}`
+      );
+      if (lastComplianceResult.failures.length > 0) {
+        lastComplianceResult.failures.forEach((failure) => {
+          console.info(`  ${failure.dimension}: ${failure.reason}`);
+        });
+      }
+    }
 
     // Retry on a near-verbatim (Jaccard) hit, a semantic-duplicate "regenerate",
     // a generic coreMessage (broad praise hides real repetition), a repeated

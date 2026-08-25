@@ -63,6 +63,13 @@ import type { CtaType, PostPattern } from "../post-pattern";
  */
 export type ComplianceStatus = "passed" | "failed" | "not_checked";
 
+export type ComplianceDimension = "angle" | "hook" | "structure" | "cta" | "bannedWords";
+
+export interface ComplianceFailure {
+  dimension: ComplianceDimension;
+  reason: string;
+}
+
 export interface ComplianceResult {
   status: ComplianceStatus;
   /** True when at least one dimension was actually evaluated. */
@@ -74,6 +81,8 @@ export interface ComplianceResult {
    */
   passed: boolean;
   reasons: string[];
+  /** Structured failure information — only populated when status === "failed". */
+  failures: ComplianceFailure[];
   /** Which dimensions this run actually evaluated. */
   checked: {
     angle: boolean;
@@ -98,6 +107,7 @@ export const NO_COMPLIANCE_CHECK: ComplianceResult = {
   evaluated: false,
   passed: true,
   reasons: [],
+  failures: [],
   checked: { angle: false, hook: false, cta: false, structure: false, bannedWords: false },
 };
 
@@ -477,39 +487,58 @@ function checkListStructure(text: string): { passed: boolean; reason: string | n
 export function validateGenerationCompliance(params: ComplianceCheckParams): ComplianceResult {
   const { text, angle, pattern } = params;
   const reasons: string[] = [];
+  const failures: ComplianceFailure[] = [];
 
   const angleChecked =
     (angle === "Tips & Tricks" && pattern !== undefined) || angle === "Myth vs Fact";
   if (angle === "Tips & Tricks" && pattern) {
     const tips = checkTipsAndTricks(text, pattern.ctaType);
-    if (!tips.passed && tips.reason) reasons.push(tips.reason);
+    if (!tips.passed && tips.reason) {
+      reasons.push(tips.reason);
+      failures.push({ dimension: "angle", reason: tips.reason });
+    }
   } else if (angle === "Myth vs Fact") {
     const myth = checkMythVsFact(text);
-    if (!myth.passed && myth.reason) reasons.push(myth.reason);
+    if (!myth.passed && myth.reason) {
+      reasons.push(myth.reason);
+      failures.push({ dimension: "angle", reason: myth.reason });
+    }
   }
 
   const hookChecked = pattern?.hookType === "Contrast";
   if (hookChecked) {
     const hook = checkContrastHook(text);
-    if (!hook.passed && hook.reason) reasons.push(hook.reason);
+    if (!hook.passed && hook.reason) {
+      reasons.push(hook.reason);
+      failures.push({ dimension: "hook", reason: hook.reason });
+    }
   }
 
   const structureChecked = pattern?.structure === "List";
   if (structureChecked) {
     const list = checkListStructure(text);
-    if (!list.passed && list.reason) reasons.push(list.reason);
+    if (!list.passed && list.reason) {
+      reasons.push(list.reason);
+      failures.push({ dimension: "structure", reason: list.reason });
+    }
   }
 
   const ctaChecked = pattern !== undefined && !UNCHECKED_CTA_TYPES.includes(pattern.ctaType);
   if (ctaChecked) {
     const cta = checkCta(text, pattern!.ctaType);
-    if (!cta.passed && cta.reason) reasons.push(cta.reason);
+    if (!cta.passed && cta.reason) {
+      reasons.push(cta.reason);
+      failures.push({ dimension: "cta", reason: cta.reason });
+    }
   }
 
   // Runs regardless of angle/pattern — a banned term is a violation on its own.
   const bannedWordsChecked = true;
   const bannedWords = checkBannedWords(text);
-  if (!bannedWords.passed && bannedWords.reason) reasons.push(bannedWords.reason);
+  if (!bannedWords.passed && bannedWords.reason) {
+    reasons.push(bannedWords.reason);
+    failures.push({ dimension: "bannedWords", reason: bannedWords.reason });
+  }
 
   const evaluated =
     angleChecked || hookChecked || structureChecked || ctaChecked || bannedWordsChecked;
@@ -522,6 +551,7 @@ export function validateGenerationCompliance(params: ComplianceCheckParams): Com
     evaluated,
     passed,
     reasons,
+    failures,
     checked: {
       angle: angleChecked,
       hook: hookChecked,

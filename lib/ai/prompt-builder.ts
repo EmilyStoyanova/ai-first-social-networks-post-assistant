@@ -14,6 +14,7 @@ import {
   renderFeedItemContent,
   sourceExtractionInstruction,
 } from "./source-content";
+import type { ComplianceFailure } from "./quality/generation-compliance";
 
 export interface BuiltPrompts {
   systemPrompt: string;
@@ -103,6 +104,54 @@ function optional(label: string, value: string | null | undefined): string {
 
 function lines(...parts: string[]): string {
   return parts.filter(Boolean).join("\n");
+}
+
+// Map compliance failures to specific remediation guidance
+function getRemediationGuidance(failure: ComplianceFailure): string {
+  switch (failure.dimension) {
+    case "structure":
+      if (failure.reason.includes("List")) {
+        return "Structure: Use 3–5 real, clearly separated numbered or bulleted list items. Each item must be scannable and hold at least a few words of content.";
+      }
+      return "Fix the post structure to match the required format.";
+    case "cta":
+      if (failure.reason.includes("Share")) {
+        return "CTA: End with an unmistakable sharing invitation — for example, wording equivalent to 'Share this' / 'Send to a friend' / 'Spread the word' (in Bulgarian: 'Сподели...', 'Изпрати...', 'Споделете...')";
+      }
+      if (failure.reason.includes("Follow")) {
+        return "CTA: End with a follow/connect invitation — for example, 'Follow us for more' or 'Subscribe to stay updated' (in Bulgarian: 'Следвайте нас...')";
+      }
+      if (failure.reason.includes("Comment")) {
+        return "CTA: End with a comment/opinion request — for example, 'Tell us what you think' or 'Share your thoughts' (in Bulgarian: 'Какво мислите?' or 'Споделете мнението си')";
+      }
+      if (failure.reason.includes("Reflection")) {
+        return "CTA: Close with a reflective question directed at the reader — ask them to think about their own situation or experience (must include a second-person reference like 'you' / 'your' / 'yourself')";
+      }
+      if (failure.reason.includes("Website")) {
+        return "CTA: End with a website/link visit prompt — for example, 'Visit our website' or 'Check the link in bio'";
+      }
+      if (failure.reason.includes("Open Question")) {
+        return "CTA: End with an open-ended question that invites the reader to respond";
+      }
+      return "Fix the call to action to match the required type.";
+    case "hook":
+      if (failure.reason.includes("Contrast")) {
+        return "Hook: Start with a recognizable contrast construction — for example 'Instead of X, try Y' / 'Most people think X, but actually Y' / 'Not X, but Y' (in Bulgarian: 'Вместо...', 'Не..., а...')";
+      }
+      return "Fix the opening hook to match the required type.";
+    case "angle":
+      if (failure.reason.includes("Tips & Tricks")) {
+        return "Angle: Include 2–4 actionable, distinct tips or pieces of advice. They should be presented as a numbered or bulleted list, or as separate substantial sentences (not just passing mentions).";
+      }
+      if (failure.reason.includes("Myth vs Fact")) {
+        return "Angle: Open by naming a common misconception or myth, then immediately provide a fact or correction that contradicts it. Both the myth and the correction must be clear in the opening.";
+      }
+      return "Fix the post angle to match the required type.";
+    case "bannedWords":
+      return "Remove the banned word entirely and rewrite the section so the meaning is preserved without it.";
+    default:
+      return "Fix this compliance requirement.";
+  }
 }
 
 // ─── Image prompt instruction ─────────────────────────────────────────────────
@@ -669,7 +718,7 @@ export interface RetryContext {
    * reason, this one must NOT change the angle, pattern, or content aspect — the
    * requirement was correct, only the execution was not.
    */
-  complianceFailure?: { reasons: string[] };
+  complianceFailure?: { reasons: string[]; failures: ComplianceFailure[] };
   /** When provided the retry prompt forces the model to use this angle. */
   forcedAngle?: ContentAngle;
   /** When provided the retry prompt forces the model to use this writing pattern. */
@@ -755,11 +804,16 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
   // Compliance-failure block — the angle/hook/structure/CTA were the right
   // ones; the text just did not satisfy them.
   const complianceBlock = retry.complianceFailure
-    ? [
-        "## It did not follow its own required content pattern",
-        ...retry.complianceFailure.reasons.map((r) => `- ${r}`),
-        "",
-      ].join("\n")
+    ? (() => {
+        const failures = retry.complianceFailure.failures ?? [];
+        const remediationLines = failures.map((f) => `  - ${getRemediationGuidance(f)}`).join("\n");
+        return [
+          "## It did not follow its own required content pattern",
+          ...retry.complianceFailure.reasons.map((r) => `- ${r}`),
+          ...(remediationLines ? ["", "## How to fix these failures:", remediationLines] : []),
+          "",
+        ].join("\n");
+      })()
     : "";
 
   // A retry caused ONLY by a failed compliance check needs the OPPOSITE framing
@@ -778,6 +832,9 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     !retry.matchedText;
 
   if (complianceOnly) {
+    const failures = retry.complianceFailure?.failures ?? [];
+    const remediationLines = failures.map((f) => `• ${getRemediationGuidance(f)}`);
+
     const complianceOnlyBlock = [
       `⚠ REGENERATION REQUIRED (did not follow its own required content pattern).`,
       "",
@@ -789,6 +846,7 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
       "## What was wrong",
       ...retry.complianceFailure!.reasons.map((r) => `- ${r}`),
       "",
+      ...(remediationLines.length > 0 ? ["## How to fix it", ...remediationLines, ""] : []),
       "## What you MUST do",
       "Keep the EXACT SAME angle, hook, structure, and CTA as the rejected attempt above — do not switch to a different pattern, topic, or content aspect.",
       "Rewrite the post so it genuinely satisfies every requirement listed above.",

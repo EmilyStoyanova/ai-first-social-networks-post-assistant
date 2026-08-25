@@ -479,6 +479,105 @@ describe("generateWithRetry — compliance failure triggers a retry", () => {
     assert.ok(result.complianceResult.reasons.length > 0);
     assert.strictEqual(result.parsed.text, CLEAN_TEXT);
   });
+
+  it("includes structured failure information for List structure failure", async () => {
+    const provider = recordingProvider([
+      jsonPost(CLEAN_TEXT),
+      jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT),
+    ]);
+    const diversity = {
+      initialAngle: "Tips & Tricks" as const,
+      recentAngles: [],
+      initialPattern: {
+        hookType: "Question" as const,
+        structure: "List" as const,
+        ctaType: "Follow" as const,
+      },
+      recentPatterns: [],
+      recentTopics: [],
+    };
+    await generateWithRetry(provider, "sys", "user", [], diversity);
+
+    const retryPrompt = provider.prompts[1];
+    // Should include both the failure reason and the remediation guidance
+    assert.match(retryPrompt, /List structure requires 3–5 scannable list items; found 0/);
+    assert.match(retryPrompt, /Use 3–5 real, clearly separated numbered or bulleted list items/);
+  });
+
+  it("includes remediation guidance for Share CTA failure", async () => {
+    const provider = recordingProvider([
+      jsonPost(CLEAN_TEXT),
+      jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT),
+    ]);
+    const diversity = {
+      initialAngle: "Tips & Tricks" as const,
+      recentAngles: [],
+      initialPattern: {
+        hookType: "Question" as const,
+        structure: "Story Arc" as const,
+        ctaType: "Share" as const,
+      },
+      recentPatterns: [],
+      recentTopics: [],
+    };
+    await generateWithRetry(provider, "sys", "user", [], diversity);
+
+    const retryPrompt = provider.prompts[1];
+    // Should include both the failure reason and Share-specific guidance
+    assert.match(retryPrompt, /Share CTA is required/);
+    assert.match(retryPrompt, /unmistakable sharing invitation/);
+    assert.match(retryPrompt, /Сподели|Изпрати/);
+  });
+
+  it("includes all failure reasons and remediation when multiple checks fail", async () => {
+    // CLEAN_TEXT fails both Tips & Tricks (0 tips) and Share CTA (no share invitation)
+    const provider = recordingProvider([
+      jsonPost(CLEAN_TEXT),
+      jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT),
+    ]);
+    const diversity = {
+      initialAngle: "Tips & Tricks" as const,
+      recentAngles: [],
+      initialPattern: {
+        hookType: "Question" as const,
+        structure: "Story Arc" as const,
+        ctaType: "Share" as const,
+      },
+      recentPatterns: [],
+      recentTopics: [],
+    };
+    await generateWithRetry(provider, "sys", "user", [], diversity);
+
+    const retryPrompt = provider.prompts[1];
+    // Both failures should be present
+    assert.match(retryPrompt, /Tips & Tricks requires 2–4 actionable tips/);
+    assert.match(retryPrompt, /Share CTA is required/);
+    // Both remediations should be present
+    assert.match(retryPrompt, /actionable.*tips/);
+    assert.match(retryPrompt, /sharing invitation/);
+  });
+
+  it("compliance result includes structured failures when status is failed", async () => {
+    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
+
+    assert.strictEqual(result.complianceResult.status, "failed");
+    assert.ok(result.complianceResult.failures.length > 0, "should have structured failures");
+
+    // Check that failures include dimension and reason
+    const hasAngleFailure = result.complianceResult.failures.some((f) => f.dimension === "angle");
+    const hasCtaFailure = result.complianceResult.failures.some((f) => f.dimension === "cta");
+    assert.ok(hasAngleFailure, "should have angle failure");
+    assert.ok(hasCtaFailure, "should have cta failure");
+  });
+
+  it("compliance result has empty failures array when status is passed", async () => {
+    const provider = makeProvider([jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
+
+    assert.strictEqual(result.complianceResult.status, "passed");
+    assert.strictEqual(result.complianceResult.failures.length, 0);
+  });
 });
 
 describe("generateWithRetry — the banned-word check runs even with no diversity options at all", () => {
