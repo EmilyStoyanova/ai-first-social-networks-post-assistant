@@ -126,3 +126,75 @@ describe("channel-policy — channels with no verified constraints", () => {
     assert.deepEqual(violations, []);
   });
 });
+
+describe("channel-policy — Facebook writing principles", () => {
+  it("Facebook policy includes guidance for first-line hooks", () => {
+    const policy = CHANNEL_POLICIES.facebook;
+    const hookHint = policy.hints.find((h) => h.id === "facebook_first_line_hook");
+    assert.ok(hookHint, "Facebook policy should include first-line hook guidance");
+    assert.match(
+      hookHint.promptFragment,
+      /(?:opening|first).*(?:1.{0,5}2|1–2).*lines/i,
+      "hook hint should mention the critical first 1–2 lines"
+    );
+  });
+
+  it("Facebook policy includes guidance for mobile formatting", () => {
+    const policy = CHANNEL_POLICIES.facebook;
+    const formatHint = policy.hints.find((h) => h.id === "facebook_mobile_formatting");
+    assert.ok(formatHint, "Facebook policy should include mobile formatting guidance");
+    assert.match(formatHint.promptFragment, /short\s+paragraphs|mobile/i);
+  });
+
+  it("Facebook policy emphasizes single main idea focus", () => {
+    const policy = CHANNEL_POLICIES.facebook;
+    const oneIdeaHint = policy.hints.find((h) => h.id === "facebook_one_idea");
+    assert.ok(oneIdeaHint, "Facebook policy should emphasize one main idea");
+    assert.match(oneIdeaHint.promptFragment, /one.*main.*idea|single/i);
+  });
+
+  it("Facebook policy includes conversational tone guidance", () => {
+    const policy = CHANNEL_POLICIES.facebook;
+    const toneHint = policy.hints.find((h) => h.id === "facebook_conversational_tone");
+    assert.ok(toneHint, "Facebook policy should include conversational tone guidance");
+    assert.match(toneHint.promptFragment, /conversational|authentic/i);
+  });
+
+  it("Facebook policy includes audience value emphasis", () => {
+    const policy = CHANNEL_POLICIES.facebook;
+    const valueHint = policy.hints.find((h) => h.id === "facebook_audience_value");
+    assert.ok(valueHint, "Facebook policy should emphasize audience value");
+    assert.match(valueHint.promptFragment, /why.*matters|benefit|value/i);
+  });
+
+  it("Facebook policy includes meaningful CTA guidance", () => {
+    const policy = CHANNEL_POLICIES.facebook;
+    const ctaHint = policy.hints.find((h) => h.id === "facebook_cta_meaningful");
+    assert.ok(ctaHint, "Facebook policy should include meaningful CTA guidance");
+    assert.match(ctaHint.promptFragment, /meaningful|relevant|call to action/i);
+  });
+
+  it("Facebook policy includes moderate emoji usage guidance", () => {
+    const policy = CHANNEL_POLICIES.facebook;
+    const emojiHint = policy.hints.find((h) => h.id === "facebook_emoji_use");
+    assert.ok(emojiHint, "Facebook policy should include emoji guidance");
+    assert.match(emojiHint.promptFragment, /moderate|0.{0,5}2/i);
+  });
+
+  it("Facebook policy advises against template-like writing", () => {
+    const policy = CHANNEL_POLICIES.facebook;
+    const templateHint = policy.hints.find((h) => h.id === "facebook_avoid_template_writing");
+    assert.ok(templateHint, "Facebook policy should warn against template-like writing");
+    assert.match(templateHint.promptFragment, /template|formulaic|coherent/i);
+  });
+
+  it("all Facebook hints have non-empty prompt fragments", () => {
+    const policy = CHANNEL_POLICIES.facebook;
+    for (const hint of policy.hints) {
+      assert.ok(
+        hint.promptFragment.trim().length > 0,
+        `Facebook hint ${hint.id} must have a non-empty prompt fragment`
+      );
+    }
+  });
+});

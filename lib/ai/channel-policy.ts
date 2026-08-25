@@ -80,27 +80,73 @@ export const CHANNEL_POLICIES: Record<SocialChannel, ChannelPolicy> = {
     hints: [
       {
         severity: "WARNING",
-        id: "facebook_conversational_tone",
-        description: "Facebook audiences typically respond better to a conversational tone.",
-        promptFragment: "Write a conversational, engaging post.",
+        id: "facebook_first_line_hook",
+        description:
+          "The first 1–2 lines of a Facebook post appear before the 'See more' button; they are critical to engagement.",
+        promptFragment:
+          "Your opening 1–2 lines are critical — they appear before 'See more'. Start with a strong hook: a direct question, a surprising fact, a specific observation, or a clear benefit. Avoid generic, dramatic, or clickbait-style openings that feel artificial. The hook must feel natural and relevant to the source content.",
       },
       {
         severity: "WARNING",
-        id: "facebook_length",
-        description: "Shorter Facebook posts are generally recommended practice.",
-        promptFragment: "Ideal length: 40–250 characters. Maximum: 500 characters.",
+        id: "facebook_mobile_formatting",
+        description:
+          "Facebook is primarily read on mobile; formatting and whitespace significantly affect readability.",
+        promptFragment:
+          "Format for mobile reading: use short paragraphs (1–2 sentences each), add blank lines between logical sections, and avoid dense text blocks. Whitespace should improve readability without making the post feel fragmented. Only use bullets or numbered lists when the content genuinely benefits from them, not as automatic decoration.",
+      },
+      {
+        severity: "WARNING",
+        id: "facebook_one_idea",
+        description: "Each Facebook post should communicate one primary message effectively.",
+        promptFragment:
+          "Focus on ONE main idea. Do not try to cover product promotion, company history, educational advice, and news in a single post — every paragraph should support the central message. If the source covers multiple topics, select the most valuable angle for your audience.",
+      },
+      {
+        severity: "WARNING",
+        id: "facebook_conversational_tone",
+        description:
+          "Facebook audiences typically respond better to a conversational, authentic tone.",
+        promptFragment:
+          "Write a conversational, direct, and authentic post. Speak like a knowledgeable human, not a marketing template. Use the brand's configured form of address ('ти' or 'вие' in Bulgarian) consistently. Avoid corporate filler, generic AI wording, artificial excitement, and canned phrases.",
+      },
+      {
+        severity: "WARNING",
+        id: "facebook_audience_value",
+        description:
+          "Posts that explain why content matters to the reader drive more meaningful engagement than posts that only recite facts.",
+        promptFragment:
+          "Focus on audience value: explain why this matters, what practical benefit the reader gets, what problem it solves, or what decision it helps them make. Prefer concrete benefits and source-specific facts over generic promotional claims.",
+      },
+      {
+        severity: "WARNING",
+        id: "facebook_cta_meaningful",
+        description:
+          "A clear, relevant call to action that matches the post's purpose drives engagement better than generic engagement bait.",
+        promptFragment:
+          "End with a meaningful call to action that directly relates to your post. Prefer specific open-ended questions that invite real answers over generic engagement prompts like 'A вие какво мислите?' Use a CTA that matches the post's goal: ask for experience/opinion, encourage reading, direct to a link, invite sharing, ask for reflection, or let content speak for itself.",
       },
       {
         severity: "SUGGESTION",
         id: "facebook_emoji_use",
-        description: "Occasional emojis may add warmth without reading as noisy.",
-        promptFragment: "Emojis are welcome but use sparingly.",
+        description:
+          "Moderate emoji use (0–2 per post) can add visual warmth without appearing noisy.",
+        promptFragment:
+          "Use emojis moderately (0–2 per post). Emojis should enhance readability or provide a visual accent, not replace words or decorate every paragraph. Respect the brand's voice if it requires more or fewer emojis.",
       },
       {
         severity: "SUGGESTION",
         id: "facebook_hashtag_count",
-        description: "A small number of hashtags is the usual practice on Facebook.",
-        promptFragment: "Include 1–3 relevant hashtags at the end if they add value.",
+        description: "A small number of relevant hashtags is the usual practice on Facebook.",
+        promptFragment:
+          "Include 1–3 relevant hashtags at the end if they genuinely add value. Avoid hashtag bloat — Facebook users typically expect minimal tagging.",
+      },
+      {
+        severity: "SUGGESTION",
+        id: "facebook_avoid_template_writing",
+        description:
+          "Posts that feel formulaic (hook → filler → list → generic question) reduce effectiveness and feel inauthentic.",
+        promptFragment:
+          "Avoid template-like writing. Do not distort the content merely to satisfy a selected hook/structure pattern. The final post should feel like one coherent piece of writing, not a formula plugged into a template. Vary your structure and tone across posts to avoid repetitive patterns.",
       },
     ],
   },
