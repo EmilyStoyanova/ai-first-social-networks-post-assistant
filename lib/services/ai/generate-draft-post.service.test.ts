@@ -429,10 +429,11 @@ describe("generatePostFromContext — semantic duplicate gate", () => {
     // Must mirror MOCK_LLM_TEXT's `text` field in generate-draft-post.service.ts
     // exactly — the near-verbatim match is what forces the Jaccard flag here.
     const MOCK_TEXT =
-      "While most teams stay quiet before a launch, we like to build in the open — big things are coming!\n" +
+      "Most people assume a team should stay quiet before a launch. Actually, building in the open is what earns trust — while the silent approach loses it.\n" +
       "1. A first look drops this week.\n" +
       "2. Early access opens right after.\n" +
-      "Follow us, share this with a friend, visit our website, and comment your thoughts below — what do you think?";
+      "3. The full rollout lands next month.\n" +
+      "Follow us, share this with a friend, visit our website, and comment your thoughts below — what would you want to see first?";
     const recentRows: RecentRow[] = [{ id: "recent-1", content: MOCK_TEXT, promptSnapshot: null }];
     // ACCEPT_GATE: the semantic gate is clean, so only Jaccard forces the abort.
     const { deps, created } = makeDeps(recentRows, ACCEPT_GATE);

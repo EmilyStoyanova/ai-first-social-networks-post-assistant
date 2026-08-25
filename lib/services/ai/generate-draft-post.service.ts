@@ -80,15 +80,18 @@ import { observeProvider } from "@/lib/generation-trace/observed-provider";
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
 // The text satisfies every deterministic compliance check at once (Step 2's
-// generation-compliance gate) — a Contrast opening, 2 list-style tips, and
-// every checkable CTA — so it is accepted on the first attempt regardless of
-// which angle/hook/CTA a test's (possibly empty) diversity history selects.
+// generation-compliance gate) — a debunked misconception, a Contrast opening,
+// 3 list-style points (which is both a valid List structure and a valid Tips &
+// Tricks count), and every checkable CTA including Reflection — so it is
+// accepted on the first attempt regardless of which angle/hook/structure/CTA a
+// test's (possibly empty) diversity history selects.
 const MOCK_LLM_TEXT = JSON.stringify({
   text:
-    "While most teams stay quiet before a launch, we like to build in the open — big things are coming!\n" +
+    "Most people assume a team should stay quiet before a launch. Actually, building in the open is what earns trust — while the silent approach loses it.\n" +
     "1. A first look drops this week.\n" +
     "2. Early access opens right after.\n" +
-    "Follow us, share this with a friend, visit our website, and comment your thoughts below — what do you think?",
+    "3. The full rollout lands next month.\n" +
+    "Follow us, share this with a friend, visit our website, and comment your thoughts below — what would you want to see first?",
   hashtags: ["innovation", "growth", "comingsoon"],
   coreMessage:
     "Anticipation for an upcoming launch builds excitement and keeps the audience engaged.",
@@ -1372,10 +1375,10 @@ async function runGeneration(
   // acceptance the compliance gate exists to prevent, so generation aborts and
   // the claimed source article goes back to the pool.
   //
-  // The gate reports `passed` for anything it cannot check deterministically
-  // (structure, unverifiable CTA types, other angles/hooks), so this can only
-  // fire on a requirement that was actually measured and actually missed.
-  if (!complianceResult.passed) {
+  // Only `status === "failed"` blocks. A pattern with nothing deterministically
+  // measurable reports `not_checked` — the gate verified nothing, which is not
+  // the same as finding a violation, and must never abort a generation.
+  if (complianceResult.status === "failed") {
     await releaseClaimedFeedItem();
     console.warn(
       `[generation] Aborted after ${attempts} attempts → code=POST_FAILED_COMPLIANCE reasons=${complianceResult.reasons.join(
@@ -1395,7 +1398,7 @@ async function runGeneration(
         cta: selectedPattern?.ctaType ?? null,
         claimReleased: ownedClaimId !== null,
       },
-      metadata: { checked: complianceResult.checked },
+      metadata: { status: complianceResult.status, checked: complianceResult.checked },
     });
     return {
       success: false,

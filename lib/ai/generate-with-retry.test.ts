@@ -38,15 +38,17 @@ function jsonPostWithTopic(text: string, topic: string): string {
 }
 
 // Full DiversityOptions carrying the normalized topic memory. Angle/pattern are
-// valid so retry selection has something to rotate through. ctaType is "No
-// CTA" and hookType/angle are ones the compliance gate never checks (Step 2),
-// so these fixtures exercise Topic Memory in isolation without also tripping
-// the new compliance gate on CLEAN_TEXT/DUPLICATE_TEXT's nonsense sentences.
+// valid so retry selection has something to rotate through. Every dimension is
+// one the compliance gate never checks (Step 2) — angle "Educational", hook
+// "Question", structure "Story Arc", CTA "No CTA" — so these fixtures exercise
+// Topic Memory in isolation without also tripping the compliance gate on
+// CLEAN_TEXT/DUPLICATE_TEXT's nonsense sentences. That makes attempt 1 report
+// `not_checked`, which is non-blocking by design.
 function makeDiversity(topicMemory: string[]): DiversityOptions {
   return {
     initialAngle: "Educational",
     recentAngles: [],
-    initialPattern: { hookType: "Question", structure: "List", ctaType: "No CTA" },
+    initialPattern: { hookType: "Question", structure: "Story Arc", ctaType: "No CTA" },
     recentPatterns: [],
     recentTopics: topicMemory,
   };
@@ -55,15 +57,17 @@ function makeDiversity(topicMemory: string[]): DiversityOptions {
 const DUPLICATE_TEXT = "a b c d e";
 const CLEAN_TEXT = "x y z w q";
 
-// Satisfies every deterministic compliance check at once (Tips & Tricks tip
-// count, Contrast hook, and every checkable CTA) — used where a test's retry
-// rotates angle/hook/structure/CTA to an unpredictable value (LRU-driven, not
-// under the test's control) and the response still needs to be accepted.
+// Satisfies every deterministic compliance check at once (Myth vs Fact debunk,
+// Tips & Tricks tip count, Contrast hook, List item count, and every checkable
+// CTA including Reflection) — used where a test's retry rotates
+// angle/hook/structure/CTA to an unpredictable value (LRU-driven, not under the
+// test's control) and the response still needs to be accepted.
 const UNIVERSALLY_COMPLIANT_TEXT = [
-  "While most guides repeat the same tired tips, here is what actually works in Lisbon.",
+  "Most people assume Lisbon is best in summer, but the data shows autumn actually wins.",
   "1. Try the pastel de nata from a bakery, not a chain.",
   "2. Order the bifana sandwich from a stall near Praça da Figueira.",
-  "Follow us, share this with a friend, visit our website, and comment your favorite spot below — what's yours?",
+  "3. Ride tram 28 before nine, while the queues are still short.",
+  "Follow us, share this with a friend, visit our website, and comment your favorite spot below — which one would you try first?",
 ].join("\n");
 
 const recentPost: RecentPost = { id: "p1", text: "a b c d" };
@@ -395,16 +399,18 @@ describe("generateWithRetry — gray zone accepts without retrying", () => {
 });
 
 // ─── Post-generation compliance gate (Step 2) ──────────────────────────────
-// Angle: Tips & Tricks, Hook: Question (unchecked), Structure: List
+// Angle: Tips & Tricks, Hook: Question (unchecked), Structure: Story Arc
 // (unchecked), CTA: Follow — mirrors the real production pattern
 // (Tips & Tricks / Contrast / Follow) that was accepted with 0 tips and no
-// Follow CTA.
+// Follow CTA. Angle and CTA are the only checked dimensions here, on purpose:
+// these tests are about what the LOOP does with a failure, so exactly two
+// checks keep the expected reasons predictable.
 
 function makeComplianceDiversity(): DiversityOptions {
   return {
     initialAngle: "Tips & Tricks",
     recentAngles: [],
-    initialPattern: { hookType: "Question", structure: "List", ctaType: "Follow" },
+    initialPattern: { hookType: "Question", structure: "Story Arc", ctaType: "Follow" },
     recentPatterns: [],
     recentTopics: [],
   };
@@ -425,6 +431,7 @@ describe("generateWithRetry — compliance failure triggers a retry", () => {
     const result = await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
 
     assert.strictEqual(provider.callCount, 2, "should retry exactly once");
+    assert.strictEqual(result.complianceResult.status, "passed");
     assert.strictEqual(result.complianceResult.passed, true);
     assert.strictEqual(result.attempts, 2);
     assert.strictEqual(result.parsed.text, COMPLIANT_TIPS_FOLLOW_TEXT);
@@ -466,6 +473,7 @@ describe("generateWithRetry — compliance failure triggers a retry", () => {
 
     assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
     assert.strictEqual(result.attempts, MAX_GENERATION_ATTEMPTS);
+    assert.strictEqual(result.complianceResult.status, "failed");
     assert.strictEqual(result.complianceResult.passed, false);
     assert.ok(result.complianceResult.reasons.length > 0);
     assert.strictEqual(result.parsed.text, CLEAN_TEXT);
@@ -482,6 +490,113 @@ describe("generateWithRetry — compliance check needs an angle AND a pattern to
       1,
       "nothing to check against — accepted on the first try"
     );
+    assert.strictEqual(result.complianceResult.status, "not_checked");
+    assert.strictEqual(result.complianceResult.evaluated, false);
     assert.strictEqual(result.complianceResult.passed, true);
+  });
+});
+
+// ─── "Nothing was checkable" must never behave like a failure ───────────────
+// The whole point of separating `not_checked` from `passed` is honesty in the
+// report — it must not leak into control flow. An unsupported pattern is still
+// accepted on the first try, exactly as it was before the status existed.
+
+describe("generateWithRetry — an unsupported pattern combination never blocks", () => {
+  it("accepts on attempt 1 and reports not_checked when no dimension is measurable", async () => {
+    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", [], {
+      // Not one of these has a deterministic check: the angle is not
+      // Tips & Tricks or Myth vs Fact, the hook is not Contrast, the structure
+      // is not List, and "Try It" has no low-false-positive CTA signal.
+      initialAngle: "Behind the Scenes",
+      recentAngles: [],
+      initialPattern: { hookType: "Empathy", structure: "Story Arc", ctaType: "Try It" },
+      recentPatterns: [],
+      recentTopics: [],
+    });
+
+    assert.strictEqual(provider.callCount, 1, "an unverifiable pattern must not cause a retry");
+    assert.strictEqual(result.complianceResult.status, "not_checked");
+    assert.strictEqual(result.complianceResult.evaluated, false);
+    assert.deepEqual(result.complianceResult.reasons, []);
+    assert.deepEqual(result.complianceResult.checked, {
+      angle: false,
+      hook: false,
+      cta: false,
+      structure: false,
+    });
+  });
+});
+
+// ─── The real TravelNest failure, end to end through the loop ───────────────
+// Angle: Myth vs Fact · Hook: Bold Statement · Structure: List · CTA:
+// Reflection — the combination that reported "Passed: true" with every
+// `checked.*` false. Three of the four are now measured, so the same post is
+// rejected and retried instead of accepted.
+
+const TRAVELNEST_PATTERN: DiversityOptions = {
+  initialAngle: "Myth vs Fact",
+  recentAngles: [],
+  initialPattern: { hookType: "Bold Statement", structure: "List", ctaType: "Reflection" },
+  recentPatterns: [],
+  recentTopics: [],
+};
+
+const TRAVELNEST_TEXT =
+  "Есента е най-добрият момент за пътуване, но къде отиват пътниците? " +
+  "Топ 10 дестинации за тази година включват 8 европейски градове и два мексикански курорта.";
+
+const TRAVELNEST_COMPLIANT_TEXT = [
+  "Мит: есента е мъртъв сезон за пътуване. Факт: цените на билетите падат с около 30% след 15 септември.",
+  "1. Лисабон — слънце до края на октомври.",
+  "2. Рим — половината опашки пред музеите.",
+  "3. Прага — най-евтините нощувки за годината.",
+  "А вие къде бихте пътували тази есен?",
+].join("\n");
+
+describe("generateWithRetry — the real TravelNest post is rejected and retried", () => {
+  it("fails compliance on the real text and names all three missed requirements", async () => {
+    const provider = recordingProvider([
+      jsonPost(TRAVELNEST_TEXT),
+      jsonPost(TRAVELNEST_COMPLIANT_TEXT),
+    ]);
+    const result = await generateWithRetry(provider, "sys", "user", [], TRAVELNEST_PATTERN);
+
+    assert.strictEqual(provider.callCount, 2, "the real post must be rejected, not accepted");
+    assert.strictEqual(result.attempts, 2);
+    assert.strictEqual(result.complianceResult.status, "passed");
+    assert.strictEqual(result.parsed.text, TRAVELNEST_COMPLIANT_TEXT);
+
+    // The retry prompt must name what was missing, and must not rotate away
+    // from the pattern that was correct all along.
+    const retryPrompt = provider.prompts[1];
+    assert.match(
+      retryPrompt,
+      /Myth vs Fact requires the opening to challenge a clear misconception/
+    );
+    assert.match(retryPrompt, /List structure requires 3–5 scannable list items; found 0/);
+    assert.match(retryPrompt, /Reflection CTA is required/);
+    assert.doesNotMatch(retryPrompt, /FORCED CONTENT PATTERN/);
+  });
+
+  it("keeps the same angle, hook, structure and CTA on the retry", async () => {
+    const provider = makeProvider([jsonPost(TRAVELNEST_TEXT), jsonPost(TRAVELNEST_COMPLIANT_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", [], TRAVELNEST_PATTERN);
+
+    assert.strictEqual(result.selectedAngle, TRAVELNEST_PATTERN.initialAngle);
+    assert.deepEqual(result.selectedPattern, TRAVELNEST_PATTERN.initialPattern);
+  });
+
+  it("reports checked=true for the three measurable dimensions and false for the hook", async () => {
+    const provider = makeProvider([jsonPost(TRAVELNEST_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", [], TRAVELNEST_PATTERN);
+
+    assert.strictEqual(result.complianceResult.status, "failed");
+    assert.deepEqual(result.complianceResult.checked, {
+      angle: true,
+      hook: false, // "Bold Statement" has no defensible deterministic signal
+      cta: true,
+      structure: true,
+    });
   });
 });

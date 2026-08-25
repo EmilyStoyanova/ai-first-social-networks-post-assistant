@@ -1,5 +1,6 @@
 import type { GenerationTrigger } from "@prisma/client";
 import type { FeedItemContext } from "@/lib/ai/types";
+import type { ComplianceResult } from "@/lib/ai/quality/generation-compliance";
 import type { GenerationAttemptRecord } from "./attempt-record";
 import type { FeedItemArtifacts } from "./feed-item-artifacts";
 import type { ImageGenerationRecord } from "./image-record";
@@ -57,6 +58,19 @@ export function deriveTrigger(options: {
   if (options.generationBatchId) return "bulk";
   if (options.contentGroupId) return "manual_multi_channel";
   return options.generatedById ? "manual" : "system";
+}
+
+/**
+ * The compliance dimensions this run had no deterministic check for.
+ *
+ * Named explicitly rather than left as three `false`s to read past: an
+ * unmeasured requirement is not evidence of compliance, and the trace has to
+ * say which requirements those were.
+ */
+function unmeasuredDimensions(checked: ComplianceResult["checked"]): string[] {
+  return (Object.keys(checked) as (keyof ComplianceResult["checked"])[]).filter(
+    (dimension) => !checked[dimension]
+  );
 }
 
 /**
@@ -226,25 +240,42 @@ export function recordAttemptSteps(
   }
 
   if (record.compliance) {
+    const compliance = record.compliance;
+    // A run that checked nothing certified nothing. It must read as "not
+    // checked", never as a pass — the whole point of `status`. `passed` is
+    // omitted entirely in that case so no reader can mistake the neutral
+    // non-blocking `true` for a verdict.
     tracer.step({
       type: "validation",
       label: "Generation compliance",
       attempt,
-      status: record.compliance.passed ? "success" : "failed",
+      status:
+        compliance.status === "passed"
+          ? "success"
+          : compliance.status === "failed"
+            ? "failed"
+            : "skipped",
       output: {
-        passed: record.compliance.passed,
-        reasons: record.compliance.reasons,
+        status: compliance.status,
+        ...(compliance.evaluated ? { passed: compliance.passed } : {}),
         angle: record.angle ?? null,
+        angleChecked: compliance.checked.angle,
         hook: record.pattern?.hookType ?? null,
+        hookChecked: compliance.checked.hook,
         structure: record.pattern?.structure ?? null,
+        structureChecked: compliance.checked.structure,
         cta: record.pattern?.ctaType ?? null,
+        ctaChecked: compliance.checked.cta,
+        reasons: compliance.reasons,
       },
       metadata: {
-        checked: record.compliance.checked,
-        // Story Arc (and every structure) is stylistically too flexible to
-        // validate deterministically — this is a documented limitation, not a
-        // silent pass. See lib/ai/quality/generation-compliance.ts.
-        structureNote: "Structure is never deterministically checked (not_checked).",
+        evaluated: compliance.evaluated,
+        // Which dimensions carry no deterministic check at all — a documented
+        // limitation, not a silent pass. See lib/ai/quality/generation-compliance.ts.
+        notChecked: unmeasuredDimensions(compliance.checked),
+        note: compliance.evaluated
+          ? "Dimensions listed in notChecked have no deterministic check and were not verified."
+          : "No dimension of this pattern is deterministically measurable — compliance was NOT verified.",
       },
     });
   }

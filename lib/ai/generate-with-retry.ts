@@ -104,12 +104,15 @@ export interface GenerationLoopResult {
   topicRepeated: boolean;
   /**
    * Post-generation compliance gate (Step 2): whether the accepted (or last)
-   * candidate's text actually satisfies the angle/hook/CTA it was generated
-   * under. A failure is a retry trigger like the others; NO_COMPLIANCE_CHECK
-   * when no angle/pattern was supplied to check against. Still failing here
-   * after the last attempt is fatal to the caller — the generation service
-   * refuses to persist a post that never met its own requirements
-   * (POST_FAILED_COMPLIANCE).
+   * candidate's text actually satisfies the angle/hook/structure/CTA it was
+   * generated under. NO_COMPLIANCE_CHECK when no angle/pattern was supplied to
+   * check against.
+   *
+   * Only `status === "failed"` is a retry trigger, and only it is fatal to the
+   * caller — the generation service refuses to persist a post that never met a
+   * requirement it was actually measured against (POST_FAILED_COMPLIANCE).
+   * `status === "not_checked"` means the pattern has no deterministic check at
+   * all: the gate verified nothing, and non-verification never blocks.
    */
   complianceResult: ComplianceResult;
   /** Number of generation attempts actually made (1..maxAttempts). */
@@ -255,9 +258,10 @@ export async function generateWithRetry(
 
       // When the previous attempt failed the compliance gate, name exactly
       // which requirements it missed so the model can fix them directly.
-      const complianceFailure = !lastComplianceResult.passed
-        ? { reasons: lastComplianceResult.reasons }
-        : undefined;
+      const complianceFailure =
+        lastComplianceResult.status === "failed"
+          ? { reasons: lastComplianceResult.reasons }
+          : undefined;
 
       userPrompt = buildRetryUserPrompt(baseUserPrompt, {
         candidateText: lastParsed.text,
@@ -362,7 +366,9 @@ export async function generateWithRetry(
     // Topic Memory: reject a candidate whose normalized topic was already used.
     lastTopicRepeated = isTopicRepeated(lastParsed.topic, diversityOptions?.recentTopics ?? []);
     // Post-generation compliance gate (Step 2): did the text actually follow
-    // the angle/hook/CTA it was generated under? Only runs when both are known.
+    // the angle/hook/structure/CTA it was generated under? Only runs when both
+    // are known — and even then it reports `not_checked` for a pattern nothing
+    // in it can be measured deterministically.
     lastComplianceResult =
       currentAngle !== undefined && currentPattern !== undefined
         ? validateGenerationCompliance({
@@ -383,7 +389,7 @@ export async function generateWithRetry(
       lastSemanticResult.decision === "regenerate" ||
       lastCoreMessageGeneric ||
       lastTopicRepeated ||
-      !lastComplianceResult.passed;
+      lastComplianceResult.status === "failed";
 
     // Diagnostic: which of the triggers fired, and whether retries remain.
     const rejectionReason: AttemptRejectionReason | null = !needsRetry
