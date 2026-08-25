@@ -15,6 +15,9 @@
  *   - Angle "Myth vs Fact": the opening names a misconception AND corrects it
  *   - Hook "Contrast": a recognizable contrast construction in the opening
  *   - Structure "List": 3–5 distinct, scannable list items
+ *   - Banned word "Стоп": unlike every check above, this one does not depend on
+ *     the angle/hook/structure/CTA the candidate was generated under — it runs
+ *     on every candidate, unconditionally (see `checkBannedWords`).
  *
  * Deliberately NOT checked, and never a failure reason:
  *   - CTA "Try It" — no clear, low-false-positive textual signal
@@ -41,6 +44,11 @@
  * `not_checked` means compliance was never verified. It is still non-blocking
  * (`passed` stays true, so an unsupported pattern never triggers a retry or an
  * abort) but it must never be displayed or read as a pass.
+ *
+ * Since the banned-word check always runs, `status` is "not_checked" only for
+ * the neutral `NO_COMPLIANCE_CHECK` placeholder (no candidate text was ever
+ * measured) — a real call to `validateGenerationCompliance` always evaluates
+ * at least that one dimension, so it always resolves to "passed" or "failed".
  */
 
 import type { ContentAngle } from "../content-angle";
@@ -67,22 +75,30 @@ export interface ComplianceResult {
   passed: boolean;
   reasons: string[];
   /** Which dimensions this run actually evaluated. */
-  checked: { angle: boolean; hook: boolean; cta: boolean; structure: boolean };
+  checked: {
+    angle: boolean;
+    hook: boolean;
+    cta: boolean;
+    structure: boolean;
+    bannedWords: boolean;
+  };
 }
 
 export interface ComplianceCheckParams {
   text: string;
-  angle: ContentAngle;
-  pattern: PostPattern;
+  /** Omitted when this generation had no angle to check against (e.g. no diversity options at all). */
+  angle?: ContentAngle;
+  /** Omitted when this generation had no pattern to check against. */
+  pattern?: PostPattern;
 }
 
-/** Neutral result for callers with no angle/pattern to check against. */
+/** Neutral result for callers with no text to check at all. */
 export const NO_COMPLIANCE_CHECK: ComplianceResult = {
   status: "not_checked",
   evaluated: false,
   passed: true,
   reasons: [],
-  checked: { angle: false, hook: false, cta: false, structure: false },
+  checked: { angle: false, hook: false, cta: false, structure: false, bannedWords: false },
 };
 
 // ─── Text helpers ───────────────────────────────────────────────────────────
@@ -133,6 +149,32 @@ function extractListItems(text: string): string[] {
     items.push(match[1].trim());
   }
   return items;
+}
+
+// ─── Banned word: "Стоп" ────────────────────────────────────────────────────
+// Product decision: the standalone Bulgarian word "стоп" must never appear in
+// generated post text — in any casing ("Стоп", "СТОП"), with any trailing
+// punctuation ("Стоп!"), or inside a longer phrase ("Стоп на...", "Кажи стоп
+// на..."), and especially not as the opening hook. Unlike every check above,
+// this one does not depend on the angle/hook/structure/CTA the candidate was
+// generated under — it runs on every candidate, unconditionally.
+//
+// bgWord()'s Cyrillic-aware boundary is what keeps this from also rejecting
+// "автостоп" (hitchhiking) or "стопанство" (economy/farm): in both, "стоп" is
+// directly adjacent to more Cyrillic letters, so the lookaround fails and
+// only the genuinely standalone word matches.
+
+const BANNED_STOP_WORD_RE = new RegExp(bgWord("стоп"), "i");
+
+function checkBannedWords(text: string): { passed: boolean; reason: string | null } {
+  if (BANNED_STOP_WORD_RE.test(text)) {
+    return {
+      passed: false,
+      reason:
+        'The word "Стоп" is not allowed anywhere in the post (in any casing or with any punctuation), and especially not as the opening hook.',
+    };
+  }
+  return { passed: true, reason: null };
 }
 
 // ─── CTA compliance ─────────────────────────────────────────────────────────
@@ -436,8 +478,9 @@ export function validateGenerationCompliance(params: ComplianceCheckParams): Com
   const { text, angle, pattern } = params;
   const reasons: string[] = [];
 
-  const angleChecked = angle === "Tips & Tricks" || angle === "Myth vs Fact";
-  if (angle === "Tips & Tricks") {
+  const angleChecked =
+    (angle === "Tips & Tricks" && pattern !== undefined) || angle === "Myth vs Fact";
+  if (angle === "Tips & Tricks" && pattern) {
     const tips = checkTipsAndTricks(text, pattern.ctaType);
     if (!tips.passed && tips.reason) reasons.push(tips.reason);
   } else if (angle === "Myth vs Fact") {
@@ -445,25 +488,31 @@ export function validateGenerationCompliance(params: ComplianceCheckParams): Com
     if (!myth.passed && myth.reason) reasons.push(myth.reason);
   }
 
-  const hookChecked = pattern.hookType === "Contrast";
+  const hookChecked = pattern?.hookType === "Contrast";
   if (hookChecked) {
     const hook = checkContrastHook(text);
     if (!hook.passed && hook.reason) reasons.push(hook.reason);
   }
 
-  const structureChecked = pattern.structure === "List";
+  const structureChecked = pattern?.structure === "List";
   if (structureChecked) {
     const list = checkListStructure(text);
     if (!list.passed && list.reason) reasons.push(list.reason);
   }
 
-  const ctaChecked = !UNCHECKED_CTA_TYPES.includes(pattern.ctaType);
+  const ctaChecked = pattern !== undefined && !UNCHECKED_CTA_TYPES.includes(pattern.ctaType);
   if (ctaChecked) {
-    const cta = checkCta(text, pattern.ctaType);
+    const cta = checkCta(text, pattern!.ctaType);
     if (!cta.passed && cta.reason) reasons.push(cta.reason);
   }
 
-  const evaluated = angleChecked || hookChecked || structureChecked || ctaChecked;
+  // Runs regardless of angle/pattern — a banned term is a violation on its own.
+  const bannedWordsChecked = true;
+  const bannedWords = checkBannedWords(text);
+  if (!bannedWords.passed && bannedWords.reason) reasons.push(bannedWords.reason);
+
+  const evaluated =
+    angleChecked || hookChecked || structureChecked || ctaChecked || bannedWordsChecked;
   const passed = reasons.length === 0;
 
   return {
@@ -478,6 +527,7 @@ export function validateGenerationCompliance(params: ComplianceCheckParams): Com
       hook: hookChecked,
       cta: ctaChecked,
       structure: structureChecked,
+      bannedWords: bannedWordsChecked,
     },
   };
 }

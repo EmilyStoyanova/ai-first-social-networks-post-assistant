@@ -579,25 +579,44 @@ describe("validateGenerationCompliance — Bold Statement hook is not_checked", 
 // ─── Zero checked requirements ──────────────────────────────────────────────
 
 describe("validateGenerationCompliance — nothing checkable", () => {
-  it("reports not_checked instead of a verified pass when no dimension is measurable", () => {
+  it("still evaluates via the banned-word check even when no pattern dimension is measurable", () => {
+    // None of the angle/hook/structure/CTA dimensions are measurable for this
+    // combination, but the banned-word check is unconditional, so the gate is
+    // never truly "nothing checked" — it always resolves to passed or failed.
     const result = validateGenerationCompliance({
       text: "Плътен текст, който не следва нито един измерим модел.",
       angle: "Behind the Scenes",
       pattern: { hookType: "Bold Statement", structure: "Story Arc", ctaType: "Try It" },
     });
 
-    assert.strictEqual(result.status, "not_checked");
-    assert.strictEqual(result.evaluated, false);
+    assert.strictEqual(result.status, "passed");
+    assert.strictEqual(result.evaluated, true);
     assert.deepEqual(result.reasons, []);
     assert.deepEqual(result.checked, {
       angle: false,
       hook: false,
       cta: false,
       structure: false,
+      bannedWords: true,
     });
-    // Non-blocking: `passed` stays true so an unverifiable pattern never causes
-    // a retry or an abort. `status` is what says it was never verified.
     assert.strictEqual(result.passed, true);
+  });
+
+  it("omitting angle and pattern entirely still runs the banned-word check", () => {
+    const clean = validateGenerationCompliance({ text: "Plain text with nothing banned in it." });
+    assert.strictEqual(clean.status, "passed");
+    assert.strictEqual(clean.evaluated, true);
+    assert.deepEqual(clean.checked, {
+      angle: false,
+      hook: false,
+      cta: false,
+      structure: false,
+      bannedWords: true,
+    });
+
+    const banned = validateGenerationCompliance({ text: "Стоп! Не изпускайте офертата." });
+    assert.strictEqual(banned.status, "failed");
+    assert.strictEqual(banned.passed, false);
   });
 
   it("reports status passed only when something was actually checked and cleared", () => {
@@ -705,6 +724,7 @@ describe("validateGenerationCompliance — regression: the real TravelNest post"
       hook: false, // Bold Statement — documented as not deterministically measurable
       cta: true,
       structure: true,
+      bannedWords: true,
     });
   });
 });
@@ -721,6 +741,105 @@ describe("NO_COMPLIANCE_CHECK", () => {
       hook: false,
       cta: false,
       structure: false,
+      bannedWords: false,
     });
+  });
+});
+
+// ─── Banned word: "Стоп" ─────────────────────────────────────────────────────
+// Product decision: the standalone Bulgarian word "стоп" must never appear in
+// generated text — any casing, any punctuation, anywhere, and especially not
+// as the opening hook. Runs unconditionally, unlike every other check above.
+
+describe("validateGenerationCompliance — banned word Стоп", () => {
+  const check = (text: string) => validateGenerationCompliance({ text });
+
+  it("fails on the plain word", () => {
+    const result = check("Стоп на скъпите самолетни билети този сезон.");
+    assert.strictEqual(result.passed, false);
+    assert.strictEqual(result.status, "failed");
+    assert.ok(result.reasons.some((r) => /Стоп/.test(r)));
+  });
+
+  it("fails regardless of casing — СТОП", () => {
+    const result = check("СТОП на компромисите с качеството.");
+    assert.strictEqual(result.passed, false);
+  });
+
+  it("fails regardless of casing — mixed", () => {
+    const result = check("СтОп с чакането — резервирайте сега.");
+    assert.strictEqual(result.passed, false);
+  });
+
+  it("fails with trailing punctuation — Стоп!", () => {
+    const result = check("Стоп! Не изпускайте тази оферта.");
+    assert.strictEqual(result.passed, false);
+  });
+
+  it("fails inside a longer phrase — Стоп на…", () => {
+    const result = check("Стоп на скучните пътувания — открийте нещо ново с нас.");
+    assert.strictEqual(result.passed, false);
+  });
+
+  it("fails inside an imperative phrase — Кажи стоп на…", () => {
+    const result = check("Кажи стоп на пропуснатите оферти и резервирай днес.");
+    assert.strictEqual(result.passed, false);
+  });
+
+  it("fails when used as the opening hook", () => {
+    const result = check(
+      "Стоп! Това е последният шанс да хванете нашата есенна промоция тази година."
+    );
+    assert.strictEqual(result.passed, false);
+  });
+
+  it("fails when it appears later in the post, not just the opening", () => {
+    const result = check(
+      "Есента вече е тук. Стоп на високите цени — вижте новите ни оферти още днес."
+    );
+    assert.strictEqual(result.passed, false);
+  });
+
+  it("does not flag words that merely contain the letters — автостоп", () => {
+    const result = check("Автостоп остава любим начин за евтино пътуване из Европа.");
+    assert.strictEqual(result.passed, true);
+    assert.deepEqual(result.reasons, []);
+  });
+
+  it("does not flag words that merely contain the letters — стопанство", () => {
+    const result = check("Селското стопанство в региона расте с всяка година.");
+    assert.strictEqual(result.passed, true);
+  });
+
+  it("does not flag the English word 'stop' — Latin script, not the Cyrillic word", () => {
+    const result = check("Don't stop planning your next trip — book it today.");
+    assert.strictEqual(result.passed, true);
+  });
+
+  it("passes ordinary Bulgarian text with no banned word", () => {
+    const result = check("Есента носи по-ниски цени на самолетните билети тази година.");
+    assert.strictEqual(result.passed, true);
+    assert.strictEqual(result.checked.bannedWords, true);
+  });
+
+  it("still fires alongside a failed pattern check — both reasons are reported", () => {
+    const result = validateGenerationCompliance({
+      text: "Стоп! Ето един полезен съвет за пътуване без никакви действия.",
+      angle: "Educational",
+      pattern: { hookType: "Question", structure: "Single Insight", ctaType: "Follow" },
+    });
+    assert.strictEqual(result.passed, false);
+    assert.ok(result.reasons.some((r) => /Стоп/.test(r)));
+    assert.ok(result.reasons.some((r) => r.includes("Follow CTA is required")));
+  });
+
+  it("a compliant pattern still fails overall when the banned word is present", () => {
+    const result = validateGenerationCompliance({
+      text: "Следвайте ни за още съвети. Стоп на скучните пътувания!",
+      angle: "Educational",
+      pattern: { hookType: "Question", structure: "Single Insight", ctaType: "Follow" },
+    });
+    assert.strictEqual(result.status, "failed");
+    assert.strictEqual(result.passed, false);
   });
 });

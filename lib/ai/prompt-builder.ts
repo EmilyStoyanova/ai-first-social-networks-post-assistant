@@ -323,6 +323,7 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
       brand?.forbiddenWords.length
         ? `- Never use these words: ${brand.forbiddenWords.join(", ")}.`
         : "",
+      '- Never use the word "Стоп" anywhere in the post, in any casing or with any punctuation (e.g. "Стоп", "СТОП", "Стоп!", "Стоп на…", "Кажи стоп на…") — and especially never as the opening hook.',
       "- Do not fabricate facts. Use only what the provided content supports.",
       "- Return ONLY a JSON object — no markdown fences, no explanation, no extra text."
     )

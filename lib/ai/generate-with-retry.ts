@@ -105,14 +105,14 @@ export interface GenerationLoopResult {
   /**
    * Post-generation compliance gate (Step 2): whether the accepted (or last)
    * candidate's text actually satisfies the angle/hook/structure/CTA it was
-   * generated under. NO_COMPLIANCE_CHECK when no angle/pattern was supplied to
-   * check against.
+   * generated under, AND does not contain a banned term (e.g. "Стоп") — the
+   * banned-term check runs even when no angle/pattern was supplied.
    *
    * Only `status === "failed"` is a retry trigger, and only it is fatal to the
    * caller — the generation service refuses to persist a post that never met a
    * requirement it was actually measured against (POST_FAILED_COMPLIANCE).
-   * `status === "not_checked"` means the pattern has no deterministic check at
-   * all: the gate verified nothing, and non-verification never blocks.
+   * `status === "not_checked"` means nothing at all was measurable: the gate
+   * verified nothing, and non-verification never blocks.
    */
   complianceResult: ComplianceResult;
   /** Number of generation attempts actually made (1..maxAttempts). */
@@ -366,17 +366,15 @@ export async function generateWithRetry(
     // Topic Memory: reject a candidate whose normalized topic was already used.
     lastTopicRepeated = isTopicRepeated(lastParsed.topic, diversityOptions?.recentTopics ?? []);
     // Post-generation compliance gate (Step 2): did the text actually follow
-    // the angle/hook/structure/CTA it was generated under? Only runs when both
-    // are known — and even then it reports `not_checked` for a pattern nothing
-    // in it can be measured deterministically.
-    lastComplianceResult =
-      currentAngle !== undefined && currentPattern !== undefined
-        ? validateGenerationCompliance({
-            text: lastParsed.text,
-            angle: currentAngle,
-            pattern: currentPattern,
-          })
-        : NO_COMPLIANCE_CHECK;
+    // the angle/hook/structure/CTA it was generated under, and is it free of
+    // banned terms? Angle/pattern are passed through even when undefined — the
+    // banned-word check runs regardless, and it reports `not_checked` only when
+    // truly nothing about the candidate can be measured deterministically.
+    lastComplianceResult = validateGenerationCompliance({
+      text: lastParsed.text,
+      angle: currentAngle,
+      pattern: currentPattern,
+    });
 
     // Retry on a near-verbatim (Jaccard) hit, a semantic-duplicate "regenerate",
     // a generic coreMessage (broad praise hides real repetition), a repeated

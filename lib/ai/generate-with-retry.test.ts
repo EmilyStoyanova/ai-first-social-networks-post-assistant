@@ -38,12 +38,13 @@ function jsonPostWithTopic(text: string, topic: string): string {
 }
 
 // Full DiversityOptions carrying the normalized topic memory. Angle/pattern are
-// valid so retry selection has something to rotate through. Every dimension is
-// one the compliance gate never checks (Step 2) — angle "Educational", hook
-// "Question", structure "Story Arc", CTA "No CTA" — so these fixtures exercise
-// Topic Memory in isolation without also tripping the compliance gate on
-// CLEAN_TEXT/DUPLICATE_TEXT's nonsense sentences. That makes attempt 1 report
-// `not_checked`, which is non-blocking by design.
+// valid so retry selection has something to rotate through. Every pattern
+// dimension is one the compliance gate never checks (Step 2) — angle
+// "Educational", hook "Question", structure "Story Arc", CTA "No CTA" — so
+// these fixtures exercise Topic Memory in isolation without also tripping the
+// pattern-specific compliance checks on CLEAN_TEXT/DUPLICATE_TEXT's nonsense
+// sentences. The banned-word check still runs (it always does) and passes,
+// since neither fixture text contains the banned word.
 function makeDiversity(topicMemory: string[]): DiversityOptions {
   return {
     initialAngle: "Educational",
@@ -480,29 +481,40 @@ describe("generateWithRetry — compliance failure triggers a retry", () => {
   });
 });
 
-describe("generateWithRetry — compliance check needs an angle AND a pattern to run", () => {
-  it("never fails compliance when no diversity options are given at all", async () => {
+describe("generateWithRetry — the banned-word check runs even with no diversity options at all", () => {
+  it("still evaluates compliance (via the banned-word check) with no angle/pattern", async () => {
     const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
     const result = await generateWithRetry(provider, "sys", "user", []);
 
     assert.strictEqual(
       provider.callCount,
       1,
-      "nothing to check against — accepted on the first try"
+      "nothing banned, nothing else to check — accepted on the first try"
     );
-    assert.strictEqual(result.complianceResult.status, "not_checked");
-    assert.strictEqual(result.complianceResult.evaluated, false);
+    assert.strictEqual(result.complianceResult.status, "passed");
+    assert.strictEqual(result.complianceResult.evaluated, true);
     assert.strictEqual(result.complianceResult.passed, true);
+  });
+
+  it("aborts-and-retries on the banned word even with no angle/pattern at all", async () => {
+    const provider = makeProvider([jsonPost("Стоп! Не изпускайте нашата есенна оферта.")]);
+    const result = await generateWithRetry(provider, "sys", "user", []);
+
+    assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
+    assert.strictEqual(result.complianceResult.status, "failed");
+    assert.strictEqual(result.complianceResult.passed, false);
   });
 });
 
-// ─── "Nothing was checkable" must never behave like a failure ───────────────
+// ─── "Nothing pattern-specific was checkable" must never behave like a failure ─
 // The whole point of separating `not_checked` from `passed` is honesty in the
 // report — it must not leak into control flow. An unsupported pattern is still
-// accepted on the first try, exactly as it was before the status existed.
+// accepted on the first try, exactly as it was before the status existed; the
+// banned-word check still runs and, finding nothing, resolves the gate to
+// "passed" rather than "not_checked".
 
 describe("generateWithRetry — an unsupported pattern combination never blocks", () => {
-  it("accepts on attempt 1 and reports not_checked when no dimension is measurable", async () => {
+  it("accepts on attempt 1; the banned-word check is the only one that evaluates", async () => {
     const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
     const result = await generateWithRetry(provider, "sys", "user", [], {
       // Not one of these has a deterministic check: the angle is not
@@ -516,14 +528,15 @@ describe("generateWithRetry — an unsupported pattern combination never blocks"
     });
 
     assert.strictEqual(provider.callCount, 1, "an unverifiable pattern must not cause a retry");
-    assert.strictEqual(result.complianceResult.status, "not_checked");
-    assert.strictEqual(result.complianceResult.evaluated, false);
+    assert.strictEqual(result.complianceResult.status, "passed");
+    assert.strictEqual(result.complianceResult.evaluated, true);
     assert.deepEqual(result.complianceResult.reasons, []);
     assert.deepEqual(result.complianceResult.checked, {
       angle: false,
       hook: false,
       cta: false,
       structure: false,
+      bannedWords: true,
     });
   });
 });
@@ -597,6 +610,7 @@ describe("generateWithRetry — the real TravelNest post is rejected and retried
       hook: false, // "Bold Statement" has no defensible deterministic signal
       cta: true,
       structure: true,
+      bannedWords: true,
     });
   });
 });
