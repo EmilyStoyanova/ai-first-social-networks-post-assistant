@@ -599,6 +599,7 @@
     "retranslateQueued": "{count} articles from this source were queued for retranslation.",
     "retranslateQueuedNone": "No articles from this source needed retranslation.",
     "retranslateError": "This source's articles could not be queued for retranslation.",
+    "retranslateIncludeCompleted": "Also include already-translated articles",
     "translationOriginal": "Original",
     "translationErrorSummary": "Translation failed: {error}. It will be retried automatically.",
     "classification": {

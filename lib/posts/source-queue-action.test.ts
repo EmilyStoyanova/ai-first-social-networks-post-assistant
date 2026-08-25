@@ -5,6 +5,7 @@ import {
   isSourceQueueActionDisabled,
   queuedMessageFor,
   queuedMessageKey,
+  sourceQueueActionBody,
   sourceQueueActionEndpoint,
   type SourceQueueAction,
 } from "./source-queue-action";
@@ -110,6 +111,25 @@ describe("queuedMessageFor", () => {
   });
 });
 
+describe("sourceQueueActionBody", () => {
+  it("sends no body for reclassify, checked or not", () => {
+    // Reclassify has no options of its own — a body here would be a request the
+    // route was never built to read.
+    assert.equal(sourceQueueActionBody("reclassify", false), undefined);
+    assert.equal(sourceQueueActionBody("reclassify", true), undefined);
+  });
+
+  it("sends no body for retranslate when the checkbox is unchecked", () => {
+    // The ordinary click must stay byte-for-byte the bodyless request it always
+    // was — the route's own default (includeCompleted: false) already matches.
+    assert.equal(sourceQueueActionBody("retranslate", false), undefined);
+  });
+
+  it("sends { includeCompleted: true } for retranslate when the checkbox is checked", () => {
+    assert.deepEqual(sourceQueueActionBody("retranslate", true), { includeCompleted: true });
+  });
+});
+
 // ─── The messages actually exist ──────────────────────────────────────────────
 //
 // next-intl throws on a missing key rather than falling back, so a key this module
@@ -127,6 +147,7 @@ describe("the panel's message keys resolve in both locales", () => {
     "retranslateQueued",
     "retranslateQueuedNone",
     "retranslateError",
+    "retranslateIncludeCompleted",
   ];
 
   for (const key of RETRANSLATE_KEYS) {

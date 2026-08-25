@@ -70,3 +70,21 @@ export function queuedMessageFor(
       ? "retranslateQueued"
       : "retranslateQueuedNone";
 }
+
+/**
+ * The JSON body one queue action's POST carries, or `undefined` for a plain, bodyless
+ * request.
+ *
+ * Only "retranslate" ever reads a body at all — reclassify has no options of its
+ * own — and even then only when the checkbox is actually checked, so an ordinary
+ * click sends exactly the bodyless request the route already treats as the default
+ * (`includeCompleted: false`). Kept `undefined` rather than `{ includeCompleted: false }`
+ * for that unchecked case so the common path is byte-for-byte what it always was.
+ */
+export function sourceQueueActionBody(
+  action: SourceQueueAction,
+  includeCompleted: boolean
+): { includeCompleted: true } | undefined {
+  if (action !== "retranslate" || !includeCompleted) return undefined;
+  return { includeCompleted: true };
+}

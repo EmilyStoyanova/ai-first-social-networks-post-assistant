@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { Prisma } from "@prisma/client";
 import {
   RETRANSLATE_REOPEN_DATA,
+  parseIncludeCompletedFromBody,
   requestRetranslation,
   retranslatableWhere,
   retranslateSourceFeedItems,
@@ -87,12 +88,66 @@ describe("retranslatableWhere — what may be reopened", () => {
     assert.deepEqual(translating.translationLeaseExpiresAt, { lt: NOW });
   });
 
-  it("never reopens a COMPLETED translation", () => {
-    // Requirement, not preference: a successful translation is not thrown away by a
-    // blunt button. The architecture re-translates a completed row only when its
-    // input hash changes, which is a fact about the article rather than a request.
+  it("never reopens a COMPLETED translation BY DEFAULT", () => {
+    // Requirement, not preference: a successful translation is not thrown away by an
+    // accidental click. `includeCompleted` (below) is the explicit escape hatch.
     const serialised = JSON.stringify(retranslatableWhere("c", "s", NOW));
     assert.ok(!serialised.includes("completed"));
+  });
+
+  it("reopens a COMPLETED translation when includeCompleted is explicitly true", () => {
+    const branches = statusBranches(retranslatableWhere("c", "s", NOW, true));
+    assert.ok(
+      branches.some(
+        (b) =>
+          typeof b === "object" &&
+          b !== null &&
+          (b as Record<string, unknown>).translationStatus === "completed"
+      ),
+      "an explicit request must be able to reach a successful translation"
+    );
+  });
+
+  it("matches a completed row on STATUS alone, not on a hash comparison", () => {
+    // The whole point of asking is to force a fresh attempt even when the article's
+    // hash has not moved — a hash-gated branch would silently do nothing for the
+    // common case (identical article, operator wants a BETTER translation of it).
+    const branches = statusBranches(retranslatableWhere("c", "s", NOW, true));
+    const completed = branches.find(
+      (b) =>
+        typeof b === "object" &&
+        b !== null &&
+        (b as Record<string, unknown>).translationStatus === "completed"
+    ) as Record<string, unknown>;
+    assert.deepEqual(completed, { translationStatus: "completed" });
+  });
+
+  it("does not add the completed branch at all when includeCompleted is false", () => {
+    // Not merely "excluded by a filter" — explicitly absent from the query, so a
+    // reader of the generated WHERE can see the feature was not asked for.
+    assert.deepEqual(retranslatableWhere("c", "s", NOW, false), retranslatableWhere("c", "s", NOW));
+  });
+
+  it("still excludes a CONSUMED article even with includeCompleted", () => {
+    // Forcing a redo is still a request about future output; a published post's
+    // article is not that, regardless of which statuses are being reopened.
+    assert.equal(retranslatableWhere("c", "s", NOW, true).usedInPost, false);
+  });
+
+  it("includeCompleted does not loosen ANY of the other exclusions", () => {
+    // pending, skipped, and a LIVE translating claim must stay excluded — the flag
+    // widens exactly one status, not the whole rule.
+    const serialised = JSON.stringify(retranslatableWhere("c", "s", NOW, true));
+    assert.ok(!serialised.includes('"pending"'));
+    assert.ok(!serialised.includes("skipped"));
+    const branches = statusBranches(retranslatableWhere("c", "s", NOW, true));
+    const translatingBranches = branches.filter(
+      (b) =>
+        typeof b === "object" &&
+        b !== null &&
+        (b as Record<string, unknown>).translationStatus === "translating"
+    );
+    assert.equal(translatingBranches.length, 1, "only the expired-lease recovery branch");
   });
 
   it("never reopens a PENDING row — it is already queued", () => {
@@ -187,13 +242,18 @@ describe("RETRANSLATE_REOPEN_DATA — what a reopen writes", () => {
 describe("retranslateSourceFeedItems", () => {
   it("enqueues the drain when rows were reopened", async () => {
     let enqueueCalls = 0;
-    const result = await retranslateSourceFeedItems("company-1", "source-1", {
-      reopen: async () => 7,
-      enqueue: async () => {
-        enqueueCalls += 1;
-        return enqueued;
-      },
-    });
+    const result = await retranslateSourceFeedItems(
+      "company-1",
+      "source-1",
+      {},
+      {
+        reopen: async () => 7,
+        enqueue: async () => {
+          enqueueCalls += 1;
+          return enqueued;
+        },
+      }
+    );
 
     assert.equal(result.reopened, 7);
     assert.equal(enqueueCalls, 1);
@@ -202,13 +262,18 @@ describe("retranslateSourceFeedItems", () => {
 
   it("does NOT enqueue when nothing was reopened", async () => {
     let enqueueCalls = 0;
-    const result = await retranslateSourceFeedItems("company-1", "source-1", {
-      reopen: async () => 0,
-      enqueue: async () => {
-        enqueueCalls += 1;
-        return enqueued;
-      },
-    });
+    const result = await retranslateSourceFeedItems(
+      "company-1",
+      "source-1",
+      {},
+      {
+        reopen: async () => 0,
+        enqueue: async () => {
+          enqueueCalls += 1;
+          return enqueued;
+        },
+      }
+    );
 
     assert.equal(result.reopened, 0);
     assert.equal(result.enqueued, null);
@@ -217,14 +282,53 @@ describe("retranslateSourceFeedItems", () => {
 
   it("passes the scope through to the reopen unchanged", async () => {
     const seen: Array<[string, string | null]> = [];
-    await retranslateSourceFeedItems("company-1", "source-9", {
-      reopen: async (c, s) => {
-        seen.push([c, s]);
-        return 1;
-      },
-      enqueue: async () => enqueued,
-    });
+    await retranslateSourceFeedItems(
+      "company-1",
+      "source-9",
+      {},
+      {
+        reopen: async (c, s) => {
+          seen.push([c, s]);
+          return 1;
+        },
+        enqueue: async () => enqueued,
+      }
+    );
     assert.deepEqual(seen, [["company-1", "source-9"]]);
+  });
+
+  it("defaults includeCompleted to false when options is omitted", async () => {
+    let seenIncludeCompleted: boolean | undefined;
+    await retranslateSourceFeedItems(
+      "company-1",
+      "source-1",
+      {},
+      {
+        reopen: async (_c, _s, includeCompleted) => {
+          seenIncludeCompleted = includeCompleted;
+          return 1;
+        },
+        enqueue: async () => enqueued,
+      }
+    );
+    assert.equal(seenIncludeCompleted, false);
+  });
+
+  it("passes includeCompleted: true through to the reopen", async () => {
+    let seenIncludeCompleted: boolean | undefined;
+    await retranslateSourceFeedItems(
+      "company-1",
+      "source-1",
+      { includeCompleted: true },
+      {
+        reopen: async (_c, _s, includeCompleted) => {
+          seenIncludeCompleted = includeCompleted;
+          return 1;
+        },
+        enqueue: async () => enqueued,
+      }
+    );
+    assert.equal(seenIncludeCompleted, true);
   });
 });
 
@@ -235,13 +339,20 @@ describe("duplicate protection", () => {
     // The job-level half: the partial unique index jobs_dedupe_active_key rejects a
     // second enqueue while one translation run is queued or active. The run already
     // in flight re-derives its work from the rows, which now include the reopened ones.
-    const result = await requestRetranslation("acme", "source-1", "user-1", false, {
-      resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
-      sourceBelongsToCompany: async () => true,
-      translationEnabled: async () => true,
-      reopen: async () => 4,
-      enqueue: async () => deduped,
-    });
+    const result = await requestRetranslation(
+      "acme",
+      "source-1",
+      "user-1",
+      false,
+      {},
+      {
+        resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
+        sourceBelongsToCompany: async () => true,
+        translationEnabled: async () => true,
+        reopen: async () => 4,
+        enqueue: async () => deduped,
+      }
+    );
 
     assert.equal(result.success, true);
     assert.ok(result.success);
@@ -284,8 +395,8 @@ describe("duplicate protection", () => {
       },
     };
 
-    const first = await requestRetranslation("acme", "source-1", "user-1", false, deps);
-    const second = await requestRetranslation("acme", "source-1", "user-1", false, deps);
+    const first = await requestRetranslation("acme", "source-1", "user-1", false, {}, deps);
+    const second = await requestRetranslation("acme", "source-1", "user-1", false, {}, deps);
 
     assert.ok(first.success && second.success);
     assert.equal(first.reopened, 5);
@@ -305,44 +416,72 @@ describe("requestRetranslation — authorization", () => {
   };
 
   it("reopens for an owner", async () => {
-    const result = await requestRetranslation("acme", "source-1", "user-1", false, {
-      ...baseDeps,
-      resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
-    });
+    const result = await requestRetranslation(
+      "acme",
+      "source-1",
+      "user-1",
+      false,
+      {},
+      {
+        ...baseDeps,
+        resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
+      }
+    );
     assert.ok(result.success);
     assert.equal(result.reopened, 3);
   });
 
   it("refuses an editor with FORBIDDEN", async () => {
-    const result = await requestRetranslation("acme", "source-1", "user-1", false, {
-      ...baseDeps,
-      resolveAccess: async () => ({ ok: false, code: "FORBIDDEN" }) as never,
-    });
+    const result = await requestRetranslation(
+      "acme",
+      "source-1",
+      "user-1",
+      false,
+      {},
+      {
+        ...baseDeps,
+        resolveAccess: async () => ({ ok: false, code: "FORBIDDEN" }) as never,
+      }
+    );
     assert.equal(result.success, false);
     assert.ok(!result.success);
     assert.equal(result.code, "FORBIDDEN");
   });
 
   it("answers NOT_FOUND for a non-member, so the response cannot confirm the company", async () => {
-    const result = await requestRetranslation("acme", "source-1", "user-1", false, {
-      ...baseDeps,
-      resolveAccess: async () => ({ ok: false, code: "NOT_FOUND" }) as never,
-    });
+    const result = await requestRetranslation(
+      "acme",
+      "source-1",
+      "user-1",
+      false,
+      {},
+      {
+        ...baseDeps,
+        resolveAccess: async () => ({ ok: false, code: "NOT_FOUND" }) as never,
+      }
+    );
     assert.ok(!result.success);
     assert.equal(result.code, "NOT_FOUND");
   });
 
   it("answers NOT_FOUND for a source belonging to ANOTHER company, and writes nothing", async () => {
     let reopenCalls = 0;
-    const result = await requestRetranslation("acme", "someone-elses-source", "user-1", false, {
-      ...baseDeps,
-      resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
-      sourceBelongsToCompany: async () => false,
-      reopen: async () => {
-        reopenCalls += 1;
-        return 99;
-      },
-    });
+    const result = await requestRetranslation(
+      "acme",
+      "someone-elses-source",
+      "user-1",
+      false,
+      {},
+      {
+        ...baseDeps,
+        resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
+        sourceBelongsToCompany: async () => false,
+        reopen: async () => {
+          reopenCalls += 1;
+          return 99;
+        },
+      }
+    );
 
     assert.ok(!result.success);
     assert.equal(result.code, "NOT_FOUND");
@@ -350,12 +489,40 @@ describe("requestRetranslation — authorization", () => {
   });
 
   it("lets a global admin through", async () => {
-    const result = await requestRetranslation("acme", "source-1", "admin-1", true, {
-      ...baseDeps,
-      resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
-    });
+    const result = await requestRetranslation(
+      "acme",
+      "source-1",
+      "admin-1",
+      true,
+      {},
+      {
+        ...baseDeps,
+        resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
+      }
+    );
     assert.ok(result.success);
     assert.equal(result.reopened, 3);
+  });
+
+  it("passes includeCompleted through to the eventual reopen call", async () => {
+    let seenIncludeCompleted: boolean | undefined;
+    const result = await requestRetranslation(
+      "acme",
+      "source-1",
+      "user-1",
+      false,
+      { includeCompleted: true },
+      {
+        ...baseDeps,
+        resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
+        reopen: async (_c, _s, includeCompleted) => {
+          seenIncludeCompleted = includeCompleted;
+          return 2;
+        },
+      }
+    );
+    assert.ok(result.success);
+    assert.equal(seenIncludeCompleted, true);
   });
 });
 
@@ -365,25 +532,76 @@ describe("requestRetranslation — a source with translation disabled", () => {
   it("reports zero honestly instead of queueing rows the drain would only skip", async () => {
     let reopenCalls = 0;
     let enqueueCalls = 0;
-    const result = await requestRetranslation("acme", "source-1", "user-1", false, {
-      resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
-      sourceBelongsToCompany: async () => true,
-      translationEnabled: async () => false,
-      reopen: async () => {
-        reopenCalls += 1;
-        return 42;
-      },
-      enqueue: async () => {
-        enqueueCalls += 1;
-        return enqueued;
-      },
-    });
+    const result = await requestRetranslation(
+      "acme",
+      "source-1",
+      "user-1",
+      false,
+      {},
+      {
+        resolveAccess: async () => ({ ok: true, companyId: "company-1" }) as never,
+        sourceBelongsToCompany: async () => true,
+        translationEnabled: async () => false,
+        reopen: async () => {
+          reopenCalls += 1;
+          return 42;
+        },
+        enqueue: async () => {
+          enqueueCalls += 1;
+          return enqueued;
+        },
+      }
+    );
 
     assert.ok(result.success);
     assert.equal(result.reopened, 0);
     assert.equal(result.enqueued, false);
     assert.equal(reopenCalls, 0, "nothing may be written for a source that cannot translate");
     assert.equal(enqueueCalls, 0);
+  });
+});
+
+// ─── The request body ─────────────────────────────────────────────────────────
+//
+// The route reads `req.json()` and hands whatever it got (or nothing, on a parse
+// failure) to this function — see retranslate/route.ts. It lives here rather than
+// in the route itself because Node's test runner glob-expands any CLI argument
+// containing `[...]` characters, so a `route.test.ts` inside this app's
+// `[slug]/[sourceId]` directories is unreachable by `npx tsx --test`; every other
+// company-scoped route in this codebase is tested at this same seam for the same
+// reason.
+
+describe("parseIncludeCompletedFromBody", () => {
+  it("defaults to false for the ordinary bodyless click (undefined body)", () => {
+    assert.equal(parseIncludeCompletedFromBody(undefined), false);
+  });
+
+  it("reads includeCompleted: true", () => {
+    assert.equal(parseIncludeCompletedFromBody({ includeCompleted: true }), true);
+  });
+
+  it("reads includeCompleted: false", () => {
+    assert.equal(parseIncludeCompletedFromBody({ includeCompleted: false }), false);
+  });
+
+  it("defaults to false when the key is absent", () => {
+    assert.equal(parseIncludeCompletedFromBody({}), false);
+  });
+
+  it("defaults to false for null", () => {
+    assert.equal(parseIncludeCompletedFromBody(null), false);
+  });
+
+  it("ignores a non-boolean value rather than trusting it", () => {
+    assert.equal(parseIncludeCompletedFromBody({ includeCompleted: "true" }), false);
+    assert.equal(parseIncludeCompletedFromBody({ includeCompleted: 1 }), false);
+    assert.equal(parseIncludeCompletedFromBody({ includeCompleted: null }), false);
+  });
+
+  it("defaults to false for a body that is not a plain object", () => {
+    assert.equal(parseIncludeCompletedFromBody(["includeCompleted", true]), false);
+    assert.equal(parseIncludeCompletedFromBody("includeCompleted"), false);
+    assert.equal(parseIncludeCompletedFromBody(42), false);
   });
 });
 

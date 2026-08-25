@@ -18,6 +18,7 @@ import {
 import {
   isSourceQueueActionDisabled,
   queuedMessageFor,
+  sourceQueueActionBody,
   sourceQueueActionEndpoint,
   type SourceQueueAction,
 } from "@/lib/posts/source-queue-action";
@@ -326,6 +327,13 @@ export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
   const [running, setRunning] = useState<SourceQueueAction | null>(null);
   /** The action that last reported back, and how many rows it reopened. */
   const [queued, setQueued] = useState<{ action: SourceQueueAction; count: number } | null>(null);
+  /**
+   * Whether "Retranslate this source" should also redo articles that already
+   * succeeded. Off by default, exactly like the server's own default — see
+   * retranslate-feed-items.service.ts for why a successful translation is never
+   * touched without this being explicitly turned on.
+   */
+  const [includeCompleted, setIncludeCompleted] = useState(false);
 
   /**
    * Always refetches. The filter is applied by the SERVER over the whole source,
@@ -384,8 +392,12 @@ export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
     setQueued(null);
     setLoadError("");
     try {
+      const body = sourceQueueActionBody(action, includeCompleted);
       const res = await fetch(sourceQueueActionEndpoint(slug, sourceId, action), {
         method: "POST",
+        ...(body === undefined
+          ? {}
+          : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
       });
       if (!res.ok) throw new Error();
       const json = (await res.json()) as { data: { reopened: number } };
@@ -470,6 +482,21 @@ export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
                 </>
               )}
             </div>
+          )}
+
+          {/* Off by default, matching the server's own default: a successful
+              translation is never touched without this being turned on explicitly. */}
+          {canManage && counts !== null && (
+            <label className="text-micro text-fg-faint mb-3 flex items-center gap-1.5">
+              <input
+                type="checkbox"
+                checked={includeCompleted}
+                onChange={(e) => setIncludeCompleted(e.target.checked)}
+                disabled={running !== null || loading}
+                className="accent-fg h-3 w-3"
+              />
+              {t("retranslateIncludeCompleted")}
+            </label>
           )}
 
           {/* Every message names THIS source, because the action did. "0 queued"

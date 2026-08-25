@@ -30,7 +30,7 @@ import { RECLASSIFY_REOPEN_DATA, sourceBelongsToCompany } from "./reclassify-fee
  */
 
 /**
- * Which translation states may be reopened.
+ * Which translation states may be reopened BY DEFAULT (`includeCompleted` false).
  *
  *   • `failed` — the state this action exists for, including the attempt-exhausted
  *     rows nothing else can reach.
@@ -42,17 +42,17 @@ import { RECLASSIFY_REOPEN_DATA, sourceBelongsToCompany } from "./reclassify-fee
  *     changed. This is half of the duplicate-protection (see the module note).
  *   • `translating` with a LIVE lease — in flight behind a claim. Touching it would
  *     yank the row out from under a running worker.
- *   • `completed` — a successful translation is never thrown away by a blunt button.
- *     The architecture DOES re-translate a completed row safely, but only when its
- *     input hash changes (see claimFeedItemForTranslation), which is a statement
- *     about the ARTICLE having changed rather than an operator's request. Offering
- *     "redo the ones that worked" needs its own explicit, selectable control.
+ *   • `completed` — held out of the DEFAULT set because a successful translation
+ *     must not be thrown away by an accidental click. It is NOT excluded from the
+ *     feature: `includeCompleted` (below) is exactly the explicit, selectable
+ *     control this comment used to say did not exist yet — see that parameter.
  *   • `skipped` — terminal by design, and both of its causes are already covered
  *     elsewhere: translation turned off for the source (re-enabling it plus the next
  *     ingest reopens the rows automatically, because their stored hash is null and
  *     therefore never matches), or an article with no text at all (which would be
  *     re-skipped without a model call, inflating the count this action reports with
- *     work that cannot happen).
+ *     work that cannot happen). `includeCompleted` does not touch this branch —
+ *     forcing a retranslation is meaningless for a row that has no translatable text.
  *
  * `translationStatus: null` on an ENABLED RSS SOURCE is included for exactly the
  * reason the reclassify predicate includes its own null case: the translation
@@ -77,12 +77,22 @@ const RETRANSLATABLE_STATUSES = ["failed"] as const;
  * post was built on, and replacing it now would make the post's own record disagree
  * with the article it cites — while doing nothing for the post itself, which is
  * already written. `companyId` stays alongside `sourceId` for the same tenancy
- * reason it does there.
+ * reason it does there. Consumed articles stay out EVEN with `includeCompleted` —
+ * forcing a redo is still a request about future output, and a published post's
+ * article is not that.
+ *
+ * `includeCompleted` is the explicit, selectable escape hatch: an operator who
+ * wants a genuinely BETTER translation of an article the pipeline already finished
+ * — the classifier was narrowed, the engine changed, a earlier run's output reads
+ * badly — can ask for it by name, on the same source-scoped button, rather than by
+ * an UPDATE run by hand. Off by default: the button must not silently spend model
+ * calls re-doing work that already succeeded.
  */
 export function retranslatableWhere(
   companyId: string,
   sourceId: string | null,
-  now: Date
+  now: Date,
+  includeCompleted = false
 ): Record<string, unknown> {
   return {
     companyId,
@@ -95,6 +105,10 @@ export function retranslatableWhere(
       { translationStatus: { in: [...RETRANSLATABLE_STATUSES] } },
       { translationStatus: null },
       { translationStatus: "translating", translationLeaseExpiresAt: { lt: now } },
+      // Added ONLY on explicit request. A completed row is matched unconditionally
+      // on status — not on a hash comparison — because the whole point of asking is
+      // to force a fresh attempt even when the ARTICLE has not changed at all.
+      ...(includeCompleted ? [{ translationStatus: "completed" }] : []),
     ],
   };
 }
@@ -121,11 +135,17 @@ export function retranslatableWhere(
  *   • `title` / `content` / `url` and every source column — the extracted article is
  *     immutable source data and is what the retry re-reads.
  *   • `translatedTitle` / `translatedContent` — the previous output stays visible
- *     until a new one replaces it, exactly as reclassify keeps the old verdict.
+ *     until a new one replaces it, exactly as reclassify keeps the old verdict, and
+ *     right up until the new translation is written it is still what generation
+ *     reads (`resolveFeedItemContent` only trusts a `completed` row — see
+ *     feed-item-translation.ts — so a row sitting `pending` mid-retry still serves
+ *     its LAST good translation, never a gap).
  *   • `translationHash` — overwritten by the claim, and useful provenance until then.
  *     The "nothing changed" short-circuit in translateFeedItem cannot fire on these
  *     rows anyway: it requires `translationStatus === "completed"`, and this sets
- *     `pending`.
+ *     `pending` — which is exactly what makes `includeCompleted` force a REAL model
+ *     call even when the article's hash has not moved at all, rather than being
+ *     silently skipped as unchanged.
  */
 export const RETRANSLATE_REOPEN_DATA = {
   translationStatus: "pending",
@@ -165,9 +185,51 @@ export interface RetranslateResult {
   enqueued: EnqueueJobResult | null;
 }
 
+/**
+ * The real, caller-supplied request — as opposed to `RetranslateDeps`, which is
+ * test-only injection. Mirrors the `options`/`deps` split `translateFeedItems`
+ * already uses (see translate-feed-items.service.ts) so the two kinds of parameter
+ * are never confused for one another.
+ */
+export interface RetranslateOptions {
+  /**
+   * Also reopen rows whose translation already SUCCEEDED. Off by default — see the
+   * `completed` branch of the doc comment on `RETRANSLATABLE_STATUSES` and the one
+   * on `retranslatableWhere` for why this is opt-in rather than automatic.
+   */
+  includeCompleted?: boolean;
+}
+
+/**
+ * Reads `includeCompleted` out of an already-JSON-parsed request body, defensively.
+ *
+ * Lives here rather than in the route itself so it is a plain, testable function —
+ * Node's test runner glob-expands any CLI path argument containing `[...]`
+ * characters, which makes a `route.test.ts` file placed inside this app's
+ * `[slug]/[sourceId]` directories unreachable by `npx tsx --test`, and every other
+ * company-scoped route in this codebase is tested at exactly this seam for exactly
+ * that reason. The route (see retranslate/route.ts) does the `req.json()` call and
+ * its own try/catch for "no body" / "not JSON" — both collapse to `undefined` before
+ * this function ever runs — so this only has to judge a value that DID parse.
+ *
+ * Anything present but not a literal boolean is ignored rather than trusted, since a
+ * caller crafting the body by hand is not this route's audience.
+ */
+export function parseIncludeCompletedFromBody(body: unknown): boolean {
+  if (body !== null && typeof body === "object" && "includeCompleted" in body) {
+    const value = (body as Record<string, unknown>).includeCompleted;
+    if (typeof value === "boolean") return value;
+  }
+  return false;
+}
+
 export interface RetranslateDeps {
   /** Flips eligible rows to pending; returns how many. `sourceId` null = whole company. */
-  reopen?: (companyId: string, sourceId: string | null) => Promise<number>;
+  reopen?: (
+    companyId: string,
+    sourceId: string | null,
+    includeCompleted: boolean
+  ) => Promise<number>;
   enqueue?: () => Promise<EnqueueJobResult>;
   /** Whether this source actually has translation turned on. */
   translationEnabled?: (companyId: string, sourceId: string) => Promise<boolean>;
@@ -177,10 +239,11 @@ export interface RetranslateDeps {
 async function defaultReopen(
   companyId: string,
   sourceId: string | null,
-  now: Date
+  now: Date,
+  includeCompleted: boolean
 ): Promise<number> {
   const result = await prisma.feedItem.updateMany({
-    where: retranslatableWhere(companyId, sourceId, now),
+    where: retranslatableWhere(companyId, sourceId, now, includeCompleted),
     data: { ...REOPEN_DATA },
   });
   return result.count;
@@ -223,18 +286,21 @@ async function defaultTranslationEnabled(companyId: string, sourceId: string): P
  *
  * Idempotent in the way that matters, exactly as reclassification is. A second click
  * matches only what the drain has not already moved on (`pending` and live claims are
- * not eligible), and the second enqueue is absorbed by the dedupe key.
+ * not eligible — and, with `includeCompleted`, a row already reopened once has since
+ * left `completed` too), and the second enqueue is absorbed by the dedupe key.
  */
 export async function retranslateSourceFeedItems(
   companyId: string,
   sourceId: string | null,
+  options: RetranslateOptions = {},
   deps: RetranslateDeps = {}
 ): Promise<RetranslateResult> {
+  const includeCompleted = options.includeCompleted ?? false;
   const now = deps.now ?? (() => new Date());
-  const reopen = deps.reopen ?? ((c, s) => defaultReopen(c, s, now()));
+  const reopen = deps.reopen ?? ((c, s, ic) => defaultReopen(c, s, now(), ic));
   const enqueue = deps.enqueue ?? defaultEnqueue;
 
-  const reopened = await reopen(companyId, sourceId);
+  const reopened = await reopen(companyId, sourceId, includeCompleted);
   if (reopened === 0) return { reopened: 0, enqueued: null };
 
   return { reopened, enqueued: await enqueue() };
@@ -258,6 +324,9 @@ export interface RequestRetranslationDeps extends RetranslateDeps {
  * than FORBIDDEN so the response cannot confirm the company exists. A source from
  * another company is NOT_FOUND for the same reason.
  *
+ * `options.includeCompleted` passes straight through to `retranslateSourceFeedItems`
+ * — this layer only resolves WHO is asking, never WHAT they asked for.
+ *
  * It enqueues the existing drain and returns; no model call happens in the request.
  */
 export async function requestRetranslation(
@@ -265,6 +334,7 @@ export async function requestRetranslation(
   sourceId: string,
   userId: string,
   isGlobalAdmin: boolean,
+  options: RetranslateOptions = {},
   deps: RequestRetranslationDeps = {}
 ): Promise<RequestRetranslationResult> {
   const resolveAccess = deps.resolveAccess ?? resolveBrandGuidelinesAccess;
@@ -293,11 +363,12 @@ export async function requestRetranslation(
     return { success: true, reopened: 0, enqueued: false, deduplicated: false };
   }
 
-  const result = await retranslateSourceFeedItems(access.companyId, sourceId, deps);
+  const result = await retranslateSourceFeedItems(access.companyId, sourceId, options, deps);
 
   console.info("[rss-translation] manual retranslation requested", {
     companyId: access.companyId,
     sourceId,
+    includeCompleted: options.includeCompleted ?? false,
     reopened: result.reopened,
     enqueued: result.enqueued?.enqueued ?? false,
     deduplicated: result.enqueued?.deduplicated ?? false,
