@@ -123,7 +123,7 @@ export const CHANNEL_POLICIES: Record<SocialChannel, ChannelPolicy> = {
         description:
           "A clear, relevant call to action that matches the post's purpose drives engagement better than generic engagement bait.",
         promptFragment:
-          "End with a meaningful call to action that directly relates to your post. Prefer specific open-ended questions that invite real answers over generic engagement prompts like 'A вие какво мислите?' Use a CTA that matches the post's goal: ask for experience/opinion, encourage reading, direct to a link, invite sharing, ask for reflection, or let content speak for itself.",
+          "End with a meaningful call to action that directly relates to your post. When a specific CTA type is assigned above, follow it exactly as instructed — do not deviate or reframe it. When no CTA is assigned, prefer specific requests (questions, comments, shares, or visits) that invite real engagement over canned phrases like 'A вие какво мислите?'",
       },
       {
         severity: "SUGGESTION",
