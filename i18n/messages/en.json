@@ -61,7 +61,7 @@
     "EMAIL_NOT_VERIFIED": "Please verify your email address before signing in.",
     "POST_TOO_LONG_WITH_URL": "The post plus the source link exceeds the channel's character limit. Generate again or shorten the post.",
     "CANNOT_GENERATE_UNIQUE_POST": "Couldn't create a post different enough from recent ones. Try again later or add fresh source material.",
-    "POST_FAILED_COMPLIANCE": "The post didn't follow the format it was asked for (its hook, tips, or call to action). Nothing was saved — try generating again.",
+    "POST_FAILED_COMPLIANCE": "The post kept using wording that isn't allowed. Nothing was saved — try generating again.",
     "NO_FEED_ITEMS_AVAILABLE": "No RSS articles are available to write about right now. Click \"Ingest\" on a content source to fetch the latest articles, or add a new RSS source.",
     "SELECTED_SOURCE_UNAVAILABLE": "No new articles are available for the selected source.",
     "POLICY_VIOLATION": "This post doesn't meet the requirements for this channel.",

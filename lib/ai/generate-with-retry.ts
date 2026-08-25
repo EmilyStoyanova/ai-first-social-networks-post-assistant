@@ -104,16 +104,17 @@ export interface GenerationLoopResult {
    */
   topicRepeated: boolean;
   /**
-   * Post-generation compliance gate (Step 2): whether the accepted (or last)
-   * candidate's text actually satisfies the angle/hook/structure/CTA it was
-   * generated under, AND does not contain a banned term (e.g. "Стоп") — the
-   * banned-term check runs even when no angle/pattern was supplied.
+   * Post-generation compliance gate: whether the accepted (or last) candidate's
+   * text is free of banned terms (e.g. "Стоп"). It runs on every candidate,
+   * with or without an angle/pattern.
+   *
+   * It does NOT re-verify the angle/hook/structure/CTA the candidate was
+   * generated under — those are prompt guidance and can never fail here (see
+   * generation-compliance.ts).
    *
    * Only `status === "failed"` is a retry trigger, and only it is fatal to the
-   * caller — the generation service refuses to persist a post that never met a
-   * requirement it was actually measured against (POST_FAILED_COMPLIANCE).
-   * `status === "not_checked"` means nothing at all was measurable: the gate
-   * verified nothing, and non-verification never blocks.
+   * caller — the generation service refuses to persist a post that still
+   * carries a banned term (POST_FAILED_COMPLIANCE).
    */
   complianceResult: ComplianceResult;
   /** Number of generation attempts actually made (1..maxAttempts). */
@@ -205,10 +206,11 @@ export async function generateWithRetry(
       let retryPattern: PostPattern | undefined;
       let retryAspect: ContentAspect | undefined;
 
-      // A retry caused ONLY by a failed compliance check must not rotate the
-      // angle/pattern/aspect — the requirement was correct, only the execution
-      // was not, so switching to a different pattern would dodge it rather than
-      // fix it. Every other retry reason keeps rotating exactly as before.
+      // A retry caused ONLY by a failed compliance check (i.e. a banned term)
+      // must not rotate the angle/pattern/aspect — none of them caused the
+      // violation, so switching them would churn the post for no reason while
+      // the offending word is what has to go. Every other retry reason keeps
+      // rotating exactly as before.
       const rotateDiversity = lastRejectionReason !== "compliance_failed";
 
       if (diversityOptions && rotateDiversity) {
@@ -257,8 +259,8 @@ export async function generateWithRetry(
       // picks a genuinely different subject (Topic Memory).
       const repeatedTopic = lastTopicRepeated && lastParsed.topic ? lastParsed.topic : undefined;
 
-      // When the previous attempt failed the compliance gate, name exactly
-      // which requirements it missed so the model can fix them directly.
+      // When the previous attempt failed the compliance gate, name exactly what
+      // it violated so the model can fix it directly.
       const complianceFailure =
         lastComplianceResult.status === "failed"
           ? { reasons: lastComplianceResult.reasons, failures: lastComplianceResult.failures }
@@ -366,23 +368,20 @@ export async function generateWithRetry(
     lastCoreMessageGeneric = assessCoreMessage(lastParsed.coreMessage).generic;
     // Topic Memory: reject a candidate whose normalized topic was already used.
     lastTopicRepeated = isTopicRepeated(lastParsed.topic, diversityOptions?.recentTopics ?? []);
-    // Post-generation compliance gate (Step 2): did the text actually follow
-    // the angle/hook/structure/CTA it was generated under, and is it free of
-    // banned terms? Angle/pattern are passed through even when undefined — the
-    // banned-word check runs regardless, and it reports `not_checked` only when
-    // truly nothing about the candidate can be measured deterministically.
-    lastComplianceResult = validateGenerationCompliance({
-      text: lastParsed.text,
-      angle: currentAngle,
-      pattern: currentPattern,
-    });
+    // Post-generation compliance gate: is the text free of banned terms? The
+    // angle/hook/structure/CTA it was generated under are NOT re-verified here —
+    // they are generation guidance and never a gate (see generation-compliance.ts).
+    lastComplianceResult = validateGenerationCompliance({ text: lastParsed.text });
 
-    // Diagnostic compliance logging: log which dimensions were checked and which failed.
+    // Diagnostic compliance logging. `enforced` names the dimensions that can
+    // actually block; everything absent from it (angle/hook/structure/CTA) is
+    // prompt guidance that is never verified after generation, so it can never
+    // appear as a failure here.
     if (lastComplianceResult.evaluated) {
-      const checkedDimensions = (
+      const enforcedDimensions = (
         Object.entries(lastComplianceResult.checked) as Array<[ComplianceDimension, boolean]>
       )
-        .filter(([, wasChecked]) => wasChecked)
+        .filter(([, isEnforced]) => isEnforced)
         .map(([dim]) => dim)
         .join(",");
       const failedDimensions =
@@ -390,7 +389,7 @@ export async function generateWithRetry(
           ? lastComplianceResult.failures.map((f) => f.dimension).join(",")
           : "none";
       console.info(
-        `[generation-compliance] attempt=${attempt} checked=${checkedDimensions || "none"} failed=${failedDimensions}`
+        `[generation-compliance] attempt=${attempt} enforced=${enforcedDimensions || "none"} failed=${failedDimensions} (stylistic dimensions are guidance only)`
       );
       if (lastComplianceResult.failures.length > 0) {
         lastComplianceResult.failures.forEach((failure) => {

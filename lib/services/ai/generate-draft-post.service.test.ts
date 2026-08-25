@@ -2609,18 +2609,25 @@ describe("generatePostFromContext — compliance abort", () => {
 
   // With no post history the pattern selector picks the first value of every
   // dimension: hook "Question", structure "Single Insight", CTA "Comment Prompt".
-  // So the requirement these fixtures are judged against is the Comment Prompt CTA.
-  const NONCOMPLIANT = JSON.stringify({
+  // This post carries no comment prompt at all — it misses its selected CTA, and
+  // is saved anyway. Stylistic requirements are generation guidance, never a gate.
+  const NO_STYLE_POST = JSON.stringify({
     text: "Our team shipped a new release this morning. It is available to every customer today.",
     hashtags: ["release"],
     coreMessage: "The new release removes the manual export step customers asked about.",
     imagePrompt: "A laptop showing a changelog",
   });
 
-  const COMPLIANT = JSON.stringify({
-    text:
-      "Our team shipped a new release this morning. It is available to every customer today. " +
-      "What would you automate first? Tell us in the comments.",
+  // The one thing that still aborts: a banned term.
+  const BANNED = JSON.stringify({
+    text: "Стоп на ръчния експорт. Новата версия е достъпна за всички клиенти още днес.",
+    hashtags: ["release"],
+    coreMessage: "The new release removes the manual export step customers asked about.",
+    imagePrompt: "A laptop showing a changelog",
+  });
+
+  const CLEAN = JSON.stringify({
+    text: "Край на ръчния експорт. Новата версия е достъпна за всички клиенти още днес.",
     hashtags: ["release"],
     coreMessage: "The new release removes the manual export step customers asked about.",
     imagePrompt: "A laptop showing a changelog",
@@ -2648,20 +2655,35 @@ describe("generatePostFromContext — compliance abort", () => {
     return { deps, calls: () => calls };
   }
 
-  it("does NOT save a candidate that fails compliance on every attempt", async () => {
+  it("SAVES a post that missed the CTA it was generated under, on the first attempt", async () => {
+    // The regression this whole change exists for: a usable post was retried
+    // three times and then discarded because its closing sentence did not match
+    // a CTA pattern. It is now saved, first try, with no retry at all.
     const { deps: base, created, embedded } = makeDeps([]);
-    const { deps, calls } = scriptDeps([NONCOMPLIANT], base);
+    const { deps, calls } = scriptDeps([NO_STYLE_POST], base);
 
     const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
 
-    assert.equal(result.success, false, "a never-compliant post must not be persisted");
+    assert.ok(result.success, "a stylistic miss must never block the save");
+    assert.equal(calls(), 1, "a stylistic miss must not cost a retry");
+    assert.ok(created(), "the post was saved");
+    assert.ok(embedded(), "the accepted post was embedded, as on any normal success");
+  });
+
+  it("does NOT save a candidate that carries a banned word on every attempt", async () => {
+    const { deps: base, created, embedded } = makeDeps([]);
+    const { deps, calls } = scriptDeps([BANNED], base);
+
+    const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
+
+    assert.equal(result.success, false, "a banned term must not be persisted");
     if (!result.success) {
       assert.equal(result.code, "POST_FAILED_COMPLIANCE");
       assert.equal(result.attempts, 3);
-      // The reasons name what was missing, not merely that something was.
+      // The reasons name what was wrong, not merely that something was.
       assert.ok(
-        result.complianceReasons?.some((r) => /Comment Prompt/i.test(r)),
-        `expected a Comment Prompt reason, got ${JSON.stringify(result.complianceReasons)}`
+        result.complianceReasons?.some((r) => /Стоп/.test(r)),
+        `expected a banned-word reason, got ${JSON.stringify(result.complianceReasons)}`
       );
     }
     assert.equal(created(), null, "the post must NOT be saved");
@@ -2669,7 +2691,7 @@ describe("generatePostFromContext — compliance abort", () => {
     assert.equal(calls(), 3, "every attempt was spent before aborting");
   });
 
-  it("releases the claimed source article when it aborts on compliance", async () => {
+  it("releases the claimed source article when it aborts on a banned word", async () => {
     let claims = 0;
     let releases = 0;
     const db: GenerateDraftPostDb = {
@@ -2690,7 +2712,7 @@ describe("generatePostFromContext — compliance abort", () => {
         },
       },
     };
-    const { deps } = scriptDeps([NONCOMPLIANT], {
+    const { deps } = scriptDeps([BANNED], {
       db,
       auditLog: async () => {},
       embed: async () => ({ status: "embedded" }),
@@ -2721,27 +2743,27 @@ describe("generatePostFromContext — compliance abort", () => {
     assert.equal(releases, 1, "the claim was released on abort");
   });
 
-  it("proceeds normally when a retry brings the post into compliance", async () => {
+  it("proceeds normally when a retry removes the banned word", async () => {
     const { deps: base, created, embedded } = makeDeps([]);
-    const { deps, calls } = scriptDeps([NONCOMPLIANT, COMPLIANT], base);
+    const { deps, calls } = scriptDeps([BANNED, CLEAN], base);
 
     const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
 
-    assert.ok(result.success, "a compliant retry must be saved like any other post");
+    assert.ok(result.success, "a clean retry must be saved like any other post");
     assert.equal(calls(), 2, "one retry, then accepted");
     assert.ok(created(), "the post was saved");
-    assert.match(created()!.content as string, /Tell us in the comments/);
+    assert.match(created()!.content as string, /Край на ръчния експорт/);
     assert.ok(embedded(), "the accepted post was embedded, as on any normal success");
   });
 
-  it("still reports a duplicate as a duplicate when the candidate is ALSO noncompliant", async () => {
+  it("still reports a duplicate as a duplicate when the candidate ALSO carries a banned word", async () => {
     // The compliance abort sits AFTER the uniqueness abort on purpose. A post
     // that trips both must keep reporting the uniqueness failure it always did,
     // so nothing about the pre-existing exhaustion behaviour changes.
-    const noncompliantText = JSON.parse(NONCOMPLIANT).text as string;
+    const noncompliantText = JSON.parse(BANNED).text as string;
     const rows: RecentRow[] = [{ id: "recent-1", content: noncompliantText, promptSnapshot: null }];
     const { deps: base, created } = makeDeps(rows, ACCEPT_GATE);
-    const { deps } = scriptDeps([NONCOMPLIANT], base);
+    const { deps } = scriptDeps([BANNED], base);
 
     const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
 

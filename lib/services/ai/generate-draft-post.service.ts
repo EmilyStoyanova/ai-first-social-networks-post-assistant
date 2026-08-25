@@ -79,12 +79,11 @@ import { observeProvider } from "@/lib/generation-trace/observed-provider";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
-// The text satisfies every deterministic compliance check at once (Step 2's
-// generation-compliance gate) — a debunked misconception, a Contrast opening,
-// 3 list-style points (which is both a valid List structure and a valid Tips &
-// Tricks count), and every checkable CTA including Reflection — so it is
-// accepted on the first attempt regardless of which angle/hook/structure/CTA a
-// test's (possibly empty) diversity history selects.
+// A rich, realistic fixture: a debunked misconception, a contrast opening, 3
+// list-style points and several CTAs. Only the absence of a banned term is what
+// actually gets it past the compliance gate — the angle/hook/structure/CTA are
+// no longer verified — but the shape is kept so mock output still looks like a
+// real post to anything downstream that reads it.
 const MOCK_LLM_TEXT = JSON.stringify({
   text:
     "Most people assume a team should stay quiet before a launch. Actually, building in the open is what earns trust — while the silent approach loses it.\n" +
@@ -223,11 +222,12 @@ export type GenerateDraftPostErrorCode =
   // duplicate (near-verbatim, semantic, or a repeated topic). We refuse to
   // persist a post we could not make unique.
   | "CANNOT_GENERATE_UNIQUE_POST"
-  // Every retry was exhausted and the final candidate still did not follow the
-  // content pattern it was generated under (missing CTA, missing tips, missing
-  // contrast hook). Distinct from CANNOT_GENERATE_UNIQUE_POST: the post may be
-  // perfectly unique — it just is not the post that was asked for. We refuse to
-  // persist a candidate the compliance gate never passed.
+  // Every retry was exhausted and the final candidate still broke a hard
+  // content rule — in practice, a banned term. Distinct from
+  // CANNOT_GENERATE_UNIQUE_POST: the post may be perfectly unique and perfectly
+  // on-pattern, it just contains something that must never be published. The
+  // post's angle/hook/structure/CTA can NOT trigger this — they are generation
+  // guidance and are not gated (see lib/ai/quality/generation-compliance.ts).
   | "POST_FAILED_COMPLIANCE"
   // Source articles existed but every one was already claimed (concurrent
   // run / exhausted pool). Not an error — callers skip cleanly.
@@ -248,9 +248,9 @@ export interface GenerateDraftPostFailure {
   /** Set only for CANNOT_GENERATE_UNIQUE_POST — attempts made before aborting. */
   attempts?: number;
   /**
-   * Set only for POST_FAILED_COMPLIANCE — the compliance requirements the final
-   * candidate still missed, verbatim from the gate (e.g. "Follow CTA is
-   * required; no follow/connect invitation was found.").
+   * Set only for POST_FAILED_COMPLIANCE — the rules the final candidate still
+   * broke, verbatim from the gate (e.g. 'The word "Стоп" is not allowed
+   * anywhere in the post…').
    */
   complianceReasons?: string[];
   /**
@@ -1369,15 +1369,15 @@ async function runGeneration(
   // ── Compliance abort ──────────────────────────────────────────────────────
   // Same shape as the uniqueness abort above, and deliberately placed after it
   // so that block's behaviour is untouched: a duplicate still reports as a
-  // duplicate. What is left here is a candidate that is unique but does not do
-  // what its own content pattern required (no Follow CTA, no actionable tips,
-  // no contrast hook) after every retry. Persisting it is exactly the silent
-  // acceptance the compliance gate exists to prevent, so generation aborts and
-  // the claimed source article goes back to the pool.
+  // duplicate. What is left here is a candidate that is unique but still breaks
+  // a hard content rule — a banned term — after every retry. Publishing it is
+  // exactly what the rule forbids, so generation aborts and the claimed source
+  // article goes back to the pool.
   //
-  // Only `status === "failed"` blocks. A pattern with nothing deterministically
-  // measurable reports `not_checked` — the gate verified nothing, which is not
-  // the same as finding a violation, and must never abort a generation.
+  // This is now the ONLY thing that reaches here. A post that did not honour
+  // its selected angle/hook/structure/CTA is saved like any other: those are
+  // generation guidance, deliberately not gated, and a stylistic miss is never
+  // worth discarding usable content over. See lib/ai/quality/generation-compliance.ts.
   if (complianceResult.status === "failed") {
     await releaseClaimedFeedItem();
     console.warn(
@@ -1403,7 +1403,7 @@ async function runGeneration(
     return {
       success: false,
       code: "POST_FAILED_COMPLIANCE",
-      message: `The generated post did not follow its required content pattern after ${attempts} attempts.`,
+      message: `The generated post still broke a hard content rule after ${attempts} attempts.`,
       attempts,
       complianceReasons: complianceResult.reasons,
     };

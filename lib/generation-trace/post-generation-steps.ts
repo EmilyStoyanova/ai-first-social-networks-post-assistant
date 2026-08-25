@@ -61,11 +61,12 @@ export function deriveTrigger(options: {
 }
 
 /**
- * The compliance dimensions this run had no deterministic check for.
+ * The compliance dimensions this run did not verify.
  *
- * Named explicitly rather than left as three `false`s to read past: an
- * unmeasured requirement is not evidence of compliance, and the trace has to
- * say which requirements those were.
+ * Named explicitly rather than left as `false`s to read past: an unmeasured
+ * requirement is not evidence of compliance, and the trace has to say which
+ * requirements those were. In practice this is always the four stylistic
+ * dimensions — they are generation guidance and are deliberately not gated.
  */
 function unmeasuredDimensions(checked: ComplianceResult["checked"]): string[] {
   return (Object.keys(checked) as (keyof ComplianceResult["checked"])[]).filter(
@@ -270,12 +271,12 @@ export function recordAttemptSteps(
       },
       metadata: {
         evaluated: compliance.evaluated,
-        // Which dimensions carry no deterministic check at all — a documented
-        // limitation, not a silent pass. See lib/ai/quality/generation-compliance.ts.
+        // Which dimensions were not verified — a documented limitation, not a
+        // silent pass. See lib/ai/quality/generation-compliance.ts.
         notChecked: unmeasuredDimensions(compliance.checked),
         note: compliance.evaluated
-          ? "Dimensions listed in notChecked have no deterministic check and were not verified."
-          : "No dimension of this pattern is deterministically measurable — compliance was NOT verified.",
+          ? "Dimensions listed in notChecked were not verified. The angle, hook, structure and CTA are generation guidance only — a post is never rejected for missing one."
+          : "Nothing was measured — compliance was NOT verified.",
       },
     });
   }

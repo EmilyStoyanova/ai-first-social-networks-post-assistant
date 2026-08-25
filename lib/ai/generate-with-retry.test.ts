@@ -399,186 +399,169 @@ describe("generateWithRetry — gray zone accepts without retrying", () => {
   });
 });
 
-// ─── Post-generation compliance gate (Step 2) ──────────────────────────────
-// Angle: Tips & Tricks, Hook: Question (unchecked), Structure: Story Arc
-// (unchecked), CTA: Follow — mirrors the real production pattern
-// (Tips & Tricks / Contrast / Follow) that was accepted with 0 tips and no
-// Follow CTA. Angle and CTA are the only checked dimensions here, on purpose:
-// these tests are about what the LOOP does with a failure, so exactly two
-// checks keep the expected reasons predictable.
+// ─── Post-generation compliance gate ────────────────────────────────────────
+// The gate enforces banned terms and nothing else. The angle/hook/structure/CTA
+// a post was generated under are prompt guidance: the model is asked for them,
+// but a post that misses one is still a good post and is saved as-is.
+//
+// These fixtures pin that. Every one of them is a pattern the OLD gate could
+// measure, paired with text that misses it outright — the exact shape that used
+// to burn all three attempts and then discard the post.
 
-function makeComplianceDiversity(): DiversityOptions {
+function styleDiversity(pattern: DiversityOptions["initialPattern"]): DiversityOptions {
   return {
     initialAngle: "Tips & Tricks",
     recentAngles: [],
-    initialPattern: { hookType: "Question", structure: "Story Arc", ctaType: "Follow" },
+    initialPattern: pattern,
     recentPatterns: [],
     recentTopics: [],
   };
 }
 
-// CLEAN_TEXT ("x y z w q") has no sentence punctuation and no follow language,
-// so it fails BOTH the tips count (0) and the Follow CTA check.
-const COMPLIANT_TIPS_FOLLOW_TEXT = [
-  "Here are two ways to plan a smarter trip.",
-  "1. Book your tickets at least two months in advance.",
-  "2. Pack only what fits in a single carry-on bag.",
-  "Follow us for more travel tips!",
-].join("\n");
+// CLEAN_TEXT ("x y z w q") has no sentence punctuation, no list, no contrast,
+// no misconception and no CTA language of any kind — it misses every stylistic
+// requirement there is.
+const NO_STYLE_TEXT = CLEAN_TEXT;
 
-describe("generateWithRetry — compliance failure triggers a retry", () => {
-  it("retries a noncompliant candidate and accepts a compliant one", async () => {
-    const provider = makeProvider([jsonPost(CLEAN_TEXT), jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT)]);
-    const result = await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
+describe("generateWithRetry — a missed stylistic requirement never triggers a retry", () => {
+  // One case per dimension the old gate used to enforce. In every one the
+  // provider is given exactly ONE response: if the loop retried, it would run
+  // out of responses, so `callCount === 1` is a real assertion, not a formality.
 
-    assert.strictEqual(provider.callCount, 2, "should retry exactly once");
+  it("accepts a post with no share invitation under a Share CTA", async () => {
+    const provider = makeProvider([jsonPost(NO_STYLE_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      styleDiversity({ hookType: "Question", structure: "Story Arc", ctaType: "Share" })
+    );
+
+    assert.strictEqual(provider.callCount, 1, "a missing Share CTA must not cause a retry");
+    assert.strictEqual(result.attempts, 1);
+    assert.strictEqual(result.complianceResult.status, "passed");
+    assert.strictEqual(result.parsed.text, NO_STYLE_TEXT);
+  });
+
+  it("accepts a post with no follow invitation under a Follow CTA", async () => {
+    const provider = makeProvider([jsonPost(NO_STYLE_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      styleDiversity({ hookType: "Question", structure: "Story Arc", ctaType: "Follow" })
+    );
+
+    assert.strictEqual(provider.callCount, 1);
+    assert.strictEqual(result.complianceResult.status, "passed");
+  });
+
+  it("accepts a post with no list items under a List structure", async () => {
+    const provider = makeProvider([jsonPost(NO_STYLE_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      styleDiversity({ hookType: "Question", structure: "List", ctaType: "No CTA" })
+    );
+
+    assert.strictEqual(provider.callCount, 1, "a missing List structure must not cause a retry");
+    assert.strictEqual(result.complianceResult.status, "passed");
+  });
+
+  it("accepts a post with no contrast opening under a Contrast hook", async () => {
+    const provider = makeProvider([jsonPost(NO_STYLE_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      styleDiversity({ hookType: "Contrast", structure: "Story Arc", ctaType: "No CTA" })
+    );
+
+    assert.strictEqual(provider.callCount, 1, "a missing Contrast hook must not cause a retry");
+    assert.strictEqual(result.complianceResult.status, "passed");
+  });
+
+  it("accepts a post that debunks nothing under a Myth vs Fact angle", async () => {
+    const provider = makeProvider([jsonPost(NO_STYLE_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", [], {
+      initialAngle: "Myth vs Fact",
+      recentAngles: [],
+      initialPattern: { hookType: "Question", structure: "Story Arc", ctaType: "No CTA" },
+      recentPatterns: [],
+      recentTopics: [],
+    });
+
+    assert.strictEqual(provider.callCount, 1, "a missing Myth vs Fact opening must not retry");
+    assert.strictEqual(result.complianceResult.status, "passed");
+  });
+
+  it("accepts a post with zero tips under a Tips & Tricks angle", async () => {
+    const provider = makeProvider([jsonPost(NO_STYLE_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      styleDiversity({ hookType: "Question", structure: "Story Arc", ctaType: "No CTA" })
+    );
+
+    assert.strictEqual(provider.callCount, 1);
+    assert.strictEqual(result.complianceResult.status, "passed");
+  });
+
+  it("accepts a post missing EVERY stylistic requirement at once", async () => {
+    // Myth vs Fact + Contrast + List + Share against text that has none of
+    // them: four simultaneous misses, still one call and a saved post.
+    const provider = makeProvider([jsonPost(NO_STYLE_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", [], {
+      initialAngle: "Myth vs Fact",
+      recentAngles: [],
+      initialPattern: { hookType: "Contrast", structure: "List", ctaType: "Share" },
+      recentPatterns: [],
+      recentTopics: [],
+    });
+
+    assert.strictEqual(provider.callCount, 1, "four stylistic misses must still not retry");
+    assert.strictEqual(result.attempts, 1);
     assert.strictEqual(result.complianceResult.status, "passed");
     assert.strictEqual(result.complianceResult.passed, true);
-    assert.strictEqual(result.attempts, 2);
-    assert.strictEqual(result.parsed.text, COMPLIANT_TIPS_FOLLOW_TEXT);
+    assert.deepEqual(result.complianceResult.reasons, []);
+    assert.deepEqual(result.complianceResult.failures, []);
+    assert.strictEqual(result.parsed.text, NO_STYLE_TEXT);
   });
 
-  it("keeps the SAME angle/hook/structure/CTA across the retry — never rotates for a compliance-only failure", async () => {
-    const provider = makeProvider([jsonPost(CLEAN_TEXT), jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT)]);
-    const diversity = makeComplianceDiversity();
-    const result = await generateWithRetry(provider, "sys", "user", [], diversity);
+  it("reports the stylistic dimensions as unchecked rather than as verified passes", async () => {
+    const provider = makeProvider([jsonPost(NO_STYLE_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      styleDiversity({ hookType: "Contrast", structure: "List", ctaType: "Share" })
+    );
 
-    assert.deepEqual(result.selectedAngle, diversity.initialAngle);
-    assert.deepEqual(result.selectedPattern, diversity.initialPattern);
-  });
-
-  it("the retry prompt names the concrete compliance failure reasons, without forcing a different pattern", async () => {
-    const provider = recordingProvider([
-      jsonPost(CLEAN_TEXT),
-      jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT),
-    ]);
-    await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
-
-    const retryPrompt = provider.prompts[1];
-    assert.match(retryPrompt, /Tips & Tricks requires 2–4 actionable tips; found 0/);
-    assert.match(retryPrompt, /Follow CTA is required/);
-    // Every other retry reason tells the model to switch pattern/topic — a pure
-    // compliance retry must not, since the pattern itself was already correct.
-    assert.doesNotMatch(retryPrompt, /FORCED CONTENT PATTERN/);
-    assert.doesNotMatch(retryPrompt, /Do not reuse the same hook type/);
-  });
-
-  it("exhausts attempts and hands the failed verdict back rather than throwing", async () => {
-    // The loop reports; it does not decide. `complianceResult.passed === false`
-    // surviving to the return value is what lets the generation service refuse
-    // to save the post (POST_FAILED_COMPLIANCE) — see
-    // generate-draft-post.service.test.ts, "compliance abort". So the contract
-    // asserted here is "never throws AND never launders the failure into a pass".
-    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
-    const result = await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
-
-    assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
-    assert.strictEqual(result.attempts, MAX_GENERATION_ATTEMPTS);
-    assert.strictEqual(result.complianceResult.status, "failed");
-    assert.strictEqual(result.complianceResult.passed, false);
-    assert.ok(result.complianceResult.reasons.length > 0);
-    assert.strictEqual(result.parsed.text, CLEAN_TEXT);
-  });
-
-  it("includes structured failure information for List structure failure", async () => {
-    const provider = recordingProvider([
-      jsonPost(CLEAN_TEXT),
-      jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT),
-    ]);
-    const diversity = {
-      initialAngle: "Tips & Tricks" as const,
-      recentAngles: [],
-      initialPattern: {
-        hookType: "Question" as const,
-        structure: "List" as const,
-        ctaType: "Follow" as const,
-      },
-      recentPatterns: [],
-      recentTopics: [],
-    };
-    await generateWithRetry(provider, "sys", "user", [], diversity);
-
-    const retryPrompt = provider.prompts[1];
-    // Should include both the failure reason and the remediation guidance
-    assert.match(retryPrompt, /List structure requires 3–5 scannable list items; found 0/);
-    assert.match(retryPrompt, /Use 3–5 real, clearly separated numbered or bulleted list items/);
-  });
-
-  it("includes remediation guidance for Share CTA failure", async () => {
-    const provider = recordingProvider([
-      jsonPost(CLEAN_TEXT),
-      jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT),
-    ]);
-    const diversity = {
-      initialAngle: "Tips & Tricks" as const,
-      recentAngles: [],
-      initialPattern: {
-        hookType: "Question" as const,
-        structure: "Story Arc" as const,
-        ctaType: "Share" as const,
-      },
-      recentPatterns: [],
-      recentTopics: [],
-    };
-    await generateWithRetry(provider, "sys", "user", [], diversity);
-
-    const retryPrompt = provider.prompts[1];
-    // Should include both the failure reason and Share-specific guidance
-    assert.match(retryPrompt, /Share CTA is required/);
-    assert.match(retryPrompt, /unmistakable sharing invitation/);
-    assert.match(retryPrompt, /Сподели|Изпрати/);
-  });
-
-  it("includes all failure reasons and remediation when multiple checks fail", async () => {
-    // CLEAN_TEXT fails both Tips & Tricks (0 tips) and Share CTA (no share invitation)
-    const provider = recordingProvider([
-      jsonPost(CLEAN_TEXT),
-      jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT),
-    ]);
-    const diversity = {
-      initialAngle: "Tips & Tricks" as const,
-      recentAngles: [],
-      initialPattern: {
-        hookType: "Question" as const,
-        structure: "Story Arc" as const,
-        ctaType: "Share" as const,
-      },
-      recentPatterns: [],
-      recentTopics: [],
-    };
-    await generateWithRetry(provider, "sys", "user", [], diversity);
-
-    const retryPrompt = provider.prompts[1];
-    // Both failures should be present
-    assert.match(retryPrompt, /Tips & Tricks requires 2–4 actionable tips/);
-    assert.match(retryPrompt, /Share CTA is required/);
-    // Both remediations should be present
-    assert.match(retryPrompt, /actionable.*tips/);
-    assert.match(retryPrompt, /sharing invitation/);
-  });
-
-  it("compliance result includes structured failures when status is failed", async () => {
-    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
-    const result = await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
-
-    assert.strictEqual(result.complianceResult.status, "failed");
-    assert.ok(result.complianceResult.failures.length > 0, "should have structured failures");
-
-    // Check that failures include dimension and reason
-    const hasAngleFailure = result.complianceResult.failures.some((f) => f.dimension === "angle");
-    const hasCtaFailure = result.complianceResult.failures.some((f) => f.dimension === "cta");
-    assert.ok(hasAngleFailure, "should have angle failure");
-    assert.ok(hasCtaFailure, "should have cta failure");
-  });
-
-  it("compliance result has empty failures array when status is passed", async () => {
-    const provider = makeProvider([jsonPost(COMPLIANT_TIPS_FOLLOW_TEXT)]);
-    const result = await generateWithRetry(provider, "sys", "user", [], makeComplianceDiversity());
-
-    assert.strictEqual(result.complianceResult.status, "passed");
-    assert.strictEqual(result.complianceResult.failures.length, 0);
+    assert.deepEqual(result.complianceResult.checked, {
+      angle: false,
+      hook: false,
+      cta: false,
+      structure: false,
+      bannedWords: true,
+    });
+    assert.strictEqual(result.complianceResult.evaluated, true);
   });
 });
+
+// ─── The banned word is still a real gate ───────────────────────────────────
+// Everything stylistic stopped blocking; this did not. A banned term is a hard
+// product prohibition, so it still retries and still refuses to launder a
+// failure into a pass when the attempts run out.
+
+const BANNED_TEXT = "Стоп! Не изпускайте нашата есенна оферта.";
 
 describe("generateWithRetry — the banned-word check runs even with no diversity options at all", () => {
   it("still evaluates compliance (via the banned-word check) with no angle/pattern", async () => {
@@ -596,7 +579,7 @@ describe("generateWithRetry — the banned-word check runs even with no diversit
   });
 
   it("aborts-and-retries on the banned word even with no angle/pattern at all", async () => {
-    const provider = makeProvider([jsonPost("Стоп! Не изпускайте нашата есенна оферта.")]);
+    const provider = makeProvider([jsonPost(BANNED_TEXT)]);
     const result = await generateWithRetry(provider, "sys", "user", []);
 
     assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
@@ -605,46 +588,101 @@ describe("generateWithRetry — the banned-word check runs even with no diversit
   });
 });
 
-// ─── "Nothing pattern-specific was checkable" must never behave like a failure ─
-// The whole point of separating `not_checked` from `passed` is honesty in the
-// report — it must not leak into control flow. An unsupported pattern is still
-// accepted on the first try, exactly as it was before the status existed; the
-// banned-word check still runs and, finding nothing, resolves the gate to
-// "passed" rather than "not_checked".
+describe("generateWithRetry — a banned word still triggers a retry", () => {
+  it("retries a banned candidate and accepts the clean rewrite", async () => {
+    const provider = makeProvider([jsonPost(BANNED_TEXT), jsonPost(CLEAN_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      styleDiversity({ hookType: "Question", structure: "Story Arc", ctaType: "Share" })
+    );
 
-describe("generateWithRetry — an unsupported pattern combination never blocks", () => {
-  it("accepts on attempt 1; the banned-word check is the only one that evaluates", async () => {
-    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
-    const result = await generateWithRetry(provider, "sys", "user", [], {
-      // Not one of these has a deterministic check: the angle is not
-      // Tips & Tricks or Myth vs Fact, the hook is not Contrast, the structure
-      // is not List, and "Try It" has no low-false-positive CTA signal.
-      initialAngle: "Behind the Scenes",
-      recentAngles: [],
-      initialPattern: { hookType: "Empathy", structure: "Story Arc", ctaType: "Try It" },
-      recentPatterns: [],
-      recentTopics: [],
-    });
-
-    assert.strictEqual(provider.callCount, 1, "an unverifiable pattern must not cause a retry");
+    assert.strictEqual(provider.callCount, 2, "should retry exactly once");
+    assert.strictEqual(result.attempts, 2);
     assert.strictEqual(result.complianceResult.status, "passed");
-    assert.strictEqual(result.complianceResult.evaluated, true);
-    assert.deepEqual(result.complianceResult.reasons, []);
-    assert.deepEqual(result.complianceResult.checked, {
-      angle: false,
-      hook: false,
-      cta: false,
-      structure: false,
-      bannedWords: true,
+    assert.strictEqual(result.parsed.text, CLEAN_TEXT);
+  });
+
+  it("names the violation and its remediation without rotating the pattern away", async () => {
+    const provider = recordingProvider([jsonPost(BANNED_TEXT), jsonPost(CLEAN_TEXT)]);
+    await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      styleDiversity({ hookType: "Question", structure: "Story Arc", ctaType: "Share" })
+    );
+
+    const retryPrompt = provider.prompts[1];
+    assert.match(retryPrompt, /Стоп/);
+    assert.match(retryPrompt, /Remove the banned word entirely/);
+    // The pattern did not cause the violation, so the retry must not swap it.
+    assert.doesNotMatch(retryPrompt, /FORCED CONTENT PATTERN/);
+    assert.doesNotMatch(retryPrompt, /Do not reuse the same hook type/);
+  });
+
+  it("keeps the SAME angle/hook/structure/CTA across a banned-word retry", async () => {
+    const provider = makeProvider([jsonPost(BANNED_TEXT), jsonPost(CLEAN_TEXT)]);
+    const diversity = styleDiversity({
+      hookType: "Question",
+      structure: "Story Arc",
+      ctaType: "Share",
     });
+    const result = await generateWithRetry(provider, "sys", "user", [], diversity);
+
+    assert.strictEqual(result.selectedAngle, diversity.initialAngle);
+    assert.deepEqual(result.selectedPattern, diversity.initialPattern);
+  });
+
+  it("exhausts attempts and hands the failed verdict back rather than throwing", async () => {
+    // The loop reports; it does not decide. `complianceResult.passed === false`
+    // surviving to the return value is what lets the generation service refuse
+    // to save the post (POST_FAILED_COMPLIANCE) — see
+    // generate-draft-post.service.test.ts, "compliance abort". So the contract
+    // asserted here is "never throws AND never launders the failure into a pass".
+    const provider = makeProvider([jsonPost(BANNED_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      styleDiversity({ hookType: "Question", structure: "Story Arc", ctaType: "Share" })
+    );
+
+    assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
+    assert.strictEqual(result.attempts, MAX_GENERATION_ATTEMPTS);
+    assert.strictEqual(result.complianceResult.status, "failed");
+    assert.strictEqual(result.complianceResult.passed, false);
+    assert.ok(result.complianceResult.reasons.length > 0);
+    assert.strictEqual(result.parsed.text, BANNED_TEXT);
+  });
+
+  it("attributes the failure to bannedWords and to nothing else", async () => {
+    const provider = makeProvider([jsonPost(BANNED_TEXT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      styleDiversity({ hookType: "Contrast", structure: "List", ctaType: "Share" })
+    );
+
+    assert.strictEqual(result.complianceResult.status, "failed");
+    assert.deepEqual(
+      result.complianceResult.failures.map((f) => f.dimension),
+      ["bannedWords"]
+    );
   });
 });
 
-// ─── The real TravelNest failure, end to end through the loop ───────────────
+// ─── The real TravelNest post, end to end through the loop ──────────────────
 // Angle: Myth vs Fact · Hook: Bold Statement · Structure: List · CTA:
-// Reflection — the combination that reported "Passed: true" with every
-// `checked.*` false. Three of the four are now measured, so the same post is
-// rejected and retried instead of accepted.
+// Reflection, against text that debunks nothing, lists nothing and closes on no
+// reflective prompt. Three of those four used to be measured, so this post was
+// retried twice and then thrown away. It is a perfectly publishable post: it is
+// now accepted on the first attempt.
 
 const TRAVELNEST_PATTERN: DiversityOptions = {
   initialAngle: "Myth vs Fact",
@@ -658,58 +696,36 @@ const TRAVELNEST_TEXT =
   "Есента е най-добрият момент за пътуване, но къде отиват пътниците? " +
   "Топ 10 дестинации за тази година включват 8 европейски градове и два мексикански курорта.";
 
-const TRAVELNEST_COMPLIANT_TEXT = [
-  "Мит: есента е мъртъв сезон за пътуване. Факт: цените на билетите падат с около 30% след 15 септември.",
-  "1. Лисабон — слънце до края на октомври.",
-  "2. Рим — половината опашки пред музеите.",
-  "3. Прага — най-евтините нощувки за годината.",
-  "А вие къде бихте пътували тази есен?",
-].join("\n");
-
-describe("generateWithRetry — the real TravelNest post is rejected and retried", () => {
-  it("fails compliance on the real text and names all three missed requirements", async () => {
-    const provider = recordingProvider([
-      jsonPost(TRAVELNEST_TEXT),
-      jsonPost(TRAVELNEST_COMPLIANT_TEXT),
-    ]);
+describe("generateWithRetry — the real TravelNest post is accepted, not discarded", () => {
+  it("accepts it on the first attempt despite missing three stylistic requirements", async () => {
+    const provider = recordingProvider([jsonPost(TRAVELNEST_TEXT)]);
     const result = await generateWithRetry(provider, "sys", "user", [], TRAVELNEST_PATTERN);
 
-    assert.strictEqual(provider.callCount, 2, "the real post must be rejected, not accepted");
-    assert.strictEqual(result.attempts, 2);
+    assert.strictEqual(provider.callCount, 1, "a usable post must not be retried over style");
+    assert.strictEqual(result.attempts, 1);
     assert.strictEqual(result.complianceResult.status, "passed");
-    assert.strictEqual(result.parsed.text, TRAVELNEST_COMPLIANT_TEXT);
-
-    // The retry prompt must name what was missing, and must not rotate away
-    // from the pattern that was correct all along.
-    const retryPrompt = provider.prompts[1];
-    assert.match(
-      retryPrompt,
-      /Myth vs Fact requires the opening to challenge a clear misconception/
-    );
-    assert.match(retryPrompt, /List structure requires 3–5 scannable list items; found 0/);
-    assert.match(retryPrompt, /Reflection CTA is required/);
-    assert.doesNotMatch(retryPrompt, /FORCED CONTENT PATTERN/);
+    assert.deepEqual(result.complianceResult.reasons, []);
+    assert.strictEqual(result.parsed.text, TRAVELNEST_TEXT);
   });
 
-  it("keeps the same angle, hook, structure and CTA on the retry", async () => {
-    const provider = makeProvider([jsonPost(TRAVELNEST_TEXT), jsonPost(TRAVELNEST_COMPLIANT_TEXT)]);
+  it("reports every stylistic dimension as unchecked — it certifies nothing about them", async () => {
+    const provider = makeProvider([jsonPost(TRAVELNEST_TEXT)]);
+    const result = await generateWithRetry(provider, "sys", "user", [], TRAVELNEST_PATTERN);
+
+    assert.deepEqual(result.complianceResult.checked, {
+      angle: false,
+      hook: false,
+      cta: false,
+      structure: false,
+      bannedWords: true,
+    });
+  });
+
+  it("keeps the selected angle and pattern on the record for provenance", async () => {
+    const provider = makeProvider([jsonPost(TRAVELNEST_TEXT)]);
     const result = await generateWithRetry(provider, "sys", "user", [], TRAVELNEST_PATTERN);
 
     assert.strictEqual(result.selectedAngle, TRAVELNEST_PATTERN.initialAngle);
     assert.deepEqual(result.selectedPattern, TRAVELNEST_PATTERN.initialPattern);
-  });
-
-  it("reports checked=true for the three measurable dimensions and false for the hook", async () => {
-    const provider = makeProvider([jsonPost(TRAVELNEST_TEXT)]);
-    const result = await generateWithRetry(provider, "sys", "user", [], TRAVELNEST_PATTERN);
-
-    assert.strictEqual(result.complianceResult.status, "failed");
-    assert.deepEqual(result.complianceResult.checked, {
-      angle: true,
-      hook: false, // "Bold Statement" has no defensible deterministic signal
-      cta: true,
-      structure: true,
-      bannedWords: true,
-    });
   });
 });

@@ -106,52 +106,22 @@ function lines(...parts: string[]): string {
   return parts.filter(Boolean).join("\n");
 }
 
-// Map compliance failures to specific remediation guidance
+/**
+ * How to fix each enforced compliance failure.
+ *
+ * Keyed by the dimensions that can actually fail — which is only `bannedWords`.
+ * The angle/hook/structure/CTA remediations that used to live here were
+ * unreachable once those dimensions stopped being gated (see
+ * quality/generation-compliance.ts): they are generation guidance now, and a
+ * post is never sent back to the model to fix one.
+ */
+const REMEDIATION_GUIDANCE: Record<ComplianceFailure["dimension"], string> = {
+  bannedWords:
+    "Remove the banned word entirely and rewrite the section so the meaning is preserved without it.",
+};
+
 function getRemediationGuidance(failure: ComplianceFailure): string {
-  switch (failure.dimension) {
-    case "structure":
-      if (failure.reason.includes("List")) {
-        return "Structure: Use 3–5 real, clearly separated numbered or bulleted list items. Each item must be scannable and hold at least a few words of content.";
-      }
-      return "Fix the post structure to match the required format.";
-    case "cta":
-      if (failure.reason.includes("Share")) {
-        return "CTA: End with an unmistakable sharing invitation — for example, wording equivalent to 'Share this' / 'Send to a friend' / 'Spread the word' (in Bulgarian: 'Сподели...', 'Изпрати...', 'Споделете...')";
-      }
-      if (failure.reason.includes("Follow")) {
-        return "CTA: End with a follow/connect invitation — for example, 'Follow us for more' or 'Subscribe to stay updated' (in Bulgarian: 'Следвайте нас...')";
-      }
-      if (failure.reason.includes("Comment")) {
-        return "CTA: End with a comment/opinion request — for example, 'Tell us what you think' or 'Share your thoughts' (in Bulgarian: 'Какво мислите?' or 'Споделете мнението си')";
-      }
-      if (failure.reason.includes("Reflection")) {
-        return "CTA: Close with a reflective question directed at the reader — ask them to think about their own situation or experience (must include a second-person reference like 'you' / 'your' / 'yourself')";
-      }
-      if (failure.reason.includes("Website")) {
-        return "CTA: End with a website/link visit prompt — for example, 'Visit our website' or 'Check the link in bio'";
-      }
-      if (failure.reason.includes("Open Question")) {
-        return "CTA: End with an open-ended question that invites the reader to respond";
-      }
-      return "Fix the call to action to match the required type.";
-    case "hook":
-      if (failure.reason.includes("Contrast")) {
-        return "Hook: Start with a recognizable contrast construction — for example 'Instead of X, try Y' / 'Most people think X, but actually Y' / 'Not X, but Y' (in Bulgarian: 'Вместо...', 'Не..., а...')";
-      }
-      return "Fix the opening hook to match the required type.";
-    case "angle":
-      if (failure.reason.includes("Tips & Tricks")) {
-        return "Angle: Include 2–4 actionable, distinct tips or pieces of advice. They should be presented as a numbered or bulleted list, or as separate substantial sentences (not just passing mentions).";
-      }
-      if (failure.reason.includes("Myth vs Fact")) {
-        return "Angle: Open by naming a common misconception or myth, then immediately provide a fact or correction that contradicts it. Both the myth and the correction must be clear in the opening.";
-      }
-      return "Fix the post angle to match the required type.";
-    case "bannedWords":
-      return "Remove the banned word entirely and rewrite the section so the meaning is preserved without it.";
-    default:
-      return "Fix this compliance requirement.";
-  }
+  return REMEDIATION_GUIDANCE[failure.dimension];
 }
 
 // ─── Image prompt instruction ─────────────────────────────────────────────────
@@ -712,11 +682,10 @@ export interface RetryContext {
   repeatedTopic?: string;
   /**
    * Present when the retry was triggered by a failed post-generation compliance
-   * check (Step 2): the angle/hook/structure/CTA were the right ones, but the
-   * text did not actually satisfy them (e.g. a "Tips & Tricks" post with zero
-   * tips, or a "Follow" CTA with no follow invitation). Unlike every other retry
-   * reason, this one must NOT change the angle, pattern, or content aspect — the
-   * requirement was correct, only the execution was not.
+   * check — in practice, a banned term in the text. Unlike every other retry
+   * reason, this one must NOT change the angle, pattern, or content aspect:
+   * none of them caused the violation, so rotating them would churn the post
+   * while leaving the offending word to be written again.
    */
   complianceFailure?: { reasons: string[]; failures: ComplianceFailure[] };
   /** When provided the retry prompt forces the model to use this angle. */
@@ -801,14 +770,14 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
       ].join("\n")
     : "";
 
-  // Compliance-failure block — the angle/hook/structure/CTA were the right
-  // ones; the text just did not satisfy them.
+  // Compliance-failure block — the text broke a hard content rule (a banned
+  // term). Nothing about its angle/hook/structure/CTA is at issue.
   const complianceBlock = retry.complianceFailure
     ? (() => {
         const failures = retry.complianceFailure.failures ?? [];
         const remediationLines = failures.map((f) => `  - ${getRemediationGuidance(f)}`).join("\n");
         return [
-          "## It did not follow its own required content pattern",
+          "## It broke a hard content rule",
           ...retry.complianceFailure.reasons.map((r) => `- ${r}`),
           ...(remediationLines ? ["", "## How to fix these failures:", remediationLines] : []),
           "",
@@ -819,9 +788,9 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
   // A retry caused ONLY by a failed compliance check needs the OPPOSITE framing
   // of every other retry reason below: every other trigger tells the model to
   // switch away from the rejected attempt (different angle, different hook,
-  // different claim). Compliance failure means the pattern was correct and the
-  // execution was not, so switching it would just dodge the requirement instead
-  // of fixing it. Only take this branch when nothing else also fired.
+  // different claim). A compliance failure is a banned term — the post itself
+  // was fine, so the fix is surgical and everything else must stay put. Only
+  // take this branch when nothing else also fired.
   const complianceOnly =
     retry.complianceFailure &&
     !retry.forcedAngle &&
@@ -836,7 +805,7 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     const remediationLines = failures.map((f) => `• ${getRemediationGuidance(f)}`);
 
     const complianceOnlyBlock = [
-      `⚠ REGENERATION REQUIRED (did not follow its own required content pattern).`,
+      `⚠ REGENERATION REQUIRED (the post broke a hard content rule).`,
       "",
       "## Rejected attempt",
       "---",
@@ -848,8 +817,8 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
       "",
       ...(remediationLines.length > 0 ? ["## How to fix it", ...remediationLines, ""] : []),
       "## What you MUST do",
-      "Keep the EXACT SAME angle, hook, structure, and CTA as the rejected attempt above — do not switch to a different pattern, topic, or content aspect.",
-      "Rewrite the post so it genuinely satisfies every requirement listed above.",
+      "Keep the EXACT SAME angle, hook, structure, CTA, topic, and content aspect as the rejected attempt above — none of them caused this, and changing them would lose a post that was otherwise fine.",
+      "Rewrite only what it takes to satisfy every rule listed above, preserving the meaning of the original.",
     ].join("\n");
     return `${complianceOnlyBlock}\n\n${baseUserPrompt}`;
   }
