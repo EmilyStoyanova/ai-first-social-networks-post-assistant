@@ -30,8 +30,33 @@ import type { FeedItemContext } from "./types";
  * model was never shown.
  */
 
-/** Per-item free-text budget. Structured fields (date, kind) are never truncated. */
+/**
+ * Per-item free-text budget for a BACKGROUND item. Structured fields (date,
+ * kind) are never truncated.
+ *
+ * Stays small: these articles are topical awareness only, the prompt says so
+ * outright, and their links are never attached. An opening paragraph is all the
+ * awareness they need to provide.
+ */
 export const CONTENT_PER_ITEM_LIMIT = 900;
+
+/**
+ * Free-text budget for the PRIMARY article — the one the post is actually
+ * about.
+ *
+ * It used to share the 900 above, which is the second half of the truncation
+ * bug: even a perfectly extracted 9,000-character article reached the model as
+ * its first two paragraphs. A news feature states its subject in the headline
+ * and its substance further down, so the discarded 90% is routinely where the
+ * point lives — an article about protest is read as an article about scenery
+ * because only the scene-setting opening survived.
+ *
+ * Sized to hold a long feature whole rather than to a token budget: at ~4 chars
+ * per token this is roughly 3k tokens, which every model in use here accepts
+ * comfortably. Truncation still exists as a backstop for the genuinely enormous
+ * page, but it is no longer the normal case.
+ */
+export const PRIMARY_CONTENT_LIMIT = 12_000;
 
 /** The source types whose `content` is a JSON object rather than prose. */
 const STRUCTURED_TYPES = new Set(["product_page", "calendar_event"]);

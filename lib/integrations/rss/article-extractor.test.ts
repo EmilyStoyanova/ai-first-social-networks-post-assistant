@@ -7,6 +7,7 @@ import {
   extractArticleContent,
   extractArticleParts,
   extractReadableText,
+  resolveArticleContent,
 } from "./article-extractor";
 import type { DnsResolver } from "./article-extractor";
 import { pickSourceImage } from "./article-image";
@@ -372,7 +373,15 @@ describe("extractArticleParts — image candidates", () => {
 
   it("returns empty parts for unparseable input rather than throwing", () => {
     const parts = extractArticleParts("", ARTICLE_URL);
-    assert.deepEqual(parts, { text: null, metaImageUrl: null, contentImageUrl: null });
+    assert.deepEqual(parts, {
+      text: null,
+      method: null,
+      // Empty input parses fine and simply has no article in it — that is a
+      // finding about the page, not a crash, and it is now labelled as one.
+      error: "no_article_text",
+      metaImageUrl: null,
+      contentImageUrl: null,
+    });
   });
 
   it("still scans the body when og:image is only the site's stock picture", () => {
@@ -443,7 +452,13 @@ describe("extractArticle — end-to-end image extraction", () => {
       resolve: resolver("10.0.0.1", 4),
       fetch: mockFetch(200, HTML),
     });
-    assert.deepEqual(result, { text: null, metaImageUrl: null, contentImageUrl: null });
+    assert.deepEqual(result, {
+      text: null,
+      method: null,
+      error: "ssrf_blocked",
+      metaImageUrl: null,
+      contentImageUrl: null,
+    });
   });
 
   it("returns no image when the article 404s", async () => {
@@ -452,5 +467,158 @@ describe("extractArticle — end-to-end image extraction", () => {
       fetch: mockFetch(404, HTML),
     });
     assert.equal(result.metaImageUrl, null);
+  });
+});
+
+// ─── Extraction cascade and provenance ───────────────────────────────────────
+
+describe("extractArticleParts — cascade and provenance", () => {
+  const LONG_BODY = "Reported detail with context and analysis of the events. ".repeat(8);
+
+  it("uses Readability and records it as the method", () => {
+    const result = extractArticleParts(ARTICLE_HTML, ARTICLE_URL);
+    assert.equal(result.method, "readability");
+    assert.equal(result.error, null);
+    assert.ok(result.text && result.text.length >= 300);
+  });
+
+  it("falls back to JSON-LD articleBody when there is no readable body", () => {
+    // A consent/paywall shell: no article markup for Readability to score, but
+    // the publisher still ships the body server-side for search engines.
+    const html = `<html><head>
+      <script type="application/ld+json">${JSON.stringify({
+        "@type": "NewsArticle",
+        articleBody: LONG_BODY,
+      })}</script>
+    </head><body><div id="consent"><p>Accept cookies</p></div></body></html>`;
+
+    const result = extractArticleParts(html, ARTICLE_URL);
+    assert.equal(result.method, "json_ld");
+    assert.ok(result.text?.includes("Reported detail with context"));
+    assert.equal(result.error, null);
+  });
+
+  it("records why nothing could be extracted instead of returning a bare null", () => {
+    const result = extractArticleParts(`<html><body><p>Hi</p></body></html>`, ARTICLE_URL);
+    assert.equal(result.text, null);
+    assert.equal(result.method, null);
+    assert.equal(result.error, "no_article_text");
+  });
+
+  it("keeps the article's image alongside a fallback-extracted body", () => {
+    const html = `<html><head>
+      <meta property="og:image" content="https://example.com/lead.jpg">
+      <script type="application/ld+json">${JSON.stringify({ articleBody: LONG_BODY })}</script>
+    </head><body><div id="paywall"><p>Subscribe</p></div></body></html>`;
+
+    const result = extractArticleParts(html, ARTICLE_URL);
+    assert.equal(result.method, "json_ld");
+    assert.equal(result.metaImageUrl, "https://example.com/lead.jpg");
+  });
+
+  it("survives a very large document without leaking the jsdom window", () => {
+    // The close() path: a leaked window is not directly observable, so this
+    // asserts the parse still completes and returns normally under bulk.
+    const bulk = `<div><p>${LONG_BODY}</p></div>`.repeat(400);
+    const result = extractArticleParts(
+      `<html><body><article>${bulk}</article></body></html>`,
+      ARTICLE_URL
+    );
+    assert.ok(result.text);
+  });
+});
+
+describe("extractArticle — failure reasons are recorded", () => {
+  it("records the HTTP status when the page does not return 200", async () => {
+    const result = await extractArticle(ARTICLE_URL, {
+      resolve: publicResolver,
+      fetch: mockFetch(403, ARTICLE_HTML),
+    });
+    assert.equal(result.text, null);
+    assert.equal(result.error, "http_403");
+  });
+
+  it("records a non-HTML content type", async () => {
+    const result = await extractArticle(ARTICLE_URL, {
+      resolve: publicResolver,
+      fetch: mockFetch(200, "{}", "application/json"),
+    });
+    assert.match(result.error ?? "", /^non_html/);
+  });
+
+  it("records a transport failure", async () => {
+    const result = await extractArticle(ARTICLE_URL, {
+      resolve: publicResolver,
+      fetch: async () => {
+        throw new Error("socket hang up");
+      },
+    });
+    assert.match(result.error ?? "", /^fetch_failed/);
+  });
+
+  it("records a missing url", async () => {
+    assert.equal((await extractArticle(null)).error, "no_url");
+  });
+});
+
+// ─── resolveArticleContent — the RSS summary must not pass as an article ─────
+
+describe("resolveArticleContent", () => {
+  const SUMMARY = "One teaser sentence the feed shipped in its description element.";
+
+  it("marks a real extraction complete and keeps its method", () => {
+    const extracted = extractArticleParts(ARTICLE_HTML, ARTICLE_URL);
+    const resolved = resolveArticleContent(extracted, SUMMARY);
+
+    assert.equal(resolved.complete, true);
+    assert.equal(resolved.method, "readability");
+    assert.equal(resolved.error, null);
+    assert.equal(resolved.content, extracted.text);
+    assert.equal(resolved.chars, extracted.text?.length);
+  });
+
+  it("stores the feed summary but marks it INCOMPLETE", () => {
+    const failed = {
+      text: null,
+      method: null,
+      error: "http_403",
+      metaImageUrl: null,
+      contentImageUrl: null,
+    };
+    const resolved = resolveArticleContent(failed, SUMMARY);
+
+    // The summary is still kept — a titled row beats an empty one for a human
+    // browsing the feed — but it no longer claims to be the article.
+    assert.equal(resolved.content, SUMMARY);
+    assert.equal(resolved.complete, false);
+    assert.equal(resolved.method, "rss_summary");
+    assert.equal(resolved.error, "http_403", "the real cause must survive into the row");
+  });
+
+  it("reports no content at all when the feed supplied no summary either", () => {
+    const failed = {
+      text: null,
+      method: null,
+      error: "no_article_text",
+      metaImageUrl: null,
+      contentImageUrl: null,
+    };
+    const resolved = resolveArticleContent(failed, null);
+
+    assert.equal(resolved.content, null);
+    assert.equal(resolved.method, null);
+    assert.equal(resolved.chars, 0);
+    assert.equal(resolved.complete, false);
+  });
+
+  it("treats a whitespace-only summary as no summary", () => {
+    const failed = {
+      text: null,
+      method: null,
+      error: "no_article_text",
+      metaImageUrl: null,
+      contentImageUrl: null,
+    };
+    assert.equal(resolveArticleContent(failed, "   \n  ").content, null);
   });
 });

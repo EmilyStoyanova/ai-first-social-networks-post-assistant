@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ILlmProvider, LlmRequest, FeedItemContext } from "./types";
 import { validateAspects, type ContentAspect } from "./content-aspect";
-import { renderFeedItemContent } from "./source-content";
+import { PRIMARY_CONTENT_LIMIT, renderFeedItemContent } from "./source-content";
 
 // ─── Context fingerprint ───────────────────────────────────────────────────────
 
@@ -40,7 +40,12 @@ export function buildPrimaryFingerprint(primary: FeedItemContext | null): string
  * JSON reached this extractor raw came back as "product launch date".
  */
 function buildSourceContent(primary: FeedItemContext): string {
-  return renderFeedItemContent(primary);
+  // Same budget the generation prompt gives the primary, not the default. The
+  // shared-rendering invariant above is about the TEXT, so a smaller limit here
+  // would reinstate the divergence it exists to prevent: aspects mined from the
+  // opening paragraphs, then imposed as a mandatory constraint on a model that
+  // was shown the whole article.
+  return renderFeedItemContent(primary, PRIMARY_CONTENT_LIMIT);
 }
 
 // ─── Response parsing ─────────────────────────────────────────────────────────

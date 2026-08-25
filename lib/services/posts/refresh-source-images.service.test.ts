@@ -11,7 +11,13 @@ import type { ExtractedArticle } from "@/lib/integrations/rss/article-extractor"
 const OLD_IMAGE = "https://cdn.example.com/site-banner.jpg";
 const NEW_IMAGE = "https://cdn.example.com/media/8f3c2a91.jpg";
 
-const EMPTY_ARTICLE: ExtractedArticle = { text: null, metaImageUrl: null, contentImageUrl: null };
+const EMPTY_ARTICLE: ExtractedArticle = {
+  text: null,
+  method: null,
+  error: "no_article_text",
+  metaImageUrl: null,
+  contentImageUrl: null,
+};
 
 function article(overrides: Partial<ExtractedArticle>): ExtractedArticle {
   return { ...EMPTY_ARTICLE, ...overrides };

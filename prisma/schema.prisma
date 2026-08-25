@@ -415,6 +415,31 @@ model FeedItem {
   /// take the image away from a post that was already using it.
   sourceImageUrl String? @map("source_image_url")
 
+  // How `content` above was obtained. Written by RSS ingestion only.
+  //
+  // NOT to be confused with the `extraction*` columns further down: those are
+  // the product-page extraction feature (a model call against an owner's
+  // instruction) and are always NULL for RSS. These describe whether the ARTICLE
+  // BODY was actually read off the page, which used to be unknowable — a failed
+  // fetch, a consent shell and a genuinely bodyless page all stored the feed's
+  // one-sentence `<description>` and looked identical to a full article.
+  /// readability | json_ld | dom | rss_summary — which reader produced `content`.
+  contentExtraction      String?   @map("content_extraction")
+  /// Length of `content` as stored, so thin items are queryable without a scan.
+  contentChars           Int?      @map("content_chars")
+  /// FALSE means `content` is the feed summary, NOT the article — such an item is
+  /// excluded from post generation (see candidateWhereFor).
+  ///
+  /// NULL means "unknown", and is NOT the same as false: every row ingested
+  /// before this column existed is NULL, as is every non-RSS source type. Those
+  /// stay eligible. Treating NULL as incomplete would make the entire existing
+  /// archive ungeneratable the moment this shipped.
+  contentComplete        Boolean?  @map("content_complete")
+  /// Why full-text extraction produced nothing — http_403, timeout_15000ms,
+  /// parse_failed, no_article_text. The diagnostic that did not exist before.
+  contentExtractionError String?   @map("content_extraction_error")
+  contentExtractedAt     DateTime? @map("content_extracted_at")
+
   // Translation (v2-4). Written only for RSS sources with translation enabled.
   // `title` and `content` above always hold the ORIGINAL article text and are
   // never overwritten by translation; generation falls back to them unless

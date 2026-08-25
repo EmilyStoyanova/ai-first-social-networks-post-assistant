@@ -1,7 +1,11 @@
 import { prisma } from "@/lib/db/client";
 import { parseFeed } from "@/lib/integrations/rss/parser";
 import { scrapeProductPage } from "@/lib/integrations/product-page/scraper";
-import { extractArticle } from "@/lib/integrations/rss/article-extractor";
+import {
+  extractArticle,
+  resolveArticleContent,
+  type ResolvedArticleContent,
+} from "@/lib/integrations/rss/article-extractor";
 import { pickSourceImage } from "@/lib/integrations/rss/article-image";
 import {
   computeTranslationHash,
@@ -167,6 +171,26 @@ export function requiresExtractionWork(
   return Object.keys(extractionFieldsFor(hash, existing)).length > 0;
 }
 
+/**
+ * The provenance columns for one article read, or `{}` when the caller has no
+ * provenance to report (every non-RSS source type).
+ *
+ * `{}` rather than a row of NULLs, and that distinction is load-bearing on the
+ * UPDATE path: writing NULLs would erase a good previous read whenever a later
+ * ingest of the same URL happened to have none — the same rule `sourceImageUrl`
+ * already follows one field below.
+ */
+function contentProvenanceFields(article: ResolvedArticleContent | undefined) {
+  if (!article) return {};
+  return {
+    contentExtraction: article.method,
+    contentChars: article.chars,
+    contentComplete: article.complete,
+    contentExtractionError: article.error,
+    contentExtractedAt: new Date(),
+  };
+}
+
 async function upsertFeedItem(
   sourceId: string,
   companyId: string,
@@ -191,7 +215,14 @@ async function upsertFeedItem(
    * same contract translation and extraction follow.
    */
   classifiable = false,
-  existingClassifications?: Map<string, ClassifiableItemState>
+  existingClassifications?: Map<string, ClassifiableItemState>,
+  /**
+   * Provenance of the article body, for RSS. Undefined for every other source
+   * type, whose `content` is a JSON payload assembled here rather than read off
+   * a page — those keep NULL provenance, which the generation gate reads as
+   * "unknown, still eligible" exactly as it does for pre-existing rows.
+   */
+  articleContent?: ResolvedArticleContent
 ): Promise<{
   outcome: "created" | "updated";
   requiresTranslation: boolean;
@@ -221,6 +252,7 @@ async function upsertFeedItem(
         // a post may already be using — the stored value stands until a run
         // resolves a better one.
         ...(sourceImageUrl ? { sourceImageUrl } : {}),
+        ...contentProvenanceFields(articleContent),
         ...translationFieldsForUpdate(translation, hash, existing),
         ...extractionFieldsFor(extractionHash, existingExtraction),
         ...classificationFields,
@@ -244,6 +276,7 @@ async function upsertFeedItem(
         content,
         publishedAt,
         sourceImageUrl,
+        ...contentProvenanceFields(articleContent),
         ...translationFieldsForCreate(translation),
         ...extractionFieldsFor(extractionHash, undefined),
         ...classificationFieldsForCreate(classifiable),
@@ -383,7 +416,19 @@ export async function runSourceIngestion(
       if (processed.has(item.url)) continue;
       processed.add(item.url);
       const extracted = await extractArticle(item.url);
-      const content = extracted.text ?? item.summary;
+      // Was `extracted.text ?? item.summary` — the line that let a feed blurb be
+      // stored as if it were the article. The fallback still happens; it is now
+      // labelled, and the label is what generation refuses to write from.
+      const article = resolveArticleContent(extracted, item.summary);
+      const content = article.content;
+      if (!article.complete) {
+        console.warn("[rss-ingestion] no article body — storing feed summary only", {
+          url: item.url,
+          sourceId,
+          reason: article.error,
+          chars: article.chars,
+        });
+      }
       // Each candidate has already been filtered for icons, avatars and
       // tracking pixels; pickSourceImage only chooses between them.
       const sourceImageUrl = pickSourceImage({
@@ -405,7 +450,8 @@ export async function runSourceIngestion(
         null,
         undefined,
         classifiable,
-        existingClassifications
+        existingClassifications,
+        article
       );
       if (outcome === "created") created++;
       else updated++;

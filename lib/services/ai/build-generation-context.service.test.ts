@@ -40,6 +40,14 @@ interface Row {
   enabled: boolean;
   usedInPost: boolean;
   sourceEnabled: boolean;
+  /**
+   * Whether `content` is the article or only the feed's summary.
+   *
+   * `null` is the third state and the important one: every row ingested before
+   * the column existed, and every non-RSS source type, reads as unknown and must
+   * stay eligible.
+   */
+  contentComplete: boolean | null;
   /** Higher is newer — stands in for `publishedAt desc, createdAt desc`. */
   publishedAt: number;
 }
@@ -57,6 +65,7 @@ function row(id: string, classification: string | null, overrides: Partial<Row> 
     enabled: true,
     usedInPost: false,
     sourceEnabled: true,
+    contentComplete: true,
     // Seeded rows get strictly decreasing recency, so "declared first" reads as
     // "newest" and a tier's internal order is the array order.
     publishedAt: seq,
@@ -96,6 +105,22 @@ function matches(r: Row, where: Record<string, unknown>): boolean {
       case "classification":
         // Exact equality, including null — this is the tier predicate.
         if (r.classification !== value) return false;
+        break;
+      case "AND":
+        // Every clause must hold. Used for the content-completeness gate, which
+        // is nested here rather than left at the top level so it cannot collide
+        // with an OR a caller composes on.
+        if (!(value as Array<Record<string, unknown>>).every((clause) => matches(r, clause)))
+          return false;
+        break;
+      case "OR":
+        if (!(value as Array<Record<string, unknown>>).some((clause) => matches(r, clause)))
+          return false;
+        break;
+      case "contentComplete":
+        // Exact equality including null — `{ contentComplete: null }` is the
+        // branch that admits the pre-existing archive.
+        if (r.contentComplete !== value) return false;
         break;
       default:
         throw new Error(`Test interpreter does not model the filter key "${key}"`);
@@ -357,5 +382,62 @@ describe("candidateWhereFor", () => {
   it("cannot leak another company's articles into a scoped window", async () => {
     const corpus = [row("h1", "HIGH", { companyId: "co-2" }), row("m1", "MEDIUM")];
     assert.deepEqual(await windowFor(corpus, POOLED), ["m1"]);
+  });
+});
+
+// ─── Content completeness gate ────────────────────────────────────────────────
+
+describe("candidate window — summary-only articles are not generatable", () => {
+  it("withholds an article whose stored content is only the feed summary", async () => {
+    // The Albania case: full-text extraction failed, the feed's one-sentence
+    // <description> was stored instead, and a post was written from it about a
+    // subject the article never covers.
+    const corpus = [row("summary-only", null, { contentComplete: false }), row("full", null)];
+
+    assert.deepEqual(await windowFor(corpus, POOLED), ["full"]);
+  });
+
+  it("withholds it regardless of how highly the classifier rated it", async () => {
+    // Priority orders; it never grants eligibility. A HIGH verdict on an
+    // article nobody actually read must not buy it a way back in.
+    const corpus = [row("h-partial", "HIGH", { contentComplete: false }), row("m-full", "MEDIUM")];
+
+    assert.deepEqual(await windowFor(corpus, POOLED), ["m-full"]);
+  });
+
+  it("keeps rows ingested before the column existed (NULL is not incomplete)", async () => {
+    // The migration risk: NULL means unknown. Treating it as incomplete would
+    // make the entire pre-existing archive ungeneratable on deploy.
+    const corpus = [row("legacy", null, { contentComplete: null })];
+
+    assert.deepEqual(await windowFor(corpus, POOLED), ["legacy"]);
+  });
+
+  it("keeps non-RSS sources, which never carry the flag", async () => {
+    // A product page / prompt / calendar event stores a JSON payload assembled
+    // at ingestion, not an article read off a page.
+    const corpus = [row("product-page", null, { contentComplete: null })];
+
+    assert.deepEqual(await windowFor(corpus, { kind: "content_source", sourceId: "src-1" }), [
+      "product-page",
+    ]);
+  });
+
+  it("applies to a pinned sibling channel too", async () => {
+    // The content-group door: a sibling window drops the usedInPost filter, and
+    // must not become a way for an unread article to re-enter generation.
+    const corpus = [row("pinned", null, { contentComplete: false, usedInPost: true })];
+
+    assert.deepEqual(await windowFor(corpus, { kind: "feed_item", feedItemId: "pinned" }), []);
+  });
+
+  it("returns an empty window when every candidate is summary-only", async () => {
+    // Correct outcome: the caller skips rather than writing from a blurb.
+    const corpus = [
+      row("s1", "HIGH", { contentComplete: false }),
+      row("s2", "MEDIUM", { contentComplete: false }),
+    ];
+
+    assert.deepEqual(await windowFor(corpus, POOLED), []);
   });
 });

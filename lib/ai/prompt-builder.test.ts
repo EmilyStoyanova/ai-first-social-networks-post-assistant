@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { buildPrompts, buildRetryUserPrompt } from "./prompt-builder";
 import { CHANNEL_POLICIES } from "./channel-policy";
 import { renderExtraction } from "./product-page-extraction";
+import { PRIMARY_CONTENT_LIMIT, renderFeedItemContent } from "./source-content";
 import type { BrandContext, FeedItemContext, GenerationContext } from "./types";
 
 function makeCtx(overrides: {
@@ -1361,5 +1362,82 @@ describe("prompt-builder — the checked extraction is what every channel writes
 
     assert.match(userPrompt, /completeness wins/);
     assert.ok(userPrompt.includes("Growth Conference"));
+  });
+});
+
+// ─── Primary source budget ────────────────────────────────────────────────────
+
+describe("prompt-builder — the primary article gets a full-article budget", () => {
+  /** Distinct sentences, so a specific position in the article is locatable. */
+  function longArticle(sentences: number): string {
+    return Array.from(
+      { length: sentences },
+      (_, i) => `Paragraph ${i} states a distinct fact about the subject under discussion.`
+    ).join("\n\n");
+  }
+
+  function item(id: string, content: string): FeedItemContext {
+    return {
+      id,
+      title: `Article ${id}`,
+      content,
+      url: `https://news.example.com/${id}`,
+      publishedAt: null,
+      sourceType: "rss",
+      sourceName: "Example",
+      consumable: true,
+    };
+  }
+
+  it("keeps a long primary article whole instead of cutting it at 900 characters", () => {
+    // The second half of the truncation bug: extraction could be perfect and the
+    // model would still only ever see the opening two paragraphs.
+    const primary = item("p1", longArticle(60));
+    assert.ok(primary.content!.length > 4000, "fixture must exceed the old budget many times over");
+
+    const { userPrompt } = buildPrompts({ ...makeCtx({}), feedItems: [primary] }, primary);
+
+    assert.ok(userPrompt.includes("Paragraph 0 states"), "the opening must survive");
+    assert.ok(userPrompt.includes("Paragraph 59 states"), "the CLOSING must survive too");
+    assert.ok(!userPrompt.includes("…"), "a full article must not be truncated at all");
+  });
+
+  it("still truncates a primary beyond the full-article budget", () => {
+    // The backstop is intact — it is simply no longer the normal case.
+    const primary = item("p1", "x".repeat(PRIMARY_CONTENT_LIMIT + 5_000));
+    const { userPrompt } = buildPrompts({ ...makeCtx({}), feedItems: [primary] }, primary);
+
+    assert.ok(userPrompt.includes("…"));
+    assert.ok(userPrompt.length < PRIMARY_CONTENT_LIMIT + 5_000);
+  });
+
+  it("does not extend the larger budget to background items", () => {
+    // Background articles are topical awareness only and their links are never
+    // attached; four of them must not crowd out the actual subject.
+    const primary = item("p1", longArticle(40));
+    const background = item("b1", longArticle(60));
+
+    const { userPrompt } = buildPrompts(
+      { ...makeCtx({}), feedItems: [primary, background] },
+      primary
+    );
+
+    assert.ok(userPrompt.includes("Paragraph 39 states"), "the primary is whole");
+    assert.ok(
+      !userPrompt.includes("Paragraph 59 states"),
+      "the background item is still capped at the per-item limit"
+    );
+  });
+
+  it("gives aspect mining the SAME text the generation prompt shows", () => {
+    // The documented shared-rendering invariant: an aspect is imposed on the
+    // post as a mandatory constraint, so it must not be mined from less text
+    // than the writer was given.
+    const primary = item("p1", longArticle(60));
+
+    const mined = renderFeedItemContent(primary, PRIMARY_CONTENT_LIMIT);
+    const { userPrompt } = buildPrompts({ ...makeCtx({}), feedItems: [primary] }, primary);
+
+    assert.ok(userPrompt.includes(mined), "the prompt must contain exactly what mining reads");
   });
 });

@@ -16,6 +16,8 @@ const OG_IMAGE = "https://cdn.example.com/lead.jpg";
 
 const EMPTY_ARTICLE: ExtractedArticle = {
   text: null,
+  method: null,
+  error: "no_article_text",
   metaImageUrl: null,
   contentImageUrl: null,
 };

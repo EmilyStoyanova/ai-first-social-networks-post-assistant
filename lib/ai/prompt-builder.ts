@@ -11,6 +11,7 @@ import { getChannelPolicy } from "./channel-policy";
 import {
   extractionFoundNothing,
   framePrimarySource,
+  PRIMARY_CONTENT_LIMIT,
   renderFeedItemContent,
   sourceExtractionInstruction,
 } from "./source-content";
@@ -407,7 +408,17 @@ function buildSystemPrompt(ctx: GenerationContext, contentLanguage?: string): st
 
 // ─── User prompt ──────────────────────────────────────────────────────────────
 
-const TOTAL_FEED_CHAR_LIMIT = 5000;
+/**
+ * Total budget for the BACKGROUND items, after the primary has been rendered.
+ *
+ * This was a combined budget of 5,000 for primary and background together, back
+ * when the primary could not exceed 900 characters anyway. With the primary now
+ * allowed a full article (PRIMARY_CONTENT_LIMIT), a shared pool would let four
+ * background blurbs decide how much of the actual subject the model gets to
+ * read. They are separate budgets because they are not competing concerns: the
+ * primary is the assignment, the rest is peripheral vision.
+ */
+const BACKGROUND_FEED_CHAR_LIMIT = 3_000;
 
 /**
  * How many recent image prompts to show, and how much of each.
@@ -431,8 +442,8 @@ function truncate(text: string, max: number): string {
  * are unchanged; the JSON-backed ones (product page, calendar event) are turned
  * into readable fields instead of being dumped as a raw object.
  */
-function excerptFor(item: FeedItemContext): string {
-  return renderFeedItemContent(item);
+function excerptFor(item: FeedItemContext, limit?: number): string {
+  return renderFeedItemContent(item, limit);
 }
 
 function buildJsonFormatInstruction(imageRequired: boolean): string {
@@ -474,11 +485,11 @@ function buildUserPrompt(
 
   let feedSection = "";
   if (primary) {
-    // Primary always fits: it is allotted the budget first.
-    let budget = TOTAL_FEED_CHAR_LIMIT;
-    const primaryBlock = excerptFor(primary);
-    budget -= primaryBlock.length + 10;
+    // The primary is rendered against its OWN budget and is never trimmed to
+    // make room for background items — it is the article the post is about.
+    const primaryBlock = excerptFor(primary, PRIMARY_CONTENT_LIMIT);
 
+    let budget = BACKGROUND_FEED_CHAR_LIMIT;
     const secondaryBlocks: string[] = [];
     for (const item of feedItems) {
       if (item.id === primary.id) continue;

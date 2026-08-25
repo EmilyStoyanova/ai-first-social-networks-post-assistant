@@ -290,6 +290,18 @@ export function candidateWhereFor(companyId: string, scope: SourceScope): Record
     // Manual enable/disable. Authoritative over any verdict: a person who
     // switched an article off has overruled the classifier, whatever it decided.
     enabled: true,
+    // An item whose stored `content` is only the feed's `<description>` is not
+    // an article and may not become a post. Such a row carries a headline that
+    // names a subject its one stored sentence never covers, so everything
+    // downstream — aspect mining, the core message, the post itself — is written
+    // about a topic nobody read, and the real article is then linked beneath it.
+    //
+    // Written as an explicit OR over the two admitted states rather than as
+    // `{ not: false }`, for the reason candidate-priority.ts already documents
+    // about nullable columns: NULL is the pre-existing archive and every non-RSS
+    // source type, and a negation would silently drop all of them. Nested under
+    // AND so it cannot collide with a top-level OR a caller composes on.
+    AND: [{ OR: [{ contentComplete: null }, { contentComplete: true }] }],
     // usedInPost:false — one-post-per-article. DROPPED for a direct content
     // source: its stored extraction describes a page/prompt/event that does not
     // stop existing once a post cites it, and ingestion writes only one row per
