@@ -12,6 +12,7 @@ import {
   MAX_TRANSLATION_RETRIES,
   MIN_TRANSLATION_CONTENT_CHARS,
   type JsonRepair,
+  type TranslationParseFailure,
 } from "@/lib/ai/feed-item-translation";
 import type {
   ArticleTranslation,
@@ -88,6 +89,14 @@ export class OllamaTranslationProvider implements TranslationProvider {
      */
     let currentTitleValues: readonly ProtectedValue[] = request.prompts.titleProtectedValues;
     let currentContentValues: readonly ProtectedValue[] = request.prompts.contentProtectedValues;
+    /**
+     * Why the PREVIOUS try was rejected, so the next one can be sampled for the defect it is
+     * actually correcting rather than by try number alone — `null` on the first try, which has
+     * no previous. See samplingForTry: the escalating temperature/repeat-penalty schedule
+     * breaks decoding loops but actively suppresses `[[n]]` placeholders, so a
+     * `protected_token` rejection is retried at the base sampling instead.
+     */
+    let lastFailure: TranslationParseFailure | null = null;
 
     // In-request regeneration loop. A bad reply from the self-hosted model (invalid JSON, a
     // decoding loop, drifted language) is usually transient, and a fresh sample seconds later
@@ -101,7 +110,7 @@ export class OllamaTranslationProvider implements TranslationProvider {
       }
       // Never let one try run past the item's own budget.
       const budgetMs = Math.min(context.attemptTimeoutMs, remainingMs);
-      const { temperature, repeatPenalty } = samplingForTry(tryIndex);
+      const { temperature, repeatPenalty } = samplingForTry(tryIndex, lastFailure);
       const tryStartedMs = now().getTime();
       tries = tryIndex + 1;
       context.reportTry?.(tries);
@@ -112,6 +121,9 @@ export class OllamaTranslationProvider implements TranslationProvider {
         of: maxTries,
         temperature,
         repeatPenalty,
+        // What this try is correcting, so a reader can tell WHY the sampling is what it is —
+        // a try 2 at temperature 0 is the protected-token path, not a stuck schedule.
+        correcting: lastFailure,
         budgetMs,
       });
 
@@ -123,6 +135,7 @@ export class OllamaTranslationProvider implements TranslationProvider {
         metadata: {
           temperature,
           repeatPenalty,
+          correcting: lastFailure,
           contentBudget,
           schema,
           isRetryPrompt: tries > 1,
@@ -208,6 +221,9 @@ export class OllamaTranslationProvider implements TranslationProvider {
         const parseError = parseErr instanceof TranslationParseError ? parseErr : null;
         const reason = parseError?.reason ?? "invalid_json";
         const willRetry = isRetriableParseFailure(reason) && tryIndex < maxTries - 1;
+        // Carried into the NEXT try's sampling, so a retry is tuned for the defect it is
+        // correcting rather than by try number alone (see samplingForTry).
+        lastFailure = reason;
         console.warn("[rss-translation] unusable model response", {
           ...diag,
           try: tries,

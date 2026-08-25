@@ -369,10 +369,38 @@ export function estimateTokenCount(text: string): number {
 export const MAX_TRANSLATION_RETRIES = 2;
 
 /**
- * Sampling settings for try `n` (0-based) within one attempt.
+ * The sampling a `protected_token` rejection is retried with — deliberately NOT the
+ * escalating schedule every other defect gets.
+ *
+ * ── Why the escalation is wrong for THIS defect ──────────────────────────────
+ * Ollama's `repeat_penalty` down-weights tokens already present in the recent context
+ * window. In a body carrying placeholders, the tokens `[`, `]` and the digits are, by
+ * construction, the most-repeated tokens in the output: an article with thirty protected
+ * values must emit `[[` thirty times. Raising the penalty to break a decoding loop
+ * therefore SUPPRESSES THE EXACT TOKENS THE RETRY EXISTS TO OBTAIN — the escalation was
+ * tuned for the "със със със …" loop and is actively counter-productive here.
+ *
+ * Temperature is held at 0 for the same reason from the other direction. Copying a
+ * placeholder through is a low-entropy operation whose correct answer is the argmax
+ * token; sampling away from it is what turns `[[23]]` into `[[2]]` or `[[3]]`. The one
+ * argument for raising it — that re-issuing an IDENTICAL prompt at temperature 0
+ * reproduces the same reply — does not apply to this path at all, because
+ * {@link buildTranslationRetryPrompt} has already changed the prompt by naming the
+ * defect. The retry is a correction, not a re-roll, so it does not need noise to differ.
+ *
+ * The penalty is held at the schedule's own BASE value rather than dropped below it:
+ * 1.1 is Ollama's default and the setting the first try — the one that most often
+ * succeeds — already ran under, so this holds behaviour steady instead of trading one
+ * unmeasured setting for another.
+ */
+export const PROTECTED_TOKEN_SAMPLING = { temperature: 0, repeatPenalty: 1.1 } as const;
+
+/**
+ * Sampling settings for try `n` (0-based) within one attempt, given why the PREVIOUS try
+ * was rejected (`null` on the first try, which has no previous).
  *
  * The first try is deterministic (temperature 0) because that produces the most faithful
- * translation. That determinism is exactly why a retry MUST change the sampling: re-issuing an
+ * translation. That determinism is why a retry generally changes the sampling: re-issuing an
  * identical prompt at temperature 0 to the same model reproduces the same bad reply, so a
  * "retry" that varies nothing is guaranteed to fail the same way and only wastes the deadline.
  *
@@ -380,8 +408,16 @@ export const MAX_TRANSLATION_RETRIES = 2;
  * loop ("със със със …"), which is precisely what Ollama's `repeat_penalty` suppresses. Values
  * stay modest: too high a penalty starts blocking legitimately repeated words and degrades the
  * translation.
+ *
+ * `protected_token` is the one defect this schedule makes WORSE rather than better, and it is
+ * routed around the escalation entirely — see {@link PROTECTED_TOKEN_SAMPLING}. Every other
+ * reason keeps the escalating schedule unchanged.
  */
-export function samplingForTry(tryIndex: number): { temperature: number; repeatPenalty: number } {
+export function samplingForTry(
+  tryIndex: number,
+  lastFailure: TranslationParseFailure | null = null
+): { temperature: number; repeatPenalty: number } {
+  if (lastFailure === "protected_token") return { ...PROTECTED_TOKEN_SAMPLING };
   const TEMPERATURES = [0, 0.3, 0.6];
   const PENALTIES = [1.1, 1.2, 1.3];
   const i = Math.min(Math.max(tryIndex, 0), TEMPERATURES.length - 1);

@@ -195,7 +195,6 @@ describe("protectTokens — plain cardinal-number-hyphen-word compounds are pros
       ["Configured as TX-2/B on the panel.", "TX-2/B"],
       ["Firmware v2.14.3 fixes the charging fault.", "v2.14.3"],
       ["The unit is rated P2 for this duty cycle.", "P2"],
-      ["Wired for 230V mains only.", "230V"],
     ] as const) {
       const { values } = protectTokens(source);
       assert.deepEqual(
@@ -315,6 +314,183 @@ describe("protectTokens — plain cardinal-number-hyphen-word compounds are pros
       const emailCase = "Write to service@example.com.The reply comes within a day.";
       assert.equal(normaliseGluedSentenceBoundaries(emailCase), emailCase);
     });
+  });
+});
+
+// ─── Measurements glued to their unit are not identities ──────────────────────
+//
+// The module header has always stated the policy: measurements stay translatable,
+// because the model localises them correctly ("90 Nm … 13 mm" → "90 Нм … 13 мм") and a
+// placeholder freezes English formatting into Bulgarian. `isIdentifier` implemented
+// that only for the SPACED form. English technical writing glues the unit to the
+// number, and once "32GB" is a single token it is indistinguishable by shape from a
+// model code: no lowercase letter, so it matched the all-caps branch, while "2.55GHz"
+// and "7300MB/s" carry internal punctuation and matched the separator branch.
+//
+// The consequence is not merely cosmetic. Restoration is a conjunctive gate — every
+// index must return exactly once — so an article's survival odds fall geometrically
+// with the placeholder count, and a spec-heavy review reaches ~85 of them across the
+// 3000-char body cap. These tests pin the line between a QUANTITY (translatable) and an
+// IDENTITY (protected), in both directions, because moving it the wrong way in either
+// direction is a silent data loss.
+describe("protectTokens — measurements glued to a unit are quantities, not identifiers", () => {
+  const MEASUREMENTS = [
+    // Data size and rate.
+    "32GB",
+    "16GB",
+    "2TB",
+    "512MB",
+    "1.5TB",
+    "7300MB/s",
+    "43.2PB/sec",
+    "10Gbps",
+    // Frequency.
+    "2.55GHz",
+    "5.4GHz",
+    "240Hz",
+    "120Hz",
+    "3200MHz",
+    "60Hz",
+    // Power, energy, electricity.
+    "320W",
+    "90W",
+    "65W",
+    "230V",
+    "5000mAh",
+    "12V",
+    "1.5A",
+    // Temperature.
+    "78C",
+    "95C",
+    "6500K",
+    // Resolution shorthand, length, time, imaging.
+    "4K",
+    "8K",
+    "16mm",
+    "1.6kg",
+    "120fps",
+    "50MP",
+    "7200rpm",
+    "0.5ms",
+  ];
+
+  for (const token of MEASUREMENTS) {
+    it(`leaves "${token}" translatable`, () => {
+      const source = `The unit is rated ${token} in practice.`;
+      const { text, values } = protectTokens(source);
+      assert.equal(text, source, `"${token}" must reach the model untouched`);
+      assert.deepEqual(values, []);
+    });
+  }
+
+  it("leaves a measurement alone in the sentence positions that used to protect it", () => {
+    for (const source of [
+      "32GB of memory ships as standard.",
+      "It ships with 32GB.",
+      "Memory (32GB) is soldered.",
+      "Two sticks, 16GB and 16GB, fill the board.",
+      "Bandwidth reaches 7300MB/s, well past the older part.",
+    ]) {
+      assert.deepEqual(protectTokens(source).values, [], `expected "${source}" untouched`);
+    }
+  });
+
+  it("still protects the product identifiers that sit right beside those measurements", () => {
+    // The whole point of the narrowing: a spec sentence keeps its IDENTITIES protected
+    // while shedding its QUANTITIES, so the values whose loss would be silent are the
+    // only ones the model is asked to carry.
+    const { values } = protectTokens(
+      "The BE173BU pairs a 7700X3D with 32GB of DDR5-6000 at 2.55GHz and 320W."
+    );
+    assert.deepEqual(
+      values.map((v) => v.value),
+      ["BE173BU", "7700X3D", "DDR5-6000"]
+    );
+  });
+
+  it("keeps an identifier that merely ENDS in something unit-shaped", () => {
+    // A closed unit list, anchored to a number that must come FIRST, is what separates
+    // these from "32GB": every one of them either starts with a letter or ends in a
+    // suffix no unit list contains.
+    for (const [source, expected] of [
+      ["The BE173BU is the panel in question.", "BE173BU"],
+      ["Paired with a 7700X3D processor.", "7700X3D"],
+      ["The SN850X is the drive under test.", "SN850X"],
+      ["An X670E board hosts the chip.", "X670E"],
+      ["Memory is DDR5-6000 throughout.", "DDR5-6000"],
+      ["Firmware V1.04 fixed the flicker.", "V1.04"],
+      ["The GDDR6X modules run hot.", "GDDR6X"],
+      ["Rated HDR10 for the panel.", "HDR10"],
+    ] as const) {
+      const { values } = protectTokens(source);
+      assert.deepEqual(
+        values.map((v) => v.value),
+        [expected],
+        `expected "${expected}" to stay protected in "${source}"`
+      );
+    }
+  });
+
+  it("requires the NUMBER to come first — a letter-led token is never a measurement", () => {
+    // "V1.04" is a version, "W3C" is a name; both would be measurements if the unit were
+    // allowed to lead. Only "1.04V" and "3W" are quantities.
+    assert.deepEqual(
+      protectTokens("Firmware V1.04 draws 1.04V at idle.").values.map((v) => v.value),
+      ["V1.04"]
+    );
+  });
+
+  it("requires a KNOWN unit — an unrecognised suffix stays an identifier", () => {
+    for (const token of ["7700X3D", "16U", "3D", "5G", "2B12"]) {
+      const { values } = protectTokens(`Model ${token} is listed.`);
+      assert.equal(values.length, 1, `"${token}" must remain protected`);
+      assert.equal(values[0].value, token);
+    }
+  });
+
+  it("cuts the placeholder count on a real spec-heavy paragraph", () => {
+    // The measured basis of the change: a representative hardware-review paragraph of
+    // the shape TechPowerUp and ServeTheHome publish. Before the narrowing this produced
+    // 22 placeholders — indices past [[20]] in ONE paragraph, and ~85 once extrapolated
+    // across the 3000-char body cap, every one of which the model had to reproduce
+    // exactly once or lose the whole article.
+    const paragraph =
+      "The MSI MEG BE173BU monitor pairs a 4K panel with HDR10 support and a 240Hz " +
+      "refresh rate. Inside our test rig sat a Ryzen 7 7700X3D paired with 32GB of " +
+      "DDR5-6000 memory on an X670E board. Storage came from a 2TB WD_BLACK SN850X " +
+      "NVMe SSD rated at 7300MB/s sequential reads. The GPU was an RTX 4080 Super with " +
+      "16GB GDDR6X running at 2.55GHz boost. Power draw peaked at 320W under load, and " +
+      "the CPU held 5.4GHz on two cores while the package sat at 78C. Firmware V1.04 " +
+      "fixed the flicker we saw at 120Hz on the earlier F0.92 build. See " +
+      "https://example.com/reviews/be173bu for the full charts.";
+
+    const { values } = protectTokens(paragraph);
+
+    // Exact, in order of appearance — pinned in BOTH directions, because the failure this
+    // narrowing fixes and the corruption the module exists to prevent sit on opposite
+    // sides of this one list. Every entry is an IDENTITY whose loss would be silent;
+    // every quantity in the paragraph (4K, 240Hz, 32GB, 2TB, 7300MB/s, 16GB, 2.55GHz,
+    // 320W, 5.4GHz, 78C, 120Hz) is absent and now reaches the model as ordinary text.
+    assert.deepEqual(
+      values.map((v) => v.value),
+      [
+        "BE173BU",
+        "HDR10",
+        "7700X3D",
+        "DDR5-6000",
+        "X670E",
+        "SN850X",
+        "GDDR6X",
+        "V1.04",
+        "F0.92",
+        "https://example.com/reviews/be173bu",
+      ]
+    );
+  });
+
+  it("does not disturb the spaced form, which was already translatable", () => {
+    const source = "Maximum torque is 90 Nm and the chuck is 13 mm keyless.";
+    assert.equal(protectTokens(source).text, source);
   });
 });
 

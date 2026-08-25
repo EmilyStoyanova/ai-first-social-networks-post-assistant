@@ -594,6 +594,11 @@
     "translationCompleted": "Преведена · {lang}",
     "translationPending": "Чака превод",
     "translationFailed": "Неуспешен превод",
+    "retranslate": "Преведи отново този източник",
+    "retranslating": "Добавяне…",
+    "retranslateQueued": "{count} статии от този източник са добавени за повторен превод.",
+    "retranslateQueuedNone": "Няма статии за повторен превод в този източник.",
+    "retranslateError": "Повторният превод на този източник не успя.",
     "translationOriginal": "Оригинал",
     "translationErrorSummary": "Преводът не успя: {error}. Ще опитаме пак автоматично.",
     "classification": {

@@ -195,6 +195,63 @@ describe("OllamaTranslationProvider — protected-token validation", () => {
     assert.equal(result.tries, 1);
   });
 
+  // ─── Reason-aware retry sampling ──────────────────────────────────────────
+  //
+  // The engine's escalating sampling schedule exists to break a decoding loop, and it is
+  // counter-productive for exactly one defect: a dropped or duplicated placeholder.
+  // Ollama's `repeat_penalty` down-weights tokens already in the recent context, and
+  // "[", "]" and the digits ARE the most-repeated tokens in a placeholder-carrying body,
+  // so raising it suppresses what the retry is asking for. These two tests pin that the
+  // provider actually sends the reason-appropriate sampling — samplingForTry's own unit
+  // tests cover the mapping, this covers the wiring.
+  it("retries a protected_token rejection WITHOUT escalating temperature or repeat penalty", async () => {
+    const request = requestFor("DCD-800 review", "The DCD-800 arrives next week.");
+    const llm = llmWithReplies([
+      // Try 1: the placeholder is gone entirely.
+      JSON.stringify({ title: "Преглед", content: "Пристига следващата седмица." }),
+      // Try 2: corrected.
+      JSON.stringify({ title: "Преглед на [[0]]", content: "[[0]] пристига следващата седмица." }),
+    ]);
+
+    const result = await provider(llm).translate(request, contextFor());
+
+    assert.equal(result.tries, 2);
+    assert.equal(llm.calls.length, 2);
+    assert.equal(llm.calls[0].temperature, 0, "try 1 is deterministic, as always");
+    assert.equal(llm.calls[0].repeatPenalty, 1.1);
+    assert.equal(
+      llm.calls[1].temperature,
+      0,
+      "a protected_token retry must NOT sample away from the argmax placeholder token"
+    );
+    assert.equal(
+      llm.calls[1].repeatPenalty,
+      1.1,
+      "a protected_token retry must NOT penalise the bracket/digit tokens it is asking for"
+    );
+  });
+
+  it("still escalates on a repetition rejection — the case the schedule was built for", async () => {
+    const request = requestFor("Ordinary headline", "Just plain prose, nothing to hold out.");
+    assert.equal(request.prompts.contentProtectedValues.length, 0);
+
+    const llm = llmWithReplies([
+      // Try 1: a genuine decoding loop — valid JSON, right language, unusable text.
+      JSON.stringify({ title: "Заглавие", content: "със със със със със със със" }),
+      // Try 2: normal prose.
+      JSON.stringify({
+        title: "Заглавие",
+        content: "Съвсем нормален текст за теста, който е достатъчно дълъг.",
+      }),
+    ]);
+
+    const result = await provider(llm).translate(request, contextFor());
+
+    assert.equal(result.tries, 2);
+    assert.equal(llm.calls[1].temperature, 0.3, "anti-repetition escalation must be untouched");
+    assert.equal(llm.calls[1].repeatPenalty, 1.2);
+  });
+
   it("does not send any placeholder instructions when the source has nothing to protect", async () => {
     const request = requestFor("Ordinary headline", "Just plain prose, nothing to hold out.");
     assert.equal(request.prompts.titleProtectedValues.length, 0);

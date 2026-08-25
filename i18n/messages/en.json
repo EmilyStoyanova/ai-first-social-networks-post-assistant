@@ -594,6 +594,11 @@
     "translationCompleted": "Translated · {lang}",
     "translationPending": "Translation pending",
     "translationFailed": "Translation failed",
+    "retranslate": "Retranslate this source",
+    "retranslating": "Queueing…",
+    "retranslateQueued": "{count} articles from this source were queued for retranslation.",
+    "retranslateQueuedNone": "No articles from this source needed retranslation.",
+    "retranslateError": "This source's articles could not be queued for retranslation.",
     "translationOriginal": "Original",
     "translationErrorSummary": "Translation failed: {error}. It will be retried automatically.",
     "classification": {

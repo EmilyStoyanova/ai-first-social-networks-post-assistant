@@ -180,7 +180,7 @@ export interface RequestReclassificationDeps extends ReclassifyDeps {
  * a non-member is: "you may not touch that source" confirms the source exists,
  * and an id from a URL is guessable in a way a slug behind a login is not.
  */
-async function defaultSourceBelongsToCompany(
+export async function sourceBelongsToCompany(
   companyId: string,
   sourceId: string
 ): Promise<boolean> {
@@ -223,7 +223,7 @@ export async function requestReclassification(
   deps: RequestReclassificationDeps = {}
 ): Promise<RequestReclassificationResult> {
   const resolveAccess = deps.resolveAccess ?? resolveBrandGuidelinesAccess;
-  const belongs = deps.sourceBelongsToCompany ?? defaultSourceBelongsToCompany;
+  const belongs = deps.sourceBelongsToCompany ?? sourceBelongsToCompany;
 
   const access = await resolveAccess(slug, userId, isGlobalAdmin);
   if (!access.ok) return { success: false, code: access.code };

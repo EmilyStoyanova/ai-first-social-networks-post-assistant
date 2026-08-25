@@ -4,6 +4,7 @@ import { MadladTranslationProvider } from "./madlad-translation.provider";
 import { TranslationTransportError } from "./translation-provider";
 import type { ArticleTranslationContext, TranslationProvider } from "./translation-provider";
 import { MAX_REPAIRS_PER_ARTICLE, maxRepairsFor, MIN_REPAIR_BUDGET_MS } from "./segment-repair";
+import { protectTokens } from "./protected-tokens";
 import { TranslationTimeoutError } from "./translation-timeout";
 import { buildTranslationPrompts, TranslationParseError } from "@/lib/ai/feed-item-translation";
 import { GenerationTracer } from "@/lib/generation-trace/tracer";
@@ -606,6 +607,33 @@ describe("MadladTranslationProvider — data-only segments are never sent", () =
     assert.ok(!sent.some((t) => /^\s*(\[\[\d+\]\]\s*)+$/.test(t)));
     const raw = result.raw as Record<string, unknown>;
     assert.equal(raw.bypassedDataOnlySegments, 2);
+  });
+
+  // Regression guard for the coupling between two different questions. The bypass used
+  // to key off "did this segment get protected?", which was a proxy for "is this segment
+  // data?" only for as long as measurements were (wrongly) classified as identifiers.
+  // Narrowing the classifier so "44GB" translates normally inside a sentence must NOT
+  // start sending a segment that is nothing BUT "44GB" to a translation model — see
+  // isDataOnlySegment and stripMeasurements.
+  it("bypasses a measurement-only cell even though it is no longer a PROTECTED value", async () => {
+    stubFetch(translated);
+    const cells = "44GB\n\n43.2PB/sec\n\n300GB/sec\n\n2.55GHz";
+    // The premise: these carry no placeholders at all any more.
+    assert.deepEqual(protectTokens("44GB").values, []);
+    assert.deepEqual(protectTokens("43.2PB/sec").values, []);
+
+    const result = await provider().translate(
+      requestFor("Заглавие на статията", `The rack holds the drives.\n\n${cells}`),
+      contextFor()
+    );
+
+    const raw = result.raw as Record<string, unknown>;
+    assert.equal(raw.bypassedDataOnlySegments, 4, "every spec cell must still be bypassed");
+    const sent = requests.flatMap((r) => bodyTexts(r.body));
+    for (const cell of ["44GB", "43.2PB/sec", "300GB/sec", "2.55GHz"]) {
+      assert.ok(!sent.includes(cell), `"${cell}" must never go on the wire on its own`);
+      assert.ok(result.translatedContent?.includes(cell), `"${cell}" must be stored byte-exact`);
+    }
   });
 
   it("bypasses a segment of several protected values joined by punctuation", async () => {

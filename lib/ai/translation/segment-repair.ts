@@ -1,4 +1,4 @@
-import type { ProtectedText, ProtectedValue } from "./protected-tokens";
+import { stripMeasurements, type ProtectedText, type ProtectedValue } from "./protected-tokens";
 import type { TranslationProvider } from "./translation-provider";
 
 /**
@@ -118,19 +118,30 @@ export function maxRepairsFor(segmentCount: number): number {
  *
  * ── Deliberately conservative ────────────────────────────────────────────────
  * Two conditions, both required:
- *   • the segment carries at least one PROTECTED value — a segment with none has
- *     never had this failure mode, and leaving it alone keeps the change from
- *     touching ordinary prose or bare numbers ("900,000", "Up to 4 TB") at all;
- *   • removing the placeholders leaves NO letter, in any script — so a single word
- *     of prose anywhere in the segment disqualifies it.
+ *   • the segment carries at least one PROTECTED value or one glued MEASUREMENT —
+ *     a segment with neither has never had this failure mode, and leaving it alone
+ *     keeps the change from touching ordinary prose or bare numbers ("900,000",
+ *     "Up to 4 TB") at all;
+ *   • removing the placeholders AND the measurements leaves NO letter, in any script —
+ *     so a single word of prose anywhere in the segment disqualifies it.
  *
- * Bypassed:      "44GB" → "[[0]]"          "[[0]] / [[1]]"        "16U"
- * NOT bypassed:  "The system has [[0]] of SRAM."   "Supports [[0]] networking."
+ * Measurements are counted here even though they are no longer PROTECTED (see
+ * `stripMeasurements` in protected-tokens.ts). The two questions are different: "44GB"
+ * is not an identity that must be held out of the decoder — the model localises it
+ * correctly inside a sentence — but a segment that is nothing BUT "44GB" is a
+ * specification cell with no language in it, and sending it is the round-trip that can
+ * only lose it. Keying the bypass off protection alone silently un-bypassed every
+ * measurement cell the moment the classifier was narrowed.
+ *
+ * Bypassed:      "44GB"    "43.2PB/sec"    "[[0]] / [[1]]"    "16U" → "[[0]]"
+ * NOT bypassed:  "The system has [[0]] of SRAM."   "Supports 44GB networking."
  *                "WSE-3 Turbo" → "[[0]] Turbo"     "Model [[0]] improves speed."
  */
 export function isDataOnlySegment(protectedText: ProtectedText): boolean {
-  if (protectedText.values.length === 0) return false;
-  return !ANY_LETTER.test(protectedText.text.replace(PLACEHOLDER_PATTERN, ""));
+  const withoutPlaceholders = protectedText.text.replace(PLACEHOLDER_PATTERN, "");
+  const { text: withoutMeasurements, removed } = stripMeasurements(withoutPlaceholders);
+  if (protectedText.values.length === 0 && removed === 0) return false;
+  return !ANY_LETTER.test(withoutMeasurements);
 }
 
 /** Mirrors `protected-tokens.ts`'s placeholder syntax — kept in step with it. */

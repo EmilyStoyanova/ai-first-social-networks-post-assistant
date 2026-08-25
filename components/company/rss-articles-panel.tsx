@@ -15,6 +15,12 @@ import {
   type FeedItemClassificationFilter,
   type FeedItemClassificationState,
 } from "@/lib/posts/feed-item-classification-filter";
+import {
+  isSourceQueueActionDisabled,
+  queuedMessageFor,
+  sourceQueueActionEndpoint,
+  type SourceQueueAction,
+} from "@/lib/posts/source-queue-action";
 import { formatDate as formatSharedDate } from "@/lib/i18n/format-date";
 
 interface Props {
@@ -311,8 +317,15 @@ export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
   const [counts, setCounts] = useState<FeedItemClassificationCounts | null>(null);
   const [filter, setFilter] = useState<FeedItemClassificationFilter>("all");
   const [loadError, setLoadError] = useState("");
-  const [reclassifying, setReclassifying] = useState(false);
-  const [reclassified, setReclassified] = useState<number | null>(null);
+  /**
+   * Which requeue action is in flight, or null. ONE piece of state for both buttons
+   * rather than a boolean each: they act on overlapping rows, so "is anything
+   * running" is the question both controls need answered — see
+   * isSourceQueueActionDisabled.
+   */
+  const [running, setRunning] = useState<SourceQueueAction | null>(null);
+  /** The action that last reported back, and how many rows it reopened. */
+  const [queued, setQueued] = useState<{ action: SourceQueueAction; count: number } | null>(null);
 
   /**
    * Always refetches. The filter is applied by the SERVER over the whole source,
@@ -357,28 +370,31 @@ export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
   }
 
   /**
-   * Queues the EXISTING classification drain — no LLM call happens in this
-   * request. Scoped to THIS source, which is the source the button sits inside:
-   * the number it reports back has to be checkable against the list below it.
-   * The list is reloaded so a verdict that has already settled shows up;
-   * anything still queued appears on the next open.
+   * Queues one of the EXISTING drains — no LLM call happens in this request.
+   * Scoped to THIS source, which is the source the button sits inside: the number
+   * it reports back has to be checkable against the list below it. The list is
+   * reloaded so anything that has already settled shows up; work still queued
+   * appears on the next open.
+   *
+   * One handler for both actions, because they differ only in their endpoint and
+   * their messages — see lib/posts/source-queue-action.ts.
    */
-  async function handleReclassify() {
-    setReclassifying(true);
-    setReclassified(null);
+  async function handleQueueAction(action: SourceQueueAction) {
+    setRunning(action);
+    setQueued(null);
     setLoadError("");
     try {
-      const res = await fetch(`/api/v1/companies/${slug}/content-sources/${sourceId}/reclassify`, {
+      const res = await fetch(sourceQueueActionEndpoint(slug, sourceId, action), {
         method: "POST",
       });
       if (!res.ok) throw new Error();
       const json = (await res.json()) as { data: { reopened: number } };
-      setReclassified(json.data.reopened);
+      setQueued({ action, count: json.data.reopened });
       await load(filter);
     } catch {
-      setLoadError(tc("reclassifyError"));
+      setLoadError(action === "reclassify" ? tc("reclassifyError") : t("retranslateError"));
     } finally {
-      setReclassifying(false);
+      setRunning(null);
     }
   }
 
@@ -431,26 +447,39 @@ export function RssArticlesPanel({ slug, sourceId, canManage }: Props) {
               ))}
 
               {canManage && (
-                <button
-                  type="button"
-                  onClick={handleReclassify}
-                  disabled={reclassifying || loading}
-                  className="text-micro text-fg-muted hover:text-fg ml-auto font-medium underline-offset-2 transition-colors hover:underline disabled:opacity-50"
-                >
-                  {reclassifying ? tc("reclassifying") : tc("reclassify")}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => handleQueueAction("reclassify")}
+                    disabled={isSourceQueueActionDisabled({ running, loading }, "reclassify")}
+                    className="text-micro text-fg-muted hover:text-fg ml-auto font-medium underline-offset-2 transition-colors hover:underline disabled:opacity-50"
+                  >
+                    {running === "reclassify" ? tc("reclassifying") : tc("reclassify")}
+                  </button>
+                  {/* Beside reclassify rather than under its own heading: both act
+                      on this source's articles and both only QUEUE work, so they
+                      belong to the same control group. */}
+                  <button
+                    type="button"
+                    onClick={() => handleQueueAction("retranslate")}
+                    disabled={isSourceQueueActionDisabled({ running, loading }, "retranslate")}
+                    className="text-micro text-fg-muted hover:text-fg font-medium underline-offset-2 transition-colors hover:underline disabled:opacity-50"
+                  >
+                    {running === "retranslate" ? t("retranslating") : t("retranslate")}
+                  </button>
+                </>
               )}
             </div>
           )}
 
-          {/* Both messages name THIS source, because the action did. "0 queued"
+          {/* Every message names THIS source, because the action did. "0 queued"
               on its own reads like a failure, when it usually means the source
               was already up to date. */}
-          {reclassified !== null && (
+          {queued !== null && (
             <Alert variant="success" className="mb-3">
-              {reclassified === 0
-                ? tc("reclassifyQueuedNone")
-                : tc("reclassifyQueued", { count: reclassified })}
+              {queued.action === "reclassify"
+                ? tc(queuedMessageFor("reclassify", queued.count), { count: queued.count })
+                : t(queuedMessageFor("retranslate", queued.count), { count: queued.count })}
             </Alert>
           )}
 

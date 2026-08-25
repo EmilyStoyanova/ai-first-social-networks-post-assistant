@@ -113,11 +113,190 @@ const EMAIL = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
  * a bare cardinal followed by "-" and a lowercase word is the same shape and the same
  * failure. This does not broaden which genuine identifiers get excluded — every real
  * model code / SKU / version string measured (`DCD-800`, `TX-2/B`, `v2.14.3`, `P2`,
- * `230V`) either does not start with a digit, uses a separator other than "-", or ends in
- * uppercase/mixed-case rather than a plain lowercase word, so none of them match this
- * shape.
+ * `BE173BU`) either does not start with a digit, uses a separator other than "-", or ends
+ * in uppercase/mixed-case rather than a plain lowercase word, so none of them match this
+ * shape. (`230V` was listed here as a fifth example until the measurement exclusion below
+ * reclassified it as what it is — a voltage, not an identity.)
  */
 const NUMBER_HYPHEN_WORD_COMPOUND = /^\d+(?:st|nd|rd|th|s)?-[a-z]+$/;
+
+/**
+ * A quantity written GLUED to its unit — "32GB", "2.55GHz", "320W", "240Hz", "78C",
+ * "7300MB/s", "4K".
+ *
+ * ── Why this exclusion exists ────────────────────────────────────────────────
+ * The header above states this module's policy plainly: measurements are left
+ * translatable, because the model renders them CORRECTLY and localises them the way
+ * Bulgarian actually writes them ("90 Nm … 13 mm" → "90 Нм … 13 мм"), and freezing one
+ * behind a placeholder forces English formatting into Bulgarian text. `isIdentifier`
+ * below did not implement that policy for the glued form, and could not have: English
+ * technical writing omits the space Bulgarian keeps, and once "32GB" is one token it is
+ * indistinguishable BY SHAPE from a model code — it has no lowercase letter, so it
+ * matched the all-caps branch, while "2.55GHz" and "7300MB/s" carry internal
+ * punctuation and matched the separator branch. The policy was right; only the spaced
+ * form was ever covered by it.
+ *
+ * ── Why it matters beyond formatting ────────────────────────────────────────
+ * Restoration is a CONJUNCTIVE gate: `restoreTokens` requires every index to come back
+ * exactly once, so an article's chance of surviving falls geometrically with the number
+ * of placeholders in it. Measured over a representative 780-character hardware review
+ * (the shape TechPowerUp and ServeTheHome publish constantly), the classifier produced
+ * 22 protected values — one per 6.2 words, extrapolating to ~85 across the 3000-char
+ * body cap, and reaching indices like [[23]] and [[30]] that the model must then track
+ * and reproduce individually. Ten of those 22 were measurements, not identities:
+ *
+ *   4K  32GB  2TB  7300MB/s  16GB  2.55GHz  320W  5.4GHz  78C  90W
+ *
+ * Excluding them cut that article from 22 placeholders to 12, and two other real article
+ * shapes from 12 to 4 and from 8 to 3 — a 45-67% reduction across the three, without
+ * giving up one value whose loss would be silent. (The band is wide because it depends
+ * on how spec-dense the prose is; the denser the article, the more this removes, which
+ * is the right direction — density is what made these articles fail.)
+ *
+ * ── The bound ────────────────────────────────────────────────────────────────
+ * A CLOSED unit list, never an open "letters after digits" shape — that is what keeps
+ * "7700X3D", "SN850X" and "X670E" protected while "7300MB/s" is not. The number must
+ * come FIRST, so anything beginning with a letter ("V1.04", "DDR5-6000", "P2") is
+ * untouched by this and keeps whatever the branches below decide. Single-character
+ * units are matched case-SENSITIVELY, because a case-insensitive single letter would
+ * start swallowing short model codes; multi-character units are matched
+ * case-insensitively, where no such ambiguity exists.
+ */
+const MEASUREMENT_SHAPE =
+  /^\d+(?:[.,]\d+)?(?:[-–]\d+(?:[.,]\d+)?)?([A-Za-zµ]+)(?:\/([A-Za-zµ]+))?$/;
+
+/** Units of one character. Exact case: "5A" is amperes, "5a" is not how anyone writes it. */
+const SINGLE_CHAR_UNITS = new Set(["W", "V", "A", "C", "F", "K", "m", "g", "s", "h"]);
+
+/** Units of two or more characters, compared lowercased — "GHz", "ghz" and "GHZ" are one unit. */
+const MULTI_CHAR_UNITS = new Set([
+  // Data size and rate.
+  "kb",
+  "mb",
+  "gb",
+  "tb",
+  "pb",
+  "eb",
+  "kib",
+  "mib",
+  "gib",
+  "tib",
+  "kbit",
+  "mbit",
+  "gbit",
+  "bps",
+  "kbps",
+  "mbps",
+  "gbps",
+  "tbps",
+  // Frequency.
+  "hz",
+  "khz",
+  "mhz",
+  "ghz",
+  "thz",
+  // Power, energy, electricity.
+  "mw",
+  "kw",
+  "mwh",
+  "wh",
+  "kwh",
+  "mah",
+  "mv",
+  "kv",
+  "ma",
+  // Length and mass.
+  "nm",
+  "µm",
+  "um",
+  "mm",
+  "cm",
+  "km",
+  "mg",
+  "kg",
+  "lb",
+  "oz",
+  "ft",
+  "in",
+  // Time.
+  "ms",
+  "us",
+  "ns",
+  "sec",
+  "min",
+  "hr",
+  // Display, imaging, motion.
+  "fps",
+  "dpi",
+  "ppi",
+  "nits",
+  "cd",
+  "lm",
+  "db",
+  "px",
+  "mp",
+  "rpm",
+  // Pressure and torque. ("nm" is already listed above for nanometres; newton-metres
+  // share the spelling once lowercased, and both readings are a measurement anyway.)
+  "bar",
+  "psi",
+  "pa",
+  "kpa",
+]);
+
+function isUnit(unit: string): boolean {
+  if (SINGLE_CHAR_UNITS.has(unit)) return true;
+  return MULTI_CHAR_UNITS.has(unit.toLowerCase());
+}
+
+/** Whether a token is a number glued to a known unit, optionally over a second one. */
+function isMeasurement(token: string): boolean {
+  const shape = MEASUREMENT_SHAPE.exec(token);
+  if (shape === null) return false;
+  const [, unit, perUnit] = shape;
+  return isUnit(unit) && (perUnit === undefined || isUnit(perUnit));
+}
+
+/**
+ * The same text with every glued measurement token removed, and how many were.
+ *
+ * Exists for `isDataOnlySegment` (segment-repair.ts), which asks a DIFFERENT question
+ * from this module's own: not "must this value be held out of the decoder?" but "is
+ * this segment language at all?". A flattened specification cell — "44GB",
+ * "43.2PB/sec" — is data either way, and it stopped being a PROTECTED value the moment
+ * measurements were excluded from `isIdentifier` above. Without this the bypass would
+ * have silently narrowed to the cells that still happen to be identifiers, sending the
+ * measurement cells back to a model that has no language to translate in them — undoing
+ * a fix measured at 23 of 33 restoration failures on one real article.
+ *
+ * Walks the SAME whitespace tokens with the SAME punctuation stripping as
+ * `protectTokens`, so "measurement" means one thing across this module.
+ */
+export function stripMeasurements(text: string): { text: string; removed: number } {
+  let out = "";
+  let cursor = 0;
+  let removed = 0;
+
+  const token = /\S+/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = token.exec(text)) !== null) {
+    const raw = match[0];
+    const lead = LEADING.exec(raw)?.[0] ?? "";
+    const withoutLead = raw.slice(lead.length);
+    const trail = TRAILING.exec(withoutLead)?.[0] ?? "";
+    const core = withoutLead.slice(0, withoutLead.length - trail.length);
+    if (core.length === 0 || !isMeasurement(core)) continue;
+
+    const start = match.index + lead.length;
+    out += text.slice(cursor, start);
+    cursor = start + core.length;
+    removed += 1;
+  }
+
+  out += text.slice(cursor);
+  return { text: out, removed };
+}
 
 /**
  * Whether a token is a product/model/version identifier rather than a word.
@@ -125,18 +304,19 @@ const NUMBER_HYPHEN_WORD_COMPOUND = /^\d+(?:st|nd|rd|th|s)?-[a-z]+$/;
  * Narrow on purpose. It requires BOTH a letter and a digit, and then one of two shapes
  * that ordinary prose does not have:
  *   • internal punctuation joining alphanumerics — "DCD-800", "v2.14.3", "TX-2/B";
- *   • no lowercase letters at all — "P2", "3D", "B12", "230V".
+ *   • no lowercase letters at all — "P2", "3D", "B12".
  *
  * That admits model codes, SKUs and version strings while leaving "5kg", "12mm" and
  * "1.6" alone — which matters, because those are exactly the tokens the model gets
  * RIGHT and localises, and freezing them would be a regression. The number-hyphen-word
- * exclusion above is carved out of the internal-punctuation shape for the same reason.
+ * and measurement exclusions above are carved out of those shapes for the same reason.
  */
 function isIdentifier(token: string): boolean {
   if (token.length < 2) return false;
   if (!/[A-Za-z]/.test(token)) return false;
   if (!/\d/.test(token)) return false;
   if (NUMBER_HYPHEN_WORD_COMPOUND.test(token)) return false;
+  if (isMeasurement(token)) return false;
   if (/^[A-Za-z0-9]+[-._/][A-Za-z0-9]+(?:[-._/][A-Za-z0-9]+)*$/.test(token)) return true;
   return !/[a-z]/.test(token) && /^[A-Z0-9]+$/.test(token);
 }

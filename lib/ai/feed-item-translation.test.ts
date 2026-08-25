@@ -756,6 +756,76 @@ describe("samplingForTry", () => {
     assert.deepEqual(samplingForTry(99), samplingForTry(2));
     assert.deepEqual(samplingForTry(-1), samplingForTry(0));
   });
+
+  // ─── Reason-aware retry sampling ────────────────────────────────────────────
+  //
+  // The escalating schedule above is right for a decoding loop and WRONG for a dropped
+  // placeholder, in the same mechanism: Ollama's `repeat_penalty` down-weights tokens
+  // already in the recent context, and in a body carrying placeholders the tokens "[",
+  // "]" and the digits are by construction the most-repeated tokens in the output. An
+  // article with thirty protected values must emit "[[" thirty times, so raising the
+  // penalty to break a loop suppresses precisely the tokens the retry exists to obtain.
+  // Temperature is the same story from the other side: copying a placeholder through is
+  // a low-entropy operation whose right answer is the argmax token, and sampling away
+  // from it is what turns [[23]] into [[2]].
+  describe("protected_token retries are routed around the escalation", () => {
+    it("never raises the repeat penalty above the base for a protected_token retry", () => {
+      const penalties = [0, 1, 2].map((i) => samplingForTry(i, "protected_token").repeatPenalty);
+      assert.deepEqual(penalties, [1.1, 1.1, 1.1]);
+      assert.equal(
+        penalties[0],
+        samplingForTry(0).repeatPenalty,
+        "held at the schedule's own base — Ollama's default, and what try 1 already ran under"
+      );
+    });
+
+    it("keeps the temperature deterministic for a protected_token retry", () => {
+      const temps = [0, 1, 2].map((i) => samplingForTry(i, "protected_token").temperature);
+      assert.deepEqual(temps, [0, 0, 0]);
+    });
+
+    it("is safe to hold at temperature 0 because the retry PROMPT differs", () => {
+      // The one argument for raising temperature is that an identical prompt at
+      // temperature 0 reproduces an identical reply. That does not apply here: the retry
+      // carries a correction naming the defect, so the request has already changed.
+      const base = "Title: [[0]]\nContent: [[0]] ships now.";
+      const retry = buildTranslationRetryPrompt(base, {
+        reason: "protected_token",
+        feedback: "Your translation did not reproduce the placeholders exactly.",
+      });
+      assert.notEqual(retry, base);
+      assert.match(retry, /placeholder/i);
+    });
+
+    it("leaves every OTHER failure reason on the escalating schedule", () => {
+      for (const reason of [
+        "repetition",
+        "invalid_json",
+        "wrong_language",
+        "schema_validation",
+        "empty_translation",
+      ] as const) {
+        assert.deepEqual(
+          [0, 1, 2].map((i) => samplingForTry(i, reason)),
+          [0, 1, 2].map((i) => samplingForTry(i)),
+          `"${reason}" must keep the unchanged schedule`
+        );
+      }
+    });
+
+    it("still climbs the penalty for a genuine repetition loop — the case it was built for", () => {
+      const penalties = [0, 1, 2].map((i) => samplingForTry(i, "repetition").repeatPenalty);
+      assert.ok(
+        penalties.every((p, i) => i === 0 || p > penalties[i - 1]),
+        "anti-repetition behaviour must be untouched"
+      );
+    });
+
+    it("defaults to the escalating schedule when no reason is given", () => {
+      assert.deepEqual(samplingForTry(1, null), samplingForTry(1));
+      assert.deepEqual(samplingForTry(1), { temperature: 0.3, repeatPenalty: 1.2 });
+    });
+  });
 });
 
 describe("retry + timeout budgets", () => {
