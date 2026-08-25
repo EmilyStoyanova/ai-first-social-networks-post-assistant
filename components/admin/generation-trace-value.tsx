@@ -85,10 +85,14 @@ function LongText({ value, json = false }: { value: string; json?: boolean }) {
   const t = useTranslations("generationTrace");
   const [expanded, setExpanded] = useState(false);
   const lines = value.split("\n").length;
-  // Clamped rather than paginated: the point is to see the shape at a glance and
-  // open the ones that matter, and a scroll box inside a scrolling modal is a
-  // trap for a mouse wheel.
+  // Collapsed by default: the point is to see the shape at a glance and open the
+  // ones that matter.
   const needsClamp = lines > 14 || value.length > 1400;
+  // Expanding reveals the value IN FULL, but inside its own scroll box rather
+  // than by growing without limit. A full translated article is several thousand
+  // words, and letting one field push every step below it off the end of the
+  // modal costs more than the mouse-wheel ambiguity a nested scroller creates.
+  const expandedHeightClass = "max-h-[32rem] overflow-y-auto";
 
   return (
     <div className="min-w-0">
@@ -100,7 +104,7 @@ function LongText({ value, json = false }: { value: string; json?: boolean }) {
         className={[
           "rounded-control border-border bg-surface-subtle text-fg overflow-x-auto border p-2.5 text-xs",
           "font-mono break-words whitespace-pre-wrap",
-          needsClamp && !expanded ? "max-h-64 overflow-y-hidden" : "",
+          needsClamp ? (expanded ? expandedHeightClass : "max-h-64 overflow-y-hidden") : "",
         ]
           .filter(Boolean)
           .join(" ")}

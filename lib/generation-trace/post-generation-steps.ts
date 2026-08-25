@@ -364,7 +364,15 @@ export function recordFeedItemArtifactSteps(
         // other, and only this one is about the post.
         usedByThisPost: item.usedTranslation === true,
         translatedTitleUsed: item.usedTranslation ? item.title : null,
-        translatedExcerpt: item.usedTranslation ? excerpt(item.content) : null,
+        // The FULL translated text, not a preview. This is the exact copy the
+        // prompt was built from, and the question an admin opens this step to
+        // answer — "is the translation any good?" — cannot be answered from the
+        // first 600 characters. Unlike the extraction step above, there is no
+        // second copy of it anywhere in the trace to defer to: the linked
+        // translation run holds the provider's raw reply, not the stored text.
+        // Secrets are redacted and a 40k safety cap applied by sanitizeForTrace
+        // on the way to the database, the same as for any prompt.
+        translatedContent: item.usedTranslation ? (item.content ?? null) : null,
       },
       metadata: {
         linkedRunAvailable: artifacts.runIds.translation !== null,

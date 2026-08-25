@@ -519,6 +519,98 @@ describe("generation trace — only the steps that occurred", () => {
     assert.equal(h.steps("extraction").length, 0);
   });
 
+  // ── The translated text is stored in full ──────────────────────────────────
+  // It used to be cut to a 600-character preview with a trailing "…", which made
+  // the step useless for the one question it exists to answer: is the
+  // translation any good? There is no second copy of the stored translation
+  // anywhere in the trace to fall back on — the linked translation run holds the
+  // provider's raw reply, not this text.
+
+  /** Comfortably past the old 600-char preview limit. */
+  const LONG_TRANSLATION = Array.from(
+    { length: 40 },
+    (_, i) => `Изречение номер ${i + 1} от преведената статия за нови смесители.`
+  ).join(" ");
+
+  function translatedHarness() {
+    return makeHarness({
+      depsOverride: {
+        loadFeedItemArtifacts: async () => ({
+          translation: {
+            status: "completed",
+            language: "bg",
+            provider: "GROQ",
+            model: "llama",
+            translatedAt: new Date("2026-02-28T09:00:00.000Z"),
+            error: null,
+            titleChars: 40,
+            contentChars: LONG_TRANSLATION.length,
+          },
+          classification: null,
+          extraction: null,
+          runIds: { translation: "run-translation-1", classification: null, extraction: null },
+        }),
+      },
+    });
+  }
+
+  function translatedContext(usedTranslation: boolean) {
+    return makeContext({
+      hasArticleSources: true,
+      feedItems: [
+        {
+          id: "item-1",
+          title: "Нова серия смесители",
+          content: LONG_TRANSLATION,
+          url: "https://example.com/a",
+          publishedAt: new Date("2026-02-27T00:00:00.000Z"),
+          sourceType: "rss",
+          sourceName: "Design Weekly",
+          usedTranslation,
+        },
+      ],
+    });
+  }
+
+  it("stores the translated text in full, with no truncation and no trailing ellipsis", async () => {
+    const h = translatedHarness();
+    await generatePostFromContext(translatedContext(true), "company-1", {}, h.deps);
+
+    const output = h.steps("translation")[0].output as { translatedContent: string };
+
+    // Guards the fixture itself: a short article would pass trivially.
+    assert.ok(
+      LONG_TRANSLATION.length > 600,
+      `fixture must exceed the old 600-char limit, was ${LONG_TRANSLATION.length}`
+    );
+    assert.equal(output.translatedContent, LONG_TRANSLATION, "the whole translation is stored");
+    assert.equal(output.translatedContent.length, LONG_TRANSLATION.length);
+    assert.ok(!output.translatedContent.endsWith("…"), "must not be an elided preview");
+  });
+
+  it("names the field translatedContent — the admin trace labels it 'Translated Content'", async () => {
+    // The UI derives its label mechanically from the key (see humanizeKey in
+    // components/admin/generation-trace-value.tsx), so the key IS the label.
+    const h = translatedHarness();
+    await generatePostFromContext(translatedContext(true), "company-1", {}, h.deps);
+
+    const output = h.steps("translation")[0].output as Record<string, unknown>;
+    assert.ok("translatedContent" in output);
+    assert.ok(!("translatedExcerpt" in output), "the excerpt field is gone, not merely renamed");
+  });
+
+  it("leaves translatedContent null when the post was built from the original text", async () => {
+    const h = translatedHarness();
+    await generatePostFromContext(translatedContext(false), "company-1", {}, h.deps);
+
+    const output = h.steps("translation")[0].output as {
+      translatedContent: string | null;
+      usedByThisPost: boolean;
+    };
+    assert.equal(output.usedByThisPost, false);
+    assert.equal(output.translatedContent, null);
+  });
+
   it("an image suppressed by the channel setting is recorded as skipped, with the reason", async () => {
     const h = makeHarness();
     await generatePostFromContext(makeContext(), "company-1", {}, h.deps);
