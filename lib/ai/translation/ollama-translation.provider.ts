@@ -1,9 +1,11 @@
 import type { ILlmProvider } from "@/lib/ai/types";
 import {
+  buildContentChunkPrompt,
   buildTranslationPrompts,
   buildTranslationRetryPrompt,
   isRetriableParseFailure,
   parseTranslationResponse,
+  sanitiseTranslationContent,
   samplingForTry,
   shrinkTranslationContentBudget,
   TranslationParseError,
@@ -20,8 +22,15 @@ import type {
   ArticleTranslationRequest,
   TranslationProvider,
 } from "./translation-provider";
+import { TranslationPartialProgressError } from "./translation-provider";
 import { TranslationTimeoutError, withTranslationTimeout } from "./translation-timeout";
-import { restoreTokens, type ProtectedValue } from "./protected-tokens";
+import { protectTokens, restoreTokens, type ProtectedValue } from "./protected-tokens";
+import { isDataOnlySegment } from "./segment-repair";
+import {
+  chunkArticleForTranslation,
+  reassembleChunkedTranslation,
+  OLLAMA_CHUNK_MAX_CHARS,
+} from "./ollama-chunking";
 
 /**
  * The prompt-based translation engine — the one this pipeline has always used.
@@ -38,6 +47,25 @@ import { restoreTokens, type ProtectedValue } from "./protected-tokens";
  * `TEXT_WORKER_MODEL` for every text-worker call, or `TRANSLATION_OLLAMA_MODEL` to
  * override it for translation alone (see translation-provider-config.ts) — never
  * assumed or hardcoded here.
+ *
+ * ── Two paths, chosen by size ─────────────────────────────────────────────────
+ * `buildTranslationPrompts` sends the whole article in ONE JSON call and, to keep
+ * that call inside the worker's latency budget, caps the body at
+ * {@link MAX_TRANSLATION_CONTENT_CHARS} (3000) — see that constant's own comment.
+ * Anything under the cap is unaffected by it and keeps running the ORIGINAL,
+ * UNCHANGED single-call loop below exactly as it always has.
+ *
+ * An article whose sanitised body EXCEEDS that cap used to simply lose everything
+ * past it — the truncation this file exists to remove. Such an article is now
+ * routed to `translateChunked` instead: the body is split into several
+ * ~2500–3000-char chunks (see ollama-chunking.ts), each chunk gets its own
+ * `{"content": "..."}` call with its OWN protected-token placeholders and its OWN
+ * retry cycle, and the results are stitched back into one article. The routing
+ * decision is made HERE, inside the engine, exactly as MADLAD already decides its
+ * own segmentation internally — `translate-feed-item.service.ts` builds
+ * `request.prompts` the same way for every engine and neither engine is obliged to
+ * use it; MADLAD has always ignored it in favour of `request.title`/`request.content`,
+ * and the chunked path below does the same.
  */
 export class OllamaTranslationProvider implements TranslationProvider {
   readonly kind = "ollama" as const;
@@ -51,6 +79,29 @@ export class OllamaTranslationProvider implements TranslationProvider {
   ) {}
 
   async translate(
+    request: ArticleTranslationRequest,
+    context: ArticleTranslationContext
+  ): Promise<ArticleTranslation> {
+    // Chunking applies to a "full" article body only — title_only mode has no body
+    // to chunk (the source classified it that way BEFORE this engine ever saw it;
+    // see classifyTranslationInput), and a title is never remotely close to the cap.
+    if (request.mode === "full") {
+      const cleanContent = sanitiseTranslationContent(request.content);
+      if ((cleanContent?.length ?? 0) > OLLAMA_CHUNK_MAX_CHARS) {
+        return this.translateChunked(request, context);
+      }
+    }
+    return this.translateSingleCall(request, context);
+  }
+
+  /**
+   * The ORIGINAL single-call path, untouched: the whole title+body in one JSON
+   * reply, `request.prompts` exactly as the caller built it, the same regeneration
+   * loop, sampling schedule, truncation shrink, trace steps and log lines this
+   * pipeline has always run. Used for every article that already fits under
+   * {@link MAX_TRANSLATION_CONTENT_CHARS}, and for every title_only item.
+   */
+  private async translateSingleCall(
     request: ArticleTranslationRequest,
     context: ArticleTranslationContext
   ): Promise<ArticleTranslation> {
@@ -312,4 +363,434 @@ export class OllamaTranslationProvider implements TranslationProvider {
       raw: lastResponseRaw,
     };
   }
+
+  /**
+   * Translates a large article by splitting its body into ~2500–3000-char chunks
+   * (see ollama-chunking.ts) and translating each — plus the title, as its own tiny
+   * call — independently, with its own protected-token placeholders and its own
+   * retry cycle. Reuses `request.title`/`request.content` directly rather than
+   * `request.prompts`, exactly as MADLAD already does, because the caller's prompt
+   * was built for the single-call path and is capped accordingly.
+   *
+   * ── Resumable, unit by unit ──────────────────────────────────────────────────
+   * `context.resumeSegments` is read (and `banked` grown from it) exactly as MADLAD
+   * already reads it for its own segments — the SAME field, the SAME shape, keyed
+   * here by `"title"` or a chunk's index. A unit already present in `banked` is
+   * never re-sent: this is what makes a failure partway through an article cost
+   * only the units after the failure, both within one call (a later unit can still
+   * run out of item budget and stop cleanly) and across cross-run attempts (the
+   * next claim resumes from `translationProgress` and skips every unit this call
+   * already finished).
+   */
+  private async translateChunked(
+    request: ArticleTranslationRequest,
+    context: ArticleTranslationContext
+  ): Promise<ArticleTranslation> {
+    const { tracer, now } = context;
+    const targetLang = request.targetLang;
+
+    const chunked = chunkArticleForTranslation(request.title, request.content, {});
+    const totalUnits = (chunked.title !== null ? 1 : 0) + chunked.chunks.length;
+    const resumed = context.resumeSegments ?? {};
+    const banked: Record<string, string> = { ...resumed };
+
+    console.info("[rss-translation] article split into chunks for translation", {
+      feedItemId: request.feedItemId,
+      engine: "ollama",
+      originalChars: chunked.contentChars,
+      hasTitle: chunked.title !== null,
+      chunkCount: chunked.chunks.length,
+      chunkSizes: chunked.chunks.map((c) => c.text.length),
+      resumedUnits: Object.keys(resumed).length,
+      totalUnits,
+    });
+
+    tracer.step({
+      type: "prompt",
+      label: `Article split into ${chunked.chunks.length} chunk${chunked.chunks.length === 1 ? "" : "s"} for translation`,
+      input: {
+        title: chunked.title,
+        chunks: chunked.chunks.map((c) => c.text),
+      },
+      metadata: {
+        engine: "ollama",
+        originalChars: chunked.contentChars,
+        hasTitle: chunked.title !== null,
+        chunkCount: chunked.chunks.length,
+        chunkSizes: chunked.chunks.map((c) => c.text.length),
+        resumedUnits: Object.keys(resumed).length,
+        totalUnits,
+      },
+    });
+
+    // One ATTEMPT, however many model calls it takes — see modelCalls below, and
+    // MADLAD's own reportTry(1) for the same reasoning: the cross-run attempt is
+    // tracked by the caller, this reports the ONE claim's worth of work.
+    context.reportTry?.(1);
+
+    let modelCalls = 0;
+    let anyUsedRepair = false;
+    const allRepairs: JsonRepair[] = [];
+    let lastResponseRaw: unknown;
+
+    /** Wraps one unit: resume, bypass, or translate — and bank the result. */
+    const runUnit = async (
+      key: string,
+      label: string,
+      sourceText: string,
+      build: () => UnitPrompt
+    ): Promise<void> => {
+      if (key in banked) {
+        console.info("[rss-translation] chunk already translated — resuming", {
+          feedItemId: request.feedItemId,
+          unit: label,
+        });
+        return;
+      }
+
+      const remainingMs = context.itemDeadlineMs - now().getTime();
+      if (remainingMs <= 0) {
+        throw new TranslationPartialProgressError(
+          `Ran out of item budget before translating ${label}.`,
+          banked,
+          Object.keys(banked).length,
+          totalUnits
+        );
+      }
+
+      // Reused, not reimplemented: the SAME bypass MADLAD uses for a spec-table
+      // cell — a chunk carrying nothing but protected values has no language in
+      // it at all, and sending it can only mangle the placeholders. Bypassed
+      // units cost no retry, no attempt, and no model call.
+      const protection = protectTokens(sourceText);
+      if (isDataOnlySegment(protection)) {
+        console.info("[rss-translation] chunk bypassed — nothing but protected data", {
+          feedItemId: request.feedItemId,
+          unit: label,
+          protectedTokens: protection.values.length,
+        });
+        banked[key] = sourceText;
+        return;
+      }
+
+      const built = build();
+      let outcome: UnitOutcome;
+      try {
+        outcome = await this.translateUnit(
+          built.systemPrompt,
+          built.userPrompt,
+          built.schema,
+          built.mode,
+          built.protectedValues,
+          targetLang,
+          context,
+          request,
+          label
+        );
+      } catch (err) {
+        // Retries exhausted for THIS unit (or the item's own deadline was crossed
+        // mid-retry) — everything banked so far, INCLUDING every earlier unit in
+        // this same call, survives; only this unit and whatever follows it is left
+        // for a later attempt. See TranslationPartialProgressError's own comment.
+        if (err instanceof TranslationTimeoutError) {
+          throw new TranslationPartialProgressError(
+            `Ran out of item budget translating ${label}.`,
+            banked,
+            Object.keys(banked).length,
+            totalUnits
+          );
+        }
+        throw new TranslationPartialProgressError(
+          `Could not translate ${label} after ${MAX_TRANSLATION_RETRIES + 1} tries: ` +
+            `${err instanceof Error ? err.message : String(err)}`,
+          banked,
+          Object.keys(banked).length,
+          totalUnits
+        );
+      }
+
+      banked[key] = outcome.text;
+      modelCalls += outcome.tries;
+      if (outcome.usedRepair) anyUsedRepair = true;
+      allRepairs.push(...outcome.repairs);
+      lastResponseRaw = outcome.raw;
+
+      console.info("[rss-translation] chunk translated", {
+        feedItemId: request.feedItemId,
+        unit: label,
+        tries: outcome.tries,
+        protectedTokens: built.protectedValues.length,
+        translatedChars: outcome.text.length,
+      });
+    };
+
+    if (chunked.title !== null) {
+      await runUnit("title", "title", chunked.title, () => {
+        const built = buildTranslationPrompts(chunked.title, null, targetLang);
+        return {
+          systemPrompt: built.systemPrompt,
+          userPrompt: built.userPrompt,
+          schema: built.schema,
+          protectedValues: built.titleProtectedValues,
+          mode: "title_only",
+        };
+      });
+    }
+
+    for (let i = 0; i < chunked.chunks.length; i += 1) {
+      const chunk = chunked.chunks[i];
+      const label = `chunk ${i + 1}/${chunked.chunks.length}`;
+      await runUnit(String(i), label, chunk.text, () => {
+        const built = buildContentChunkPrompt(chunk.text, targetLang, {
+          chunkIndex: i,
+          chunkCount: chunked.chunks.length,
+        });
+        return {
+          systemPrompt: built.systemPrompt,
+          userPrompt: built.userPrompt,
+          schema: built.schema,
+          protectedValues: built.protectedValues,
+          mode: "content_only",
+        };
+      });
+    }
+
+    // Every unit is present in `banked` — nothing was thrown, so nothing was
+    // skipped and nothing was left English by accident (requirement: no silent
+    // drops). `mode: full` therefore really does mean the complete article.
+    const translatedTitle = chunked.title !== null ? (banked.title ?? null) : null;
+    const translatedChunkTexts = chunked.chunks.map((_, i) => banked[String(i)] ?? "");
+    const { translatedContent } = reassembleChunkedTranslation(
+      chunked,
+      translatedTitle,
+      translatedChunkTexts
+    );
+
+    tracer.step({
+      type: "parsed_result",
+      label: "Chunked translation accepted",
+      output: { translatedTitle, translatedContent },
+      metadata: {
+        engine: "ollama",
+        chunkCount: chunked.chunks.length,
+        modelCalls,
+        usedRepair: anyUsedRepair,
+        repairs: allRepairs,
+        originalChars: chunked.contentChars,
+        translatedChars: translatedContent?.length ?? 0,
+      },
+    });
+
+    console.info("[rss-translation] chunked article translated", {
+      feedItemId: request.feedItemId,
+      engine: "ollama",
+      chunkCount: chunked.chunks.length,
+      modelCalls,
+      originalChars: chunked.contentChars,
+      translatedChars: translatedContent?.length ?? 0,
+    });
+
+    return {
+      translatedTitle,
+      translatedContent,
+      // One attempt, N model calls — see `modelCalls` below and MADLAD's own
+      // `tries: 1` for the same reasoning: the ARTICLE-level attempt is tracked by
+      // the caller (translate-feed-item.service.ts), this reports the one claim.
+      tries: 1,
+      modelCalls,
+      usedRepair: anyUsedRepair,
+      repairs: allRepairs,
+      raw: lastResponseRaw,
+    };
+  }
+
+  /**
+   * Translates ONE unit (the title, or one content chunk) with its own in-request
+   * regeneration loop — the SAME sampling schedule, retry-prompt wording, and
+   * protected-token restoration the single-call path uses, scoped to one prompt
+   * instead of the whole article. Deliberately WITHOUT the single-call path's
+   * content-shrink-on-truncation special case: a unit is already sized to the same
+   * budget that case exists to reach (see ollama-chunking.ts's OLLAMA_CHUNK_MAX_CHARS,
+   * matched to MAX_TRANSLATION_CONTENT_CHARS), so a truncated reply here is a
+   * genuine anomaly, not a sizing problem — it is retried like any other defect and,
+   * if it persists, the unit fails and the article banks what it has.
+   */
+  private async translateUnit(
+    systemPrompt: string,
+    userPrompt: string,
+    schema: unknown,
+    mode: "title_only" | "content_only",
+    protectedValues: readonly ProtectedValue[],
+    targetLang: string,
+    context: ArticleTranslationContext,
+    request: ArticleTranslationRequest,
+    label: string
+  ): Promise<UnitOutcome> {
+    const { tracer, now, diag } = context;
+    const maxTries = MAX_TRANSLATION_RETRIES + 1;
+    let currentUserPrompt = userPrompt;
+    let lastFailure: TranslationParseFailure | null = null;
+    let tries = 0;
+
+    for (let tryIndex = 0; tryIndex < maxTries; tryIndex += 1) {
+      const remainingMs = context.itemDeadlineMs - now().getTime();
+      if (remainingMs <= 0) {
+        throw new TranslationTimeoutError(context.itemTimeoutMs, "item");
+      }
+      const budgetMs = Math.min(context.attemptTimeoutMs, remainingMs);
+      const { temperature, repeatPenalty } = samplingForTry(tryIndex, lastFailure);
+      const tryStartedMs = now().getTime();
+      tries = tryIndex + 1;
+
+      console.info("[rss-translation] attempt", {
+        feedItemId: request.feedItemId,
+        unit: label,
+        try: tries,
+        of: maxTries,
+        temperature,
+        repeatPenalty,
+        correcting: lastFailure,
+        budgetMs,
+      });
+
+      const callStartedAt = new Date();
+      const response = await withTranslationTimeout(
+        this.llm.generate({
+          systemPrompt,
+          userPrompt: currentUserPrompt,
+          temperature,
+          repeatPenalty,
+          format: schema,
+          maxTokens: MAX_TRANSLATION_OUTPUT_TOKENS,
+        }),
+        budgetMs,
+        "attempt"
+      );
+
+      tracer.step({
+        type: "llm_call",
+        label: `${label} — try ${tries} of ${maxTries}`,
+        attempt: tries,
+        startedAt: callStartedAt,
+        completedAt: new Date(),
+        input: {
+          request: { temperature, repeatPenalty, maxTokens: MAX_TRANSLATION_OUTPUT_TOKENS },
+        },
+        metadata: { providerPayload: response.raw ?? null, budgetMs, unit: label },
+      });
+      tracer.step({
+        type: "raw_response",
+        label: `${label} — try ${tries}`,
+        attempt: tries,
+        output: { text: response.text },
+        metadata: { chars: response.text?.length ?? 0, unit: label },
+      });
+
+      try {
+        const parsedReply = parseTranslationResponse(response.text, targetLang, { mode });
+        const raw = parsedReply.translatedTitle ?? parsedReply.translatedContent ?? "";
+        const restored = restoreTokens(raw, protectedValues, label);
+        tracer.setAttempts(tries);
+        tracer.step({
+          type: "parsed_result",
+          label: `${label} — try ${tries} accepted`,
+          attempt: tries,
+          output: { text: restored },
+          metadata: {
+            usedRepair: parsedReply.usedRepair,
+            repairs: parsedReply.repairs,
+            unit: label,
+          },
+        });
+        return {
+          text: restored,
+          tries,
+          usedRepair: parsedReply.usedRepair,
+          repairs: parsedReply.repairs,
+          raw: response.raw,
+        };
+      } catch (parseErr) {
+        const text = response.text ?? "";
+        const parseError = parseErr instanceof TranslationParseError ? parseErr : null;
+        const reason = parseError?.reason ?? "invalid_json";
+        const willRetry = isRetriableParseFailure(reason) && tryIndex < maxTries - 1;
+        lastFailure = reason;
+        console.warn("[rss-translation] unusable model response", {
+          ...diag,
+          unit: label,
+          try: tries,
+          of: maxTries,
+          reason,
+          willRetry,
+          truncated: parseError?.truncated ?? false,
+          ...(parseError?.repetition
+            ? {
+                repetitionKind: parseError.repetition.kind,
+                repetitionSample: parseError.repetition.sample.slice(0, 40),
+                repetitionCount: parseError.repetition.count,
+              }
+            : {}),
+          elapsedMs: now().getTime() - tryStartedMs,
+          responseLength: text.length,
+          responseFirst200: text.slice(0, 200),
+          responseLast200: text.length > 200 ? text.slice(-200) : "",
+          error: parseErr instanceof Error ? parseErr.message : String(parseErr),
+        });
+        tracer.setAttempts(tries);
+        tracer.step({
+          type: "retry",
+          label: willRetry
+            ? `${label} — try ${tries} rejected — regenerating`
+            : `${label} — try ${tries} rejected — giving up`,
+          attempt: tries,
+          status: "failed",
+          output: {
+            reason,
+            willRetry,
+            truncated: parseError?.truncated ?? false,
+            repetition: parseError?.repetition ?? null,
+            unit: label,
+          },
+          error: parseErr,
+        });
+        if (!willRetry) throw parseErr;
+
+        if (parseError) {
+          currentUserPrompt = buildTranslationRetryPrompt(userPrompt, {
+            reason: parseError.reason,
+            feedback: parseError.feedback,
+          });
+        }
+      }
+    }
+
+    // Unreachable: `maxTries` is always ≥ 1, and the last iteration's catch block
+    // always either returns (accepted) or throws (willRetry is false once
+    // tryIndex === maxTries - 1). Present only so the function is provably total.
+    throw new Error(`Exhausted retries translating ${label} without a terminal outcome.`);
+  }
+}
+
+/** Everything one unit's (title's, or one chunk's) prompt-building step hands back. */
+interface UnitPrompt {
+  systemPrompt: string;
+  userPrompt: string;
+  schema: unknown;
+  protectedValues: readonly ProtectedValue[];
+  /**
+   * Which reply contract this unit's schema expects — passed explicitly rather than
+   * inferred from `schema`'s shape at call time, so a title call and a chunk call
+   * can never be misclassified by one.
+   */
+  mode: "title_only" | "content_only";
+}
+
+/** What one unit's (title's, or one chunk's) translation call produced. */
+interface UnitOutcome {
+  /** FINAL, restored text — placeholders already swapped back to their real values. */
+  text: string;
+  tries: number;
+  usedRepair: boolean;
+  repairs: JsonRepair[];
+  raw: unknown;
 }

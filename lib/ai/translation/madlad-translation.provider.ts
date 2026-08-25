@@ -6,7 +6,7 @@ import type {
   ArticleTranslationRequest,
   TranslationProvider,
 } from "./translation-provider";
-import { MadladPartialProgressError, TranslationTransportError } from "./translation-provider";
+import { TranslationPartialProgressError, TranslationTransportError } from "./translation-provider";
 import { TranslationTimeoutError, withTranslationTimeout } from "./translation-timeout";
 import { reassembleArticle, segmentArticle } from "./madlad-segmentation";
 import { assertUsableTranslation } from "./translated-text-validation";
@@ -249,7 +249,7 @@ export class MadladTranslationProvider implements TranslationProvider {
     // see ArticleTranslationContext.maxBatchesThisCall. Floored at 1 defensively: this
     // provider must never itself be the source of a zero-progress call, regardless of
     // what a caller passes, because a call that starts zero batches would throw
-    // MadladPartialProgressError below reporting no progress at all.
+    // TranslationPartialProgressError below reporting no progress at all.
     const batchCap =
       context.maxBatchesThisCall === undefined
         ? undefined
@@ -382,7 +382,7 @@ export class MadladTranslationProvider implements TranslationProvider {
 
     if (batchesToRun.length < pendingBatches.length) {
       // The cap stopped us before every PENDING batch ran. What did run is banked, not
-      // reassembled or validated — see MadladPartialProgressError's own comment for why
+      // reassembled or validated — see TranslationPartialProgressError's own comment for why
       // this must never reach the quality gate. The caller persists `translatedSegments`
       // and this same article resumes from here on its next claim, which is what makes
       // this progress rather than a re-run of the same doomed calculation.
@@ -399,7 +399,7 @@ export class MadladTranslationProvider implements TranslationProvider {
           continuationReason: "batch_cap_reached",
         }
       );
-      throw new MadladPartialProgressError(
+      throw new TranslationPartialProgressError(
         `MADLAD article ${request.feedItemId} needs ${totalBatches.length} HTTP batch(es); ` +
           `${processedBatchCount} done, ${remainingBatchCount} remaining.`,
         rawBySegment,

@@ -88,26 +88,30 @@ export interface ArticleTranslationContext {
    */
   maxBatchesThisCall?: number;
   /**
-   * MADLAD-only: raw (pre-restoration) segment translations already banked by an
-   * earlier, capped call for this same article, keyed by the segment's ARTICLE
-   * index. `undefined`/empty means starting fresh. Restoration, repair and the
-   * quality gate all run exactly once, only after every segment has a raw reply —
-   * whether that reply came from this call or an earlier one is invisible to them.
-   * Every other engine ignores this field entirely.
+   * Raw (pre-restoration) segment/chunk translations already banked by an earlier,
+   * interrupted call for this same article, keyed by a per-engine unit key —
+   * MADLAD's own ARTICLE segment index, or the Ollama chunked-translation path's
+   * `"title"` / chunk index (see ollama-chunking.ts). `undefined`/empty means
+   * starting fresh. Restoration, repair and the quality gate all run exactly once,
+   * only after every unit has a reply — whether that reply came from this call or
+   * an earlier one is invisible to them. Every other engine ignores this field.
    */
   resumeSegments?: Record<string, string>;
 }
 
 /**
- * Thrown by MADLAD instead of returning an {@link ArticleTranslation} when
- * `context.maxBatchesThisCall` stopped it before every segment had a translation.
+ * Thrown instead of returning an {@link ArticleTranslation} when an engine's own
+ * per-call progress cap (MADLAD's `context.maxBatchesThisCall`, or the Ollama
+ * chunked path running out of item budget mid-chunk) stopped it before every unit
+ * had a translation.
  *
- * This is NOT a failure: the batches that did run succeeded, and `translatedSegments`
- * is exactly what a follow-up call's `resumeSegments` needs to pick up where this one
- * left off. It is a distinct type from every other translation error specifically so
- * the caller can tell "made bounded progress, come back for the rest" apart from
- * "something went wrong" — conflating the two would make a healthy, expected pause in
- * an oversized article's translation look like a fault to retry-with-backoff.
+ * This is NOT a failure: the units that did complete succeeded, and
+ * `translatedSegments` is exactly what a follow-up call's `resumeSegments` needs to
+ * pick up where this one left off. It is a distinct type from every other
+ * translation error specifically so the caller can tell "made bounded progress, come
+ * back for the rest" apart from "something went wrong" — conflating the two would
+ * make a healthy, expected pause in an oversized article's translation look like a
+ * fault to retry-with-backoff.
  *
  * Deliberately thrown rather than returned: `ArticleTranslation` is the shared
  * "translation accepted" contract both engines return through, and a partial result
@@ -115,19 +119,28 @@ export interface ArticleTranslationContext {
  * existing quality gate, repair and reassembly logic must stay completely unaware
  * that partial progress exists at all, which throwing (instead of adding a variant to
  * the success type) guarantees by construction.
+ *
+ * Named engine-neutrally (not `MadladPartialProgressError`, its original name) once a
+ * second engine — the Ollama chunked-translation path — started throwing it too: the
+ * mechanism it signals (bounded progress, safe to resume) is identical for both, and
+ * one shared type is what lets `translate-feed-item.service.ts` bank/resume either
+ * engine's progress through a single catch block. `processedBatchCount`/
+ * `totalBatchCount` keep their names for the same reason — "batch" now means "one
+ * unit of resumable translation work," an HTTP batch for MADLAD, a chunk or the title
+ * for Ollama chunking.
  */
-export class MadladPartialProgressError extends Error {
+export class TranslationPartialProgressError extends Error {
   constructor(
     message: string,
-    /** Raw (pre-restoration) reply for every segment translated so far, keyed by article index. */
+    /** Raw (pre-restoration) reply for every unit translated so far, keyed by article index. */
     readonly translatedSegments: Record<string, string>,
-    /** HTTP batches completed across every call for this article so far, including this one. */
+    /** Units completed across every call for this article so far, including this one. */
     readonly processedBatchCount: number,
-    /** Total HTTP batches this article needs — `processedBatchCount` reaches this when done. */
+    /** Total units this article needs — `processedBatchCount` reaches this when done. */
     readonly totalBatchCount: number
   ) {
     super(message);
-    this.name = "MadladPartialProgressError";
+    this.name = "TranslationPartialProgressError";
   }
 }
 

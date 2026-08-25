@@ -787,8 +787,25 @@ export const TRANSLATION_TITLE_JSON_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/**
+ * The schema for ONE CHUNK of a large article's body — no `title` key at all.
+ *
+ * Used only by the Ollama chunked-translation path (see ollama-chunking.ts and
+ * `buildContentChunkPrompt` below), never by the single-call path above: a chunk is a
+ * fragment of the body, not the whole article, and asking for a `title` alongside it
+ * would either invent one per chunk or force an empty string N times over.
+ */
+export const TRANSLATION_CONTENT_ONLY_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    content: { type: "string" },
+  },
+  required: ["content"],
+  additionalProperties: false,
+} as const;
+
 /** Which reply contract a translation is working to — set by the input, not the caller. */
-export type TranslationReplyMode = "full" | "title_only";
+export type TranslationReplyMode = "full" | "title_only" | "content_only";
 
 /** True when the target is Bulgarian in any of the forms the config/company can supply. */
 export function isBulgarianTarget(targetLang: string): boolean {
@@ -1153,6 +1170,83 @@ export function buildTranslationRetryPrompt(
     failure.feedback,
     "Answer again in full. Return ONLY the corrected JSON object — no apology, no explanation, no reasoning.",
   ].join("\n");
+}
+
+/** What `buildContentChunkPrompt` returns — everything one chunk's translation call needs. */
+export interface ContentChunkPrompt {
+  systemPrompt: string;
+  userPrompt: string;
+  schema: typeof TRANSLATION_CONTENT_ONLY_JSON_SCHEMA;
+  /** Values held out of the decoder for THIS chunk alone — see the module comment below. */
+  protectedValues: ProtectedValue[];
+}
+
+/**
+ * The prompt for ONE CHUNK of a large article's body — the Ollama chunked-translation
+ * path's counterpart to `buildTranslationPrompts` above, used only when an article is
+ * too large for that single call (see ollama-chunking.ts and OllamaTranslationProvider).
+ *
+ * ── Why a separate builder rather than a mode of `buildTranslationPrompts` ──────
+ * A chunk is neither a whole article nor a title. Reusing the "full" shape would force
+ * a `title` key onto every one of N chunks; reusing "title_only" (as segment-repair.ts
+ * already does for one short MADLAD sentence) would ask the model to translate "the
+ * article title" at chunk length, which is misleading, AND — more importantly —
+ * `parseTranslationResponse`'s title_only branch runs no decoding-loop check, because a
+ * real title has never been long enough to loop. A ~2500–3000 char chunk is exactly
+ * long enough, so `content_only` mode gets the SAME repetition/language checks a "full"
+ * article body gets (see that branch below).
+ *
+ * ── Protected tokens are LOCAL to this call ─────────────────────────────────────
+ * `protectTokens` runs on THIS chunk's text alone, so its `[[n]]` indices restart at 0
+ * for every chunk — there is no article-wide placeholder namespace to keep in sync
+ * across chunks, and a spec-heavy chunk with 20 placeholders never pushes another
+ * chunk's indices into the 20s. This is not a special mechanism; it falls out of
+ * calling the same `protectTokens` per chunk instead of once for the whole body.
+ */
+export function buildContentChunkPrompt(
+  chunkText: string,
+  targetLang: string,
+  meta: { chunkIndex: number; chunkCount: number }
+): ContentChunkPrompt {
+  const language = languageName(targetLang);
+  const protection = protectTokens(chunkText);
+
+  const lines = [
+    `You are a professional translator. Translate the following passage into ${language}.`,
+    "This passage is one part of a longer article that has been split for translation. Translate exactly and only what is given below, preserving its meaning and its paragraph breaks — do not summarize, condense, expand, explain, or add anything the passage does not say.",
+    "Preserve meaning exactly. Keep proper names, URLs, brand names, model names, identifiers, SKUs, version numbers, code, and commands unchanged, exactly as written.",
+  ];
+
+  if (isBulgarianTarget(targetLang)) {
+    lines.push(
+      "Translate ONLY into natural, fluent Bulgarian, written in Bulgarian Cyrillic.",
+      "Do NOT use Serbian, Macedonian, Russian, or any mixed-language words, letters, or spelling.",
+      "If the text contains words in Chinese, Japanese, Korean or any other language, do NOT copy them — translate their meaning into Bulgarian or leave them out."
+    );
+  }
+
+  if (protection.values.length > 0) {
+    lines.push(
+      "The text below contains placeholders of the exact form [[0]], [[1]], [[2]], etc., marking values that must not be touched — URLs, identifiers, model names, SKUs, version numbers, and similar.",
+      "Copy every such placeholder through EXACTLY as written, including both square brackets and the number inside, once each, in the same position relative to the surrounding words. Never translate, alter, remove, duplicate, reorder, or explain a placeholder — translate only the ordinary words around it."
+    );
+  }
+
+  lines.push(
+    'Respond with ONLY a single, complete JSON object of exactly this shape: {"content": "..."}',
+    ...JSON_DISCIPLINE,
+    'Do not add a title, a heading, or any key other than "content" — this passage is a fragment of the article, not the whole thing.'
+  );
+
+  const systemPrompt = lines.join("\n");
+  const userPrompt = `Passage ${meta.chunkIndex + 1} of ${meta.chunkCount}:\n${protection.text}`;
+
+  return {
+    systemPrompt,
+    userPrompt,
+    schema: TRANSLATION_CONTENT_ONLY_JSON_SCHEMA,
+    protectedValues: protection.values,
+  };
 }
 
 /**
@@ -1539,7 +1633,12 @@ function extractJson(raw: string): { text: string; repairs: JsonRepair[] } {
 // ─── Reply validation ─────────────────────────────────────────────────────────
 
 export interface ParseTranslationOptions {
-  /** "full" expects a translated body; "title_only" must never store one. */
+  /**
+   * "full" expects a translated body; "title_only" must never store one;
+   * "content_only" is a single chunk of a large article's body — see
+   * {@link buildContentChunkPrompt} — and returns its text as `translatedContent`
+   * with `translatedTitle` always null.
+   */
   mode?: TranslationReplyMode;
 }
 
@@ -1612,6 +1711,52 @@ export function parseTranslationResponse(
   }
 
   const record = parsed as Record<string, unknown>;
+
+  // content_only: a chunk of a large article's body — no `title` key in this schema at
+  // all, so it is checked and returned BEFORE the title requirement below, which does
+  // not apply to it. Everything else a "full" article's content gets — the empty
+  // check, the truncation-fragment floor, the language check, the decoding-loop
+  // check — applies here too: a ~2500–3000 char chunk is exactly long enough to loop,
+  // unlike a title, which never has been.
+  if (mode === "content_only") {
+    if (!("content" in record) || typeof record.content !== "string") {
+      throw new TranslationParseError(
+        'Translation response is missing "content".',
+        "schema_validation",
+        { truncated: indicatesTruncation(repairs) }
+      );
+    }
+    const content = record.content;
+    if (content.trim() === "") {
+      throw new TranslationParseError(
+        'Translation response is missing a non-empty "content".',
+        "empty_translation"
+      );
+    }
+    if (repairs.includes("closed_string") && content.trim().length < MIN_REPAIRED_CONTENT_CHARS) {
+      throw new TranslationParseError(
+        `Translation response was cut off after ${content.trim().length} characters.`,
+        "invalid_json",
+        { truncated: true }
+      );
+    }
+    assertBulgarianEnough(content, targetLang);
+    const loop = detectRepetition(content);
+    if (loop) {
+      throw new TranslationParseError(
+        `Translation degenerated into a ${loop.kind} loop ("${loop.sample}" ×${loop.count}).`,
+        "repetition",
+        { repetition: loop }
+      );
+    }
+    return {
+      translatedTitle: null,
+      translatedContent: content,
+      usedRepair,
+      repairs,
+      ...languageOf(content, targetLang),
+    };
+  }
 
   if (!("title" in record)) {
     throw new TranslationParseError(

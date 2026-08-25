@@ -26,7 +26,7 @@ import type {
   TranslationProvider,
 } from "@/lib/ai/translation/translation-provider";
 import {
-  MadladPartialProgressError,
+  TranslationPartialProgressError,
   TranslationTransportError,
 } from "@/lib/ai/translation/translation-provider";
 import {
@@ -65,7 +65,7 @@ export type TranslateFeedItemOutcome =
    * MADLAD stopped after `processedBatchCount` of `totalBatchCount` HTTP batches — an
    * article too large for one item budget. NOT a failure: real progress was banked and
    * the claim was released back to `pending` (no backoff) so the very next selection
-   * resumes exactly here. See MadladPartialProgressError and `translationProgress`.
+   * resumes exactly here. See TranslationPartialProgressError and `translationProgress`.
    */
   | { status: "partial"; processedBatchCount: number; totalBatchCount: number }
   /**
@@ -596,8 +596,8 @@ export async function translateFeedItem(
       mode,
     };
   } catch (err) {
-    if (err instanceof MadladPartialProgressError) {
-      // NOT a failure — see MadladPartialProgressError's own comment. The batches that
+    if (err instanceof TranslationPartialProgressError) {
+      // NOT a failure — see TranslationPartialProgressError's own comment. The batches that
       // ran succeeded; what happens next depends only on whether this claim's attempt
       // was the item's last one.
       const elapsedMs = now().getTime() - startedAtMs;
@@ -605,14 +605,12 @@ export async function translateFeedItem(
       const isFinalAttempt = attempt >= MAX_TRANSLATION_ATTEMPTS;
 
       if (isFinalAttempt) {
-        // Exhausted its cross-run attempt budget before every batch ran — a genuinely
+        // Exhausted its cross-run attempt budget before every unit ran — a genuinely
         // oversized article, not a loop: this is the EXPLICIT failure the invariant
-        // requires instead of banking progress forever. `translationProgress` is
-        // cleared so a future re-translation of this exact item (e.g. after the
-        // worker's batch size or timeout budget changes) starts clean rather than
-        // resuming from a stale, possibly-mismatched partial state.
+        // requires instead of banking progress forever.
+        const unitNoun = translator.kind === "madlad" ? "MADLAD HTTP batch(es)" : "chunk(s)";
         const failMessage =
-          `Oversized article: needed ${err.totalBatchCount} MADLAD HTTP batch(es), only ` +
+          `Oversized article: needed ${err.totalBatchCount} ${unitNoun}, only ` +
           `${err.processedBatchCount} completed across ${MAX_TRANSLATION_ATTEMPTS} attempts.`;
         console.warn("[rss-translation] oversized article FAILED — attempt budget exhausted", {
           ...diag,
@@ -638,7 +636,19 @@ export async function translateFeedItem(
             translationError: failMessage,
             translationNextRetryAt: nextRetryAt,
             translationLeaseExpiresAt: null,
-            translationProgress: Prisma.JsonNull,
+            // Diverges by engine, deliberately. MADLAD clears: its own long-standing
+            // reasoning is that a stale batch banked under an OLD worker batch-size or
+            // timeout setting should never silently resume under a NEW one, so a future
+            // retranslation of this item starts clean. The Ollama chunked path PRESERVES:
+            // each chunk already passed its own full retry/validation cycle before being
+            // banked (see OllamaTranslationProvider), so there is no "under old worker
+            // settings" risk to guard against — only the cost of re-translating chunks
+            // that already succeeded, which a later retry (manual or a future attempt
+            // budget) should not have to pay twice. This is what keeps an article's
+            // successfully-translated chunks from being forced through the model again
+            // just because ONE later chunk kept failing.
+            translationProgress:
+              translator.kind === "madlad" ? Prisma.JsonNull : err.translatedSegments,
           },
         });
         if (written.count === 0) {

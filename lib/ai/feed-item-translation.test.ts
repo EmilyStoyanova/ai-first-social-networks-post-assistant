@@ -9,7 +9,9 @@ import {
   sanitiseTranslationContent,
   shrinkTranslationContentBudget,
   TRANSLATION_TITLE_JSON_SCHEMA,
+  TRANSLATION_CONTENT_ONLY_JSON_SCHEMA,
   assessBulgarian,
+  buildContentChunkPrompt,
   buildTranslationPrompts,
   buildTranslationRetryPrompt,
   capTranslationContent,
@@ -962,6 +964,115 @@ describe("parseTranslationResponse — title-only mode", () => {
       () => parseTranslationResponse('{"title":"Компанията обяви нова', "bg", opts),
       (e: unknown) => e instanceof TranslationParseError && e.reason === "invalid_json"
     );
+  });
+});
+
+// ─── content_only mode (Phase 3 chunked translation) ───────────────────────────
+//
+// One chunk of a large article's body — no title in the schema at all, and unlike
+// title_only mode, the FULL set of checks a "full" article's body gets (empty check,
+// truncation-fragment floor, language check, decoding-loop check): a ~2500–3000 char
+// chunk is exactly long enough to loop, which a title never has been.
+
+describe("parseTranslationResponse — content_only mode", () => {
+  const opts = { mode: "content_only" } as const;
+
+  it("stores the translated content, with translatedTitle always null", () => {
+    const r = parseTranslationResponse('{"content":"Преведен пасаж от статията."}', "bg", opts);
+    assert.equal(r.translatedContent, "Преведен пасаж от статията.");
+    assert.equal(r.translatedTitle, null);
+  });
+
+  it("rejects a reply missing the content key entirely", () => {
+    assert.throws(
+      () => parseTranslationResponse('{"title":"Nope"}', "bg", opts),
+      (e: unknown) => e instanceof TranslationParseError && e.reason === "schema_validation"
+    );
+  });
+
+  it("rejects an empty content string", () => {
+    assert.throws(
+      () => parseTranslationResponse('{"content":""}', "bg", opts),
+      (e: unknown) => e instanceof TranslationParseError && e.reason === "empty_translation"
+    );
+  });
+
+  it("rejects a non-Bulgarian chunk", () => {
+    const raw = JSON.stringify({ content: "This chunk was never translated at all." });
+    assert.throws(
+      () => parseTranslationResponse(raw, "bg", opts),
+      (e: unknown) => e instanceof TranslationParseError && e.reason === "wrong_language"
+    );
+  });
+
+  it("catches a decoding loop inside a chunk — the check title_only mode never needed", () => {
+    // The whole reason this is its own mode rather than a reuse of title_only: a
+    // title is never long enough to loop, but a chunk is exactly the size that can.
+    const raw = JSON.stringify({ content: "със със със със със със със" });
+    assert.throws(
+      () => parseTranslationResponse(raw, "bg", opts),
+      (e: unknown) => e instanceof TranslationParseError && e.reason === "repetition"
+    );
+  });
+
+  it("rejects content cut off mid-string as a short fragment", () => {
+    assert.throws(
+      () => parseTranslationResponse('{"content":"Прекъснат пасаж по средата', "bg", opts),
+      (e: unknown) => e instanceof TranslationParseError && e.reason === "invalid_json"
+    );
+  });
+});
+
+describe("buildContentChunkPrompt", () => {
+  it("protects tokens LOCALLY to the chunk — indices always start at [[0]]", () => {
+    const chunk1 = buildContentChunkPrompt("The BE173BU ships next month.", "bg", {
+      chunkIndex: 0,
+      chunkCount: 2,
+    });
+    const chunk2 = buildContentChunkPrompt("The SN850X9 ships alongside it.", "bg", {
+      chunkIndex: 1,
+      chunkCount: 2,
+    });
+
+    assert.equal(chunk1.protectedValues.length, 1);
+    assert.equal(chunk1.protectedValues[0].value, "BE173BU");
+    assert.match(chunk1.userPrompt, /\[\[0\]\]/);
+
+    // A second, LATER chunk with its own identifier restarts at [[0]] too — not
+    // [[1]], which is what an article-wide shared placeholder namespace would give.
+    assert.equal(chunk2.protectedValues.length, 1);
+    assert.equal(chunk2.protectedValues[0].value, "SN850X9");
+    assert.match(chunk2.userPrompt, /\[\[0\]\]/);
+  });
+
+  it("uses the content-only schema, never the title or full schema", () => {
+    const built = buildContentChunkPrompt("Some passage.", "bg", { chunkIndex: 0, chunkCount: 1 });
+    assert.deepEqual(built.schema, TRANSLATION_CONTENT_ONLY_JSON_SCHEMA);
+  });
+
+  it("never asks for a title key", () => {
+    const built = buildContentChunkPrompt("Some passage.", "bg", { chunkIndex: 0, chunkCount: 3 });
+    assert.ok(!/"title"/.test(built.systemPrompt));
+    assert.match(built.systemPrompt, /"content"/);
+  });
+
+  it("names the chunk's position among its siblings in the user prompt", () => {
+    const built = buildContentChunkPrompt("Some passage.", "bg", { chunkIndex: 2, chunkCount: 5 });
+    assert.match(built.userPrompt, /Passage 3 of 5/);
+  });
+
+  it("says nothing about placeholders when the chunk has nothing to protect", () => {
+    const built = buildContentChunkPrompt("Just plain prose, nothing to hold out.", "bg", {
+      chunkIndex: 0,
+      chunkCount: 1,
+    });
+    assert.equal(built.protectedValues.length, 0);
+    assert.ok(!/\[\[n\]\]|placeholder/i.test(built.systemPrompt));
+  });
+
+  it("still asks for Bulgarian-specific discipline for a bg target", () => {
+    const built = buildContentChunkPrompt("Some passage.", "bg", { chunkIndex: 0, chunkCount: 1 });
+    assert.match(built.systemPrompt, /Bulgarian Cyrillic/);
   });
 });
 

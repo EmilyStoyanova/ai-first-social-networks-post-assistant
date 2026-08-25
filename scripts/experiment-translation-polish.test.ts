@@ -26,10 +26,14 @@ import {
 
 describe("requiredIdentifiers", () => {
   it("finds the genuine identifiers protectTokens would freeze", () => {
+    // "44GB" and "300GB/sec" are glued MEASUREMENTS, not identities — protectTokens
+    // stopped freezing that shape once the classifier was narrowed to exclude
+    // number-plus-known-unit tokens (see protected-tokens.ts's MEASUREMENT_SHAPE),
+    // so only the genuine model identifier survives here now.
     const ids = requiredIdentifiers("The WSE-3 has 44GB of SRAM and 300GB/sec bandwidth.");
     assert.deepEqual(
       ids.map((v) => v.value),
-      ["WSE-3", "44GB", "300GB/sec"]
+      ["WSE-3"]
     );
   });
 

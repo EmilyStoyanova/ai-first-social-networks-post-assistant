@@ -36,6 +36,7 @@ import {
   TranslationParseError,
   detectRepetition,
   assessBulgarian,
+  type TranslationReplyMode,
 } from "@/lib/ai/feed-item-translation";
 import {
   protectTokens,
@@ -908,7 +909,11 @@ export async function reconstructMadladArticle(
   repairEngine: OllamaTranslationProvider,
   title: string | null,
   content: string | null,
-  mode: "full" | "title_only"
+  // Widened to the full TranslationReplyMode union (this benchmark never actually
+  // receives "content_only" — only buildTranslationPrompts feeds it, which never
+  // produces that mode) purely so `buildTranslationPrompts(...).mode` can be passed
+  // through without a cast.
+  mode: TranslationReplyMode
 ): Promise<MadladReconstruction> {
   const { segments: sourceSegments, plan } = segmentArticle(title, content, { mode });
   const protectedSegments: ProtectedText[] = sourceSegments.map((s) => protectTokens(s));

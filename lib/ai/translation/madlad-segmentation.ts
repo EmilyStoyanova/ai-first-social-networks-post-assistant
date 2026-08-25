@@ -1,4 +1,8 @@
-import { capTranslationContent, sanitiseTranslationContent } from "@/lib/ai/feed-item-translation";
+import {
+  capTranslationContent,
+  sanitiseTranslationContent,
+  type TranslationReplyMode,
+} from "@/lib/ai/feed-item-translation";
 
 /**
  * Cutting an article into pieces MADLAD can actually translate, and putting the
@@ -155,8 +159,16 @@ export interface SegmentArticleOptions {
   maxContentChars?: number;
   /** Per-segment character cap. Defaults to {@link MAX_SEGMENT_CHARS}. */
   maxSegmentChars?: number;
-  /** "title_only" ignores the body entirely — a bodyless article has none to send. */
-  mode?: "full" | "title_only";
+  /**
+   * "title_only" ignores the body entirely — a bodyless article has none to send.
+   * Typed against the full {@link TranslationReplyMode} union (which also carries
+   * "content_only", used only by the Ollama chunked-translation path and never
+   * actually passed here) rather than its own narrower copy, so a caller holding a
+   * `TranslationReplyMode`-typed value never needs an unsound cast to pass it
+   * through. Every other value is treated exactly like "full": only "title_only" is
+   * ever checked for.
+   */
+  mode?: TranslationReplyMode;
 }
 
 /**

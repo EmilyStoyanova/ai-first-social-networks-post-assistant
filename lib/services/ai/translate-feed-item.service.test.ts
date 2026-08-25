@@ -1115,8 +1115,18 @@ describe("translateFeedItem — in-request retries", () => {
 
 /**
  * A long, clean English article — the shape of the ArchDaily bodies that truncated in
- * production. Comfortably over MAX_TRANSLATION_CONTENT_CHARS so the first try is capped at the
- * ceiling and a shrink is visible as a shorter prompt.
+ * production.
+ *
+ * Sized (via `.repeat(15)` below, ~2650 clean chars) to stay UNDER
+ * `OLLAMA_CHUNK_MAX_CHARS`/`MAX_TRANSLATION_CONTENT_CHARS` (3000) on purpose: this suite is
+ * about the single-call path's shrink-on-truncation mechanism, and an article THAT size now
+ * routes to the chunked path instead (see ollama-chunking.ts) — chunking is what removes the
+ * truncation for a genuinely oversized article, so it is no longer reachable via this path at
+ * that size, and correctly so. What this fixture still proves: the shrink mechanism itself is
+ * untouched and still fires correctly for a SMALLER article whose reply happens to truncate for
+ * an unrelated reason (verbose output, a stray reasoning block) rather than sheer size — the
+ * first try sends the article whole (comfortably under the 3000 cap), and a truncated reply
+ * still halves the BUDGET (not the article) for the next try, visibly shrinking the request.
  */
 const LONG_ARTICLE =
   "In the heart of Ahmedabad's Navrangpura district in India sits the Sardar Vallabhbhai " +
@@ -1144,7 +1154,7 @@ describe("translateFeedItem — truncation shrinks the next try", () => {
     let outcome;
     try {
       outcome = await translateFeedItem(
-        makeItem({ content: LONG_ARTICLE.repeat(40) }),
+        makeItem({ content: LONG_ARTICLE.repeat(15) }),
         "bg",
         makeDeps(db, p.generate)
       );
@@ -1161,8 +1171,14 @@ describe("translateFeedItem — truncation shrinks the next try", () => {
       second < first,
       `the retry must ask for less than the try that could not finish (${first} → ${second})`
     );
-    // Halved, so the retry is a materially easier request rather than the same roll again.
-    assert.ok(second <= first / 2 + 10, `expected roughly half of ${first}, got ${second}`);
+    // The first try sends the article WHOLE (comfortably under the 3000 cap, so nothing
+    // is trimmed off it yet) and a truncated reply halves the BUDGET, not the article
+    // itself — so the retry is capped at ~1500 (shrinkTranslationContentBudget(3000)),
+    // not at half of whatever the first try happened to be.
+    assert.ok(
+      second <= 1500 + 10,
+      `expected the retry capped near the shrunk 1500-char budget, got ${second}`
+    );
   });
 
   it("does NOT shrink after a defect that a smaller article would not fix", async () => {
@@ -1176,7 +1192,7 @@ describe("translateFeedItem — truncation shrinks the next try", () => {
     const cap = captureConsole();
     try {
       await translateFeedItem(
-        makeItem({ content: LONG_ARTICLE.repeat(40) }),
+        makeItem({ content: LONG_ARTICLE.repeat(15) }),
         "bg",
         makeDeps(db, p.generate)
       );
@@ -1202,7 +1218,7 @@ describe("translateFeedItem — truncation shrinks the next try", () => {
     let outcome;
     try {
       outcome = await translateFeedItem(
-        makeItem({ content: LONG_ARTICLE.repeat(40) }),
+        makeItem({ content: LONG_ARTICLE.repeat(15) }),
         "bg",
         makeDeps(db, p.generate)
       );
@@ -1232,7 +1248,7 @@ describe("translateFeedItem — truncation shrinks the next try", () => {
     let outcome;
     try {
       outcome = await translateFeedItem(
-        makeItem({ content: LONG_ARTICLE.repeat(40) }),
+        makeItem({ content: LONG_ARTICLE.repeat(15) }),
         "bg",
         makeDeps(db, p.generate)
       );
@@ -1265,7 +1281,7 @@ describe("translateFeedItem — truncation shrinks the next try", () => {
     const cap = captureConsole();
     try {
       await translateFeedItem(
-        makeItem({ content: LONG_ARTICLE.repeat(40) }),
+        makeItem({ content: LONG_ARTICLE.repeat(15) }),
         "bg",
         makeDeps(db, p.generate)
       );
