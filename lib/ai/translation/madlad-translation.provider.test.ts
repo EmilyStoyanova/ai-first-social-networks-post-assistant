@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { MadladTranslationProvider } from "./madlad-translation.provider";
-import { TranslationTransportError } from "./translation-provider";
+import { TranslationPartialProgressError, TranslationTransportError } from "./translation-provider";
 import type { ArticleTranslationContext, TranslationProvider } from "./translation-provider";
 import { MAX_REPAIRS_PER_ARTICLE, maxRepairsFor, MIN_REPAIR_BUDGET_MS } from "./segment-repair";
 import { protectTokens } from "./protected-tokens";
@@ -1921,6 +1921,32 @@ describe("MadladTranslationProvider — HTTP batching", () => {
       );
     }
     assert.ok(result.translatedContent);
+  });
+
+  it("reports batch_cap_reached when maxBatchesThisCall stops it before every pending batch runs", async () => {
+    // The diagnostic requirement: MADLAD's OWN deliberate stop (context.maxBatchesThisCall)
+    // must be distinguishable, in the thrown error itself, from the Ollama chunked path's
+    // "a unit exhausted its own retry budget" — both throw TranslationPartialProgressError,
+    // but only this one is genuinely `reason: "batch_cap_reached"`.
+    stubFetch(translated);
+    const p = new MadladTranslationProvider(
+      "http://w:3002",
+      "k",
+      "google/madlad400-3b-mt",
+      "en",
+      1,
+      4
+    );
+    await assert.rejects(
+      p.translate(requestFor(null, makeSegments(10)), contextFor({ maxBatchesThisCall: 1 })),
+      (err: unknown) => {
+        assert.ok(err instanceof TranslationPartialProgressError);
+        assert.equal(err.reason, "batch_cap_reached");
+        assert.equal(err.failureReason, null);
+        assert.equal(err.processedBatchCount, 1);
+        return true;
+      }
+    );
   });
 
   it("setting concurrency has NO effect on batch dispatch — batches always run sequentially", async () => {

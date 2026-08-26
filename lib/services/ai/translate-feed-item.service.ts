@@ -644,7 +644,14 @@ export async function translateFeedItem(
           processedBatchCount: err.processedBatchCount,
           remainingBatchCount,
           progressMade: true,
+          // The cross-run attempt counter is what actually ended this article — always
+          // true here, regardless of engine. `lastCallReason`/`lastCallFailureReason`
+          // are the WHY behind the last call's own stop, so a reader does not have to
+          // guess whether the final attempt was cut short by MADLAD's batch cap, the
+          // item's own deadline, or a chunk that kept failing `protected_token`.
           continuationReason: "attempt_budget_exhausted",
+          lastCallReason: err.reason,
+          ...(err.failureReason ? { lastCallFailureReason: err.failureReason } : {}),
         });
         tracer.fail("TRANSLATION_TIMEOUT", failMessage);
         const nextRetryAt = computeTranslationBackoff(attempt, now());
@@ -693,7 +700,14 @@ export async function translateFeedItem(
         processedBatchCount: err.processedBatchCount,
         remainingBatchCount,
         progressMade: true,
-        continuationReason: "batch_cap_reached",
+        // The REAL reason this call stopped short — see TranslationPartialProgressReason.
+        // Used to hardcode "batch_cap_reached" unconditionally, which was accurate for
+        // MADLAD (the only engine that threw this error at the time) but became
+        // misleading once the Ollama chunked path started throwing it too for a chunk
+        // that exhausted its own retry budget, most often on a `protected_token`
+        // restoration failure — that underlying reason is `lastCallFailureReason` below.
+        continuationReason: err.reason,
+        ...(err.failureReason ? { lastCallFailureReason: err.failureReason } : {}),
       });
       const written = await db.feedItem.updateMany({
         where: {

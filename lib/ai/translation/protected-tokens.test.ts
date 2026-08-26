@@ -205,6 +205,56 @@ describe("protectTokens — plain cardinal-number-hyphen-word compounds are pros
     }
   });
 
+  it("still protects DCI-P3, a real hyphenated identifier", () => {
+    const { values } = protectTokens("The panel covers 100% of DCI-P3 color space.");
+    assert.deepEqual(
+      values.map((v) => v.value),
+      ["DCI-P3"]
+    );
+  });
+
+  // ─── Regression: real production failure, number-word glue with NO punctuation at
+  // all (Ollama/Qwen live logs, 2026-08-26) ──────────────────────────────────────
+  //
+  // "3.0During" — no space AND no sentence-ending punctuation between "3.0" and
+  // "During" at all (a lost paragraph break, not merely a lost space), so
+  // `normaliseGluedSentenceBoundaries` (which needs a `.`/`!`/`?` to find the boundary)
+  // never saw it. It matched the same internal-punctuation shape as "v2.14.3" and was
+  // protected; the placeholder was dropped on every retry.
+  describe("protectTokens — a number glued straight to a capitalised word is an artifact, not a version", () => {
+    it("does not protect the exact failing production token", () => {
+      const source = "The port supports USB 3.0During testing, temperatures stayed low.";
+      assert.deepEqual(protectTokens(source).values, []);
+    });
+
+    it("does not protect other number-word glue shapes", () => {
+      for (const token of ["3.0During", "12Once", "1.5After", "4Since"]) {
+        const { values } = protectTokens(`Reached ${token} the test concluded.`);
+        assert.deepEqual(values, [], `expected "${token}" to stay untouched`);
+      }
+    });
+
+    it("still protects a real version string once whitespace is intact", () => {
+      const { values } = protectTokens("Firmware v2.14.3 fixes the charging fault.");
+      assert.deepEqual(
+        values.map((v) => v.value),
+        ["v2.14.3"]
+      );
+    });
+
+    it("does not misfire on a genuine version suffix of only ONE lowercase letter", () => {
+      // "3.0Ti" has the identical digit-dot-digit-letter shape as "3.0During" but only
+      // one lowercase letter after the capital ("i"), unlike a real glued word
+      // ("During" has five) — the two-lowercase-letter floor is what keeps a short,
+      // real suffix from being wrongly excluded.
+      const { values } = protectTokens("Configured as 3.0Ti on the panel.");
+      assert.deepEqual(
+        values.map((v) => v.value),
+        ["3.0Ti"]
+      );
+    });
+  });
+
   // ─── Regression: real production failure, glued sentence boundary (MADLAD, feed item
   // 825c8475, segment 69/120, 2026-08-20) ────────────────────────────────────────────
   //

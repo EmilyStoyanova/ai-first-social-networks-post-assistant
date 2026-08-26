@@ -404,7 +404,8 @@ export class MadladTranslationProvider implements TranslationProvider {
           `${processedBatchCount} done, ${remainingBatchCount} remaining.`,
         rawBySegment,
         processedBatchCount,
-        totalBatches.length
+        totalBatches.length,
+        "batch_cap_reached"
       );
     }
 

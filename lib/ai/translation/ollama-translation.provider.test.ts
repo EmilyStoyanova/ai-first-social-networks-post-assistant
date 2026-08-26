@@ -313,7 +313,14 @@ const BG_FILLER = "Преведен текст на естествен и пра
  * progress path.
  */
 function chunkedLlm(
-  opts: { markers?: readonly string[]; failMarker?: string } = {}
+  opts: {
+    markers?: readonly string[];
+    failMarker?: string;
+    /** Always answer this marker's chunk with valid Bulgarian prose that DROPS every
+     *  `[[n]]` placeholder the chunk carried — exercises the `protected_token` path
+     *  specifically, as opposed to `failMarker`'s repetition-loop reply. */
+    dropPlaceholdersForMarker?: string;
+  } = {}
 ): ILlmProvider & { calls: LlmRequest[] } {
   const calls: LlmRequest[] = [];
   const markers = opts.markers ?? [];
@@ -337,6 +344,9 @@ function chunkedLlm(
       if (marker && marker === opts.failMarker) {
         // A degenerate reply every single try — never a valid, acceptable translation.
         return { text: JSON.stringify({ content: "със със със със със със" }) };
+      }
+      if (marker && marker === opts.dropPlaceholdersForMarker) {
+        return { text: JSON.stringify({ content: [BG_FILLER, marker].join(" ") }) };
       }
       const placeholders = body.match(/\[\[\d+\]\]/g) ?? [];
       const text = [BG_FILLER, marker ?? "", ...placeholders].filter(Boolean).join(" ");
@@ -504,6 +514,40 @@ describe("OllamaTranslationProvider — chunked translation of a large article",
         assert.equal(Object.keys(err.translatedSegments).length, 2);
         assert.ok(err.totalBatchCount >= 4, "title + 3 chunks");
         assert.equal(err.processedBatchCount, 2);
+        // The diagnostic requirement: a chunk that exhausted its OWN retry budget must
+        // be distinguishable from MADLAD's batch cap, and the underlying parse-failure
+        // reason (a repetition loop, here) must survive onto the partial-progress error
+        // rather than being buried in the free-text message alone.
+        assert.equal(err.reason, "unit_retry_exhausted");
+        assert.equal(err.failureReason, "repetition");
+        return true;
+      }
+    );
+  });
+
+  it("carries a protected_token failure reason through to TranslationPartialProgressError", async () => {
+    // The exact diagnostic gap this test guards: a chunk that could not get its
+    // protected value(s) back byte-exact is reported with `failureReason:
+    // "protected_token"`, not folded into the generic "unit exhausted its retries"
+    // story — this is what lets a caller's logs say WHY a chunk kept failing instead
+    // of always reading as if the run had hit MADLAD's batch cap (see
+    // translate-feed-item.service.ts's continuationReason).
+    const content = [
+      paragraphWithMarker("ALPHAMARKER", 2600, 0),
+      `Model ${"BE173BU"} leads the lineup. ` + paragraphWithMarker("BETAMARKER", 2500, 3),
+    ].join("\n\n");
+    const llm = chunkedLlm({
+      markers: ["ALPHAMARKER", "BETAMARKER"],
+      dropPlaceholdersForMarker: "BETAMARKER",
+    });
+    const request = chunkedRequestFor("Title", content);
+
+    await assert.rejects(
+      () => provider(llm).translate(request, contextForChunked()),
+      (err: unknown) => {
+        assert.ok(err instanceof TranslationPartialProgressError);
+        assert.equal(err.reason, "unit_retry_exhausted");
+        assert.equal(err.failureReason, "protected_token");
         return true;
       }
     );

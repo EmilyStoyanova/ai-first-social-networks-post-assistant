@@ -1,6 +1,7 @@
 import type { GenerationTracer } from "@/lib/generation-trace/tracer";
 import type {
   JsonRepair,
+  TranslationParseFailure,
   TranslationPrompts,
   TranslationReplyMode,
 } from "@/lib/ai/feed-item-translation";
@@ -129,6 +130,27 @@ export interface ArticleTranslationContext {
  * unit of resumable translation work," an HTTP batch for MADLAD, a chunk or the title
  * for Ollama chunking.
  */
+/**
+ * WHY one call stopped short of translating every unit — distinct from whether more
+ * cross-run attempts remain, which the caller (translate-feed-item.service.ts) tracks
+ * separately via its own attempt counter.
+ *
+ * Read by the caller's own diagnostics so a chunk that exhausted its OWN in-request
+ * retry budget (most often a `protected_token` restoration that never came back
+ * clean — see `failureReason`) is never logged as if the run had reached MADLAD's
+ * batch cap. Before this field existed, every reason funnelled through one hardcoded
+ * log string ("batch_cap_reached"), which was accurate for MADLAD (the only engine
+ * that ever threw this error) but became misleading the moment the Ollama chunked
+ * path started throwing it too for a completely different reason.
+ */
+export type TranslationPartialProgressReason =
+  /** MADLAD only: `context.maxBatchesThisCall` stopped this call before every PENDING batch ran. */
+  | "batch_cap_reached"
+  /** The item's own deadline passed before every unit had a translation. */
+  | "item_budget_exhausted"
+  /** A chunk exhausted its own in-request regeneration budget — see `failureReason` for why. */
+  | "unit_retry_exhausted";
+
 export class TranslationPartialProgressError extends Error {
   constructor(
     message: string,
@@ -137,7 +159,18 @@ export class TranslationPartialProgressError extends Error {
     /** Units completed across every call for this article so far, including this one. */
     readonly processedBatchCount: number,
     /** Total units this article needs — `processedBatchCount` reaches this when done. */
-    readonly totalBatchCount: number
+    readonly totalBatchCount: number,
+    /** Why THIS call stopped short — see {@link TranslationPartialProgressReason}. */
+    readonly reason: TranslationPartialProgressReason,
+    /**
+     * The underlying per-unit parse-failure reason (e.g. "protected_token",
+     * "invalid_json") when `reason` is "unit_retry_exhausted" and the failing try's
+     * error was a `TranslationParseError`. Null for every other `reason`, and when the
+     * unit failed some other way (a repetition loop is reported via `reason` alone —
+     * this field exists so `protected_token` specifically is never buried in a
+     * free-text message).
+     */
+    readonly failureReason: TranslationParseFailure | null = null
   ) {
     super(message);
     this.name = "TranslationPartialProgressError";

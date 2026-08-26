@@ -467,7 +467,8 @@ export class OllamaTranslationProvider implements TranslationProvider {
           `Ran out of item budget before translating ${label}.`,
           banked,
           Object.keys(banked).length,
-          totalUnits
+          totalUnits,
+          "item_budget_exhausted"
         );
       }
 
@@ -510,7 +511,8 @@ export class OllamaTranslationProvider implements TranslationProvider {
             `Ran out of item budget translating ${label}.`,
             banked,
             Object.keys(banked).length,
-            totalUnits
+            totalUnits,
+            "item_budget_exhausted"
           );
         }
         throw new TranslationPartialProgressError(
@@ -518,7 +520,9 @@ export class OllamaTranslationProvider implements TranslationProvider {
             `${err instanceof Error ? err.message : String(err)}`,
           banked,
           Object.keys(banked).length,
-          totalUnits
+          totalUnits,
+          "unit_retry_exhausted",
+          err instanceof TranslationParseError ? err.reason : null
         );
       }
 

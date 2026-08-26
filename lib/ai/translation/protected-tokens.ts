@@ -299,6 +299,27 @@ export function stripMeasurements(text: string): { text: string; removed: number
 }
 
 /**
+ * A number run glued directly to a capitalised word of real prose — "3.0During",
+ * "12Once" — with NO separator between them at all, unlike the glued-SENTENCE-boundary
+ * case above (which needs a `.`/`!`/`?` to fire). This is the shape a missing
+ * paragraph break leaves when two block elements are concatenated by extraction with
+ * no whitespace and no punctuation whatsoever — "…supports USB 3.0" (end of one
+ * paragraph) "During testing, temperatures…" (start of the next) becomes one token,
+ * "3.0During" (feed item live logs, 2026-08-26). It matched the SAME internal-
+ * punctuation identifier shape as "v2.14.3" (the "." is internal punctuation joining
+ * two alphanumeric runs) and was protected; the model dropped the placeholder on
+ * every retry, exactly like every other glued-boundary case in this file.
+ *
+ * Requiring TWO OR MORE lowercase letters after the capital is what keeps this from
+ * misfiring on a real digit-led product suffix: "GTX1080Ti" ends in "Ti" (one
+ * lowercase letter) and is untouched; a genuine word-shaped tail ("During", "Once",
+ * "After") always has several. This only EXCLUDES the token from protection — it is
+ * left exactly as extracted, glued and all, rather than guessing where to insert a
+ * space (see the file's own restraint about guessing at protected-value identity).
+ */
+const GLUED_NUMBER_WORD = /^\d+(?:[.,]\d+)*\p{Lu}\p{Ll}{2,}$/u;
+
+/**
  * Whether a token is a product/model/version identifier rather than a word.
  *
  * Narrow on purpose. It requires BOTH a letter and a digit, and then one of two shapes
@@ -310,6 +331,17 @@ export function stripMeasurements(text: string): { text: string; removed: number
  * "1.6" alone — which matters, because those are exactly the tokens the model gets
  * RIGHT and localises, and freezing them would be a regression. The number-hyphen-word
  * and measurement exclusions above are carved out of those shapes for the same reason.
+ *
+ * ── Why short bare tokens ("P2", "Z8", "E15") are NOT narrowed further ───────────
+ * A bare all-caps-or-digit token is, by shape alone, indistinguishable from a
+ * two-character coincidence — "Z8" and "P2" are the identical shape, and no rule can
+ * separate a genuine short model suffix from an unrelated fragment by shape alone.
+ * "E15" (feed item 8cf9a29f-4778-4f5b-a4e7-8dcb7977bc5f, 2026-08-20 — see
+ * madlad-translation.provider.test.ts's "REJECTS the exact production title failure")
+ * is measured, real, genuine, and exactly this shape; a length/run-count floor tight
+ * enough to exclude an artifact like "Z8" would also exclude it. `restoreTokens`
+ * rejecting rather than corrupting a translation is this module's accepted failure
+ * mode for a short identifier the model cannot reliably carry — see the file header.
  */
 function isIdentifier(token: string): boolean {
   if (token.length < 2) return false;
@@ -317,6 +349,7 @@ function isIdentifier(token: string): boolean {
   if (!/\d/.test(token)) return false;
   if (NUMBER_HYPHEN_WORD_COMPOUND.test(token)) return false;
   if (isMeasurement(token)) return false;
+  if (GLUED_NUMBER_WORD.test(token)) return false;
   if (/^[A-Za-z0-9]+[-._/][A-Za-z0-9]+(?:[-._/][A-Za-z0-9]+)*$/.test(token)) return true;
   return !/[a-z]/.test(token) && /^[A-Z0-9]+$/.test(token);
 }
