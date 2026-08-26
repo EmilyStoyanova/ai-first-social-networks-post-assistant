@@ -6,10 +6,10 @@ import {
   MAX_COMPANY_CONTEXT_CHARS,
   MAX_STORED_MATCHED_TOPICS,
   MAX_STORED_REASON_CHARS,
+  MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH,
   buildClassificationRepairPrompt,
   buildClassificationSystemPrompt,
   buildClassificationUserPrompt,
-  classificationExcerpt,
   fitsSingleClassificationCall,
   classificationFieldsForCreate,
   classificationFieldsForUpdate,
@@ -24,7 +24,7 @@ import {
   topicsFingerprint,
   type ClassificationContext,
 } from "./feed-item-classification";
-import { aggregateChunkAnalyses, type ChunkAnalysis } from "./classification-chunk-analysis";
+import type { ArticleUnderstanding } from "./article-understanding";
 import { resolveTopicPriorities, type TopicPriorities } from "./topic-priorities";
 
 const SCOPED: TopicPriorities = resolveTopicPriorities({
@@ -52,20 +52,42 @@ const ctx = (
 /**
  * A model reply.
  *
- * `mainSubject` and `primaryTopic` are filled in with values that AGREE with the
- * rest of the object — the first matched topic, or null for OUT_OF_SCOPE — so a
- * test about (say) the rejection reason does not have to restate them. Pass either
- * explicitly, including null, to test it directly: the spread puts the caller last.
+ * `primaryTopic` is filled in with a value that AGREES with the rest of the
+ * object — the first matched topic, or null for OUT_OF_SCOPE — so a test about
+ * (say) the rejection reason does not have to restate it. Pass it explicitly,
+ * including null, to test it directly: the spread puts the caller last.
+ *
+ * No `mainSubject` here — the verdict reply no longer carries one. See
+ * `ClassificationVerdict`'s own comment: it comes exclusively from
+ * `ArticleUnderstanding`, produced upstream by `understandArticle`.
  */
 const reply = (obj: Record<string, unknown>) =>
   JSON.stringify({
-    mainSubject: "Какво разглежда статията.",
     primaryTopic:
       obj.rejectionReason === "OUT_OF_SCOPE"
         ? null
         : ((obj.matchedTopics as string[] | undefined)?.[0] ?? null),
     ...obj,
   });
+
+/**
+ * An `ArticleUnderstanding` — the article representation `buildClassificationUserPrompt`
+ * is judged from. Confidence defaults comfortably above
+ * {@link MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH}, so a test unrelated to the
+ * confidence gate does not have to restate it.
+ */
+const understanding = (overrides: Partial<ArticleUnderstanding> = {}): ArticleUnderstanding => ({
+  mainSubject: "Какво разглежда статията.",
+  centralThesis: null,
+  centralConflict: null,
+  articleType: "news",
+  secondaryTopics: [],
+  incidentalTopics: [],
+  entities: [],
+  confidence: 0.9,
+  evidence: [{ chunkIndex: 0, reason: "states the subject directly" }],
+  ...overrides,
+});
 
 describe("isClassifiableSourceType", () => {
   it("covers article feeds only", () => {
@@ -94,32 +116,25 @@ describe("classificationMode", () => {
   });
 });
 
-describe("classifyInput / fitsSingleClassificationCall / classificationExcerpt", () => {
+describe("classifyInput / fitsSingleClassificationCall", () => {
   it("classifies what the stored text can support", () => {
     assert.equal(classifyInput({ title: "t", body: "b" }), "full");
     assert.equal(classifyInput({ title: "t", body: "   " }), "title_only");
     assert.equal(classifyInput({ title: null, body: null }), "empty");
   });
 
-  it("a short body fits one call and is sent whole, unchanged", () => {
-    const short = "A short article body.";
-    assert.equal(fitsSingleClassificationCall(short), true);
-    assert.equal(classificationExcerpt(short), short);
+  it("a short body fits one call", () => {
+    assert.equal(fitsSingleClassificationCall("A short article body."), true);
   });
 
-  it("a long body does not fit one call — the whole-article chunk pipeline handles it instead", () => {
-    // This is the exact bug the chunk-analysis pipeline exists to fix: a body
-    // over the cap must NEVER be sent as a truncated or sampled excerpt.
-    // fitsSingleClassificationCall is what `classify-feed-item.service.ts`
-    // checks BEFORE ever building a prompt from raw text, to route it through
-    // `classification-chunk-analysis.ts` instead.
+  it("a long body does not fit one call — understandArticle routes it through chunking instead", () => {
+    // This module no longer builds a prompt from raw text at all — see
+    // `ClassificationPromptInput`'s own comment. fitsSingleClassificationCall
+    // survives only because `understandArticle` reuses it for the identical
+    // decision one step upstream, and `classify-feed-item.service.ts` reuses
+    // it again to size an item's timeout budget.
     const long = "a".repeat(MAX_CLASSIFICATION_CONTENT_CHARS + 500);
     assert.equal(fitsSingleClassificationCall(long), false);
-  });
-
-  it("classificationExcerpt is defense-in-depth ONLY — it still caps, but no real caller reaches it with a long body", () => {
-    const long = "a".repeat(MAX_CLASSIFICATION_CONTENT_CHARS + 500);
-    assert.equal(classificationExcerpt(long).length, MAX_CLASSIFICATION_CONTENT_CHARS);
   });
 });
 
@@ -193,146 +208,131 @@ describe("computeClassificationHash", () => {
   });
 });
 
-// ─── Full-article classification context ──────────────────────────────────────
+// ─── Article understanding, consumed not re-derived ────────────────────────────
 //
-// The bug this whole architecture exists to fix: classification used to be
-// handed a blind slice(0, MAX_CLASSIFICATION_CONTENT_CHARS) of the article
-// body (and, briefly, a beginning/middle/end sample of it) — a long article,
-// routinely the case once a chunked/segmented translation reassembles a whole
-// feature piece, was judged on an APPROXIMATION of its text. A real subject,
-// central conflict, or key fact stated only in the middle or the end could be
-// discarded before the model ever saw it.
+// The bug this architecture exists to fix, in two parts. First: classification
+// used to be handed a blind slice(0, MAX_CLASSIFICATION_CONTENT_CHARS) of the
+// article body (and, briefly, a beginning/middle/end sample of it) — a real
+// subject stated only in the middle or the end could be discarded before the
+// model ever saw it. Second, even after a whole-article synthesis fixed that:
+// the SAME call that read the article also decided the verdict, so naming the
+// subject and matching it against a topic were never really separate questions.
 //
-// The fix is a whole-article pipeline: EVERY part of a long article is
-// analyzed by the model into a compact structured record
-// (`classification-chunk-analysis.ts`), and the final verdict is asked from
-// the SYNTHESIS of all of them — never from a sample of the raw text. These
-// tests exercise the PROMPT the verdict model actually receives for both
-// article representations `buildClassificationUserPrompt` accepts.
+// Both are now `understandArticle`'s job, entirely upstream (see
+// `article-understanding.ts` and `understand-article.service.ts`, and their own
+// test suites for the chunking/reduction/confidence machinery). This module
+// receives the finished `ArticleUnderstanding` and does nothing but render it
+// and match it against topics — these tests exercise exactly that rendering.
 
-describe("buildClassificationUserPrompt — the short-article path", () => {
-  it("sends a short article exactly as before — no aggregate framing", () => {
-    const prompt = buildClassificationUserPrompt({
-      article: {
-        kind: "text",
-        text: { title: "t", body: "A short article about paint." },
-        inputKind: "full",
-      },
-      context: ctx(SCOPED),
+describe("buildClassificationUserPrompt — the article understanding section", () => {
+  it("renders every field, in order, under its own heading", () => {
+    const u = understanding({
+      mainSubject: "Residents are protesting a new coastal tourism development.",
+      centralThesis: "Development threatens local residents' access to the shore.",
+      centralConflict: "Residents versus developers.",
+      articleType: "news",
+      secondaryTopics: ["protected coastal area"],
+      incidentalTopics: ["tourism", "beaches", "hotels"],
+      entities: ["Albania"],
+      confidence: 0.75,
+      evidence: [{ chunkIndex: 9, reason: "names the protest directly" }],
     });
-    assert.match(prompt, /\nArticle:\nA short article about paint\./);
-    assert.ok(!prompt.includes("CENTRAL"));
-    assert.ok(!prompt.includes("synthesized from"));
-  });
-});
+    const prompt = buildClassificationUserPrompt({ understanding: u, context: ctx(SCOPED) });
 
-function analysis(overrides: Partial<ChunkAnalysis>): ChunkAnalysis {
-  return {
-    mainPoint: "A point.",
-    topics: [],
-    entities: [],
-    importantFacts: [],
-    centrality: "supporting",
-    ...overrides,
-  };
-}
-
-describe("buildClassificationUserPrompt — the whole-article (aggregate) path", () => {
-  it("renders CENTRAL and CONTEXT under distinct headings, never merged", () => {
-    const aggregate = aggregateChunkAnalyses([
-      analysis({ mainPoint: "The protest shut down the harbor.", centrality: "central" }),
-      analysis({ mainPoint: "The coastline is scenic in summer.", centrality: "supporting" }),
-    ]);
-    const prompt = buildClassificationUserPrompt({
-      article: { kind: "aggregate", title: "t", aggregate },
-      context: ctx(SCOPED),
-    });
-
-    // The heading PREFIXES, not bare "CENTRAL"/"CONTEXT" — both words also
-    // appear inside the introductory instruction paragraph ("never from
-    // CENTRAL alone without reading CONTEXT"), which would otherwise be
-    // mistaken for the section headings themselves.
-    const centralIdx = prompt.indexOf("CENTRAL —");
-    const contextIdx = prompt.indexOf("CONTEXT —");
-    assert.ok(centralIdx !== -1 && contextIdx !== -1);
-    assert.ok(prompt.includes("The protest shut down the harbor."));
-    assert.ok(prompt.includes("The coastline is scenic in summer."));
-    // The central point must appear before the CONTEXT heading, and the
-    // supporting point must appear after it — proving they are not
-    // interleaved into one undifferentiated list.
-    assert.ok(prompt.indexOf("The protest shut down the harbor.") < contextIdx);
-    assert.ok(prompt.indexOf("The coastline is scenic in summer.") > contextIdx);
-  });
-
-  it("the Albania-protesters case: a frequent supporting mention must not read as the subject", () => {
-    // Ten chunks of travel/nature CONTEXT against one CENTRAL point about the
-    // actual conflict — exactly the shape a travelogue-framed protest story
-    // takes. The prompt must tell the model context is not the subject
-    // however often it appears, not just show the raw counts.
-    const chunks: ChunkAnalysis[] = [
-      analysis({
-        mainPoint: "Local residents are protesting a new tourism development on the coast.",
-        centrality: "central",
-      }),
-      ...Array.from({ length: 10 }, (_, i) =>
-        analysis({
-          mainPoint: `The Albanian coastline near section ${i} is described as pristine and scenic.`,
-          topics: ["travel", "coastal scenery"],
-          centrality: "supporting",
-        })
-      ),
+    assert.match(prompt, /## Article understanding/);
+    const order = [
+      "MAIN SUBJECT:",
+      "Residents are protesting a new coastal tourism development.",
+      "CENTRAL THESIS:",
+      "Development threatens local residents' access to the shore.",
+      "CENTRAL CONFLICT:",
+      "Residents versus developers.",
+      "ARTICLE TYPE:",
+      "news",
+      "SECONDARY TOPICS:",
+      "protected coastal area",
+      "INCIDENTAL TOPICS:",
+      "tourism, beaches, hotels",
+      "ENTITIES:",
+      "Albania",
+      "UNDERSTANDING CONFIDENCE:",
+      "0.75",
+      "EVIDENCE:",
+      "[section 9] names the protest directly",
     ];
-    const aggregate = aggregateChunkAnalyses(chunks);
-    const prompt = buildClassificationUserPrompt({
-      article: { kind: "aggregate", title: "Along Albania's coast", aggregate },
-      context: ctx(SCOPED),
-    });
-
-    assert.ok(prompt.includes("protesting a new tourism development"));
-    assert.match(
-      prompt,
-      /NOT the article's subject on their own, however often/,
-      "must warn against a frequent supporting mention outweighing the real subject"
-    );
+    let cursor = -1;
+    for (const token of order) {
+      const idx = prompt.indexOf(token);
+      assert.ok(idx !== -1, `expected to find ${JSON.stringify(token)}`);
+      assert.ok(
+        idx > cursor,
+        `expected ${JSON.stringify(token)} to appear after the previous field`
+      );
+      cursor = idx;
+    }
   });
 
-  it("falls back honestly when no section was judged central", () => {
-    const aggregate = aggregateChunkAnalyses([
-      analysis({ mainPoint: "Scene one.", centrality: "supporting" }),
-      analysis({ mainPoint: "Scene two.", centrality: "supporting" }),
-    ]);
-    const prompt = buildClassificationUserPrompt({
-      article: { kind: "aggregate", title: "t", aggregate },
-      context: ctx(SCOPED),
+  it("renders (none) for a null thesis/conflict and empty topic/entity lists — the heading is never dropped", () => {
+    const u = understanding({
+      centralThesis: null,
+      centralConflict: null,
+      secondaryTopics: [],
+      incidentalTopics: [],
+      entities: [],
     });
-    assert.match(prompt, /no single section stood out as clearly central/i);
+    const prompt = buildClassificationUserPrompt({ understanding: u, context: ctx(SCOPED) });
+    assert.match(prompt, /CENTRAL THESIS:\n\(none/);
+    assert.match(prompt, /CENTRAL CONFLICT:\n\(none\)/);
+    assert.match(prompt, /SECONDARY TOPICS:\n\(none\)/);
+    assert.match(prompt, /INCIDENTAL TOPICS:\n\(none\)/);
+    assert.match(prompt, /ENTITIES:\n\(none\)/);
   });
 
-  it("stays bounded however many chunks the article produced", () => {
-    // 200 chunks is an unrealistically huge article — the point is that the
-    // rendered prompt does not grow with it. aggregateChunkAnalyses' own
-    // count caps are what make this true; this proves the PROMPT built from
-    // its output inherits the bound end-to-end.
-    const chunks: ChunkAnalysis[] = Array.from({ length: 200 }, (_, i) =>
-      analysis({
-        mainPoint: `Section ${i} says something about topic ${i}.`,
-        topics: [`topic ${i}`],
-        entities: [`entity ${i}`],
-        importantFacts: [`fact ${i}`],
-        centrality: i % 5 === 0 ? "central" : "supporting",
-      })
-    );
-    const aggregate = aggregateChunkAnalyses(chunks);
+  it("appears before the company's configured topic lists", () => {
     const prompt = buildClassificationUserPrompt({
-      article: { kind: "aggregate", title: "t", aggregate },
+      understanding: understanding(),
       context: ctx(SCOPED),
     });
-    const articleSection = prompt.slice(prompt.indexOf("## The article"));
     assert.ok(
-      articleSection.length < 4000,
-      `expected a bounded synthesis, got ${articleSection.length} chars`
+      prompt.indexOf("## Article understanding") < prompt.indexOf("## The company's topics")
     );
-    assert.ok(prompt.includes("capped for length"));
+  });
+
+  it("the Albania case: incidental tourism topics are shown separately from the real (protest) subject", () => {
+    const u = understanding({
+      mainSubject: "Residents are protesting new tourism development in a protected coastal area.",
+      incidentalTopics: ["tourism", "beaches", "hotels", "scenery"],
+    });
+    const prompt = buildClassificationUserPrompt({ understanding: u, context: ctx(SCOPED) });
+    const mainSubjectLine = prompt.slice(
+      prompt.indexOf("MAIN SUBJECT:"),
+      prompt.indexOf("CENTRAL THESIS:")
+    );
+    assert.match(mainSubjectLine, /protesting new tourism development/);
+    assert.doesNotMatch(mainSubjectLine, /beaches|hotels|scenery/);
+    assert.match(prompt, /INCIDENTAL TOPICS:\ntourism, beaches, hotels, scenery/);
+  });
+
+  it("stays bounded however many topics, entities, or evidence entries the understanding carries", () => {
+    // ArticleUnderstanding's own caps (MAX_SECONDARY_TOPICS, MAX_EVIDENCE, ...)
+    // already bound this — this proves the PROMPT built from it inherits that
+    // bound rather than re-expanding it.
+    const u = understanding({
+      secondaryTopics: Array.from({ length: 8 }, (_, i) => `topic ${i}`),
+      incidentalTopics: Array.from({ length: 8 }, (_, i) => `incidental ${i}`),
+      entities: Array.from({ length: 12 }, (_, i) => `entity ${i}`),
+      evidence: Array.from({ length: 6 }, (_, i) => ({ chunkIndex: i, reason: `reason ${i}` })),
+    });
+    const prompt = buildClassificationUserPrompt({ understanding: u, context: ctx(SCOPED) });
+    assert.ok(prompt.length < 4000, `expected a bounded prompt, got ${prompt.length} chars`);
+  });
+
+  it("tells the model to trust the understanding rather than re-deriving the subject", () => {
+    const prompt = buildClassificationUserPrompt({
+      understanding: understanding(),
+      context: ctx(SCOPED),
+    });
+    assert.match(prompt, /do not (re-derive|substitute) the subject/i);
   });
 });
 
@@ -940,11 +940,13 @@ describe("company context — the empty case is untouched", () => {
 
   it("omits the section from the prompt entirely", () => {
     const prompt = buildClassificationUserPrompt({
-      article: { kind: "text", text: { title: "t", body: "b" }, inputKind: "full" },
+      understanding: understanding(),
       context: ctx(SCOPED),
     });
     assert.ok(!prompt.includes("## The company\n"));
-    assert.ok(prompt.startsWith("## The company's topics"));
+    // No company section: the prompt opens straight on the article
+    // understanding, exactly as it would with company copy trimmed to nothing.
+    assert.ok(prompt.trimStart().startsWith("## Article understanding"));
   });
 
   it("still applies the primaryTopic rules — they do not depend on the context", () => {
@@ -981,7 +983,7 @@ describe("company context — when it is configured", () => {
 
   it("renders both fields into the prompt, before the topics", () => {
     const prompt = buildClassificationUserPrompt({
-      article: { kind: "text", text: { title: "t", body: "b" }, inputKind: "full" },
+      understanding: understanding(),
       context: full,
     });
     assert.match(prompt, /## The company/);
@@ -992,7 +994,7 @@ describe("company context — when it is configured", () => {
 
   it("renders only the field that has content", () => {
     const prompt = buildClassificationUserPrompt({
-      article: { kind: "text", text: { title: "t", body: "b" }, inputKind: "full" },
+      understanding: understanding(),
       context: ctx(SCOPED, { description: DESCRIPTION }),
     });
     assert.ok(prompt.includes(DESCRIPTION));
@@ -1007,7 +1009,7 @@ describe("company context — when it is configured", () => {
    */
   it("carries the sentence that stops the context from widening the scope", () => {
     const prompt = buildClassificationUserPrompt({
-      article: { kind: "text", text: { title: "t", body: "b" }, inputKind: "full" },
+      understanding: understanding(),
       context: full,
     });
     assert.ok(
@@ -1020,7 +1022,7 @@ describe("company context — when it is configured", () => {
   it("caps each field, so a pasted brochure cannot become a second topic list", () => {
     const long = "я".repeat(MAX_COMPANY_CONTEXT_CHARS + 500);
     const prompt = buildClassificationUserPrompt({
-      article: { kind: "text", text: { title: "t", body: "b" }, inputKind: "full" },
+      understanding: understanding(),
       context: ctx(SCOPED, { description: long, audience: long }),
     });
     assert.ok(!prompt.includes("я".repeat(MAX_COMPANY_CONTEXT_CHARS + 1)));
@@ -1283,8 +1285,8 @@ describe("primaryTopic — the tier of the dominant topic decides", () => {
   });
 });
 
-describe("mainSubject — what the article is about", () => {
-  it("is required: a verdict that cannot name the subject did not read the article", () => {
+describe("mainSubject — no longer part of the verdict reply", () => {
+  it("a reply is accepted with no mainSubject field at all — it is not asked for here", () => {
     const out = parseClassificationResponse(
       JSON.stringify({
         primaryTopic: "бои",
@@ -1295,15 +1297,13 @@ describe("mainSubject — what the article is about", () => {
       }),
       SCOPED
     );
-    assert.equal(out.status, "invalid");
-    assert.ok(out.status === "invalid");
-    assert.match(out.feedback, /mainSubject/);
+    assert.equal(out.status, "ok");
   });
 
-  it("is capped like the reason", () => {
+  it("a mainSubject field in the reply, if a model adds one anyway, is ignored — the stored value can only come from ArticleUnderstanding", () => {
     const out = parseClassificationResponse(
       reply({
-        mainSubject: "я".repeat(MAX_STORED_REASON_CHARS + 200),
+        mainSubject: "A DIFFERENT subject the verdict model invented.",
         classification: "HIGH",
         rejectionReason: null,
         primaryTopic: "бои",
@@ -1313,15 +1313,96 @@ describe("mainSubject — what the article is about", () => {
       SCOPED
     );
     assert.ok(out.status === "ok");
-    assert.equal(out.mainSubject.length, MAX_STORED_REASON_CHARS);
+    assert.ok(
+      !("mainSubject" in out),
+      "ClassificationVerdict must not carry a mainSubject the caller could mistakenly store"
+    );
   });
 
-  it("is asked for as a description, never as reasoning", () => {
-    // A model told to "explain your thinking" writes an argument here, and the
-    // field stops being usable as a diagnostic — the whole reason it exists.
+  it("the system prompt tells the model to trust the given understanding, not restate or replace it", () => {
     const prompt = buildClassificationSystemPrompt("scoped");
-    assert.match(prompt, /short, factual description of the subject itself/);
-    assert.match(prompt, /not an argument for your verdict/);
+    assert.match(prompt, /Treat it as fact/);
+    assert.match(prompt, /Do NOT re-read, re-summarize, restate in different words, or replace it/);
+  });
+
+  it("the JSON answer contract no longer asks for mainSubject", () => {
+    for (const mode of ["scoped", "blacklist_only"] as const) {
+      const prompt = buildClassificationSystemPrompt(mode);
+      const answerSection = prompt.slice(prompt.indexOf("## Answer"));
+      assert.ok(!answerSection.includes('"mainSubject"'));
+    }
+  });
+});
+
+describe("HIGH requires a confident understanding (MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH)", () => {
+  const highReply = reply({
+    classification: "HIGH",
+    rejectionReason: null,
+    primaryTopic: "бои",
+    matchedTopics: ["бои"],
+    reason: "Article about choosing paint.",
+  });
+
+  it("refuses HIGH when the understanding confidence is below the threshold", () => {
+    const out = parseClassificationResponse(
+      highReply,
+      SCOPED,
+      MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH - 0.01
+    );
+    assert.equal(out.status, "invalid");
+    assert.ok(out.status === "invalid");
+    assert.match(out.feedback, /UNDERSTANDING CONFIDENCE/);
+  });
+
+  it("accepts HIGH exactly at the threshold", () => {
+    const out = parseClassificationResponse(
+      highReply,
+      SCOPED,
+      MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH
+    );
+    assert.equal(out.status, "ok");
+  });
+
+  it("accepts HIGH comfortably above the threshold", () => {
+    const out = parseClassificationResponse(highReply, SCOPED, 0.9);
+    assert.equal(out.status, "ok");
+  });
+
+  it("does NOT gate MEDIUM on low confidence — only HIGH is treated as aggressive", () => {
+    const mediumReply = reply({
+      classification: "MEDIUM",
+      rejectionReason: null,
+      primaryTopic: "вентилация",
+      matchedTopics: ["вентилация"],
+      reason: "x",
+    });
+    const out = parseClassificationResponse(mediumReply, SCOPED, 0.05);
+    assert.equal(out.status, "ok");
+  });
+
+  it("does NOT gate OUT_OF_SCOPE or BLACKLIST on low confidence", () => {
+    const outOfScope = reply({
+      classification: "REJECTED",
+      rejectionReason: "OUT_OF_SCOPE",
+      primaryTopic: null,
+      matchedTopics: [],
+      reason: "x",
+    });
+    const blacklist = reply({
+      classification: "REJECTED",
+      rejectionReason: "BLACKLIST",
+      primaryTopic: "камини",
+      matchedTopics: ["камини"],
+      reason: "x",
+    });
+    assert.equal(parseClassificationResponse(outOfScope, SCOPED, 0.05).status, "ok");
+    assert.equal(parseClassificationResponse(blacklist, SCOPED, 0.05).status, "ok");
+  });
+
+  it("the system prompt visibly tells the model to hold back HIGH on low confidence", () => {
+    const prompt = buildClassificationSystemPrompt("scoped");
+    assert.match(prompt, /UNDERSTANDING CONFIDENCE.*is low/i);
+    assert.match(prompt, /Do not answer HIGH/);
   });
 });
 

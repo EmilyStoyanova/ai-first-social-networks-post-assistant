@@ -1,0 +1,392 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import {
+  ARTICLE_TYPES,
+  ArticleUnderstandingParseError,
+  buildArticleUnderstandingDirectPrompt,
+  buildArticleUnderstandingRepairPrompt,
+  buildArticleUnderstandingSynthesisPrompt,
+  buildArticleUnderstandingSystemPrompt,
+  computeConfidenceSignals,
+  confidenceCeiling,
+  parseArticleUnderstandingResponse,
+  reduceForSynthesis,
+  SAFE_SYNTHESIS_POINT_COUNT,
+  type EvidencePoint,
+} from "./article-understanding";
+import type { ChunkAnalysis } from "./classification-chunk-analysis";
+
+function chunk(overrides: Partial<ChunkAnalysis> = {}): ChunkAnalysis {
+  return {
+    mainPoint: "A point.",
+    topics: [],
+    entities: [],
+    importantFacts: [],
+    centrality: "supporting",
+    ...overrides,
+  };
+}
+
+function okReply(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    mainSubject: "Residents are protesting a new coastal tourism development.",
+    centralThesis: "Development threatens a protected coastal area.",
+    centralConflict: "Residents versus developers over the protected coast.",
+    articleType: "news",
+    secondaryTopics: ["tourism development", "coastal protection"],
+    incidentalTopics: ["local hotels"],
+    entities: ["Albania"],
+    confidence: 0.8,
+    evidence: [{ chunkIndex: 0, reason: "Describes the protest directly." }],
+    ...overrides,
+  });
+}
+
+// ─── parseArticleUnderstandingResponse ─────────────────────────────────────
+
+describe("parseArticleUnderstandingResponse", () => {
+  it("accepts a well-formed reply", () => {
+    const out = parseArticleUnderstandingResponse(okReply(), 3);
+    assert.equal(out.status, "ok");
+    if (out.status === "ok") {
+      assert.equal(out.mainSubject, "Residents are protesting a new coastal tourism development.");
+      assert.equal(out.articleType, "news");
+      assert.equal(out.confidence, 0.8);
+      assert.deepEqual(out.evidence, [
+        { chunkIndex: 0, reason: "Describes the protest directly." },
+      ]);
+    }
+  });
+
+  it("throws on a genuinely empty response", () => {
+    assert.throws(() => parseArticleUnderstandingResponse("", 1), ArticleUnderstandingParseError);
+    assert.throws(() => parseArticleUnderstandingResponse(null, 1), ArticleUnderstandingParseError);
+  });
+
+  it("rejects prose instead of JSON", () => {
+    const out = parseArticleUnderstandingResponse("This article is about a protest.", 1);
+    assert.equal(out.status, "invalid");
+    if (out.status === "invalid") assert.match(out.feedback, /JSON/);
+  });
+
+  it("rejects a missing mainSubject", () => {
+    const out = parseArticleUnderstandingResponse(okReply({ mainSubject: undefined }), 3);
+    assert.equal(out.status, "invalid");
+  });
+
+  it("rejects a bag-of-keywords mainSubject (too few words)", () => {
+    const out = parseArticleUnderstandingResponse(okReply({ mainSubject: "Coastal tourism" }), 3);
+    assert.equal(out.status, "invalid");
+    if (out.status === "invalid") assert.match(out.problem, /keywords/);
+  });
+
+  it("rejects a bag-of-keywords mainSubject (comma list with no connecting word)", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({ mainSubject: "tourism, beaches, hotels, scenery, Albania" }),
+      3
+    );
+    assert.equal(out.status, "invalid");
+    if (out.status === "invalid") assert.match(out.problem, /keywords/);
+  });
+
+  it("accepts a genuine sentence containing commas", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({
+        mainSubject:
+          "Although the piece opens with beaches and hotels, it is really about residents fighting a tourism development.",
+      }),
+      3
+    );
+    assert.equal(out.status, "ok");
+  });
+
+  it("rejects an unknown articleType", () => {
+    const out = parseArticleUnderstandingResponse(okReply({ articleType: "listicle" }), 3);
+    assert.equal(out.status, "invalid");
+  });
+
+  it("accepts every documented articleType", () => {
+    for (const type of ARTICLE_TYPES) {
+      const out = parseArticleUnderstandingResponse(okReply({ articleType: type }), 3);
+      assert.equal(out.status, "ok", `expected ${type} to be accepted`);
+    }
+  });
+
+  it("rejects a non-numeric confidence", () => {
+    const out = parseArticleUnderstandingResponse(okReply({ confidence: "high" }), 3);
+    assert.equal(out.status, "invalid");
+  });
+
+  it("clamps an out-of-range confidence rather than rejecting it", () => {
+    const out = parseArticleUnderstandingResponse(okReply({ confidence: 1.4 }), 3);
+    assert.equal(out.status, "ok");
+    if (out.status === "ok") assert.equal(out.confidence, 1);
+  });
+
+  it("allows centralThesis and centralConflict to be null", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({ centralThesis: null, centralConflict: null }),
+      3
+    );
+    assert.equal(out.status, "ok");
+    if (out.status === "ok") {
+      assert.equal(out.centralThesis, null);
+      assert.equal(out.centralConflict, null);
+    }
+  });
+
+  it("rejects a reply with no evidence", () => {
+    const out = parseArticleUnderstandingResponse(okReply({ evidence: [] }), 3);
+    assert.equal(out.status, "invalid");
+  });
+
+  it("rejects evidence citing a chunkIndex outside the article's real range", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({ evidence: [{ chunkIndex: 5, reason: "made up" }] }),
+      3
+    );
+    assert.equal(out.status, "invalid");
+    if (out.status === "invalid") assert.match(out.problem, /outside/);
+  });
+
+  it("rejects evidence with a non-integer chunkIndex", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({ evidence: [{ chunkIndex: 1.5, reason: "x" }] }),
+      3
+    );
+    assert.equal(out.status, "invalid");
+  });
+
+  it("rejects an evidence entry with no reason", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({ evidence: [{ chunkIndex: 0, reason: "" }] }),
+      3
+    );
+    assert.equal(out.status, "invalid");
+  });
+});
+
+// ─── Recursive reduction ────────────────────────────────────────────────────
+
+describe("reduceForSynthesis", () => {
+  it("passes chunks through unchanged when already under the safe count", () => {
+    const analyses = [chunk({ mainPoint: "A" }), chunk({ mainPoint: "B" })];
+    const points = reduceForSynthesis(analyses);
+    assert.equal(points.length, 2);
+    assert.deepEqual(
+      points.map((p) => p.chunkIndices),
+      [[0], [1]]
+    );
+  });
+
+  it("never silently drops a chunk — every original index survives reduction for a very long article", () => {
+    const analyses = Array.from({ length: 97 }, (_, i) =>
+      chunk({ mainPoint: `Point ${i}`, centrality: i % 13 === 0 ? "central" : "supporting" })
+    );
+    const points = reduceForSynthesis(analyses);
+
+    assert.ok(
+      points.length <= SAFE_SYNTHESIS_POINT_COUNT,
+      `reduction should fit under the safe count, got ${points.length}`
+    );
+    const seen = new Set(points.flatMap((p) => p.chunkIndices));
+    assert.equal(seen.size, 97, "every original chunk index must still be traceable");
+    for (let i = 0; i < 97; i++) assert.ok(seen.has(i), `missing chunk index ${i}`);
+  });
+
+  it("never demotes a group containing a central chunk to supporting", () => {
+    const analyses = Array.from({ length: 40 }, (_, i) =>
+      chunk({ mainPoint: `Point ${i}`, centrality: i === 39 ? "central" : "supporting" })
+    );
+    const points = reduceForSynthesis(analyses);
+    const group = points.find((p) => p.chunkIndices.includes(39));
+    assert.ok(group, "the group containing the last (central) chunk must exist");
+    assert.equal(group!.centrality, "central");
+  });
+
+  it("terminates and keeps a real topic that appears only in the last chunk reachable", () => {
+    // The real-topic-appears-late shape: 60 supporting chunks about one thing,
+    // then one central chunk with the article's real subject, right at the end.
+    const analyses = [
+      ...Array.from({ length: 60 }, (_, i) =>
+        chunk({ mainPoint: `Scenic description ${i}`, topics: ["scenery"] })
+      ),
+      chunk({
+        mainPoint: "Residents announce a lawsuit against the resort developer.",
+        topics: ["lawsuit", "development"],
+        centrality: "central",
+      }),
+    ];
+    const points = reduceForSynthesis(analyses);
+    const centralPoints = points.filter((p) => p.centrality === "central");
+    assert.equal(centralPoints.length, 1);
+    assert.ok(centralPoints[0].chunkIndices.includes(60));
+  });
+});
+
+// ─── Confidence ─────────────────────────────────────────────────────────────
+
+describe("computeConfidenceSignals / confidenceCeiling", () => {
+  it("gives a low ceiling when no chunk is central", () => {
+    const analyses = Array.from({ length: 6 }, () => chunk({ centrality: "supporting" }));
+    const ceiling = confidenceCeiling(computeConfidenceSignals(analyses));
+    assert.ok(ceiling <= 0.3, `expected a low ceiling, got ${ceiling}`);
+  });
+
+  it("gives a high ceiling for many central chunks that agree on topic", () => {
+    const analyses = Array.from({ length: 6 }, () =>
+      chunk({ centrality: "central", topics: ["coastal protest", "tourism development"] })
+    );
+    const ceiling = confidenceCeiling(computeConfidenceSignals(analyses));
+    assert.ok(ceiling >= 0.8, `expected a high ceiling, got ${ceiling}`);
+  });
+
+  it("gives a low ceiling for central chunks pointing at unrelated subjects", () => {
+    const analyses = [
+      chunk({ centrality: "central", topics: ["coastal protest"] }),
+      chunk({ centrality: "central", topics: ["local football results"] }),
+      chunk({ centrality: "central", topics: ["a museum renovation"] }),
+      chunk({ centrality: "supporting", topics: ["scenery"] }),
+    ];
+    const ceiling = confidenceCeiling(computeConfidenceSignals(analyses));
+    assert.ok(ceiling <= 0.5, `expected a suppressed ceiling for disagreement, got ${ceiling}`);
+  });
+
+  it("gives a moderate, not full, ceiling for a single uncorroborated central chunk", () => {
+    const analyses = [
+      chunk({ centrality: "central", topics: ["coastal protest"] }),
+      ...Array.from({ length: 9 }, () => chunk({ centrality: "supporting" })),
+    ];
+    const ceiling = confidenceCeiling(computeConfidenceSignals(analyses));
+    assert.ok(ceiling > 0.3 && ceiling < 0.85, `expected a moderate ceiling, got ${ceiling}`);
+  });
+
+  it("does not let repeated incidental (supporting) mentions raise the ceiling", () => {
+    const withoutRepeats = confidenceCeiling(
+      computeConfidenceSignals([
+        chunk({ centrality: "central", topics: ["protest"] }),
+        chunk({ centrality: "central", topics: ["protest"] }),
+      ])
+    );
+    const withManyRepeatedIncidentals = confidenceCeiling(
+      computeConfidenceSignals([
+        chunk({ centrality: "central", topics: ["protest"] }),
+        chunk({ centrality: "central", topics: ["protest"] }),
+        ...Array.from({ length: 20 }, () =>
+          chunk({ centrality: "supporting", topics: ["hotels"] })
+        ),
+      ])
+    );
+    assert.ok(
+      withManyRepeatedIncidentals <= withoutRepeats,
+      "piling on supporting chunks about an incidental topic must not raise the ceiling"
+    );
+  });
+});
+
+// ─── Prompts ────────────────────────────────────────────────────────────────
+
+describe("buildArticleUnderstandingSystemPrompt", () => {
+  it("tells the direct-mode model to cite chunk 0", () => {
+    const prompt = buildArticleUnderstandingSystemPrompt("direct");
+    assert.match(prompt, /chunkIndex 0/);
+  });
+
+  it("tells the synthesis-mode model to cite only sections it was shown", () => {
+    const prompt = buildArticleUnderstandingSystemPrompt("synthesis");
+    assert.match(prompt, /section numbers actually shown/);
+  });
+});
+
+describe("buildArticleUnderstandingDirectPrompt", () => {
+  it("renders the whole body as section 0", () => {
+    const prompt = buildArticleUnderstandingDirectPrompt({
+      title: "A title",
+      body: "The article body text.",
+    });
+    assert.match(prompt, /Section 0:/);
+    assert.match(prompt, /The article body text\./);
+  });
+});
+
+describe("buildArticleUnderstandingSynthesisPrompt", () => {
+  const misleadingOpening: EvidencePoint[] = [
+    {
+      text: "Beaches draw thousands of tourists every summer.",
+      chunkIndices: [0],
+      centrality: "supporting",
+    },
+    {
+      text: "Hotels along the coast report record bookings.",
+      chunkIndices: [1],
+      centrality: "supporting",
+    },
+    {
+      text: "Residents filed a lawsuit to block a new coastal resort.",
+      chunkIndices: [2],
+      centrality: "central",
+    },
+  ];
+
+  it("renders central points under CENTRAL and keeps supporting points under CONTEXT — a misleading opening does not dominate", () => {
+    const prompt = buildArticleUnderstandingSynthesisPrompt({
+      title: "Coastal region",
+      totalChunkCount: 3,
+      points: misleadingOpening,
+      topics: [],
+      entities: [],
+      importantFacts: [],
+    });
+
+    const centralSection = prompt.split("CONTEXT —")[0];
+    assert.match(centralSection, /lawsuit to block a new coastal resort/);
+    assert.doesNotMatch(centralSection, /Beaches draw thousands/);
+
+    const contextSection = prompt.slice(prompt.indexOf("CONTEXT —"));
+    assert.match(contextSection, /Beaches draw thousands/);
+    assert.match(contextSection, /record bookings/);
+  });
+
+  it("cites the reduced points' real chunk indices, even after merging", () => {
+    const merged: EvidencePoint = {
+      text: "Scenic description of the coastline.",
+      chunkIndices: [4, 5, 6, 7],
+      centrality: "supporting",
+    };
+    const prompt = buildArticleUnderstandingSynthesisPrompt({
+      title: null,
+      totalChunkCount: 8,
+      points: [merged],
+      topics: [],
+      entities: [],
+      importantFacts: [],
+    });
+    assert.match(prompt, /\[section 4,5,6,7\]/);
+  });
+
+  it("warns that CENTRAL should not be read alone, and that order/frequency is not significance", () => {
+    const prompt = buildArticleUnderstandingSynthesisPrompt({
+      title: null,
+      totalChunkCount: 1,
+      points: [{ text: "x", chunkIndices: [0], centrality: "central" }],
+      topics: [],
+      entities: [],
+      importantFacts: [],
+    });
+    assert.match(prompt, /never from CENTRAL alone/);
+    assert.match(prompt, /never by which point is listed first or mentioned most/);
+  });
+});
+
+describe("buildArticleUnderstandingRepairPrompt", () => {
+  it("carries the original prompt, the bad reply, and the feedback forward", () => {
+    const repaired = buildArticleUnderstandingRepairPrompt(
+      "original",
+      "bad reply text",
+      "fix this"
+    );
+    assert.match(repaired, /original/);
+    assert.match(repaired, /bad reply text/);
+    assert.match(repaired, /fix this/);
+  });
+});

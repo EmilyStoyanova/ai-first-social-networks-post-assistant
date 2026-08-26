@@ -68,7 +68,7 @@ function makeDeps(opts: { items?: ClassifiableItem[]; context?: ClassificationCo
 }
 
 describe("classifyFeedItems — tallying outcomes", () => {
-  it("counts `partial` separately from classified/failed/skipped", async () => {
+  it("counts classified/failed/skipped outcomes separately", async () => {
     const items = [item("a"), item("b"), item("c")];
     let call = 0;
     const deps: ClassifyFeedItemsDeps = {
@@ -85,14 +85,14 @@ describe("classifyFeedItems — tallying outcomes", () => {
             provider: "p",
             model: "m",
           };
-        if (call === 2) return { status: "partial", processedChunkCount: 2, totalChunkCount: 5 };
-        return { status: "failed", error: "x" };
+        if (call === 2) return { status: "failed", error: "x" };
+        return { status: "skipped", reason: "unchanged" };
       },
     };
     const summary = await classifyFeedItems({ companyId: "co-1" }, deps);
     assert.equal(summary.classified, 1);
-    assert.equal(summary.partial, 1);
     assert.equal(summary.failed, 1);
+    assert.equal(summary.skipped, 1);
     assert.equal(summary.scanned, 3);
   });
 

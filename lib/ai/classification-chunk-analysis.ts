@@ -131,7 +131,8 @@ function invalidChunk(problem: string, feedback: string): ChunkAnalysisOutcome {
   return { status: "invalid", problem, feedback };
 }
 
-function toStringList(value: unknown): string[] {
+/** Exported so `article-understanding.ts` reuses it for its own reply shapes. */
+export function toStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   const out: string[] = [];
   for (const entry of value) {
@@ -141,7 +142,8 @@ function toStringList(value: unknown): string[] {
   return out;
 }
 
-function capList(list: string[], itemCap: number, listCap: number): string[] {
+/** Exported so `article-understanding.ts` reuses it for its own reply shapes. */
+export function capList(list: string[], itemCap: number, listCap: number): string[] {
   return list.slice(0, listCap).map((s) => s.slice(0, itemCap));
 }
 

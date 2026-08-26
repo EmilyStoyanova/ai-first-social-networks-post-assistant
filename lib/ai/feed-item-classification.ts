@@ -36,12 +36,12 @@ import {
   type TopicGroup,
   type TopicPriorities,
 } from "./topic-priorities";
-// Type-only: the runtime chunk-analysis pipeline lives in its own module (it
-// depends on this one for findJsonObject/asString), so only the TYPE crosses
+// Type-only: both `article-understanding.ts` and `classification-chunk-analysis.ts`
+// depend on THIS module for findJsonObject/asString, so only the TYPE crosses
 // back here, to describe what buildClassificationUserPrompt accepts. A
 // type-only import is erased at compile time and cannot create a runtime
 // circular-import problem.
-import type { AggregatedArticleContext } from "./classification-chunk-analysis";
+import type { ArticleUnderstanding } from "./article-understanding";
 
 // ─── Vocabulary ───────────────────────────────────────────────────────────────
 
@@ -97,18 +97,14 @@ export const MAX_CLASSIFICATION_REPAIR_ATTEMPTS = 1;
 export const CLASSIFICATION_BATCH_SIZE = 15;
 
 /**
- * The threshold that decides whether an article fits in ONE classification
- * call.
- *
- * At or under this many characters, the whole body is sent as-is — cheap and
- * exact, the common case for an ordinary RSS article. OVER it, the article is
- * no longer sampled or truncated at all: `classify-feed-item.service.ts`
- * routes it through the whole-article chunk-analysis pipeline instead (see
- * `classification-chunk-analysis.ts`), which reads every part of the article
- * through the same model, one bounded chunk at a time, and classifies from the
- * AGGREGATE of all of them. This constant therefore no longer bounds how much
- * of a long article the classifier ultimately sees — only which of the two
- * paths (single call vs. chunk-and-aggregate) an article takes.
+ * The threshold that decides whether an article fits in ONE model call — used
+ * by `understandArticle` (`lib/services/ai/understand-article.service.ts`) to
+ * decide direct-read vs. chunk-and-synthesize, and reused here, read-only, by
+ * `classify-feed-item.service.ts` to size an item's timeout budget. This
+ * module itself never truncates or samples article text — see
+ * `ClassificationPromptInput`'s own comment: every article is judged from an
+ * `ArticleUnderstanding`, produced upstream, whole, however long the source
+ * article was.
  */
 export const MAX_CLASSIFICATION_CONTENT_CHARS = 2000;
 
@@ -190,34 +186,18 @@ export function classifyInput(text: ClassifiableText): ClassificationInputKind {
 }
 
 /**
- * Whether a body fits in ONE classification call — see
- * {@link MAX_CLASSIFICATION_CONTENT_CHARS}. `classify-feed-item.service.ts`
- * checks this BEFORE ever building a prompt, and routes anything over it
- * through the whole-article chunk-analysis pipeline instead of truncating it.
+ * Whether a body fits in ONE model call — see {@link MAX_CLASSIFICATION_CONTENT_CHARS}.
+ *
+ * This module no longer builds a prompt from raw article text at all (see
+ * `ClassificationPromptInput`) — every article, short or long, is judged from
+ * an `ArticleUnderstanding`. This function survives because `understandArticle`
+ * (`lib/services/ai/understand-article.service.ts`) reuses it for the identical
+ * decision one step upstream — direct read vs. chunk-and-synthesize — and
+ * because `classify-feed-item.service.ts` reuses it again, read-only, to size
+ * an item's timeout budget without duplicating the threshold.
  */
 export function fitsSingleClassificationCall(body: string | null): boolean {
   return (body ?? "").trim().length <= MAX_CLASSIFICATION_CONTENT_CHARS;
-}
-
-/**
- * The body as it is actually sent on the SINGLE-CALL path — trimmed, and
- * capped only as a last-resort safety net.
- *
- * Every real caller only ever reaches this with a body that already
- * satisfies {@link fitsSingleClassificationCall} — `classify-feed-item.service.ts`
- * checks that before choosing this path at all — so the cap below should
- * never actually trim anything in production. It stays as defense in depth
- * rather than trusting that invariant blindly: better an honest, bounded
- * truncation here than an unbounded prompt if a future caller skips the
- * check. It must NEVER be reached for a genuinely long article — that case is
- * the whole-article chunk-analysis pipeline's job, not this function's; see
- * `classification-chunk-analysis.ts` and `classify-feed-item.service.ts`.
- */
-export function classificationExcerpt(body: string | null): string {
-  const trimmed = (body ?? "").trim();
-  return trimmed.length <= MAX_CLASSIFICATION_CONTENT_CHARS
-    ? trimmed
-    : trimmed.slice(0, MAX_CLASSIFICATION_CONTENT_CHARS);
 }
 
 // ─── Modes ────────────────────────────────────────────────────────────────────
@@ -342,9 +322,9 @@ export function computeClassificationHash(
     .update(
       [
         (text.title ?? "").trim(),
-        // The FULL body, uncapped — not classificationExcerpt's single-call
-        // view. A long article is read in full by the chunk-analysis pipeline,
-        // so a change anywhere in it must reopen the item for reclassification,
+        // The FULL body, uncapped — not a single-call excerpt. A long article
+        // is read in full by `understandArticle`'s chunk-analysis pipeline, so
+        // a change anywhere in it must reopen the item for reclassification,
         // not only a change within the single-call cap. Hashing cost is
         // irrelevant (a SHA-256 of a long article is microseconds); only the
         // PROMPT needs to stay bounded, and that is enforced separately.
@@ -447,40 +427,32 @@ export function classificationSelectableWhere(now: Date): Record<string, unknown
 export const CLASSIFICATION_JSON_SCHEMA = {
   type: "object",
   properties: {
-    mainSubject: { type: "string" },
     primaryTopic: { type: ["string", "null"] },
     classification: { type: "string", enum: ["HIGH", "MEDIUM", "REJECTED"] },
     rejectionReason: { type: ["string", "null"], enum: ["BLACKLIST", "OUT_OF_SCOPE", null] },
     matchedTopics: { type: "array", items: { type: "string" } },
     reason: { type: "string" },
   },
-  required: [
-    "mainSubject",
-    "primaryTopic",
-    "classification",
-    "rejectionReason",
-    "matchedTopics",
-    "reason",
-  ],
+  required: ["primaryTopic", "classification", "rejectionReason", "matchedTopics", "reason"],
   additionalProperties: false,
 } as const;
 
-/** A verdict that passed every check and may be stored. */
+/**
+ * A verdict that passed every check and may be stored.
+ *
+ * Deliberately carries NO subject of its own. `mainSubject` used to be asked
+ * for here, in the same call that decides the verdict — but naming the
+ * subject and matching it against a topic are different questions, and asking
+ * them together let the second bias the first. `mainSubject` now comes
+ * exclusively from `ArticleUnderstanding` (`lib/ai/article-understanding.ts`),
+ * produced once, upstream, by `understandArticle`; this call only ever
+ * CONSUMES it (see `renderArticleUnderstandingSection`) and is neither asked
+ * for it nor allowed to overwrite it. `classify-feed-item.service.ts` stores
+ * `understanding.mainSubject` directly — never anything parsed from here.
+ */
 export interface ClassificationVerdict {
   classification: Classification;
   rejectionReason: RejectionReason | null;
-  /**
-   * What the article is about, stated plainly and in the model's own words —
-   * a FACT about the article, not an argument for the verdict (`reason` is that).
-   *
-   * It is asked for first, and separately, because naming the subject before
-   * reaching for a topic is what stops the reach. A model that has to write
-   * "fast-growing trees you can plant for free" has already made it obvious that
-   * "paints" is not what this piece is about. Stored as the operator's diagnostic:
-   * when a verdict is wrong, this says whether the classifier misread the article
-   * or misapplied the topics — two very different fixes.
-   */
-  mainSubject: string;
   /**
    * The SINGLE configured topic the verdict rests on, in its stored spelling, or
    * null for OUT_OF_SCOPE.
@@ -581,6 +553,23 @@ function topicIndex(priorities: TopicPriorities): Map<string, { topic: string; t
 }
 
 /**
+ * The MAXIMUM `ArticleUnderstanding.confidence` a HIGH verdict may rest on
+ * without itself being refused for repair — see the guard at the end of
+ * `parseClassificationResponse`.
+ *
+ * Sized from `confidenceCeiling`'s own formula (`lib/ai/article-understanding.ts`):
+ * a chunked article with NO chunk found central at all floors at 0.2; even a
+ * single, un-corroborated central chunk typically clears 0.5. 0.4 sits between
+ * those two — below it, the understanding step itself found no coherent central
+ * subject (nothing central, or central chunks that actively disagree), which is
+ * exactly the case a confident HIGH verdict must not be built on. Only HIGH is
+ * gated: it is the one verdict requirement (v2-13) calls "aggressive" — MEDIUM,
+ * BLACKLIST, and OUT_OF_SCOPE are already the conservative answers, and BLACKLIST
+ * has its own "must be central" requirement enforced separately below.
+ */
+export const MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH = 0.4;
+
+/**
  * Parses and VETS a reply.
  *
  * The vetting is the point. A model asked for one of three labels will
@@ -601,18 +590,28 @@ function topicIndex(priorities: TopicPriorities): Map<string, { topic: string; t
  *     This is the rule that keeps HIGH and MEDIUM apart; the weaker "cites at least
  *     one topic of the tier" checks below are kept underneath it.
  *   • BLACKLIST must cite at least one configured avoided topic.
- *   • HIGH must cite at least one configured top-priority topic.
+ *   • HIGH must cite at least one configured top-priority topic, AND rest on an
+ *     `ArticleUnderstanding.confidence` of at least {@link MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH}
+ *     — seeing `understandingConfidence` here is not a request for confidence,
+ *     it is a fact this call receives from a step that already ran; a model does
+ *     not get to argue with it, only stay under MEDIUM until it is true.
  *   • MEDIUM must cite at least one configured medium topic — EXCEPT in
  *     blacklist-only mode, where MEDIUM is the neutral "not blacklisted" answer
  *     and there are no medium topics to cite (and `primaryTopic` must be null).
  *   • OUT_OF_SCOPE must cite no wanted topic — that combination contradicts
  *     itself — and is unavailable in blacklist-only mode.
- *   • `mainSubject` must be present: a verdict that cannot say what the article is
- *     about was not made by reading it.
+ *
+ * `mainSubject` is deliberately NOT part of this reply or this function — see
+ * `ClassificationVerdict`'s own comment.
  */
 export function parseClassificationResponse(
   raw: string | null | undefined,
-  priorities: TopicPriorities
+  priorities: TopicPriorities,
+  // Defaults to "fully confident" — every REAL caller (classify-feed-item.service.ts)
+  // always passes the article's actual `ArticleUnderstanding.confidence` explicitly;
+  // the default only exists so tests unrelated to the confidence gate (the large
+  // majority) do not have to restate a value they do not care about.
+  understandingConfidence = 1
 ): ClassificationOutcome {
   const text = (raw ?? "").trim();
   if (text === "") {
@@ -834,6 +833,22 @@ export function parseClassificationResponse(
       'Answer "HIGH" only when the article is substantially about one of the TOP PRIORITY topics, and list the exact topic(s) from that list in "matchedTopics", copied verbatim. Belonging to the same industry or general subject area is not enough. If it matches nothing you were asked for, answer "REJECTED" with "OUT_OF_SCOPE".'
     );
   }
+  /**
+   * The deterministic half of requirement (v2-13)'s confidence rule — see
+   * {@link MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH}'s own comment. The prompt
+   * already tells the model its UNDERSTANDING CONFIDENCE and asks it to hold
+   * back; this is what makes that a rule rather than a suggestion the model is
+   * free to ignore under a confident-sounding article.
+   */
+  if (
+    classification === "HIGH" &&
+    understandingConfidence < MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH
+  ) {
+    return invalid(
+      `HIGH was returned but the article understanding's own confidence (${understandingConfidence.toFixed(2)}) is below ${MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH} — the article's central subject is not well-established.`,
+      `UNDERSTANDING CONFIDENCE for this article is only ${understandingConfidence.toFixed(2)} — the central subject itself is uncertain. Do not answer "HIGH" on an uncertain subject. Answer "MEDIUM" if the match is still real but not unmistakable, or "REJECTED" with "OUT_OF_SCOPE" if you cannot point to a clear match.`
+    );
+  }
   if (classification === "MEDIUM" && mode !== "blacklist_only" && !has("mediumPriorityTopics")) {
     return invalid(
       "MEDIUM was returned without citing a configured medium priority topic.",
@@ -847,19 +862,11 @@ export function parseClassificationResponse(
     );
   }
 
-  const mainSubject = asString(obj.mainSubject);
-  if (!mainSubject) {
-    return invalid(
-      "The reply did not say what the article is about.",
-      'The "mainSubject" field must be a short factual description of what the article is about — the subject itself, in your own words. Do not explain your verdict there.'
-    );
-  }
-
   const reason = asString(obj.reason);
   if (!reason) {
     return invalid(
       "The verdict came with no explanation.",
-      'The "reason" field must be one short sentence saying what the article is about and why that produced this verdict.'
+      'The "reason" field must be one short sentence saying why the main subject does or does not match a configured topic.'
     );
   }
 
@@ -867,7 +874,6 @@ export function parseClassificationResponse(
     status: "ok",
     classification,
     rejectionReason,
-    mainSubject: mainSubject.slice(0, MAX_STORED_REASON_CHARS),
     // The STORED spelling, not the model's — so a topic renamed in the settings is
     // matched by key here and written back exactly as the company typed it.
     primaryTopic: primaryHit?.topic ?? null,
@@ -886,23 +892,16 @@ function renderList(label: string, topics: string[]): string {
 }
 
 /**
- * What the "## The article" section of the prompt is built from:
- *
- *   • `text`      — the article fits in one call (or has no body at all).
- *     Sent as-is, exactly as classification has always sent a short article.
- *   • `aggregate` — the article did NOT fit in one call and was routed
- *     through the whole-article chunk-analysis pipeline instead (see
- *     `classification-chunk-analysis.ts`). The synthesis of every chunk is
- *     sent in its place — never a truncated or sampled excerpt of the raw
- *     text. `title` travels alongside it because the aggregate itself is
- *     title-agnostic (chunk analysis only ever sees the body).
+ * What this call is judged from: `ArticleUnderstanding`, produced ONCE, in
+ * full, upstream by `understandArticle` (`lib/services/ai/understand-article.service.ts`)
+ * — never raw or truncated article text, and never re-derived here. Short and
+ * long articles look identical by the time they reach this prompt: the size
+ * of the original article, and whether it needed chunking, is entirely
+ * `understandArticle`'s concern (see `article-understanding.ts`), not this
+ * module's.
  */
-export type ClassificationArticleInput =
-  | { kind: "text"; text: ClassifiableText; inputKind: ClassificationInputKind }
-  | { kind: "aggregate"; title: string | null; aggregate: AggregatedArticleContext };
-
 export interface ClassificationPromptInput {
-  article: ClassificationArticleInput;
+  understanding: ArticleUnderstanding;
   context: ClassificationContext;
 }
 
@@ -936,10 +935,16 @@ function companySection(context: ClassificationContext): string[] {
 /**
  * The system prompt — the rulebook.
  *
- * Three instructions carry the feature, and they pull against each other, which is
- * why each is spelled out rather than left to the model's judgement:
+ * This call answers ONE question: does the article's ALREADY-DETERMINED
+ * central subject match one of the company's configured topics? It does not
+ * re-read the article, does not restate its subject, and does not get to
+ * disagree with the ARTICLE UNDERSTANDING it is handed — see
+ * `renderArticleUnderstandingSection`. Three instructions carry the matching
+ * itself, and they pull against each other, which is why each is spelled out
+ * rather than left to the model's judgement:
  *
- *   • "Judge the MAIN subject" is what makes an incidental mention harmless.
+ *   • "Judge MAIN SUBJECT / CENTRAL THESIS, not SECONDARY or INCIDENTAL" is
+ *     what makes a frequent-but-incidental mention harmless.
  *
  *   • "A topic need not appear as a word" is what makes the match semantic instead
  *     of a keyword search that a model would happily imitate if the prompt read
@@ -952,23 +957,32 @@ function companySection(context: ClassificationContext): string[] {
  *     sells paints and water heaters. The rule, the worked examples below, and the
  *     verbatim-topic enforcement in `parseClassificationResponse` are three
  *     statements of the same constraint at three different points.
+ *
+ * A fourth, separate from matching: low UNDERSTANDING CONFIDENCE is visible in
+ * the prompt and this rule tells the model to act on it, but
+ * `MIN_UNDERSTANDING_CONFIDENCE_FOR_HIGH` in `parseClassificationResponse` is
+ * what actually enforces it — the rule below is a request, that constant is
+ * the guarantee.
  */
 export function buildClassificationSystemPrompt(mode: ClassificationMode): string {
   const parts: string[] = [
     "You sort incoming news articles for a company, deciding how useful each one is for that company's social media.",
     "",
+    "You are given an ARTICLE UNDERSTANDING below — the article's subject, already determined by reading the whole article. Treat it as fact. Do NOT re-read, re-summarize, restate in different words, or replace it with a subject of your own; your only job is deciding whether THAT subject matches one of the company's configured topics.",
+    "",
     "## How to judge",
     "",
-    "1. Work out what the article is MAINLY about — its primary subject, the thing a reader would say it is about. Ignore passing mentions, examples, and asides. The main subject can be stated anywhere in the article, including only in its middle or its end — an opening that sets a scene, tells an anecdote, or asks a question is not necessarily the subject; read the whole excerpt before deciding.",
-    "2. Compare that main subject with the company's configured topics below.",
-    "3. A topic matches when the article's main subject IS that topic, a synonym of it, a specific kind of it, or the direct choice, use, installation, repair or care of it. The topic word does not have to appear in the text: an article about choosing latex for a child's room is about paints, and an article about descaling a water heater is about water heaters. Judge the meaning, never the spelling.",
+    "1. Read the MAIN SUBJECT and CENTRAL THESIS/CENTRAL CONFLICT (if any) below — this is what the article is actually about. SECONDARY TOPICS are discussed in service of that subject but are not themselves the point; INCIDENTAL TOPICS are passing mentions. Ignore SECONDARY and INCIDENTAL topics when deciding the verdict — they exist only so you are not misled by something the article merely touches on.",
+    "2. Compare the MAIN SUBJECT (and CENTRAL THESIS/CENTRAL CONFLICT) with the company's configured topics below.",
+    "3. A topic matches when the MAIN SUBJECT IS that topic, a synonym of it, a specific kind of it, or the direct choice, use, installation, repair or care of it. The topic word does not have to appear in the text: an article whose main subject is choosing latex for a child's room is about paints, and one about descaling a water heater is about water heaters. Judge the meaning, never the spelling.",
     mode === "blacklist_only"
-      ? "4. Industry relevance is not enough. The article must be substantially about one of the configured topics — belonging to the same broad field, industry or general subject area is NOT a match."
-      : '4. Industry relevance is not enough. The article must be SUBSTANTIALLY about one of the configured topics. Sharing a broad field with them — home improvement, the household, construction, renovation, the garden, DIY, or simply being the sort of thing this company might sell — is NOT a match. If your reasoning is "this is related to the same industry" or "this company\'s customers would find it interesting", that is not a match: the answer is OUT_OF_SCOPE.',
-    "5. Never invent a topic. Every topic you cite must be copied verbatim from the lists below. If the article's subject is not on any list, say so instead of naming the nearest one — a near-miss is worse than an honest rejection.",
+      ? "4. Industry relevance is not enough, and neither is a SECONDARY or INCIDENTAL topic overlapping a configured one. The MAIN SUBJECT itself must be substantially about one of the configured topics."
+      : '4. Industry relevance is not enough, and neither is a SECONDARY or INCIDENTAL topic overlapping a configured one. The MAIN SUBJECT itself must be SUBSTANTIALLY about one of the configured topics. Sharing a broad field with them — home improvement, the household, construction, renovation, the garden, DIY, or simply being the sort of thing this company might sell — is NOT a match. If your reasoning is "this is related to the same industry" or "this company\'s customers would find it interesting", that is not a match: the answer is OUT_OF_SCOPE.',
+    "5. Never invent a topic. Every topic you cite must be copied verbatim from the lists below. If the MAIN SUBJECT is not on any list, say so instead of naming the nearest one — a near-miss is worse than an honest rejection.",
     mode === "blacklist_only"
-      ? '6. Say what the article is about in "mainSubject" — a short, factual description of the subject itself, in your own words. It is a statement about the article, not an argument for your verdict; the argument goes in "reason".'
-      : '6. Say what the article is about in "mainSubject" — a short, factual description of the subject itself, in your own words. It is a statement about the article, not an argument for your verdict; the argument goes in "reason". Then pick the ONE configured topic that subject is mainly about and put it in "primaryTopic", or null if there is none. That single topic decides your verdict.',
+      ? '6. Pick the ONE configured topic the MAIN SUBJECT is mainly about and put it in "primaryTopic", or null if there is none.'
+      : '6. Pick the ONE configured topic the MAIN SUBJECT is mainly about and put it in "primaryTopic", or null if there is none. That single topic decides your verdict.',
+    "7. If UNDERSTANDING CONFIDENCE (below) is low, the article's own central subject is not well-established. Do not answer HIGH on a low-confidence understanding unless the topic match would be unmistakable regardless — prefer MEDIUM or OUT_OF_SCOPE when in doubt.",
   ];
 
   if (mode !== "blacklist_only") {
@@ -979,10 +993,10 @@ export function buildClassificationSystemPrompt(mode: ClassificationMode): strin
       "These use a DIFFERENT company's topics, for illustration only — never cite them.",
       'Suppose the TOP PRIORITY list were: "paints", "water heaters", and the MEDIUM PRIORITY list: "air conditioners".',
       "",
-      '- "Which latex to choose for a nursery" → mainSubject "choosing paint for a child\'s room", primaryTopic "paints", HIGH, matchedTopics ["paints"]. Latex IS a paint; the whole article is about choosing one.',
-      '- "Fast-growing trees you can get for free this spring" → mainSubject "fast-growing trees available free from a municipal scheme", primaryTopic null, REJECTED / OUT_OF_SCOPE, matchedTopics []. Trees belong to the same home-and-garden world, but no configured topic is about trees. Industry proximity is not a match.',
-      '- "Ten ideas to refresh your home this spring" → mainSubject "a general spring home-refresh round-up", primaryTopic null, REJECTED / OUT_OF_SCOPE, matchedTopics []. A general home-improvement round-up is not substantially about any configured topic, even though it touches the same field.',
-      '- "How to install a window air conditioner, and what colour to paint the frame afterwards" → mainSubject "installing a window air conditioner", primaryTopic "air conditioners", MEDIUM, matchedTopics ["air conditioners", "paints"]. The article is mainly about the air conditioner; the paint is an afterthought. Citing "paints" is correct, but it is NOT the primary topic and must not raise this to HIGH.'
+      '- MAIN SUBJECT "choosing paint for a child\'s room" → primaryTopic "paints", HIGH, matchedTopics ["paints"]. Latex IS a paint; the main subject is choosing one.',
+      '- MAIN SUBJECT "fast-growing trees available free from a municipal scheme", SECONDARY TOPICS ["gardening", "spring planting"] → primaryTopic null, REJECTED / OUT_OF_SCOPE, matchedTopics []. Trees belong to the same home-and-garden world, but no configured topic is about trees. Industry proximity is not a match.',
+      '- MAIN SUBJECT "a general spring home-refresh round-up" → primaryTopic null, REJECTED / OUT_OF_SCOPE, matchedTopics []. A general home-improvement round-up is not substantially about any configured topic, even though it touches the same field.',
+      '- MAIN SUBJECT "installing a window air conditioner", INCIDENTAL TOPICS ["repainting the frame afterwards"] → primaryTopic "air conditioners", MEDIUM, matchedTopics ["air conditioners", "paints"]. The main subject is the air conditioner; the paint is only an incidental mention. Citing "paints" is correct, but it is NOT the primary topic and must not raise this to HIGH.'
     );
   }
 
@@ -1020,14 +1034,13 @@ export function buildClassificationSystemPrompt(mode: ClassificationMode): strin
     "Reply with a single JSON object and nothing else:",
     "",
     "{",
-    '  "mainSubject": "<a short factual description of what the article is about>",',
     mode === "blacklist_only"
       ? '  "primaryTopic": null,'
-      : '  "primaryTopic": "<the ONE topic the article is mainly about, copied verbatim>" | null,',
+      : '  "primaryTopic": "<the ONE topic the MAIN SUBJECT is mainly about, copied verbatim>" | null,',
     '  "classification": "HIGH" | "MEDIUM" | "REJECTED",',
     '  "rejectionReason": "BLACKLIST" | "OUT_OF_SCOPE" | null,',
     '  "matchedTopics": ["<topic copied verbatim from the lists>"],',
-    '  "reason": "<one short sentence: what the article is about, and why that verdict>"',
+    '  "reason": "<one short sentence: why the MAIN SUBJECT does or does not match a configured topic>"',
     "}",
     "",
     mode === "blacklist_only"
@@ -1039,76 +1052,72 @@ export function buildClassificationSystemPrompt(mode: ClassificationMode): strin
 }
 
 /**
- * Renders the aggregated whole-article synthesis as the "## The article"
- * section — used in place of raw text once an article has gone through the
- * chunk-analysis pipeline. `centralPoints` and `supportingPoints` are shown
- * under DISTINCT headings, and the model is told explicitly that a frequent
- * supporting mention is not the same thing as the article's real subject —
- * the Albania-protesters case this exists for: travel and scenery described
- * at length as CONTEXT must not outweigh a central point (the protest, the
- * development conflict) that appears only once but is what the piece is
- * actually about.
+ * Renders the "## Article understanding" section — the ONLY view of the article
+ * this call gets, whether the source article was short or long. Replaces
+ * BOTH of the old "## The article" branches (raw short text, and the
+ * chunk-analysis synthesis): both are now `understandArticle`'s job, done
+ * once, upstream (see `ClassificationPromptInput`'s own comment).
+ *
+ * SECONDARY and INCIDENTAL topics are shown under their own headings, exactly
+ * as central/supporting points once were, and for the same reason — the
+ * Albania-protesters case: tourism and scenery mentioned at length must not
+ * outweigh a central conflict (a protest against coastal development) that is
+ * what the piece is actually about. The difference now is that this MODULE
+ * never has to make that distinction itself; `ArticleUnderstanding` already
+ * arrives with it decided.
  */
-function renderAggregateArticleSection(
-  title: string | null,
-  aggregate: AggregatedArticleContext
-): string[] {
-  const lines: string[] = [
+function renderArticleUnderstandingSection(understanding: ArticleUnderstanding): string[] {
+  const list = (items: readonly string[]) => (items.length > 0 ? items.join(", ") : "(none)");
+
+  return [
     "",
-    `## The article (synthesized from ${aggregate.chunkCount} section${aggregate.chunkCount === 1 ? "" : "s"} of a long article)`,
+    "## Article understanding",
     "",
-    "This article was too long for one read, so it was analyzed section by section and synthesized below. Judge the article's REAL main subject from this whole synthesis — never from CENTRAL alone without reading CONTEXT, and never by which point is listed first.",
+    "This was already determined by reading the whole article. Trust it — do not re-derive the subject, and do not substitute a different one.",
     "",
-    `Title: ${title?.trim() || "(untitled)"}`,
+    "MAIN SUBJECT:",
+    understanding.mainSubject,
+    "",
+    "CENTRAL THESIS:",
+    understanding.centralThesis ?? "(none — a straightforward report with no argument)",
+    "",
+    "CENTRAL CONFLICT:",
+    understanding.centralConflict ?? "(none)",
+    "",
+    "ARTICLE TYPE:",
+    understanding.articleType,
+    "",
+    "SECONDARY TOPICS:",
+    list(understanding.secondaryTopics),
+    "",
+    "INCIDENTAL TOPICS:",
+    list(understanding.incidentalTopics),
+    "",
+    "ENTITIES:",
+    list(understanding.entities),
+    "",
+    "UNDERSTANDING CONFIDENCE:",
+    understanding.confidence.toFixed(2),
+    "",
+    "EVIDENCE:",
+    ...(understanding.evidence.length > 0
+      ? understanding.evidence.map((e) => `- [section ${e.chunkIndex}] ${e.reason}`)
+      : ["(none)"]),
     "",
   ];
-
-  if (aggregate.centralPoints.length > 0) {
-    lines.push(
-      "CENTRAL — what the article's own thesis, argument, or central conflict actually is. This is the strongest signal for the article's real subject:",
-      ...aggregate.centralPoints.map((p) => `- ${p}`),
-      ""
-    );
-  } else {
-    lines.push(
-      "CENTRAL — no single section stood out as clearly central. Judge the overall subject from the sections below taken as a whole, rather than from any one of them.",
-      ""
-    );
-  }
-
-  if (aggregate.supportingPoints.length > 0) {
-    lines.push(
-      "CONTEXT — background, scene-setting, or incidental mentions. These are NOT the article's subject on their own, however often they appear here or how much longer this section is than the CENTRAL one above:",
-      ...aggregate.supportingPoints.map((p) => `- ${p}`),
-      ""
-    );
-  }
-
-  if (aggregate.topics.length > 0) {
-    lines.push(`Topics touched on anywhere in the article: ${aggregate.topics.join(", ")}`, "");
-  }
-  if (aggregate.entities.length > 0) {
-    lines.push(`Entities named in the article: ${aggregate.entities.join(", ")}`, "");
-  }
-  if (aggregate.importantFacts.length > 0) {
-    lines.push("Key facts from the article:", ...aggregate.importantFacts.map((f) => `- ${f}`), "");
-  }
-  if (aggregate.truncated) {
-    lines.push(
-      "(This synthesis was capped for length; a small number of minor, lower-signal sections were left out.)",
-      ""
-    );
-  }
-
-  return lines;
 }
 
 export function buildClassificationUserPrompt(input: ClassificationPromptInput): string {
-  const { article, context } = input;
+  const { understanding, context } = input;
   const { priorities } = context;
   // Empty context contributes nothing, so a company that has filled in no brand
   // copy gets byte-for-byte the prompt it got before this feature existed.
-  const parts: string[] = [...companySection(context), "## The company's topics", ""];
+  const parts: string[] = [
+    ...companySection(context),
+    ...renderArticleUnderstandingSection(understanding),
+    "## The company's topics",
+    "",
+  ];
 
   if (classificationMode(priorities) === "blacklist_only") {
     parts.push(renderList("TOPICS TO AVOID", priorities.avoided));
@@ -1120,27 +1129,6 @@ export function buildClassificationUserPrompt(input: ClassificationPromptInput):
       "",
       renderList("TOPICS TO AVOID", priorities.avoided)
     );
-  }
-
-  if (article.kind === "aggregate") {
-    parts.push(...renderAggregateArticleSection(article.title, article.aggregate));
-    return parts.join("\n");
-  }
-
-  const { text, inputKind } = article;
-  parts.push("", "## The article", "", `Title: ${text.title?.trim() || "(untitled)"}`);
-
-  if (inputKind === "title_only") {
-    parts.push(
-      "",
-      "The body of this article could not be read, so the title is all there is. Judge it on the title alone, and do not assume anything the title does not say. If the title is too vague to place, reject it as OUT_OF_SCOPE rather than guessing."
-    );
-  } else {
-    // Every real caller only reaches this branch with a body that already
-    // fits one call (fitsSingleClassificationCall) — a longer one is routed
-    // through the aggregate branch above instead. classificationExcerpt's own
-    // cap is defense in depth only; see its doc comment.
-    parts.push("", "Article:", classificationExcerpt(text.body));
   }
 
   return parts.join("\n");

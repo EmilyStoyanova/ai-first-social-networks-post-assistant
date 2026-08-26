@@ -32,14 +32,6 @@ export interface ClassifyFeedItemsSummary {
   classified: number;
   failed: number;
   skipped: number;
-  /**
-   * Long articles that banked real chunk-analysis progress this run and were
-   * released back to `pending` to resume next run — see
-   * `classification-chunk-analysis.ts`. Counted separately from `classified`
-   * (not yet complete) and `failed` (still retryable): a partial item IS
-   * claimed and DOES cost one of its attempts, unlike a deferred one.
-   */
-  partial: number;
   /** Set when the batch stopped early because no default provider is configured. */
   reason?: "no_provider";
 }
@@ -64,7 +56,6 @@ const SELECT = {
   classificationStatus: true,
   classificationHash: true,
   classificationAttemptCount: true,
-  classificationChunkProgress: true,
 } as const;
 
 /**
@@ -170,7 +161,6 @@ export async function classifyFeedItems(
     classified: 0,
     failed: 0,
     skipped: 0,
-    partial: 0,
   };
 
   const candidates = await findCandidates(opts.companyId, limit);
@@ -219,7 +209,6 @@ export async function classifyFeedItems(
 
   function tally(outcome: ClassifyFeedItemOutcome): void {
     if (outcome.status === "classified") summary.classified += 1;
-    else if (outcome.status === "partial") summary.partial += 1;
     else if (outcome.status === "failed") summary.failed += 1;
     else if (outcome.status === "no_provider") {
       // Nothing in this run can succeed — stop instead of burning the batch.
