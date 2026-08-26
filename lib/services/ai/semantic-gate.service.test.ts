@@ -72,15 +72,17 @@ interface Captured {
   companyId?: string;
   channel?: SocialChannel;
   limit?: number;
+  excludeContentGroupId?: string | null;
   calls: number;
 }
 
 function fakeStore(neighbors: SemanticNeighbor[], captured: Captured): SemanticNeighborStore {
   return {
-    fetchReadyNeighbors: async (companyId, channel, limit) => {
+    fetchReadyNeighbors: async (companyId, channel, limit, excludeContentGroupId) => {
       captured.companyId = companyId;
       captured.channel = channel;
       captured.limit = limit;
+      captured.excludeContentGroupId = excludeContentGroupId ?? null;
       captured.calls += 1;
       return neighbors;
     },
@@ -118,6 +120,34 @@ describe("createSemanticGate — decisions", () => {
     const result = await gate({ coreMessage: "A fresh central claim." });
     assert.equal(result.decision, "accept");
     assert.equal(result.skipped, false);
+  });
+});
+
+// ─── Sibling exclusion (mirrors the Jaccard pool's content-group exclusion) ───
+describe("createSemanticGate — excludeContentGroupId", () => {
+  it("passes the content group through to the neighbor store, so a sibling's own embeddings are excluded too", async () => {
+    const captured: Captured = { calls: 0 };
+    const gate = createSemanticGate("co-1", "instagram" as SocialChannel, {
+      provider: fakeProvider(),
+      store: fakeStore([], captured),
+      excludeContentGroupId: "group-1",
+    });
+
+    await gate({ coreMessage: "A fresh central claim." });
+
+    assert.equal(captured.excludeContentGroupId, "group-1");
+  });
+
+  it("passes null when the generation has no content group — nothing is excluded", async () => {
+    const captured: Captured = { calls: 0 };
+    const gate = createSemanticGate("co-1", "instagram" as SocialChannel, {
+      provider: fakeProvider(),
+      store: fakeStore([], captured),
+    });
+
+    await gate({ coreMessage: "A fresh central claim." });
+
+    assert.equal(captured.excludeContentGroupId, null);
   });
 });
 

@@ -729,3 +729,160 @@ describe("generateWithRetry — the real TravelNest post is accepted, not discar
     assert.deepEqual(result.selectedPattern, TRAVELNEST_PATTERN.initialPattern);
   });
 });
+
+// ─── [jaccard_duplicate] diagnostics ───────────────────────────────────────────
+//
+// Every flagged attempt is logged with enough metadata to say, without a
+// second database query, whether the matched post was a legitimate sibling
+// (same article, or same content group) or a genuinely unrelated historical
+// post. `recentPosts` already carries that metadata (see RecentPost); this
+// only exercises the classification, which does not depend on how the caller
+// populated it — generate-draft-post.service.ts is what actually excludes
+// same-contentGroupId siblings from the pool before they ever reach here.
+describe("generateWithRetry — [jaccard_duplicate] diagnostics", () => {
+  function withCapturedWarn(): { calls: () => unknown[][]; restore: () => void } {
+    const original = console.warn;
+    const calls: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      calls.push(args);
+    };
+    return { calls: () => calls, restore: () => (console.warn = original) };
+  }
+
+  it("classifies a match against unrelated history as historical, not a sibling", async () => {
+    const provider = makeProvider([jsonPost(DUPLICATE_TEXT)]);
+    const recentPosts: RecentPost[] = [
+      {
+        id: "hist-1",
+        text: "a b c d",
+        channel: "instagram",
+        contentGroupId: "group-999",
+        feedItemId: "feed-999",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+      },
+    ];
+    const { calls, restore } = withCapturedWarn();
+    try {
+      await generateWithRetry(
+        provider,
+        "sys",
+        "user",
+        recentPosts,
+        undefined,
+        undefined,
+        1,
+        undefined,
+        { channel: "instagram", feedItemId: "feed-1", contentGroupId: "group-1" }
+      );
+    } finally {
+      restore();
+    }
+
+    const diagnosticCall = calls().find(
+      (args) => typeof args[0] === "string" && (args[0] as string).startsWith("[jaccard_duplicate]")
+    );
+    assert.ok(diagnosticCall);
+    const [message, diagnostic] = diagnosticCall as [string, Record<string, unknown>];
+    assert.match(message, /candidate instagram matched historical instagram post hist-1/);
+    assert.match(message, /similarity 0\.8 threshold 0\.75/);
+    assert.deepEqual(diagnostic, {
+      candidateChannel: "instagram",
+      candidateFeedItemId: "feed-1",
+      candidateContentGroupId: "group-1",
+      similarity: 0.8,
+      threshold: 0.75,
+      matchedPostId: "hist-1",
+      matchedPostChannel: "instagram",
+      matchedFeedItemId: "feed-999",
+      matchedContentGroupId: "group-999",
+      matchedCreatedAt: new Date("2026-01-01T00:00:00Z"),
+      matchKind: "historical_post",
+      sameChannel: true,
+      differentChannel: false,
+    });
+  });
+
+  it("classifies a match sharing this run's content group as a sibling", async () => {
+    const provider = makeProvider([jsonPost(DUPLICATE_TEXT)]);
+    const recentPosts: RecentPost[] = [
+      {
+        id: "sib-1",
+        text: "a b c d",
+        channel: "instagram",
+        contentGroupId: "group-1",
+        feedItemId: "feed-999",
+      },
+    ];
+    const { calls, restore } = withCapturedWarn();
+    try {
+      await generateWithRetry(
+        provider,
+        "sys",
+        "user",
+        recentPosts,
+        undefined,
+        undefined,
+        1,
+        undefined,
+        { channel: "instagram", feedItemId: "feed-1", contentGroupId: "group-1" }
+      );
+    } finally {
+      restore();
+    }
+
+    const diagnostic = calls().find((args) => typeof args[0] === "string")?.[1] as
+      Record<string, unknown> | undefined;
+    assert.equal(diagnostic?.matchKind, "same_content_group_sibling");
+  });
+
+  it("classifies a match sharing this run's article as a sibling, even without a shared content group", async () => {
+    const provider = makeProvider([jsonPost(DUPLICATE_TEXT)]);
+    const recentPosts: RecentPost[] = [
+      {
+        id: "sib-2",
+        text: "a b c d",
+        channel: "instagram",
+        contentGroupId: "group-999",
+        feedItemId: "feed-1",
+      },
+    ];
+    const { calls, restore } = withCapturedWarn();
+    try {
+      await generateWithRetry(
+        provider,
+        "sys",
+        "user",
+        recentPosts,
+        undefined,
+        undefined,
+        1,
+        undefined,
+        { channel: "instagram", feedItemId: "feed-1", contentGroupId: "group-1" }
+      );
+    } finally {
+      restore();
+    }
+
+    const diagnostic = calls().find((args) => typeof args[0] === "string")?.[1] as
+      Record<string, unknown> | undefined;
+    assert.equal(diagnostic?.matchKind, "same_article_sibling");
+  });
+
+  it("logs nothing when no attempt is flagged", async () => {
+    const provider = makeProvider([jsonPost(CLEAN_TEXT)]);
+    const { calls, restore } = withCapturedWarn();
+    try {
+      await generateWithRetry(provider, "sys", "user", [recentPost], undefined, undefined, 1);
+    } finally {
+      restore();
+    }
+
+    assert.equal(
+      calls().some(
+        (args) =>
+          typeof args[0] === "string" && (args[0] as string).startsWith("[jaccard_duplicate]")
+      ),
+      false
+    );
+  });
+});

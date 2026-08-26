@@ -271,10 +271,22 @@ export type GenerateDraftPostResult =
 export interface GenerateDraftPostDb {
   post: {
     findMany: (args: {
-      where: { companyId: string; channel: SocialChannel };
+      // NOT.contentGroupId excludes THIS run's own sibling channels (see
+      // runGeneration below) — a Facebook post generated moments ago for the
+      // same content group must never be compared as if it were history.
+      where: { companyId: string; channel: SocialChannel; NOT?: { contentGroupId: string } };
       orderBy: { createdAt: "desc" };
       take: number;
-      select: { id: true; content: true; promptSnapshot: true; imagePrompt: true };
+      select: {
+        id: true;
+        content: true;
+        promptSnapshot: true;
+        imagePrompt: true;
+        channel: true;
+        contentGroupId: true;
+        primaryFeedItemId: true;
+        createdAt: true;
+      };
       // imagePrompt is optional in the row so existing fakes (and legacy posts,
       // which have none) stay valid — it only feeds the visual-diversity block.
     }) => Promise<
@@ -283,6 +295,13 @@ export interface GenerateDraftPostDb {
         content: string;
         promptSnapshot: Prisma.JsonValue | null;
         imagePrompt?: string | null;
+        // The four below are optional in the row for the same reason imagePrompt
+        // is: existing fakes built before this diagnostic existed still compile
+        // and still work, they just log an "unknown" match classification.
+        channel?: SocialChannel;
+        contentGroupId?: string | null;
+        primaryFeedItemId?: string | null;
+        createdAt?: Date;
       }>
     >;
     create: (args: {
@@ -824,13 +843,40 @@ async function runGeneration(
   // Used both as prompt context (avoid repetition) and for duplicate detection
   // after. Topic Memory needs a wider window (30) than the diversity/Jaccard
   // signals (10), so we fetch 30 and slice the first 10 for the rest.
+  //
+  // Already scoped to THIS channel alone — a Facebook post never enters an
+  // Instagram generation's pool, because the two have different `channel`
+  // values. `NOT contentGroupId` is a second, narrower exclusion on top of
+  // that: it drops this run's OWN siblings (this matters for a channel that
+  // gets a SECOND look at the same topic — the sibling second-pass in
+  // generate-topic-across-channels.service.ts — and is cheap insurance against
+  // ever comparing a candidate to a post generated moments ago for the exact
+  // same story). A LATER, independent generation that happens to reuse the
+  // same article gets a NEW contentGroupId, so it is never exempted by this —
+  // only this run's own siblings are.
   const recentRows = await db.post.findMany({
-    where: { companyId, channel: context.channel.channel as SocialChannel },
+    where: {
+      companyId,
+      channel: context.channel.channel as SocialChannel,
+      ...(options.contentGroupId ? { NOT: { contentGroupId: options.contentGroupId } } : {}),
+    },
     orderBy: { createdAt: "desc" },
     take: TOPIC_MEMORY_SIZE,
     // imagePrompt rides along on the query that was already being made: it is
     // what the recent IMAGES looked like, which the post text cannot express.
-    select: { id: true, content: true, promptSnapshot: true, imagePrompt: true },
+    // channel/contentGroupId/primaryFeedItemId/createdAt feed the
+    // [jaccard_duplicate] diagnostic only — classifying a flagged match as a
+    // sibling or a genuine historical duplicate without a second query.
+    select: {
+      id: true,
+      content: true,
+      promptSnapshot: true,
+      imagePrompt: true,
+      channel: true,
+      contentGroupId: true,
+      primaryFeedItemId: true,
+      createdAt: true,
+    },
   });
 
   // Topic Memory — normalized conceptual topics from the last 30 posts. Fed to
@@ -1244,7 +1290,10 @@ async function runGeneration(
   // latest ready embeddings for this company+channel. Fail-open: any failure
   // leaves generation working and is surfaced as a skip. The gate never stores.
   const semanticGate =
-    deps.semanticGate ?? createSemanticGate(companyId, context.channel.channel as SocialChannel);
+    deps.semanticGate ??
+    createSemanticGate(companyId, context.channel.channel as SocialChannel, {
+      excludeContentGroupId: options.contentGroupId ?? null,
+    });
 
   // ── Generate with retry (duplicate-aware) ─────────────────────────────────
   // Retries up to MAX_GENERATION_ATTEMPTS times when the candidate is a
@@ -1258,7 +1307,17 @@ async function runGeneration(
         provider,
         systemPrompt,
         userPrompt,
-        recentRows10.map((r) => ({ id: r.id, text: r.content })),
+        // channel/contentGroupId/feedItemId ride along for [jaccard_duplicate]
+        // diagnostics only (see RecentPost) — the comparison itself still only
+        // ever looks at `text`.
+        recentRows10.map((r) => ({
+          id: r.id,
+          text: r.content,
+          channel: r.channel,
+          contentGroupId: r.contentGroupId ?? null,
+          feedItemId: r.primaryFeedItemId ?? null,
+          createdAt: r.createdAt,
+        })),
         {
           initialAngle,
           recentAngles,
@@ -1277,7 +1336,12 @@ async function runGeneration(
         // Every attempt, including the ones the loop discards. This is what makes
         // failed attempts — their prompts, their replies and the gate that turned
         // them down — survive a run that only returns its last candidate.
-        (record) => recordAttemptSteps(tracer, record)
+        (record) => recordAttemptSteps(tracer, record),
+        {
+          channel: context.channel.channel,
+          feedItemId: claimedFeedItemId,
+          contentGroupId: options.contentGroupId ?? null,
+        }
       )
     );
   } catch (err) {
@@ -1339,11 +1403,14 @@ async function runGeneration(
         ? "semantic_duplicate"
         : "topic_repeated";
     console.warn(
-      `[generation] Aborted after ${attempts} attempts → code=CANNOT_GENERATE_UNIQUE_POST reason=${reason} (post not saved).`
+      `[generation] Aborted after ${attempts} attempts → code=CANNOT_GENERATE_UNIQUE_POST reason=${reason}` +
+        (duplicateResult.flagged ? ` matchedPostId=${duplicateResult.matchedPostId}` : "") +
+        ` (post not saved).`
     );
     // The abort itself, as its own step. Every attempt is already on the record
-    // above; this says which gate had the last word, and that the article was
-    // handed back to the pool rather than consumed by a post that never existed.
+    // above (including the full [jaccard_duplicate] diagnostic, per attempt);
+    // this says which gate had the last word, and that the article was handed
+    // back to the pool rather than consumed by a post that never existed.
     tracer.step({
       type: "validation",
       label: "Uniqueness abort — post NOT saved",
@@ -1352,6 +1419,8 @@ async function runGeneration(
         reason,
         attempts,
         jaccardFlagged: duplicateResult.flagged,
+        jaccardMatchedPostId: duplicateResult.matchedPostId,
+        jaccardSimilarity: duplicateResult.similarityScore,
         semanticDecision: semanticResult.decision,
         topicRepeated,
         claimReleased: ownedClaimId !== null,

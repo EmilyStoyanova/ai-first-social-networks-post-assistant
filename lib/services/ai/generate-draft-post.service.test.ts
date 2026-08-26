@@ -51,6 +51,11 @@ interface RecentRow {
   promptSnapshot: Prisma.JsonValue | null;
   /** Absent on legacy rows — it only feeds the visual-diversity block. */
   imagePrompt?: string | null;
+  /** [jaccard_duplicate] diagnostic metadata only — absent on older fixtures. */
+  channel?: SocialChannel;
+  contentGroupId?: string | null;
+  primaryFeedItemId?: string | null;
+  createdAt?: Date;
 }
 
 function makeDeps(
@@ -2500,6 +2505,151 @@ describe("generatePostFromContext — Topic Memory and a dictated topic", () => 
       seenRecent?.map((r) => r.id),
       ["p1", "p2"]
     );
+  });
+});
+
+// ─── Comparison scope for a sibling channel (jaccard_duplicate false-positive) ─
+//
+// A Facebook post and its Instagram sibling are generated from the SAME
+// content group, one after the other. The Jaccard/diversity pool is already
+// scoped to (companyId, channel) — a different channel's post never enters it
+// — but this adds a second, narrower exclusion on top: a candidate must never
+// be compared against a post THIS SAME RUN generated for the group's other
+// channels, however that post got into the pool. See generate-with-retry.ts
+// for the [jaccard_duplicate] diagnostic these tests also cover.
+describe("generatePostFromContext — comparison scope for a sibling channel", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const HISTORICAL_ROW: RecentRow = {
+    id: "hist-1",
+    content: "An unrelated historical post about something else entirely.",
+    promptSnapshot: null,
+    channel: "instagram" as SocialChannel,
+    contentGroupId: null,
+    primaryFeedItemId: "old-article",
+    createdAt: new Date("2026-01-01T00:00:00Z"),
+  };
+
+  it("asks the database to exclude this run's own content group", async () => {
+    const { deps } = makeDeps([HISTORICAL_ROW]);
+    let seenWhere: { NOT?: { contentGroupId: string } } | undefined;
+    const originalFindMany = deps.db!.post.findMany;
+    deps.db!.post.findMany = async (args) => {
+      seenWhere = args.where;
+      return originalFindMany(args);
+    };
+
+    const result = await generatePostFromContext(
+      context(),
+      "co-1",
+      { contentGroupId: "group-1" },
+      deps
+    );
+
+    assert.deepEqual(seenWhere?.NOT, { contentGroupId: "group-1" });
+    assert.ok(result.success, "excluding the sibling group must not block generation");
+  });
+
+  it("does not exclude anything when the generation has no content group", async () => {
+    const { deps } = makeDeps([HISTORICAL_ROW]);
+    let seenWhere: { NOT?: { contentGroupId: string } } | undefined;
+    const originalFindMany = deps.db!.post.findMany;
+    deps.db!.post.findMany = async (args) => {
+      seenWhere = args.where;
+      return originalFindMany(args);
+    };
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+
+    assert.equal(seenWhere?.NOT, undefined);
+    assert.ok(result.success);
+  });
+
+  it("hands the loop enriched recent-post metadata for [jaccard_duplicate] diagnostics", async () => {
+    const { deps } = makeDeps([HISTORICAL_ROW]);
+    let seenRecent: unknown[] | undefined;
+    deps.generateWithRetry = async (provider, system, user, recent, diversity, gate, max) => {
+      seenRecent = recent;
+      const { generateWithRetry } = await import("@/lib/ai/generate-with-retry");
+      return generateWithRetry(provider, system, user, recent, diversity, gate, max);
+    };
+
+    const result = await generatePostFromContext(context(), "co-1", {}, deps);
+
+    assert.ok(result.success);
+    assert.deepEqual(seenRecent, [
+      {
+        id: "hist-1",
+        text: HISTORICAL_ROW.content,
+        channel: "instagram",
+        contentGroupId: null,
+        feedItemId: "old-article",
+        createdAt: HISTORICAL_ROW.createdAt,
+      },
+    ]);
+  });
+
+  it("logs a [jaccard_duplicate] diagnostic classifying a genuine historical match", async () => {
+    // Same near-verbatim setup as the existing Jaccard-abort test, but this one
+    // asserts what gets LOGGED: enough to tell a genuine historical duplicate
+    // apart from a sibling, without a second database query.
+    const MOCK_TEXT =
+      "Most people assume a team should stay quiet before a launch. Actually, building in the open is what earns trust — while the silent approach loses it.\n" +
+      "1. A first look drops this week.\n" +
+      "2. Early access opens right after.\n" +
+      "3. The full rollout lands next month.\n" +
+      "Follow us, share this with a friend, visit our website, and comment your thoughts below — what would you want to see first?";
+    const recentRows: RecentRow[] = [
+      {
+        id: "recent-1",
+        content: MOCK_TEXT,
+        promptSnapshot: null,
+        channel: "linkedin" as SocialChannel,
+        contentGroupId: null,
+        primaryFeedItemId: "unrelated-article",
+        createdAt: new Date("2026-01-01T00:00:00Z"),
+      },
+    ];
+    const { deps } = makeDeps(recentRows, ACCEPT_GATE);
+
+    const originalWarn = console.warn;
+    const warnCalls: unknown[][] = [];
+    console.warn = (...args: unknown[]) => {
+      warnCalls.push(args);
+    };
+    let result: Awaited<ReturnType<typeof generatePostFromContext>>;
+    try {
+      result = await generatePostFromContext(context(), "co-1", {}, deps);
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    // A genuine historical duplicate — not a sibling — must still fail exactly
+    // as it did before this diagnostic existed.
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "CANNOT_GENERATE_UNIQUE_POST");
+
+    const diagnosticCall = warnCalls.find(
+      (args) => typeof args[0] === "string" && (args[0] as string).startsWith("[jaccard_duplicate]")
+    );
+    assert.ok(diagnosticCall, "expected a [jaccard_duplicate] diagnostic to be logged");
+    const [message, diagnostic] = diagnosticCall as [string, Record<string, unknown>];
+    assert.match(message, /matched historical linkedin post recent-1/);
+    assert.equal(diagnostic.matchKind, "historical_post");
+    assert.equal(diagnostic.matchedPostId, "recent-1");
+    assert.equal(diagnostic.matchedFeedItemId, "unrelated-article");
+    assert.equal(diagnostic.matchedContentGroupId, null);
+    assert.equal(diagnostic.threshold, 0.75);
   });
 });
 

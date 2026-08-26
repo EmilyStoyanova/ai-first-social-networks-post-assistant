@@ -3,6 +3,7 @@ import { parseLlmPost, type ParsedLlmPost } from "./parse-llm-post";
 import { LlmResponseParseError } from "./errors";
 import {
   checkDuplicatePost,
+  SIMILARITY_THRESHOLD,
   type DuplicateCheckResult,
   type RecentPost,
 } from "./quality/duplicate-detection";
@@ -25,6 +26,82 @@ import type {
 } from "@/lib/generation-trace/attempt-record";
 
 export const MAX_GENERATION_ATTEMPTS = 3;
+
+/**
+ * What this generation IS, for `[jaccard_duplicate]` diagnostics only — never
+ * read by the comparison itself. Lets a flagged match be classified against
+ * the candidate it was flagged for (same article? same content group? a
+ * genuinely unrelated historical post?) without a second DB lookup.
+ */
+export interface DuplicateCandidateContext {
+  channel: string;
+  feedItemId: string | null;
+  contentGroupId: string | null;
+}
+
+/**
+ * Logs everything needed to answer "what existing post did this get flagged
+ * against, and was it a legitimate sibling or a real duplicate" — without
+ * needing to re-query the database. `recentPosts` already carries the metadata
+ * (see `RecentPost`); this only looks up the one that matched and classifies it.
+ */
+function logJaccardDuplicate(
+  result: DuplicateCheckResult,
+  recentPosts: readonly RecentPost[],
+  candidateContext?: DuplicateCandidateContext
+): void {
+  const matched = recentPosts.find((p) => p.id === result.matchedPostId);
+  const candidateChannel = candidateContext?.channel ?? null;
+  const candidateFeedItemId = candidateContext?.feedItemId ?? null;
+  const candidateContentGroupId = candidateContext?.contentGroupId ?? null;
+  const matchedChannel = matched?.channel ?? null;
+  const matchedFeedItemId = matched?.feedItemId ?? null;
+  const matchedContentGroupId = matched?.contentGroupId ?? null;
+
+  const sameArticleSibling =
+    candidateFeedItemId !== null && matchedFeedItemId !== null
+      ? matchedFeedItemId === candidateFeedItemId
+      : false;
+  const sameContentGroupSibling =
+    !sameArticleSibling &&
+    candidateContentGroupId !== null &&
+    matchedContentGroupId !== null &&
+    matchedContentGroupId === candidateContentGroupId;
+  const sameChannel =
+    candidateChannel !== null && matchedChannel !== null && matchedChannel === candidateChannel;
+
+  const matchKind = sameArticleSibling
+    ? "same_article_sibling"
+    : sameContentGroupSibling
+      ? "same_content_group_sibling"
+      : "historical_post";
+  const matchLabel = sameArticleSibling
+    ? "same-article sibling"
+    : sameContentGroupSibling
+      ? "same-content-group sibling"
+      : `historical ${matchedChannel ?? "unknown"}`;
+
+  console.warn(
+    `[jaccard_duplicate] candidate ${candidateChannel ?? "unknown"} matched ${matchLabel} post ${
+      result.matchedPostId
+    } similarity ${result.similarityScore} threshold ${SIMILARITY_THRESHOLD}`,
+    {
+      candidateChannel,
+      candidateFeedItemId,
+      candidateContentGroupId,
+      similarity: result.similarityScore,
+      threshold: SIMILARITY_THRESHOLD,
+      matchedPostId: result.matchedPostId,
+      matchedPostChannel: matchedChannel,
+      matchedFeedItemId,
+      matchedContentGroupId,
+      matchedCreatedAt: matched?.createdAt ?? null,
+      matchKind,
+      sameChannel,
+      differentChannel: candidateChannel !== null && matchedChannel !== null && !sameChannel,
+    }
+  );
+}
 
 // ─── Semantic duplicate gate (Phase 1.4) ──────────────────────────────────────
 // The gate embeds a candidate's coreMessage and compares it against recent
@@ -151,7 +228,9 @@ export async function generateWithRetry(
   diversityOptions?: DiversityOptions,
   semanticGate?: SemanticGate,
   maxAttempts = MAX_GENERATION_ATTEMPTS,
-  recorder?: GenerationAttemptRecorder
+  recorder?: GenerationAttemptRecorder,
+  /** Identifies THIS generation for `[jaccard_duplicate]` diagnostics only. */
+  candidateContext?: DuplicateCandidateContext
 ): Promise<GenerationLoopResult> {
   let lastParsed: ParsedLlmPost | null = null;
   let lastDuplicateResult: DuplicateCheckResult = {
@@ -358,6 +437,9 @@ export async function generateWithRetry(
       candidateText: lastParsed.text,
       recentPosts,
     });
+    if (lastDuplicateResult.flagged) {
+      logJaccardDuplicate(lastDuplicateResult, recentPosts, candidateContext);
+    }
     lastSemanticResult = semanticGate
       ? await semanticGate({
           coreMessage: lastParsed.coreMessage,

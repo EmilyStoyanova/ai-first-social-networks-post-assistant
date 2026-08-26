@@ -1,4 +1,4 @@
-const SIMILARITY_THRESHOLD = 0.75;
+export const SIMILARITY_THRESHOLD = 0.75;
 
 export interface DuplicateCheckResult {
   flagged: boolean;
@@ -9,6 +9,19 @@ export interface DuplicateCheckResult {
 export interface RecentPost {
   id: string;
   text: string;
+  /**
+   * Metadata for diagnostics only — never read by `checkDuplicatePost` itself,
+   * which compares `text` alone. Present when the caller has it, so a flagged
+   * match can be classified (sibling vs. historical) and logged without a
+   * second lookup. Optional so existing callers/fixtures that only have
+   * `{id, text}` keep compiling unchanged.
+   */
+  channel?: string;
+  /** The content-group this post belongs to, if any. */
+  contentGroupId?: string | null;
+  /** The source article this post was written from, if any. */
+  feedItemId?: string | null;
+  createdAt?: Date;
 }
 
 function normalize(text: string): Set<string> {

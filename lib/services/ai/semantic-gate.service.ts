@@ -42,7 +42,14 @@ export interface SemanticNeighborStore {
   fetchReadyNeighbors(
     companyId: string,
     channel: SocialChannel,
-    limit: number
+    limit: number,
+    /**
+     * Excludes neighbors whose post belongs to this content group — this run's
+     * OWN sibling channels, mirroring the same exclusion the Jaccard pool
+     * applies (see generate-draft-post.service.ts). Undefined/null excludes
+     * nothing, which is every caller outside a multi-channel topic.
+     */
+    excludeContentGroupId?: string | null
   ): Promise<SemanticNeighbor[]>;
 }
 
@@ -60,7 +67,7 @@ function parseVectorLiteral(literal: string): number[] {
 }
 
 const prismaSemanticNeighborStore: SemanticNeighborStore = {
-  async fetchReadyNeighbors(companyId, channel, limit) {
+  async fetchReadyNeighbors(companyId, channel, limit, excludeContentGroupId) {
     const rows = await prisma.$queryRaw<NeighborRow[]>`
       SELECT s."post_id" AS post_id,
              p."core_message" AS core_message,
@@ -71,6 +78,7 @@ const prismaSemanticNeighborStore: SemanticNeighborStore = {
         AND s."channel" = ${channel}::"SocialChannel"
         AND s."status" = 'ready'
         AND s."embedding" IS NOT NULL
+        AND (${excludeContentGroupId ?? null}::text IS NULL OR p."content_group_id" IS DISTINCT FROM ${excludeContentGroupId ?? null})
       ORDER BY s."post_created_at" DESC
       LIMIT ${limit};
     `;
@@ -91,6 +99,14 @@ export interface CreateSemanticGateDeps {
    */
   provider?: IEmbeddingProvider | null;
   store?: SemanticNeighborStore;
+  /**
+   * Excludes THIS run's own sibling channels from the neighbor pool — the same
+   * exclusion the Jaccard pool applies (see generate-draft-post.service.ts),
+   * kept in step so fixing one gate for a sibling can never leave the other
+   * still rejecting it. Undefined/null for every caller outside a multi-channel
+   * topic — nothing is excluded.
+   */
+  excludeContentGroupId?: string | null;
 }
 
 export function createSemanticGate(
@@ -100,6 +116,7 @@ export function createSemanticGate(
 ): SemanticGate {
   const store = deps.store ?? prismaSemanticNeighborStore;
   const provider = deps.provider !== undefined ? deps.provider : getEmbeddingProviderOrNull();
+  const excludeContentGroupId = deps.excludeContentGroupId ?? null;
 
   return async ({ coreMessage, topic, aspectFocus }): Promise<SemanticGateResult> => {
     const core = coreMessage?.trim();
@@ -134,7 +151,12 @@ export function createSemanticGate(
         );
       }
 
-      const neighbors = await store.fetchReadyNeighbors(companyId, channel, MAX_SEMANTIC_NEIGHBORS);
+      const neighbors = await store.fetchReadyNeighbors(
+        companyId,
+        channel,
+        MAX_SEMANTIC_NEIGHBORS,
+        excludeContentGroupId
+      );
       const evaluation = evaluateSemanticNeighbors(vector, neighbors);
       return { ...evaluation, skipped: false };
     } catch {
