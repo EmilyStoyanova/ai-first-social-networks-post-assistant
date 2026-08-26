@@ -341,6 +341,18 @@ function GeneratedPostCardBody({
     setManuallyScheduled(post.manuallyScheduled);
     setPublishedAt(post.publishedAt);
     setPublishedPostUrl(post.publishedPostUrl ?? null);
+    // The image stays excluded from reconciliation above (a person's
+    // in-progress picker choice must never be clobbered by a background
+    // refresh) — EXCEPT for adopting one that did not exist yet. Auto image
+    // generation is best-effort and awaited server-side, but it can still be
+    // slower than the response that created this card (a worker-run
+    // multi-channel/bulk generation, or a request-deadline race), so the post
+    // this card mounted with can genuinely have no image yet even though one
+    // lands moments later. Without this, that image would never appear until
+    // a full page reload remounts the card from scratch. Safe because it only
+    // fires from null → a value; an image already showing (chosen locally or
+    // already reconciled once) is never replaced by a background refresh.
+    if (imageUrl === null && post.mediaUrl) setImageUrl(post.mediaUrl);
   }
 
   const channelMeta = channelMetaFor(post.channel);
