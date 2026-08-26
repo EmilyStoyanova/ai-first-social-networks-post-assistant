@@ -8,11 +8,13 @@ import {
   computeTranslationBackoff,
   computeTranslationHash,
   estimateTokenCount,
+  sanitiseTranslationContent,
   TranslationParseError,
   MAX_TRANSLATION_ATTEMPTS,
   TRANSLATION_ATTEMPT_TIMEOUT_MS,
   TRANSLATION_ITEM_TIMEOUT_MS,
 } from "@/lib/ai/feed-item-translation";
+import { shouldChunkForTranslation } from "@/lib/ai/translation/ollama-chunking";
 import { claimFeedItemForTranslation } from "@/lib/ai/feed-item-translation-claim";
 import { resolveLlmSelection } from "./resolve-llm-selection.service";
 import {
@@ -326,6 +328,20 @@ export async function translateFeedItem(
   const prompts = buildTranslationPrompts(item.title, item.content, targetLang);
   const { systemPrompt, userPrompt, mode, contentChars, derivedTitle } = prompts;
 
+  // How much of the article body THIS call will actually translate — diagnostics only.
+  // `contentChars` (from `prompts`, above) is the single-call path's own capped view,
+  // and is accurate for it — but neither engine's oversized-article path is bound by
+  // that cap: MADLAD always processes the full sanitised body via its own segments, and
+  // Ollama does too once routed to the chunked path (see shouldChunkForTranslation).
+  // Reporting the capped number there would claim "~3000 chars sent" while the model
+  // actually saw the whole article split across several calls.
+  const willProcessFullBody =
+    translator.kind === "madlad" ||
+    (translator.kind === "ollama" && shouldChunkForTranslation(item.content));
+  const bodyCharsSent = willProcessFullBody
+    ? (sanitiseTranslationContent(item.content)?.length ?? 0)
+    : contentChars;
+
   // ── Trace ─────────────────────────────────────────────────────────────────
   // Started only HERE, after the claim, because everything above returns without
   // calling a model — and a run recorded for "nothing to do" would sit in front
@@ -370,10 +386,12 @@ export async function translateFeedItem(
     metadata: {
       titleChars: item.title?.length ?? 0,
       contentChars: item.content?.length ?? 0,
-      // How much of the page survived boilerplate/credit removal and capping —
-      // compared against contentChars it says how much was noise.
-      bodyCharsSent: contentChars,
-      truncatedForPrompt: (item.content?.length ?? 0) > contentChars,
+      // How much of the page survived boilerplate/credit removal and capping — the
+      // FULL sanitised body on an oversized-article (chunked/segmented) run, or the
+      // single-call path's own capped view otherwise. Compared against contentChars
+      // it says how much was noise (or, on the single-call path only, truncated).
+      bodyCharsSent,
+      truncatedForPrompt: (item.content?.length ?? 0) > bodyCharsSent,
     },
   });
 
@@ -386,10 +404,12 @@ export async function translateFeedItem(
     sourceUrl: item.url,
     promptLength: systemPrompt.length + userPrompt.length,
     articleTextLength: item.content?.length ?? 0,
-    // Body characters actually sent, AFTER boilerplate/credit/language-switcher removal and
-    // capping. Compared against articleTextLength it shows how much of a page was noise —
-    // the ArchDaily articles in the logs were roughly half.
-    translatedBodyChars: contentChars,
+    // Body characters actually sent, AFTER boilerplate/credit/language-switcher removal —
+    // the FULL sanitised body on an oversized-article run (MADLAD, or Ollama once routed
+    // to the chunked path), the single-call path's own capped view otherwise. Compared
+    // against articleTextLength it shows how much of a page was noise — the ArchDaily
+    // articles in the logs were roughly half.
+    translatedBodyChars: bodyCharsSent,
     // The article had no title of its own, so the model was asked to derive one from the body
     // rather than return "" — the `(untitled)` rows.
     ...(derivedTitle ? { derivedTitle: true } : {}),
@@ -603,12 +623,15 @@ export async function translateFeedItem(
       const elapsedMs = now().getTime() - startedAtMs;
       const remainingBatchCount = err.totalBatchCount - err.processedBatchCount;
       const isFinalAttempt = attempt >= MAX_TRANSLATION_ATTEMPTS;
+      // Named once, shared by both log lines below, so neither can name the wrong
+      // engine — a run-on Ollama's chunked path must never read "MADLAD" in its logs.
+      const unitNoun = translator.kind === "madlad" ? "MADLAD HTTP batch(es)" : "chunk(s)";
+      const engineLabel = translator.kind === "madlad" ? "MADLAD" : "Chunked";
 
       if (isFinalAttempt) {
         // Exhausted its cross-run attempt budget before every unit ran — a genuinely
         // oversized article, not a loop: this is the EXPLICIT failure the invariant
         // requires instead of banking progress forever.
-        const unitNoun = translator.kind === "madlad" ? "MADLAD HTTP batch(es)" : "chunk(s)";
         const failMessage =
           `Oversized article: needed ${err.totalBatchCount} ${unitNoun}, only ` +
           `${err.processedBatchCount} completed across ${MAX_TRANSLATION_ATTEMPTS} attempts.`;
@@ -661,7 +684,7 @@ export async function translateFeedItem(
       // More attempts remain — bank progress and release the claim immediately (no
       // backoff: this is not a fault) so the very next selection resumes right where
       // this call stopped instead of re-translating batches that already succeeded.
-      console.info("[rss-translation] MADLAD article progressing — resuming next run", {
+      console.info(`[rss-translation] ${engineLabel} article progressing — resuming next run`, {
         ...diag,
         elapsedMs,
         attempt,

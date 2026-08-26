@@ -69,6 +69,25 @@ function alwaysFailsBetaGenerate() {
   };
 }
 
+/** Every unit succeeds cleanly — for the diagnostics tests below, which need a
+ *  complete, successful chunked translation rather than a partial/failing one. */
+function alwaysSucceedsGenerate() {
+  return async (request: LlmRequest) => {
+    if (request.userPrompt.startsWith("Title: ") && !request.userPrompt.includes("\nContent: ")) {
+      return { text: JSON.stringify({ title: BG_FILLER }) };
+    }
+    return { text: JSON.stringify({ content: BG_FILLER }) };
+  };
+}
+
+/** Captures console.info calls, restoring the original on stop(). */
+function captureInfo() {
+  const infos: unknown[][] = [];
+  const orig = console.info;
+  console.info = (...args: unknown[]) => void infos.push(args);
+  return { infos, stop: () => (console.info = orig) };
+}
+
 function makeItem(overrides: Partial<TranslatableItem> = {}): TranslatableItem {
   return {
     id: "item-chunked-1",
@@ -196,5 +215,52 @@ describe("translateFeedItem — chunked Ollama path, a permanently-failing chunk
     assert.equal(outcome.status, "translated");
     // Only the ONE chunk that failed before is re-sent.
     assert.equal(calls, 1);
+  });
+});
+
+describe("translateFeedItem — chunked Ollama path diagnostics", () => {
+  it("names the engine as Chunked, not MADLAD, when banking progress mid-run", async () => {
+    const { db } = makeDb();
+    const item = makeItem({ translationAttemptCount: 1 }); // attempt 2 of 5 — not final
+    const cap = captureInfo();
+    try {
+      await translateFeedItem(item, "bg", deps(db, alwaysFailsBetaGenerate()));
+    } finally {
+      cap.stop();
+    }
+
+    const progressing = cap.infos.find(
+      (a) => typeof a[0] === "string" && (a[0] as string).includes("article progressing")
+    );
+    assert.ok(progressing, "expected a progress log line");
+    assert.equal(
+      progressing![0],
+      "[rss-translation] Chunked article progressing — resuming next run"
+    );
+  });
+
+  it("reports the FULL sanitised body length translated, not the ~3000-char single-call cap", async () => {
+    const { db } = makeDb();
+    const item = makeItem(); // fresh claim — will translate the whole article successfully
+    const cap = captureInfo();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(item, "bg", deps(db, alwaysSucceedsGenerate()));
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "translated");
+    const done = cap.infos.find((a) => a[0] === "[rss-translation] item translated");
+    assert.ok(done, "expected an 'item translated' log");
+    const fields = done![1] as Record<string, unknown>;
+    assert.ok(
+      (fields.translatedBodyChars as number) > 3000,
+      `expected the full body length reported, not the ~3000-char single-call cap, got ${fields.translatedBodyChars}`
+    );
+    assert.ok(
+      Math.abs((fields.translatedBodyChars as number) - CONTENT.length) < 5,
+      `expected close to the article's own ${CONTENT.length} chars, got ${fields.translatedBodyChars}`
+    );
   });
 });

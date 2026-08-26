@@ -1525,123 +1525,139 @@ async function runGeneration(
   // source deletion would null out from under us.
   const originSnapshot = buildOriginSnapshot(primary.item);
 
-  const post = await db.post.create({
-    data: {
-      companyId,
-      channel: context.channel.channel as SocialChannel,
-      // Phase 1.1 — the post's central claim/takeaway, in a dedicated column.
-      // Still mirrored in promptSnapshot.coreMessage below for audit/debugging.
-      coreMessage: parsed.coreMessage,
-      // The reserved source article. The DB unique index on this column is the
-      // hard guarantee that one feed item never backs two posts.
-      primaryFeedItemId: claimedFeedItemId,
-      // v2-8 — the quota this post consumed. Null both for mission posts and
-      // outside the mix path entirely; the scheduler only counts posts within
-      // the current schedule, so a legacy null can never be miscounted.
-      contentSourceId: options.contentSourceId ?? null,
-      ...originSnapshot,
-      status: resolvedStatus,
-      // Never stamped at generation. Approval — human or cron — is what sets it.
-      approvedAt: null,
-      content: finalContent,
-      hashtags: parsed.hashtags,
-      imagePrompt: parsed.imagePrompt ?? null,
-      notes: parsed.notes ?? null,
-      llmProvider: llmProviderStr,
-      llmModel: llmModelStr,
-      generatedById: generatedById ?? null,
-      scheduleId: scheduleId ?? null,
-      scheduledFor: scheduledFor ?? null,
-      // Whose time that is — the publisher's discriminator. See the derivation
-      // at the top of this function.
-      manuallyScheduled,
-      // Which bulk run wrote this post, if any. An association and nothing more:
-      // the status above is untouched by it, so a bulk post is reviewed exactly
-      // like any other manual draft.
-      generationBatchId: options.generationBatchId ?? null,
-      // The content topic this post is one channel's version of. An association
-      // and nothing more — status, schedule and review are untouched by it, so a
-      // grouped post behaves exactly like an ungrouped one everywhere except in
-      // how the list chooses to display it.
-      contentGroupId: options.contentGroupId ?? null,
-      safetyFlagged: safetyResult.flagged,
-      safetyFlagReason: safetyResult.flagged
-        ? `Flagged terms: ${safetyResult.matchedTerms.join(", ")}`
-        : null,
-      promptSnapshot: {
-        systemPrompt,
-        userPrompt,
-        provider: llmProviderStr,
-        model: llmModelStr,
-        // The LlmConfig actually used — an explicit selection, the user preference,
-        // or the admin default. Null only when the env-var fallback ran. provider/
-        // model above already reflect the resolved choice.
-        llmConfigId: resolvedLlmConfigId,
-        feedItemIds,
-        generatedAt: new Date().toISOString(),
-        contentAngle: selectedAngle ?? null,
-        contentPattern: selectedPattern
-          ? {
-              hookType: selectedPattern.hookType,
-              structure: selectedPattern.structure,
-              ctaType: selectedPattern.ctaType,
-            }
-          : null,
-        topic: parsed.topic ?? null,
-        // Phase 1.1 — the single central claim/takeaway of the post. Also stored
-        // in the dedicated Post.coreMessage column; mirrored here for auditing.
-        coreMessage: parsed.coreMessage,
-        qualityGuards,
-        // Phase 1.4 — semantic-duplicate gate diagnostics for calibration.
-        semanticGate: {
-          topSimilarity: semanticResult.topSimilarity,
-          matchedPostId: semanticResult.matchedPostId,
-          decision: semanticResult.decision,
-          attempts,
-          skipped: semanticResult.skipped,
-          // Phase 1.5 — the final candidate's coreMessage was generic praise.
-          coreMessageGeneric,
-          // Topic Memory — the final candidate's normalized topic was already used.
-          topicRepeated,
-        },
-        // Source link decision (v2-1) — traceability for the appended URL.
-        // primaryFeedItemId/sourceTitle pin the exact article the post is based
-        // on, so text and URL are auditably the same source.
-        primaryFeedItemId,
-        sourceUrl,
-        sourceTitle,
-        includeSourceLink,
-        includeSourceLinkLevel,
-        // Aspect fields — null when no aspect was mined (null fails the hasAspectFields guard
-        // in loadAspectPoolData so legacy and no-aspect posts are treated identically).
-        aspectFingerprint: aspectFingerprint && selectedAspect ? aspectFingerprint : null,
-        // Cast to Record<string, string>[] / Record<string, string> so Prisma's
-        // InputJsonObject constraint is satisfied (ContentAspect has no index signature).
-        aspectPool:
-          aspectFingerprint && selectedAspect
-            ? (aspectPool as unknown as Record<string, string>[])
+  // The write itself is the one operation between the claim and the post
+  // existing that can genuinely fail for reasons outside this function's
+  // control (a dropped connection, a constraint violation) — everything above
+  // it is either pure computation or an already-handled abort. Uncaught here,
+  // the claimed article would be stuck `usedInPost = true` forever with no
+  // post to show for it: found in production as orphaned claims with no
+  // release path, because the outer catch in generatePostFromContext has no
+  // access to `ownedClaimId` and only re-throws. The IIFE keeps `post`'s type
+  // inferred from the `select` below rather than fighting Prisma's overloads.
+  const post = await (async () => {
+    try {
+      return await db.post.create({
+        data: {
+          companyId,
+          channel: context.channel.channel as SocialChannel,
+          // Phase 1.1 — the post's central claim/takeaway, in a dedicated column.
+          // Still mirrored in promptSnapshot.coreMessage below for audit/debugging.
+          coreMessage: parsed.coreMessage,
+          // The reserved source article. The DB unique index on this column is the
+          // hard guarantee that one feed item never backs two posts.
+          primaryFeedItemId: claimedFeedItemId,
+          // v2-8 — the quota this post consumed. Null both for mission posts and
+          // outside the mix path entirely; the scheduler only counts posts within
+          // the current schedule, so a legacy null can never be miscounted.
+          contentSourceId: options.contentSourceId ?? null,
+          ...originSnapshot,
+          status: resolvedStatus,
+          // Never stamped at generation. Approval — human or cron — is what sets it.
+          approvedAt: null,
+          content: finalContent,
+          hashtags: parsed.hashtags,
+          imagePrompt: parsed.imagePrompt ?? null,
+          notes: parsed.notes ?? null,
+          llmProvider: llmProviderStr,
+          llmModel: llmModelStr,
+          generatedById: generatedById ?? null,
+          scheduleId: scheduleId ?? null,
+          scheduledFor: scheduledFor ?? null,
+          // Whose time that is — the publisher's discriminator. See the derivation
+          // at the top of this function.
+          manuallyScheduled,
+          // Which bulk run wrote this post, if any. An association and nothing more:
+          // the status above is untouched by it, so a bulk post is reviewed exactly
+          // like any other manual draft.
+          generationBatchId: options.generationBatchId ?? null,
+          // The content topic this post is one channel's version of. An association
+          // and nothing more — status, schedule and review are untouched by it, so a
+          // grouped post behaves exactly like an ungrouped one everywhere except in
+          // how the list chooses to display it.
+          contentGroupId: options.contentGroupId ?? null,
+          safetyFlagged: safetyResult.flagged,
+          safetyFlagReason: safetyResult.flagged
+            ? `Flagged terms: ${safetyResult.matchedTerms.join(", ")}`
             : null,
-        selectedAspect: selectedAspect
-          ? (selectedAspect as unknown as Record<string, string>)
-          : null,
-        aspectUsedAt: aspectFingerprint && selectedAspect ? new Date().toISOString() : null,
-        aspectExtractionRound: aspectFingerprint && selectedAspect ? extractionRound : null,
-      },
-    },
-    select: {
-      id: true,
-      companyId: true,
-      channel: true,
-      status: true,
-      content: true,
-      hashtags: true,
-      imagePrompt: true,
-      notes: true,
-      llmProvider: true,
-      llmModel: true,
-      createdAt: true,
-    },
-  });
+          promptSnapshot: {
+            systemPrompt,
+            userPrompt,
+            provider: llmProviderStr,
+            model: llmModelStr,
+            // The LlmConfig actually used — an explicit selection, the user preference,
+            // or the admin default. Null only when the env-var fallback ran. provider/
+            // model above already reflect the resolved choice.
+            llmConfigId: resolvedLlmConfigId,
+            feedItemIds,
+            generatedAt: new Date().toISOString(),
+            contentAngle: selectedAngle ?? null,
+            contentPattern: selectedPattern
+              ? {
+                  hookType: selectedPattern.hookType,
+                  structure: selectedPattern.structure,
+                  ctaType: selectedPattern.ctaType,
+                }
+              : null,
+            topic: parsed.topic ?? null,
+            // Phase 1.1 — the single central claim/takeaway of the post. Also stored
+            // in the dedicated Post.coreMessage column; mirrored here for auditing.
+            coreMessage: parsed.coreMessage,
+            qualityGuards,
+            // Phase 1.4 — semantic-duplicate gate diagnostics for calibration.
+            semanticGate: {
+              topSimilarity: semanticResult.topSimilarity,
+              matchedPostId: semanticResult.matchedPostId,
+              decision: semanticResult.decision,
+              attempts,
+              skipped: semanticResult.skipped,
+              // Phase 1.5 — the final candidate's coreMessage was generic praise.
+              coreMessageGeneric,
+              // Topic Memory — the final candidate's normalized topic was already used.
+              topicRepeated,
+            },
+            // Source link decision (v2-1) — traceability for the appended URL.
+            // primaryFeedItemId/sourceTitle pin the exact article the post is based
+            // on, so text and URL are auditably the same source.
+            primaryFeedItemId,
+            sourceUrl,
+            sourceTitle,
+            includeSourceLink,
+            includeSourceLinkLevel,
+            // Aspect fields — null when no aspect was mined (null fails the hasAspectFields guard
+            // in loadAspectPoolData so legacy and no-aspect posts are treated identically).
+            aspectFingerprint: aspectFingerprint && selectedAspect ? aspectFingerprint : null,
+            // Cast to Record<string, string>[] / Record<string, string> so Prisma's
+            // InputJsonObject constraint is satisfied (ContentAspect has no index signature).
+            aspectPool:
+              aspectFingerprint && selectedAspect
+                ? (aspectPool as unknown as Record<string, string>[])
+                : null,
+            selectedAspect: selectedAspect
+              ? (selectedAspect as unknown as Record<string, string>)
+              : null,
+            aspectUsedAt: aspectFingerprint && selectedAspect ? new Date().toISOString() : null,
+            aspectExtractionRound: aspectFingerprint && selectedAspect ? extractionRound : null,
+          },
+        },
+        select: {
+          id: true,
+          companyId: true,
+          channel: true,
+          status: true,
+          content: true,
+          hashtags: true,
+          imagePrompt: true,
+          notes: true,
+          llmProvider: true,
+          llmModel: true,
+          createdAt: true,
+        },
+      });
+    } catch (err) {
+      await releaseClaimedFeedItem();
+      throw err;
+    }
+  })();
 
   // ── Trace: the row that was written ───────────────────────────────────────
   // Recorded here rather than at the end so a post whose image work later fails

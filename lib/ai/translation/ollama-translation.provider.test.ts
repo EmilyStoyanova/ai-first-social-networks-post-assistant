@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { OllamaTranslationProvider } from "./ollama-translation.provider";
 import type { ArticleTranslationContext } from "./translation-provider";
 import { TranslationPartialProgressError } from "./translation-provider";
-import { OLLAMA_CHUNK_MAX_CHARS } from "./ollama-chunking";
+import { OLLAMA_CHUNK_MAX_CHARS, OLLAMA_CHUNK_MAX_PROTECTED_TOKENS } from "./ollama-chunking";
+import { protectTokens } from "./protected-tokens";
 import { buildTranslationPrompts, TranslationParseError } from "@/lib/ai/feed-item-translation";
 import { GenerationTracer } from "@/lib/generation-trace/tracer";
 import type { PersistableRun } from "@/lib/generation-trace/store";
@@ -615,5 +616,135 @@ describe("OllamaTranslationProvider — chunked translation of a large article",
     const finalMeta = finalStep!.metadata as Record<string, unknown>;
     assert.ok((finalMeta.translatedChars as number) > 0);
     assert.equal(finalMeta.modelCalls, llm.calls.length);
+  });
+});
+
+// ─── Routing on protected-token density alone (Phase 4) ──────────────────────
+//
+// The reported live failure: a SHORT article (well under OLLAMA_CHUNK_MAX_CHARS) that
+// nonetheless carries more protected-token placeholders than one call can reliably
+// round-trip. These tests exercise the routing decision and the per-chunk invariant
+// end to end through the provider, on a fixture the char-only routing would have kept
+// on the single-call path entirely.
+
+/** Distinct, realistic hardware identifiers — enough to exceed the token ceiling in a
+ *  body that stays well under the character ceiling. */
+const DENSE_TECH_IDENTIFIERS = [
+  "BE173BU",
+  "7700X3D",
+  "5800X3D",
+  "X670E",
+  "B650E",
+  "RTX-4090",
+  "RTX-4080",
+  "DDR5-6000",
+  "DDR5-5600",
+  "SN850X9",
+  "SN770X2",
+  "PCIe-5.0",
+];
+
+function denseTechnicalContent(): string {
+  return DENSE_TECH_IDENTIFIERS.map((id) => `The ${id} performed well in our benchmarks.`).join(
+    " "
+  );
+}
+
+describe("OllamaTranslationProvider — routing on protected-token density alone", () => {
+  it("routes a SHORT article to multiple calls when it is protected-token-dense", async () => {
+    const content = denseTechnicalContent();
+    assert.ok(
+      content.length < OLLAMA_CHUNK_MAX_CHARS,
+      `fixture must stay under the char ceiling, got ${content.length}`
+    );
+    const tokenCount = protectTokens(content).values.length;
+    assert.ok(
+      tokenCount > OLLAMA_CHUNK_MAX_PROTECTED_TOKENS,
+      `fixture only carries ${tokenCount} protected tokens`
+    );
+
+    const llm = chunkedLlm();
+    const request = chunkedRequestFor("Title", content);
+    const result = await provider(llm).translate(request, contextForChunked());
+
+    const chunkCalls = llm.calls.filter((c) => c.userPrompt.startsWith("Passage "));
+    assert.ok(
+      chunkCalls.length > 1,
+      `token density alone must trigger chunking, got ${chunkCalls.length} chunk call(s)`
+    );
+    for (const id of DENSE_TECH_IDENTIFIERS) {
+      assert.ok(
+        result.translatedContent?.includes(id),
+        `${id} is missing from the final translated article`
+      );
+    }
+  });
+
+  it("never sends a single chunk call carrying more placeholders than the ceiling", async () => {
+    const content = denseTechnicalContent();
+    const llm = chunkedLlm();
+    await provider(llm).translate(chunkedRequestFor("Title", content), contextForChunked());
+
+    const chunkCalls = llm.calls.filter((c) => c.userPrompt.startsWith("Passage "));
+    assert.ok(chunkCalls.length > 0);
+    for (const call of chunkCalls) {
+      const placeholderCount = (call.userPrompt.match(/\[\[\d+\]\]/g) ?? []).length;
+      assert.ok(
+        placeholderCount <= OLLAMA_CHUNK_MAX_PROTECTED_TOKENS,
+        `a chunk call carried ${placeholderCount} placeholders, over the ${OLLAMA_CHUNK_MAX_PROTECTED_TOKENS} ceiling`
+      );
+    }
+  });
+
+  it("resumes correctly when routing was triggered by protected-token density, not size", async () => {
+    const content = denseTechnicalContent();
+    const llm = chunkedLlm();
+    const request = chunkedRequestFor("Title", content);
+
+    const fresh = await provider(llm).translate(request, contextForChunked());
+    const freshCalls = llm.calls.length;
+    assert.ok(freshCalls >= 2, "the dense fixture must need more than one call");
+
+    const llm2 = chunkedLlm();
+    const resumeSegments = { title: "Заглавие вече преведено", "0": "Вече преведен текст." };
+    const resumed = await provider(llm2).translate(request, contextForChunked({ resumeSegments }));
+
+    assert.equal(
+      llm2.calls.length,
+      freshCalls - 2,
+      "resuming must skip exactly the units already banked"
+    );
+    assert.ok(resumed.translatedContent?.startsWith("Вече преведен текст."));
+    assert.equal(resumed.translatedTitle, "Заглавие вече преведено");
+    void fresh;
+  });
+
+  it("keeps a short, LOW-density article on the single-call path — routing is unaffected", async () => {
+    const content = "The BE173BU is a competent monitor for the price, with few complaints.";
+    assert.ok(protectTokens(content).values.length <= OLLAMA_CHUNK_MAX_PROTECTED_TOKENS);
+
+    // A single-call reply that faithfully echoes back whatever placeholders the prompt
+    // carried — chunkedLlm's own single-call branch is fixed BG_FILLER text with no
+    // placeholders at all, which only suits the ZERO-protected-token fixture the other
+    // single-call test above uses.
+    const calls: LlmRequest[] = [];
+    const llm: ILlmProvider & { calls: LlmRequest[] } = {
+      calls,
+      generate: async (request) => {
+        calls.push(request);
+        const placeholders = request.userPrompt.match(/\[\[\d+\]\]/g) ?? [];
+        return {
+          text: JSON.stringify({
+            title: BG_FILLER,
+            content: [BG_FILLER, ...placeholders].join(" "),
+          }),
+        };
+      },
+    };
+    const request = chunkedRequestFor("Title", content);
+    await provider(llm).translate(request, contextForChunked());
+
+    assert.equal(llm.calls.length, 1, "a sparse short article must never be chunked");
+    assert.ok(llm.calls[0].userPrompt.startsWith("Title: "));
   });
 });

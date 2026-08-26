@@ -4,6 +4,8 @@ import {
   NO_CONTENT_CAP,
   type SegmentPlan,
 } from "./madlad-segmentation";
+import { protectTokens } from "./protected-tokens";
+import { sanitiseTranslationContent } from "@/lib/ai/feed-item-translation";
 
 /**
  * Cutting a large article into pieces the PROMPT-BASED engine can translate one JSON
@@ -35,6 +37,19 @@ import {
  * slice of body pieces back into one string using their own original separators is
  * exactly the source-side text this module needs to hand the model for one chunk, so
  * that fold is reused as-is rather than re-derived.
+ *
+ * ── Protected-token awareness, not just character count ─────────────────────────
+ * A chunk under the character ceiling can still fail: a spec-dense hardware review
+ * packs far more `[[n]]` placeholders (see protected-tokens.ts) per character than
+ * ordinary prose, and restoration is a CONJUNCTIVE gate — every placeholder sent has to
+ * come back exactly once, so the chance of a clean reply falls geometrically with the
+ * count. Measured against the running worker: chunks carrying ~12-13 placeholders
+ * translated cleanly; a ~2,681-char article carrying 24-30 (short enough to look like an
+ * ordinary single-call body, under the OLD char-only routing) failed on `protected_token`
+ * on every retry. So the packer below enforces BOTH ceilings on every chunk it produces —
+ * a chunk is flushed as soon as adding the next piece would exceed EITHER one — and
+ * `shouldChunkForTranslation` routes an article to this module in the first place on
+ * EITHER condition, not just size.
  */
 
 /**
@@ -56,6 +71,37 @@ export const OLLAMA_CHUNK_MAX_CHARS = 3000;
  */
 export const OLLAMA_CHUNK_TARGET_MIN_CHARS = 2500;
 
+/**
+ * Hard ceiling on protected-token (`[[n]]`) placeholders in one final chunk.
+ *
+ * Measured live against the running worker on real TechPowerUp-style hardware reviews:
+ * chunks carrying ~12-13 placeholders translated cleanly; chunks carrying ~24-30 — an
+ * entire spec-dense article sent as one unchunked call, because it was short enough to
+ * stay under the OLD char-only routing threshold — repeatedly came back with a dropped,
+ * duplicated, or invented placeholder and failed with `protected_token` on every retry
+ * (see restoreTokens in protected-tokens.ts: restoration is a conjunctive gate, so the
+ * chance of a clean reply falls geometrically with the count). 10 sits below the
+ * smallest count ever observed to succeed, leaving margin rather than sitting on the
+ * edge of what has merely been seen to work so far.
+ */
+export const OLLAMA_CHUNK_MAX_PROTECTED_TOKENS = 10;
+
+/**
+ * Why a chunk ended where it did — diagnostics only, logged alongside its size and
+ * protected-token count so an operator can tell a size-bound split from a token-bound
+ * one at a glance:
+ *   • "size"             — the character ceiling (or the preferred-paragraph-boundary
+ *                           policy, itself a size heuristic) ended the chunk;
+ *   • "protected_tokens" — the placeholder ceiling ended it, at a paragraph/sentence
+ *                           boundary or, in the rare case a single sentence alone
+ *                           carried too many placeholders, at a word boundary within it
+ *                           (see splitTextByProtectedTokenBudget);
+ *   • "both"             — the next piece would have exceeded BOTH ceilings at once;
+ *   • "end"              — nothing forced this split; it is simply the end of the
+ *                           article (or the whole article fit in one chunk).
+ */
+export type ChunkSplitReason = "size" | "protected_tokens" | "both" | "end";
+
 /** One chunk of article body, ready to hand a translation call. */
 export interface ArticleChunk {
   /** The exact source text to translate — already folded from its body pieces. */
@@ -66,8 +112,21 @@ export interface ArticleChunk {
    * because it is article-level structure, not part of what gets translated.
    */
   leadingSeparator: string;
-  /** How many sentence-level pieces this chunk folds together — diagnostics only. */
+  /**
+   * How many sentence-level pieces this chunk folds together — diagnostics only. `0`
+   * when this chunk is a WORD-LEVEL FRAGMENT of a single piece that alone exceeded the
+   * protected-token budget (see splitTextByProtectedTokenBudget) — a fragment is not a
+   * whole piece, so it cannot honestly claim to be one.
+   */
   pieceCount: number;
+  /**
+   * Protected-token placeholders THIS chunk's own text carries — always
+   * `<= maxProtectedTokens`, the hard invariant this module guarantees. Diagnostics,
+   * and the concrete proof that the invariant held for a given chunk.
+   */
+  protectedTokenCount: number;
+  /** Why this chunk ended where it did — diagnostics only. */
+  splitReason: ChunkSplitReason;
 }
 
 export interface ChunkedArticle {
@@ -84,6 +143,68 @@ export interface ChunkArticleOptions {
   maxChunkChars?: number;
   /** Preferred minimum before a paragraph boundary is taken. Defaults to {@link OLLAMA_CHUNK_TARGET_MIN_CHARS}. */
   targetMinChars?: number;
+  /** Hard per-chunk ceiling on protected-token placeholders. Defaults to {@link OLLAMA_CHUNK_MAX_PROTECTED_TOKENS}. */
+  maxProtectedTokens?: number;
+}
+
+/** One text fragment plus the protected-token count `protectTokens` measured for it. */
+interface TextPiece {
+  text: string;
+  protectedTokenCount: number;
+}
+
+/**
+ * Splits a single piece of text that alone carries more protected-token placeholders
+ * than one chunk may hold, at WORD boundaries only, so a placeholder — always one
+ * whitespace-delimited token, by construction of `protectTokens` — can never be cut in
+ * half.
+ *
+ * This is the LAST-RESORT fallback beneath `chunkArticleForTranslation`'s own packer,
+ * which already splits at paragraph and sentence boundaries first (see that function's
+ * comment): it only ever runs on a SINGLE sentence-level piece that alone already
+ * exceeds `maxProtectedTokens`, which ordinary prose essentially never does — a
+ * flattened spec line ("SPEC0001 SPEC0002 SPEC0003 …") with no sentence punctuation is
+ * the realistic case. Greedy and linear, mirroring the outer packer's own technique one
+ * level down: a word is added to the fragment in progress unless doing so would exceed
+ * the budget, in which case the fragment is flushed first.
+ *
+ * Returns the input as a single, unsplit piece when it is already within budget — the
+ * common case — so callers can invoke this unconditionally without a separate check.
+ */
+function splitTextByProtectedTokenBudget(text: string, maxProtectedTokens: number): TextPiece[] {
+  const whole = protectTokens(text).values.length;
+  if (whole <= maxProtectedTokens) return [{ text, protectedTokenCount: whole }];
+
+  // Alternating word / separator / word / separator / … — odd indices are the literal
+  // whitespace runs between words, preserved so a rejoin needs no reconstruction.
+  const words = text.split(/(\s+)/u);
+  const out: TextPiece[] = [];
+  let current = "";
+  let currentCount = 0;
+
+  const flushCurrent = (): void => {
+    const trimmed = current.trim();
+    if (trimmed.length > 0) out.push({ text: trimmed, protectedTokenCount: currentCount });
+    current = "";
+    currentCount = 0;
+  };
+
+  for (let i = 0; i < words.length; i += 2) {
+    const word = words[i];
+    if (word.length === 0) continue;
+    const sep = words[i + 1] ?? "";
+    const wordCount = protectTokens(word).values.length;
+    if (current.length > 0 && currentCount + wordCount > maxProtectedTokens) {
+      flushCurrent();
+    }
+    current += word + sep;
+    currentCount += wordCount;
+  }
+  flushCurrent();
+
+  // Defence in depth: a single word alone over budget (never observed — a word is at
+  // most one placeholder) would otherwise vanish entirely rather than being lost loudly.
+  return out.length > 0 ? out : [{ text, protectedTokenCount: whole }];
 }
 
 /**
@@ -107,6 +228,7 @@ export function chunkArticleForTranslation(
 ): ChunkedArticle {
   const maxChunkChars = options.maxChunkChars ?? OLLAMA_CHUNK_MAX_CHARS;
   const targetMinChars = options.targetMinChars ?? OLLAMA_CHUNK_TARGET_MIN_CHARS;
+  const maxProtectedTokens = options.maxProtectedTokens ?? OLLAMA_CHUNK_MAX_PROTECTED_TOKENS;
 
   const { segments, plan, contentChars } = segmentArticle(title, content, {
     mode: "full",
@@ -118,8 +240,9 @@ export function chunkArticleForTranslation(
   const chunks: ArticleChunk[] = [];
   let start = 0;
   let currentLen = 0;
+  let currentProtectedCount = 0;
 
-  const flush = (endExclusive: number): void => {
+  const flush = (endExclusive: number, reason: ChunkSplitReason): void => {
     if (endExclusive <= start) return;
     const slice = plan.body.slice(start, endExclusive);
     const subPlan: SegmentPlan = { titleIndex: null, body: slice };
@@ -127,34 +250,90 @@ export function chunkArticleForTranslation(
     // translated article restores a SOURCE one just as well, given the source text as
     // the "translations" array — the fold neither knows nor cares which it is.
     const { translatedContent } = reassembleArticle(subPlan, segments);
-    chunks.push({
-      text: translatedContent ?? "",
-      leadingSeparator: slice[0].separator,
-      pieceCount: slice.length,
+    const text = translatedContent ?? "";
+
+    // The packer's own flush conditions below already keep a MULTI-piece slice within
+    // budget; this only ever has real work to do when the slice is a SINGLE piece that
+    // alone exceeds maxProtectedTokens (there was nothing smaller to flush earlier at).
+    // It is the hard invariant's proof, not merely its common case: every produced
+    // chunk satisfies both ceilings, unconditionally, not just on ordinary prose.
+    const pieces = splitTextByProtectedTokenBudget(text, maxProtectedTokens);
+    const wasSplitFurther = pieces.length > 1;
+    pieces.forEach((piece, i) => {
+      chunks.push({
+        text: piece.text,
+        leadingSeparator: i === 0 ? slice[0].separator : " ",
+        pieceCount: i === 0 ? slice.length : 0,
+        protectedTokenCount: piece.protectedTokenCount,
+        // A further word-level split is ALWAYS protected-token pressure — that is the
+        // only reason splitTextByProtectedTokenBudget ever divides its input.
+        splitReason: wasSplitFurther ? "protected_tokens" : reason,
+      });
     });
+
     start = endExclusive;
     currentLen = 0;
+    currentProtectedCount = 0;
   };
 
   for (let i = 0; i < plan.body.length; i += 1) {
     const piece = plan.body[i];
     const pieceText = piece.prefix + segments[piece.index];
+    const pieceProtectedCount = protectTokens(pieceText).values.length;
     const isParagraphBreak = piece.separator.includes("\n\n");
 
     if (currentLen > 0) {
-      const wouldBe = currentLen + piece.separator.length + pieceText.length;
+      const wouldBeLen = currentLen + piece.separator.length + pieceText.length;
+      const wouldBeProtected = currentProtectedCount + pieceProtectedCount;
+      const overSize = wouldBeLen > maxChunkChars;
+      const overProtected = wouldBeProtected > maxProtectedTokens;
+
       if (isParagraphBreak && currentLen >= targetMinChars) {
-        flush(i);
-      } else if (wouldBe > maxChunkChars) {
-        flush(i);
+        // The preferred natural break — a size heuristic — wins even when neither
+        // ceiling was actually about to be exceeded; noted as "both" only when
+        // protected-token pressure was ALSO real, for honest diagnostics.
+        flush(i, overProtected ? "both" : "size");
+      } else if (overSize || overProtected) {
+        flush(i, overSize && overProtected ? "both" : overSize ? "size" : "protected_tokens");
       }
     }
 
     currentLen += (currentLen === 0 ? 0 : piece.separator.length) + pieceText.length;
+    currentProtectedCount += pieceProtectedCount;
   }
-  flush(plan.body.length);
+  flush(plan.body.length, "end");
 
   return { title: cleanTitle, chunks, contentChars };
+}
+
+/**
+ * Whether an article's body should be routed to the chunked translation path — decided
+ * BEFORE any chunking happens, using the SAME two ceilings the packer above enforces per
+ * chunk, applied once to the whole sanitised body (exactly what an unchunked single call
+ * would otherwise send as ONE request).
+ *
+ * Two independent triggers:
+ *   • the body alone exceeds the per-call character ceiling (the original reason this
+ *     module exists), or
+ *   • the body carries more protected-token placeholders than one call has been measured
+ *     to round-trip reliably, however short it is in characters — see
+ *     {@link OLLAMA_CHUNK_MAX_PROTECTED_TOKENS} for the measurement behind the number. A
+ *     ~2,681-char hardware review carrying 24-30 placeholders is exactly this case: short
+ *     enough to look like an ordinary single-call body, dense enough to fail on
+ *     `protected_token` on every retry regardless.
+ */
+export function shouldChunkForTranslation(
+  content: string | null,
+  options: { maxChunkChars?: number; maxProtectedTokens?: number } = {}
+): boolean {
+  const clean = sanitiseTranslationContent(content);
+  if (clean === null || clean.length === 0) return false;
+
+  const maxChunkChars = options.maxChunkChars ?? OLLAMA_CHUNK_MAX_CHARS;
+  if (clean.length > maxChunkChars) return true;
+
+  const maxProtectedTokens = options.maxProtectedTokens ?? OLLAMA_CHUNK_MAX_PROTECTED_TOKENS;
+  return protectTokens(clean).values.length > maxProtectedTokens;
 }
 
 /**

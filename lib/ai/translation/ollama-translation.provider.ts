@@ -5,7 +5,6 @@ import {
   buildTranslationRetryPrompt,
   isRetriableParseFailure,
   parseTranslationResponse,
-  sanitiseTranslationContent,
   samplingForTry,
   shrinkTranslationContentBudget,
   TranslationParseError,
@@ -29,7 +28,7 @@ import { isDataOnlySegment } from "./segment-repair";
 import {
   chunkArticleForTranslation,
   reassembleChunkedTranslation,
-  OLLAMA_CHUNK_MAX_CHARS,
+  shouldChunkForTranslation,
 } from "./ollama-chunking";
 
 /**
@@ -48,7 +47,7 @@ import {
  * override it for translation alone (see translation-provider-config.ts) — never
  * assumed or hardcoded here.
  *
- * ── Two paths, chosen by size ─────────────────────────────────────────────────
+ * ── Two paths, chosen by size OR protected-token complexity ───────────────────
  * `buildTranslationPrompts` sends the whole article in ONE JSON call and, to keep
  * that call inside the worker's latency budget, caps the body at
  * {@link MAX_TRANSLATION_CONTENT_CHARS} (3000) — see that constant's own comment.
@@ -56,10 +55,15 @@ import {
  * UNCHANGED single-call loop below exactly as it always has.
  *
  * An article whose sanitised body EXCEEDS that cap used to simply lose everything
- * past it — the truncation this file exists to remove. Such an article is now
- * routed to `translateChunked` instead: the body is split into several
- * ~2500–3000-char chunks (see ollama-chunking.ts), each chunk gets its own
- * `{"content": "..."}` call with its OWN protected-token placeholders and its OWN
+ * past it — the truncation this file exists to remove. A SHORT article can fail
+ * the same way for a different reason: one carrying many protected-token
+ * placeholders (model names, SKUs, version strings — see protected-tokens.ts) fails
+ * `protected_token` regardless of its character count, because restoration requires
+ * every placeholder back exactly once and that chance falls geometrically with the
+ * count. `shouldChunkForTranslation` (see ollama-chunking.ts) checks BOTH conditions,
+ * and either one routes the article to `translateChunked` instead: the body is split
+ * into chunks bounded by BOTH a character ceiling and a protected-token ceiling, each
+ * chunk gets its own `{"content": "..."}` call with its OWN placeholders and its OWN
  * retry cycle, and the results are stitched back into one article. The routing
  * decision is made HERE, inside the engine, exactly as MADLAD already decides its
  * own segmentation internally — `translate-feed-item.service.ts` builds
@@ -84,12 +88,10 @@ export class OllamaTranslationProvider implements TranslationProvider {
   ): Promise<ArticleTranslation> {
     // Chunking applies to a "full" article body only — title_only mode has no body
     // to chunk (the source classified it that way BEFORE this engine ever saw it;
-    // see classifyTranslationInput), and a title is never remotely close to the cap.
-    if (request.mode === "full") {
-      const cleanContent = sanitiseTranslationContent(request.content);
-      if ((cleanContent?.length ?? 0) > OLLAMA_CHUNK_MAX_CHARS) {
-        return this.translateChunked(request, context);
-      }
+    // see classifyTranslationInput), and a title is never remotely close to either
+    // ceiling.
+    if (request.mode === "full" && shouldChunkForTranslation(request.content)) {
+      return this.translateChunked(request, context);
     }
     return this.translateSingleCall(request, context);
   }
@@ -394,13 +396,22 @@ export class OllamaTranslationProvider implements TranslationProvider {
     const resumed = context.resumeSegments ?? {};
     const banked: Record<string, string> = { ...resumed };
 
+    // Per-chunk diagnostics (requirement: chars, protected-token count, and WHY each
+    // chunk ended where it did — a size-bound split reads very differently from a
+    // token-bound one when diagnosing a `protected_token` failure after the fact).
+    const chunkSizes = chunked.chunks.map((c) => c.text.length);
+    const chunkProtectedTokenCounts = chunked.chunks.map((c) => c.protectedTokenCount);
+    const chunkSplitReasons = chunked.chunks.map((c) => c.splitReason);
+
     console.info("[rss-translation] article split into chunks for translation", {
       feedItemId: request.feedItemId,
       engine: "ollama",
       originalChars: chunked.contentChars,
       hasTitle: chunked.title !== null,
       chunkCount: chunked.chunks.length,
-      chunkSizes: chunked.chunks.map((c) => c.text.length),
+      chunkSizes,
+      chunkProtectedTokenCounts,
+      chunkSplitReasons,
       resumedUnits: Object.keys(resumed).length,
       totalUnits,
     });
@@ -417,7 +428,9 @@ export class OllamaTranslationProvider implements TranslationProvider {
         originalChars: chunked.contentChars,
         hasTitle: chunked.title !== null,
         chunkCount: chunked.chunks.length,
-        chunkSizes: chunked.chunks.map((c) => c.text.length),
+        chunkSizes,
+        chunkProtectedTokenCounts,
+        chunkSplitReasons,
         resumedUnits: Object.keys(resumed).length,
         totalUnits,
       },
