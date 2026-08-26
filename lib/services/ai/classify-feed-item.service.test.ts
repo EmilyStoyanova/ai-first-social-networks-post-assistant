@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { Prisma } from "@prisma/client";
 import {
   classifyFeedItem,
   type ClassifiableItem,
@@ -9,6 +10,10 @@ import {
   computeClassificationHash,
   type ClassificationContext,
 } from "@/lib/ai/feed-item-classification";
+import {
+  planClassificationChunks,
+  type ChunkAnalysis,
+} from "@/lib/ai/classification-chunk-analysis";
 import { resolveTopicPriorities } from "@/lib/ai/topic-priorities";
 
 const NOW = new Date("2026-08-17T12:00:00Z");
@@ -67,6 +72,8 @@ interface Recorded {
 function makeDeps(opts: {
   replies?: string[];
   throwOnGenerate?: Error;
+  /** Throws `throwOnGenerate` (or a default error) on exactly the Nth `generate` call (0-indexed), not every call. */
+  throwOnCallIndex?: number;
   noProvider?: boolean;
   claimWins?: boolean;
   writeWins?: boolean;
@@ -74,6 +81,7 @@ function makeDeps(opts: {
   const rec: Recorded = { updates: [], updateManys: [], prompts: [] };
   const replies = [...(opts.replies ?? [])];
   let updateManyCall = 0;
+  let generateCall = 0;
 
   const deps: ClassifyFeedItemDeps = {
     now: () => NOW,
@@ -104,7 +112,14 @@ function makeDeps(opts: {
             instance: {
               generate: async (req) => {
                 rec.prompts.push(req.userPrompt);
-                if (opts.throwOnGenerate) throw opts.throwOnGenerate;
+                const callIndex = generateCall++;
+                if (opts.throwOnCallIndex !== undefined) {
+                  if (callIndex === opts.throwOnCallIndex) {
+                    throw opts.throwOnGenerate ?? new Error("simulated transport failure");
+                  }
+                } else if (opts.throwOnGenerate) {
+                  throw opts.throwOnGenerate;
+                }
                 return { text: replies.shift() ?? "" };
               },
             },
@@ -112,6 +127,18 @@ function makeDeps(opts: {
   };
 
   return { deps, rec };
+}
+
+/** A well-formed chunk-analysis reply. */
+function chunkReply(overrides: Partial<ChunkAnalysis> = {}): string {
+  return JSON.stringify({
+    mainPoint: "A section of the article.",
+    topics: [],
+    entities: [],
+    importantFacts: [],
+    centrality: "supporting",
+    ...overrides,
+  });
 }
 
 const okReply = JSON.stringify({
@@ -323,6 +350,244 @@ describe("classifyFeedItem — a successful run", () => {
 
     assert.match(rec.prompts[0], /Български текст за бои/);
     assert.equal(rec.prompts[0].includes("English body."), false);
+  });
+});
+
+// ─── Whole-article classification after chunked translation ───────────────────
+//
+// A chunked/segmented translation (ollama-chunking.ts) reassembles ALL of its
+// chunks into one `translatedContent` before `translationStatus` is ever
+// written `completed` — a partial run fails or stays `pending` instead (see
+// translate-feed-item.service.ts). So a `completed` row here always carries
+// the WHOLE reassembled article, which can run far longer than a single-call
+// translation ever could. These tests exercise the REAL chunk-analysis
+// pipeline (planClassificationChunks + N chunk-analysis calls + 1 aggregate
+// verdict call) against that shape of input — never a truncated or sampled
+// excerpt of it.
+
+/** Real sentences (not "a".repeat) — the splitter needs sentence punctuation. */
+const SENTENCE = "This is one ordinary sentence about home renovation topics today. ";
+
+describe("classifyFeedItem — whole-article classification of a long, chunked translation", () => {
+  it("routes a long article through several chunk-analysis calls, then one verdict call", async () => {
+    const translatedContent = SENTENCE.repeat(400); // well over one classification call
+    const chunkCount = planClassificationChunks(null, translatedContent).chunks.length;
+    assert.ok(chunkCount > 1, "test fixture must actually need chunking");
+
+    const { deps, rec } = makeDeps({
+      replies: [...Array(chunkCount).fill(chunkReply()), okReply],
+    });
+    const out = await classifyFeedItem(
+      item({ translationStatus: "completed", translatedTitle: "t", translatedContent }),
+      SCOPED,
+      deps
+    );
+
+    assert.equal(out.status, "classified");
+    assert.equal(
+      rec.prompts.length,
+      chunkCount + 1,
+      "N chunk calls, then exactly one verdict call"
+    );
+    // Every chunk prompt names its position, so the log/trace can explain
+    // "chunk 3 of 7" rather than just a raw count.
+    assert.match(rec.prompts[0], /Section 1 of/);
+  });
+
+  it("carries a fact from a LATE chunk into the final verdict prompt — the bug this pipeline exists to fix", async () => {
+    // Opens on a topic the company has NOT configured; the real, configured
+    // subject is only found in the LAST chunk — exactly the shape a naive
+    // slice(0, N) or an opening-only read would have missed entirely.
+    const opening = "Fast-growing trees you can get for free this spring. ";
+    const translatedContent = opening + SENTENCE.repeat(400);
+    const chunkCount = planClassificationChunks(null, translatedContent).chunks.length;
+    assert.ok(chunkCount > 1);
+
+    const lateChunkAnalysis = chunkReply({
+      mainPoint: "TRUE_SUBJECT_MARKER: choosing latex paint for a nursery.",
+      topics: ["paints"],
+      centrality: "central",
+    });
+    const replies = [
+      ...Array(chunkCount - 1).fill(chunkReply({ centrality: "supporting" })),
+      lateChunkAnalysis,
+      okReply,
+    ];
+    const { deps, rec } = makeDeps({ replies });
+    const out = await classifyFeedItem(
+      item({ translationStatus: "completed", translatedTitle: "t", translatedContent }),
+      SCOPED,
+      deps
+    );
+
+    assert.equal(out.status, "classified");
+    const verdictPrompt = rec.prompts[rec.prompts.length - 1];
+    assert.ok(
+      verdictPrompt.includes("TRUE_SUBJECT_MARKER"),
+      "a fact found only in the LAST chunk must survive synthesis into the final verdict call"
+    );
+    assert.match(verdictPrompt, /CENTRAL —/);
+  });
+
+  it("never sends an unbounded prompt, however long the reassembled article is", async () => {
+    const translatedContent = SENTENCE.repeat(3000); // a genuinely huge feature article
+    const chunkCount = planClassificationChunks(null, translatedContent).chunks.length;
+    const { deps, rec } = makeDeps({
+      replies: [...Array(chunkCount).fill(chunkReply()), okReply],
+    });
+    await classifyFeedItem(
+      item({ translationStatus: "completed", translatedTitle: "t", translatedContent }),
+      SCOPED,
+      deps
+    );
+
+    for (const prompt of rec.prompts) {
+      assert.ok(
+        prompt.length < 6000,
+        `expected every single call to stay bounded, got ${prompt.length}`
+      );
+    }
+  });
+
+  it("stores the final verdict exactly like the short path — same columns, same shape", async () => {
+    const translatedContent = SENTENCE.repeat(400);
+    const chunkCount = planClassificationChunks(null, translatedContent).chunks.length;
+    const { deps, rec } = makeDeps({
+      replies: [...Array(chunkCount).fill(chunkReply()), okReply],
+    });
+    await classifyFeedItem(
+      item({ translationStatus: "completed", translatedTitle: "t", translatedContent }),
+      SCOPED,
+      deps
+    );
+
+    const write = rec.updateManys[1].data;
+    assert.equal(write.classification, "HIGH");
+    assert.equal(write.classificationStatus, "completed");
+    assert.equal(
+      write.classificationChunkProgress,
+      Prisma.JsonNull,
+      "banked progress is cleared on success"
+    );
+  });
+});
+
+describe("classifyFeedItem — chunk-analysis resumability", () => {
+  const translatedContent = SENTENCE.repeat(400);
+  const chunkCount = planClassificationChunks(null, translatedContent).chunks.length;
+  const resolvedText = { title: null, body: translatedContent };
+
+  it("skips a chunk already banked by an earlier, interrupted attempt", async () => {
+    const hash = computeClassificationHash(resolvedText, SCOPED);
+    const { deps, rec } = makeDeps({
+      // Only chunkCount - 1 chunk replies: chunk 0 is resumed, never re-asked.
+      replies: [...Array(chunkCount - 1).fill(chunkReply()), okReply],
+    });
+    const out = await classifyFeedItem(
+      item({
+        translationStatus: "completed",
+        translatedTitle: null,
+        translatedContent,
+        classificationChunkProgress: { hash, chunks: { "0": JSON.parse(chunkReply()) } },
+      }),
+      SCOPED,
+      deps
+    );
+
+    assert.equal(out.status, "classified");
+    assert.equal(rec.prompts.length, chunkCount - 1 + 1, "one fewer chunk call, plus the verdict");
+  });
+
+  it("discards banked progress when the hash no longer matches — the article changed", async () => {
+    const { deps, rec } = makeDeps({
+      replies: [...Array(chunkCount).fill(chunkReply()), okReply],
+    });
+    const out = await classifyFeedItem(
+      item({
+        translationStatus: "completed",
+        translatedTitle: null,
+        translatedContent,
+        classificationChunkProgress: {
+          hash: "stale-hash-from-a-different-article-version",
+          chunks: { "0": JSON.parse(chunkReply()) },
+        },
+      }),
+      SCOPED,
+      deps
+    );
+
+    assert.equal(out.status, "classified");
+    assert.equal(
+      rec.prompts.length,
+      chunkCount + 1,
+      "every chunk is re-analyzed — nothing trusted"
+    );
+  });
+});
+
+describe("classifyFeedItem — chunk-analysis partial progress", () => {
+  const translatedContent = SENTENCE.repeat(400);
+  const chunkCount = planClassificationChunks(null, translatedContent).chunks.length;
+
+  it("banks progress and reports `partial` when a chunk cannot be analyzed, with attempts remaining", async () => {
+    // The SECOND chunk call fails; the first already succeeded.
+    const { deps, rec } = makeDeps({
+      replies: [chunkReply()],
+      throwOnCallIndex: 1,
+    });
+    const out = await classifyFeedItem(
+      item({ translationStatus: "completed", translatedTitle: null, translatedContent }),
+      SCOPED,
+      deps
+    );
+
+    assert.deepEqual(out, {
+      status: "partial",
+      processedChunkCount: 1,
+      totalChunkCount: chunkCount,
+    });
+    const write = rec.updateManys[1].data;
+    assert.equal(
+      write.classificationStatus,
+      "pending",
+      "resumes on the very next selection, no backoff"
+    );
+    assert.equal(write.classificationLeaseExpiresAt, null);
+    const banked = write.classificationChunkProgress as {
+      hash: string;
+      chunks: Record<string, unknown>;
+    };
+    assert.equal(Object.keys(banked.chunks).length, 1);
+  });
+
+  it("fails terminally, but preserves banked chunks, once the attempt budget is spent", async () => {
+    const { deps, rec } = makeDeps({
+      replies: [chunkReply()],
+      throwOnCallIndex: 1,
+    });
+    const out = await classifyFeedItem(
+      item({
+        translationStatus: "completed",
+        translatedTitle: null,
+        translatedContent,
+        classificationAttemptCount: 2, // this is attempt 3 of MAX_CLASSIFICATION_ATTEMPTS (3)
+      }),
+      SCOPED,
+      deps
+    );
+
+    assert.equal(out.status, "failed");
+    const write = rec.updateManys[1].data;
+    assert.equal(write.classificationStatus, "failed");
+    const banked = write.classificationChunkProgress as {
+      hash: string;
+      chunks: Record<string, unknown>;
+    };
+    assert.equal(
+      Object.keys(banked.chunks).length,
+      1,
+      "the chunk that DID succeed must not be thrown away just because the item as a whole failed"
+    );
   });
 });
 

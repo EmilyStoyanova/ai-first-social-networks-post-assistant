@@ -5,7 +5,10 @@ import {
   classificationEligibleWhere,
   type ClassifyFeedItemsDeps,
 } from "./classify-feed-items.service";
-import type { ClassificationContext } from "@/lib/ai/feed-item-classification";
+import {
+  MAX_CLASSIFICATION_ATTEMPTS,
+  type ClassificationContext,
+} from "@/lib/ai/feed-item-classification";
 import type { ClassifiableItem } from "@/lib/services/ai/classify-feed-item.service";
 import { resolveTopicPriorities } from "@/lib/ai/topic-priorities";
 
@@ -63,6 +66,54 @@ function makeDeps(opts: { items?: ClassifiableItem[]; context?: ClassificationCo
     },
   };
 }
+
+describe("classifyFeedItems — tallying outcomes", () => {
+  it("counts `partial` separately from classified/failed/skipped", async () => {
+    const items = [item("a"), item("b"), item("c")];
+    let call = 0;
+    const deps: ClassifyFeedItemsDeps = {
+      findCandidates: async () => items,
+      loadContext: async () => SCOPED,
+      classify: async () => {
+        call += 1;
+        if (call === 1)
+          return {
+            status: "classified",
+            classification: "HIGH",
+            rejectionReason: null,
+            matchedTopics: ["бои"],
+            provider: "p",
+            model: "m",
+          };
+        if (call === 2) return { status: "partial", processedChunkCount: 2, totalChunkCount: 5 };
+        return { status: "failed", error: "x" };
+      },
+    };
+    const summary = await classifyFeedItems({ companyId: "co-1" }, deps);
+    assert.equal(summary.classified, 1);
+    assert.equal(summary.partial, 1);
+    assert.equal(summary.failed, 1);
+    assert.equal(summary.scanned, 3);
+  });
+
+  it("passes the run's remaining budget through, letting classifyFeedItem pick the right path default", async () => {
+    // NOT `itemTimeoutMs` pre-capped to the short-path constant — that would
+    // silently starve a chunked item of the larger budget it needs, since the
+    // drain cannot know in advance whether an item needs chunking.
+    const items = [item("a")];
+    const seen: unknown[] = [];
+    const deps: ClassifyFeedItemsDeps = {
+      findCandidates: async () => items,
+      loadContext: async () => SCOPED,
+      classify: async (_item, _ctx, opts) => {
+        seen.push(opts);
+        return { status: "skipped", reason: "unchanged" };
+      },
+    };
+    await classifyFeedItems({ companyId: "co-1", remainingMs: () => 45_000 }, deps);
+    assert.deepEqual(seen[0], { remainingRunBudgetMs: 45_000 });
+  });
+});
 
 describe("classifyFeedItems — the classification context", () => {
   /**
@@ -129,5 +180,176 @@ describe("classificationEligibleWhere", () => {
       { translationStatus: null },
       { translationStatus: { in: ["completed", "skipped", "failed"] } },
     ]);
+  });
+
+  /**
+   * A shape assertion (above) proves the filter is WORDED correctly; it proves
+   * nothing about which rows it actually admits — the classic trap that let a
+   * nullable-column `in` clause silently drop an entire tier elsewhere in this
+   * codebase (bug-1318). This interprets the REAL `where` object returned by
+   * `classificationEligibleWhere` against realistic rows instead, so a future
+   * edit that weakens the fragment fails here even if it still "looks right"
+   * by eye. `interpret` is a small generic matcher for the handful of Prisma
+   * operators this fragment actually uses (equality, `in`, `lt`, `AND`, `OR`,
+   * and a nested relation object) — not a Prisma re-implementation.
+   *
+   * The rows model the shape a CHUNKED translation takes while still in
+   * progress: `pending` with partial chunks already banked in
+   * `translationProgress` (more cross-run attempts remain — see
+   * translate-feed-item.service.ts), and `translating` (a claim is live right
+   * now). Neither may ever reach the classifier — the article is still
+   * changing which text it will read. `translationProgress` itself is not a
+   * field this `where` names at all; it is included on the rows only to show
+   * WHY those two statuses are dangerous; the exclusion happens purely on
+   * `translationStatus`.
+   */
+  it("never admits a feed item whose chunked translation is still in progress", () => {
+    const now = new Date("2026-08-18T12:00:00Z");
+    const where = classificationEligibleWhere(now);
+
+    type Row = Record<string, unknown>;
+
+    // Evaluates one Prisma-style filter object against a flat row. Handles
+    // exactly the shapes classificationEligibleWhere/classificationSelectableWhere
+    // produce: scalar equality, `{ in: [...] }` (never matches null/undefined,
+    // deliberately — Prisma's own semantics, and the trap bug-1318 was about),
+    // `{ lt: number | Date }`, `AND`/`OR` arrays, and a nested relation filter
+    // (`source: { enabled, type }`) matched key-by-key against a same-named
+    // nested object on the row.
+    function interpret(filter: Record<string, unknown>, row: Row): boolean {
+      return Object.entries(filter).every(([key, expected]) => {
+        if (key === "AND") {
+          return (expected as Record<string, unknown>[]).every((f) => interpret(f, row));
+        }
+        if (key === "OR") {
+          return (expected as Record<string, unknown>[]).some((f) => interpret(f, row));
+        }
+        const actual = row[key];
+        if (expected !== null && typeof expected === "object" && !(expected instanceof Date)) {
+          const cond = expected as Record<string, unknown>;
+          if ("in" in cond) {
+            const list = cond.in as unknown[];
+            return actual !== null && actual !== undefined && list.includes(actual);
+          }
+          if ("lt" in cond) {
+            // Works for both a number (classificationAttemptCount) and a Date
+            // (classificationLeaseExpiresAt) — `<` compares Dates by their
+            // underlying timestamp.
+            return (actual as number | Date) < (cond.lt as number | Date);
+          }
+          // A nested relation filter (`source: { enabled, type }`): every key
+          // inside it must equal the same key on the row's nested object.
+          return interpret(cond, (actual as Row) ?? {});
+        }
+        return actual === expected;
+      });
+    }
+
+    type ScenarioRow = {
+      label: string;
+      row: Row;
+      /** Present only to document WHY the row is dangerous — not read by `interpret`. */
+      translationProgress?: Record<string, string> | null;
+      expectedEligible: boolean;
+    };
+
+    const scenarios: ScenarioRow[] = [
+      {
+        label: "mid-chunk, more attempts remain (translationProgress banked)",
+        row: {
+          usedInPost: false,
+          source: { enabled: true, type: "rss" },
+          translationStatus: "pending",
+          classificationStatus: "pending",
+          classificationAttemptCount: 0,
+          classificationLeaseExpiresAt: null,
+        },
+        translationProgress: { "0": "first chunk done", "1": "second chunk done" },
+        expectedEligible: false,
+      },
+      {
+        label: "a chunk is being translated RIGHT NOW",
+        row: {
+          usedInPost: false,
+          source: { enabled: true, type: "rss" },
+          translationStatus: "translating",
+          classificationStatus: "pending",
+          classificationAttemptCount: 0,
+          classificationLeaseExpiresAt: null,
+        },
+        translationProgress: { "0": "first chunk done" },
+        expectedEligible: false,
+      },
+      {
+        label: "every chunk succeeded and was reassembled",
+        row: {
+          usedInPost: false,
+          source: { enabled: true, type: "rss" },
+          translationStatus: "completed",
+          classificationStatus: "pending",
+          classificationAttemptCount: 0,
+          classificationLeaseExpiresAt: null,
+        },
+        translationProgress: null,
+        expectedEligible: true,
+      },
+      {
+        label:
+          "translation permanently gave up (attempt budget exhausted) — classify on whatever text exists",
+        row: {
+          usedInPost: false,
+          source: { enabled: true, type: "rss" },
+          translationStatus: "failed",
+          classificationStatus: "pending",
+          classificationAttemptCount: 0,
+          classificationLeaseExpiresAt: null,
+        },
+        translationProgress: null,
+        expectedEligible: true,
+      },
+      {
+        label: "translation does not apply to this item at all",
+        row: {
+          usedInPost: false,
+          source: { enabled: true, type: "rss" },
+          translationStatus: null,
+          classificationStatus: "pending",
+          classificationAttemptCount: 0,
+          classificationLeaseExpiresAt: null,
+        },
+        translationProgress: null,
+        expectedEligible: true,
+      },
+      {
+        label: "a live classification claim (lease not yet expired) is not re-picked",
+        row: {
+          usedInPost: false,
+          source: { enabled: true, type: "rss" },
+          translationStatus: "completed",
+          classificationStatus: "classifying",
+          classificationAttemptCount: 0,
+          classificationLeaseExpiresAt: new Date(now.getTime() + 60_000),
+        },
+        translationProgress: null,
+        expectedEligible: false,
+      },
+      {
+        label: "the classification attempt budget is spent",
+        row: {
+          usedInPost: false,
+          source: { enabled: true, type: "rss" },
+          translationStatus: "completed",
+          classificationStatus: "failed",
+          classificationAttemptCount: MAX_CLASSIFICATION_ATTEMPTS,
+          classificationLeaseExpiresAt: null,
+        },
+        translationProgress: null,
+        expectedEligible: false,
+      },
+    ];
+
+    for (const { label, row, expectedEligible } of scenarios) {
+      assert.equal(interpret(where, row), expectedEligible, label);
+    }
   });
 });

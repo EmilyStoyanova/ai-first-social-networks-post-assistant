@@ -535,6 +535,15 @@ model FeedItem {
   /// Set while a run holds an atomic claim (status = 'classifying'). An expired
   /// lease means the worker died mid-call and the item is reclaimable.
   classificationLeaseExpiresAt  DateTime? @map("classification_lease_expires_at")
+  /// Whole-article classification (chunk analysis) — per-chunk analyses banked
+  /// so far for an article too long for one classification call, keyed by
+  /// chunk index as a string: `{ "<chunkIndex>": ChunkAnalysis, ... }`. Same
+  /// contract as `translationProgress`: present only while a chunked run is
+  /// incomplete (classificationStatus stays 'pending', more attempts remain),
+  /// so the next claim resumes without re-analyzing a chunk that already
+  /// succeeded. Cleared back to NULL once classification reaches a terminal
+  /// state (completed or failed) — see lib/ai/classification-chunk-analysis.ts.
+  classificationChunkProgress   Json?     @map("classification_chunk_progress")
 
   source ContentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   // A feed item backs at most one post PER CHANNEL — one topic, written once for

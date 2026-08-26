@@ -36,6 +36,12 @@ import {
   type TopicGroup,
   type TopicPriorities,
 } from "./topic-priorities";
+// Type-only: the runtime chunk-analysis pipeline lives in its own module (it
+// depends on this one for findJsonObject/asString), so only the TYPE crosses
+// back here, to describe what buildClassificationUserPrompt accepts. A
+// type-only import is erased at compile time and cannot create a runtime
+// circular-import problem.
+import type { AggregatedArticleContext } from "./classification-chunk-analysis";
 
 // ─── Vocabulary ───────────────────────────────────────────────────────────────
 
@@ -91,13 +97,18 @@ export const MAX_CLASSIFICATION_REPAIR_ATTEMPTS = 1;
 export const CLASSIFICATION_BATCH_SIZE = 15;
 
 /**
- * How much of the article body is sent.
+ * The threshold that decides whether an article fits in ONE classification
+ * call.
  *
- * Far below translation's 3000 because the question is different: translation has
- * to render the whole text, while this only has to identify what the piece is
- * ABOUT — and an article announces that in its title and opening paragraphs. The
- * cap keeps a long feature from costing more than a short one for an answer that
- * would not change.
+ * At or under this many characters, the whole body is sent as-is — cheap and
+ * exact, the common case for an ordinary RSS article. OVER it, the article is
+ * no longer sampled or truncated at all: `classify-feed-item.service.ts`
+ * routes it through the whole-article chunk-analysis pipeline instead (see
+ * `classification-chunk-analysis.ts`), which reads every part of the article
+ * through the same model, one bounded chunk at a time, and classifies from the
+ * AGGREGATE of all of them. This constant therefore no longer bounds how much
+ * of a long article the classifier ultimately sees — only which of the two
+ * paths (single call vs. chunk-and-aggregate) an article takes.
  */
 export const MAX_CLASSIFICATION_CONTENT_CHARS = 2000;
 
@@ -178,7 +189,30 @@ export function classifyInput(text: ClassifiableText): ClassificationInputKind {
   return "empty";
 }
 
-/** The body as it is actually sent — trimmed and capped. */
+/**
+ * Whether a body fits in ONE classification call — see
+ * {@link MAX_CLASSIFICATION_CONTENT_CHARS}. `classify-feed-item.service.ts`
+ * checks this BEFORE ever building a prompt, and routes anything over it
+ * through the whole-article chunk-analysis pipeline instead of truncating it.
+ */
+export function fitsSingleClassificationCall(body: string | null): boolean {
+  return (body ?? "").trim().length <= MAX_CLASSIFICATION_CONTENT_CHARS;
+}
+
+/**
+ * The body as it is actually sent on the SINGLE-CALL path — trimmed, and
+ * capped only as a last-resort safety net.
+ *
+ * Every real caller only ever reaches this with a body that already
+ * satisfies {@link fitsSingleClassificationCall} — `classify-feed-item.service.ts`
+ * checks that before choosing this path at all — so the cap below should
+ * never actually trim anything in production. It stays as defense in depth
+ * rather than trusting that invariant blindly: better an honest, bounded
+ * truncation here than an unbounded prompt if a future caller skips the
+ * check. It must NEVER be reached for a genuinely long article — that case is
+ * the whole-article chunk-analysis pipeline's job, not this function's; see
+ * `classification-chunk-analysis.ts` and `classify-feed-item.service.ts`.
+ */
 export function classificationExcerpt(body: string | null): string {
   const trimmed = (body ?? "").trim();
   return trimmed.length <= MAX_CLASSIFICATION_CONTENT_CHARS
@@ -265,6 +299,11 @@ export function companyContextFingerprint(context: ClassificationContext): strin
   const description = contextField(context.companyDescription);
   const audience = contextField(context.targetAudience);
   if (description === null && audience === null) return "";
+  // Joined with an ASCII Unit Separator (never typed by a human, so it can
+  // never appear inside either field) rather than "" — concatenating with no
+  // separator at all means description="AB", audience="" is indistinguishable
+  // from description="A", audience="B", which would silently under-invalidate
+  // the hash this feeds into.
   return [description ?? "", audience ?? ""].join("");
 }
 
@@ -303,7 +342,13 @@ export function computeClassificationHash(
     .update(
       [
         (text.title ?? "").trim(),
-        classificationExcerpt(text.body),
+        // The FULL body, uncapped — not classificationExcerpt's single-call
+        // view. A long article is read in full by the chunk-analysis pipeline,
+        // so a change anywhere in it must reopen the item for reclassification,
+        // not only a change within the single-call cap. Hashing cost is
+        // irrelevant (a SHA-256 of a long article is microseconds); only the
+        // PROMPT needs to stay bounded, and that is enforced separately.
+        (text.body ?? "").trim(),
         topicsFingerprint(context.priorities),
         companyContextFingerprint(context),
       ].join("")
@@ -469,8 +514,12 @@ export class ClassificationParseError extends Error {
   }
 }
 
-/** First balanced JSON object in a reply, ignoring fences and surrounding prose. */
-function findJsonObject(text: string): string | null {
+/**
+ * First balanced JSON object in a reply, ignoring fences and surrounding prose.
+ * Exported so `classification-chunk-analysis.ts` reuses the same parser for its
+ * own (differently-shaped) reply, rather than a second copy of this scan.
+ */
+export function findJsonObject(text: string): string | null {
   const start = text.indexOf("{");
   if (start === -1) return null;
 
@@ -502,7 +551,8 @@ function findJsonObject(text: string): string | null {
   return null;
 }
 
-function asString(value: unknown): string | null {
+/** Exported so `classification-chunk-analysis.ts` reuses it for its own reply. */
+export function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 }
 
@@ -835,11 +885,25 @@ function renderList(label: string, topics: string[]): string {
   return `${label}:\n${topics.map((t) => `- ${t}`).join("\n")}`;
 }
 
+/**
+ * What the "## The article" section of the prompt is built from:
+ *
+ *   • `text`      — the article fits in one call (or has no body at all).
+ *     Sent as-is, exactly as classification has always sent a short article.
+ *   • `aggregate` — the article did NOT fit in one call and was routed
+ *     through the whole-article chunk-analysis pipeline instead (see
+ *     `classification-chunk-analysis.ts`). The synthesis of every chunk is
+ *     sent in its place — never a truncated or sampled excerpt of the raw
+ *     text. `title` travels alongside it because the aggregate itself is
+ *     title-agnostic (chunk analysis only ever sees the body).
+ */
+export type ClassificationArticleInput =
+  | { kind: "text"; text: ClassifiableText; inputKind: ClassificationInputKind }
+  | { kind: "aggregate"; title: string | null; aggregate: AggregatedArticleContext };
+
 export interface ClassificationPromptInput {
-  text: ClassifiableText;
+  article: ClassificationArticleInput;
   context: ClassificationContext;
-  /** `title_only` makes the missing body explicit rather than leaving a gap. */
-  inputKind: ClassificationInputKind;
 }
 
 /**
@@ -895,7 +959,7 @@ export function buildClassificationSystemPrompt(mode: ClassificationMode): strin
     "",
     "## How to judge",
     "",
-    "1. Work out what the article is MAINLY about — its primary subject, the thing a reader would say it is about. Ignore passing mentions, examples, and asides.",
+    "1. Work out what the article is MAINLY about — its primary subject, the thing a reader would say it is about. Ignore passing mentions, examples, and asides. The main subject can be stated anywhere in the article, including only in its middle or its end — an opening that sets a scene, tells an anecdote, or asks a question is not necessarily the subject; read the whole excerpt before deciding.",
     "2. Compare that main subject with the company's configured topics below.",
     "3. A topic matches when the article's main subject IS that topic, a synonym of it, a specific kind of it, or the direct choice, use, installation, repair or care of it. The topic word does not have to appear in the text: an article about choosing latex for a child's room is about paints, and an article about descaling a water heater is about water heaters. Judge the meaning, never the spelling.",
     mode === "blacklist_only"
@@ -974,8 +1038,73 @@ export function buildClassificationSystemPrompt(mode: ClassificationMode): strin
   return parts.join("\n");
 }
 
+/**
+ * Renders the aggregated whole-article synthesis as the "## The article"
+ * section — used in place of raw text once an article has gone through the
+ * chunk-analysis pipeline. `centralPoints` and `supportingPoints` are shown
+ * under DISTINCT headings, and the model is told explicitly that a frequent
+ * supporting mention is not the same thing as the article's real subject —
+ * the Albania-protesters case this exists for: travel and scenery described
+ * at length as CONTEXT must not outweigh a central point (the protest, the
+ * development conflict) that appears only once but is what the piece is
+ * actually about.
+ */
+function renderAggregateArticleSection(
+  title: string | null,
+  aggregate: AggregatedArticleContext
+): string[] {
+  const lines: string[] = [
+    "",
+    `## The article (synthesized from ${aggregate.chunkCount} section${aggregate.chunkCount === 1 ? "" : "s"} of a long article)`,
+    "",
+    "This article was too long for one read, so it was analyzed section by section and synthesized below. Judge the article's REAL main subject from this whole synthesis — never from CENTRAL alone without reading CONTEXT, and never by which point is listed first.",
+    "",
+    `Title: ${title?.trim() || "(untitled)"}`,
+    "",
+  ];
+
+  if (aggregate.centralPoints.length > 0) {
+    lines.push(
+      "CENTRAL — what the article's own thesis, argument, or central conflict actually is. This is the strongest signal for the article's real subject:",
+      ...aggregate.centralPoints.map((p) => `- ${p}`),
+      ""
+    );
+  } else {
+    lines.push(
+      "CENTRAL — no single section stood out as clearly central. Judge the overall subject from the sections below taken as a whole, rather than from any one of them.",
+      ""
+    );
+  }
+
+  if (aggregate.supportingPoints.length > 0) {
+    lines.push(
+      "CONTEXT — background, scene-setting, or incidental mentions. These are NOT the article's subject on their own, however often they appear here or how much longer this section is than the CENTRAL one above:",
+      ...aggregate.supportingPoints.map((p) => `- ${p}`),
+      ""
+    );
+  }
+
+  if (aggregate.topics.length > 0) {
+    lines.push(`Topics touched on anywhere in the article: ${aggregate.topics.join(", ")}`, "");
+  }
+  if (aggregate.entities.length > 0) {
+    lines.push(`Entities named in the article: ${aggregate.entities.join(", ")}`, "");
+  }
+  if (aggregate.importantFacts.length > 0) {
+    lines.push("Key facts from the article:", ...aggregate.importantFacts.map((f) => `- ${f}`), "");
+  }
+  if (aggregate.truncated) {
+    lines.push(
+      "(This synthesis was capped for length; a small number of minor, lower-signal sections were left out.)",
+      ""
+    );
+  }
+
+  return lines;
+}
+
 export function buildClassificationUserPrompt(input: ClassificationPromptInput): string {
-  const { text, context, inputKind } = input;
+  const { article, context } = input;
   const { priorities } = context;
   // Empty context contributes nothing, so a company that has filled in no brand
   // copy gets byte-for-byte the prompt it got before this feature existed.
@@ -993,6 +1122,12 @@ export function buildClassificationUserPrompt(input: ClassificationPromptInput):
     );
   }
 
+  if (article.kind === "aggregate") {
+    parts.push(...renderAggregateArticleSection(article.title, article.aggregate));
+    return parts.join("\n");
+  }
+
+  const { text, inputKind } = article;
   parts.push("", "## The article", "", `Title: ${text.title?.trim() || "(untitled)"}`);
 
   if (inputKind === "title_only") {
@@ -1001,6 +1136,10 @@ export function buildClassificationUserPrompt(input: ClassificationPromptInput):
       "The body of this article could not be read, so the title is all there is. Judge it on the title alone, and do not assume anything the title does not say. If the title is too vague to place, reject it as OUT_OF_SCOPE rather than guessing."
     );
   } else {
+    // Every real caller only reaches this branch with a body that already
+    // fits one call (fitsSingleClassificationCall) — a longer one is routed
+    // through the aggregate branch above instead. classificationExcerpt's own
+    // cap is defense in depth only; see its doc comment.
     parts.push("", "Article:", classificationExcerpt(text.body));
   }
 

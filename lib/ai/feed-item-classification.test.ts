@@ -10,6 +10,7 @@ import {
   buildClassificationSystemPrompt,
   buildClassificationUserPrompt,
   classificationExcerpt,
+  fitsSingleClassificationCall,
   classificationFieldsForCreate,
   classificationFieldsForUpdate,
   classificationMode,
@@ -23,6 +24,7 @@ import {
   topicsFingerprint,
   type ClassificationContext,
 } from "./feed-item-classification";
+import { aggregateChunkAnalyses, type ChunkAnalysis } from "./classification-chunk-analysis";
 import { resolveTopicPriorities, type TopicPriorities } from "./topic-priorities";
 
 const SCOPED: TopicPriorities = resolveTopicPriorities({
@@ -92,14 +94,30 @@ describe("classificationMode", () => {
   });
 });
 
-describe("classifyInput / classificationExcerpt", () => {
+describe("classifyInput / fitsSingleClassificationCall / classificationExcerpt", () => {
   it("classifies what the stored text can support", () => {
     assert.equal(classifyInput({ title: "t", body: "b" }), "full");
     assert.equal(classifyInput({ title: "t", body: "   " }), "title_only");
     assert.equal(classifyInput({ title: null, body: null }), "empty");
   });
 
-  it("caps the body it sends", () => {
+  it("a short body fits one call and is sent whole, unchanged", () => {
+    const short = "A short article body.";
+    assert.equal(fitsSingleClassificationCall(short), true);
+    assert.equal(classificationExcerpt(short), short);
+  });
+
+  it("a long body does not fit one call — the whole-article chunk pipeline handles it instead", () => {
+    // This is the exact bug the chunk-analysis pipeline exists to fix: a body
+    // over the cap must NEVER be sent as a truncated or sampled excerpt.
+    // fitsSingleClassificationCall is what `classify-feed-item.service.ts`
+    // checks BEFORE ever building a prompt from raw text, to route it through
+    // `classification-chunk-analysis.ts` instead.
+    const long = "a".repeat(MAX_CLASSIFICATION_CONTENT_CHARS + 500);
+    assert.equal(fitsSingleClassificationCall(long), false);
+  });
+
+  it("classificationExcerpt is defense-in-depth ONLY — it still caps, but no real caller reaches it with a long body", () => {
     const long = "a".repeat(MAX_CLASSIFICATION_CONTENT_CHARS + 500);
     assert.equal(classificationExcerpt(long).length, MAX_CLASSIFICATION_CONTENT_CHARS);
   });
@@ -161,12 +179,160 @@ describe("computeClassificationHash", () => {
     );
   });
 
-  it("ignores text beyond the cap — what is not sent cannot change the answer", () => {
-    const body = "b".repeat(MAX_CLASSIFICATION_CONTENT_CHARS);
-    assert.equal(
-      computeClassificationHash({ title: "t", body }, ctx(SCOPED)),
-      computeClassificationHash({ title: "t", body: body + "ignored tail" }, ctx(SCOPED))
+  it("changes when text past the OLD naive cutoff changes — the excerpt now reads it", () => {
+    // Before this fix, classificationExcerpt was a blind slice(0, cap), so two
+    // articles differing only after the cap hashed identically — a re-ingest
+    // that changed only an article's ending would settle back to `completed`
+    // without ever re-judging it. The beginning/middle/end excerpt reads past
+    // the old cutoff, so this must no longer hold.
+    const base = "b".repeat(MAX_CLASSIFICATION_CONTENT_CHARS);
+    assert.notEqual(
+      computeClassificationHash({ title: "t", body: `${base} MARKER_ONE` }, ctx(SCOPED)),
+      computeClassificationHash({ title: "t", body: `${base} MARKER_TWO` }, ctx(SCOPED))
     );
+  });
+});
+
+// ─── Full-article classification context ──────────────────────────────────────
+//
+// The bug this whole architecture exists to fix: classification used to be
+// handed a blind slice(0, MAX_CLASSIFICATION_CONTENT_CHARS) of the article
+// body (and, briefly, a beginning/middle/end sample of it) — a long article,
+// routinely the case once a chunked/segmented translation reassembles a whole
+// feature piece, was judged on an APPROXIMATION of its text. A real subject,
+// central conflict, or key fact stated only in the middle or the end could be
+// discarded before the model ever saw it.
+//
+// The fix is a whole-article pipeline: EVERY part of a long article is
+// analyzed by the model into a compact structured record
+// (`classification-chunk-analysis.ts`), and the final verdict is asked from
+// the SYNTHESIS of all of them — never from a sample of the raw text. These
+// tests exercise the PROMPT the verdict model actually receives for both
+// article representations `buildClassificationUserPrompt` accepts.
+
+describe("buildClassificationUserPrompt — the short-article path", () => {
+  it("sends a short article exactly as before — no aggregate framing", () => {
+    const prompt = buildClassificationUserPrompt({
+      article: {
+        kind: "text",
+        text: { title: "t", body: "A short article about paint." },
+        inputKind: "full",
+      },
+      context: ctx(SCOPED),
+    });
+    assert.match(prompt, /\nArticle:\nA short article about paint\./);
+    assert.ok(!prompt.includes("CENTRAL"));
+    assert.ok(!prompt.includes("synthesized from"));
+  });
+});
+
+function analysis(overrides: Partial<ChunkAnalysis>): ChunkAnalysis {
+  return {
+    mainPoint: "A point.",
+    topics: [],
+    entities: [],
+    importantFacts: [],
+    centrality: "supporting",
+    ...overrides,
+  };
+}
+
+describe("buildClassificationUserPrompt — the whole-article (aggregate) path", () => {
+  it("renders CENTRAL and CONTEXT under distinct headings, never merged", () => {
+    const aggregate = aggregateChunkAnalyses([
+      analysis({ mainPoint: "The protest shut down the harbor.", centrality: "central" }),
+      analysis({ mainPoint: "The coastline is scenic in summer.", centrality: "supporting" }),
+    ]);
+    const prompt = buildClassificationUserPrompt({
+      article: { kind: "aggregate", title: "t", aggregate },
+      context: ctx(SCOPED),
+    });
+
+    // The heading PREFIXES, not bare "CENTRAL"/"CONTEXT" — both words also
+    // appear inside the introductory instruction paragraph ("never from
+    // CENTRAL alone without reading CONTEXT"), which would otherwise be
+    // mistaken for the section headings themselves.
+    const centralIdx = prompt.indexOf("CENTRAL —");
+    const contextIdx = prompt.indexOf("CONTEXT —");
+    assert.ok(centralIdx !== -1 && contextIdx !== -1);
+    assert.ok(prompt.includes("The protest shut down the harbor."));
+    assert.ok(prompt.includes("The coastline is scenic in summer."));
+    // The central point must appear before the CONTEXT heading, and the
+    // supporting point must appear after it — proving they are not
+    // interleaved into one undifferentiated list.
+    assert.ok(prompt.indexOf("The protest shut down the harbor.") < contextIdx);
+    assert.ok(prompt.indexOf("The coastline is scenic in summer.") > contextIdx);
+  });
+
+  it("the Albania-protesters case: a frequent supporting mention must not read as the subject", () => {
+    // Ten chunks of travel/nature CONTEXT against one CENTRAL point about the
+    // actual conflict — exactly the shape a travelogue-framed protest story
+    // takes. The prompt must tell the model context is not the subject
+    // however often it appears, not just show the raw counts.
+    const chunks: ChunkAnalysis[] = [
+      analysis({
+        mainPoint: "Local residents are protesting a new tourism development on the coast.",
+        centrality: "central",
+      }),
+      ...Array.from({ length: 10 }, (_, i) =>
+        analysis({
+          mainPoint: `The Albanian coastline near section ${i} is described as pristine and scenic.`,
+          topics: ["travel", "coastal scenery"],
+          centrality: "supporting",
+        })
+      ),
+    ];
+    const aggregate = aggregateChunkAnalyses(chunks);
+    const prompt = buildClassificationUserPrompt({
+      article: { kind: "aggregate", title: "Along Albania's coast", aggregate },
+      context: ctx(SCOPED),
+    });
+
+    assert.ok(prompt.includes("protesting a new tourism development"));
+    assert.match(
+      prompt,
+      /NOT the article's subject on their own, however often/,
+      "must warn against a frequent supporting mention outweighing the real subject"
+    );
+  });
+
+  it("falls back honestly when no section was judged central", () => {
+    const aggregate = aggregateChunkAnalyses([
+      analysis({ mainPoint: "Scene one.", centrality: "supporting" }),
+      analysis({ mainPoint: "Scene two.", centrality: "supporting" }),
+    ]);
+    const prompt = buildClassificationUserPrompt({
+      article: { kind: "aggregate", title: "t", aggregate },
+      context: ctx(SCOPED),
+    });
+    assert.match(prompt, /no single section stood out as clearly central/i);
+  });
+
+  it("stays bounded however many chunks the article produced", () => {
+    // 200 chunks is an unrealistically huge article — the point is that the
+    // rendered prompt does not grow with it. aggregateChunkAnalyses' own
+    // count caps are what make this true; this proves the PROMPT built from
+    // its output inherits the bound end-to-end.
+    const chunks: ChunkAnalysis[] = Array.from({ length: 200 }, (_, i) =>
+      analysis({
+        mainPoint: `Section ${i} says something about topic ${i}.`,
+        topics: [`topic ${i}`],
+        entities: [`entity ${i}`],
+        importantFacts: [`fact ${i}`],
+        centrality: i % 5 === 0 ? "central" : "supporting",
+      })
+    );
+    const aggregate = aggregateChunkAnalyses(chunks);
+    const prompt = buildClassificationUserPrompt({
+      article: { kind: "aggregate", title: "t", aggregate },
+      context: ctx(SCOPED),
+    });
+    const articleSection = prompt.slice(prompt.indexOf("## The article"));
+    assert.ok(
+      articleSection.length < 4000,
+      `expected a bounded synthesis, got ${articleSection.length} chars`
+    );
+    assert.ok(prompt.includes("capped for length"));
   });
 });
 
@@ -774,9 +940,8 @@ describe("company context — the empty case is untouched", () => {
 
   it("omits the section from the prompt entirely", () => {
     const prompt = buildClassificationUserPrompt({
-      text: { title: "t", body: "b" },
+      article: { kind: "text", text: { title: "t", body: "b" }, inputKind: "full" },
       context: ctx(SCOPED),
-      inputKind: "full",
     });
     assert.ok(!prompt.includes("## The company\n"));
     assert.ok(prompt.startsWith("## The company's topics"));
@@ -816,9 +981,8 @@ describe("company context — when it is configured", () => {
 
   it("renders both fields into the prompt, before the topics", () => {
     const prompt = buildClassificationUserPrompt({
-      text: { title: "t", body: "b" },
+      article: { kind: "text", text: { title: "t", body: "b" }, inputKind: "full" },
       context: full,
-      inputKind: "full",
     });
     assert.match(prompt, /## The company/);
     assert.ok(prompt.includes(DESCRIPTION));
@@ -828,9 +992,8 @@ describe("company context — when it is configured", () => {
 
   it("renders only the field that has content", () => {
     const prompt = buildClassificationUserPrompt({
-      text: { title: "t", body: "b" },
+      article: { kind: "text", text: { title: "t", body: "b" }, inputKind: "full" },
       context: ctx(SCOPED, { description: DESCRIPTION }),
-      inputKind: "full",
     });
     assert.ok(prompt.includes(DESCRIPTION));
     assert.ok(!prompt.includes("Audience:"));
@@ -844,9 +1007,8 @@ describe("company context — when it is configured", () => {
    */
   it("carries the sentence that stops the context from widening the scope", () => {
     const prompt = buildClassificationUserPrompt({
-      text: { title: "t", body: "b" },
+      article: { kind: "text", text: { title: "t", body: "b" }, inputKind: "full" },
       context: full,
-      inputKind: "full",
     });
     assert.ok(
       prompt.includes(
@@ -858,9 +1020,8 @@ describe("company context — when it is configured", () => {
   it("caps each field, so a pasted brochure cannot become a second topic list", () => {
     const long = "я".repeat(MAX_COMPANY_CONTEXT_CHARS + 500);
     const prompt = buildClassificationUserPrompt({
-      text: { title: "t", body: "b" },
+      article: { kind: "text", text: { title: "t", body: "b" }, inputKind: "full" },
       context: ctx(SCOPED, { description: long, audience: long }),
-      inputKind: "full",
     });
     assert.ok(!prompt.includes("я".repeat(MAX_COMPANY_CONTEXT_CHARS + 1)));
     assert.ok(prompt.includes("я".repeat(MAX_COMPANY_CONTEXT_CHARS)));
