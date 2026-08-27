@@ -156,6 +156,58 @@ describe("parseArticleUnderstandingResponse", () => {
     assert.equal(out.status, "ok");
   });
 
+  /**
+   * The production defect: the keyword check's connector list was English-only,
+   * so a grammatically perfect Bulgarian sentence with three or more
+   * comma-separated clauses could not possibly contain one and was always
+   * refused. Every article this system classifies for a Bulgarian company
+   * produces exactly this shape of mainSubject.
+   */
+  it("accepts a real multi-clause Bulgarian sentence — the English-only connector bug", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({
+        mainSubject:
+          "Теракотовите цветове са представени като модерни, земни и гостоприемни опции за интериорно боядисване, с акцент върху топлината, дълбочината и уютното усещане, които те създават в различни стаи.",
+      }),
+      3
+    );
+    assert.equal(out.status, "ok");
+  });
+
+  it("accepts a Bulgarian sentence whose clauses are short but connected", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({ mainSubject: "Статията обяснява как се избира боя, кога се грундира, и защо." }),
+      3
+    );
+    assert.equal(out.status, "ok");
+  });
+
+  it("still rejects a real keyword dump", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({ mainSubject: "paint, brushes, rollers, primer, walls, colors" }),
+      3
+    );
+    assert.equal(out.status, "invalid");
+    if (out.status === "invalid") assert.match(out.problem, /keywords/);
+  });
+
+  it("still rejects a keyword dump written in Bulgarian", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({ mainSubject: "бои, четки, валяци, грундове, стени, цветове" }),
+      3
+    );
+    assert.equal(out.status, "invalid");
+    if (out.status === "invalid") assert.match(out.problem, /keywords/);
+  });
+
+  it("still rejects a bag of short noun phrases, not just single words", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply({ mainSubject: "interior paint colours, bathroom tile options, kitchen finishes" }),
+      3
+    );
+    assert.equal(out.status, "invalid");
+  });
+
   it("rejects an unknown articleType", () => {
     const out = parseArticleUnderstandingResponse(okReply({ articleType: "listicle" }), 3);
     assert.equal(out.status, "invalid");
@@ -352,6 +404,24 @@ describe("buildArticleUnderstandingSystemPrompt", () => {
     const prompt = buildArticleUnderstandingSystemPrompt("synthesis");
     assert.match(prompt, /section numbers actually shown/);
   });
+
+  /**
+   * The signal-preservation half of the cross-lingual fix. A mainSubject that
+   * abstracts "choosing a wall colour" up into "how daylight affects colour
+   * perception" is not wrong, but it has thrown away the one concrete noun the
+   * verdict call needs to match a configured topic against — and that call never
+   * re-reads the article, so nothing downstream can recover it.
+   */
+  for (const mode of ["direct", "synthesis"] as const) {
+    it(`tells the ${mode}-mode model to keep the concrete product or practice`, () => {
+      const prompt = buildArticleUnderstandingSystemPrompt(mode);
+      assert.match(prompt, /Keep the concrete subject CONCRETE/);
+      assert.match(prompt, /choosing, buying, using, installing, repairing or caring for/);
+      // And, when it genuinely does not belong in mainSubject, that it must
+      // survive somewhere rather than vanish.
+      assert.match(prompt, /secondaryTopics" or "entities"/);
+    });
+  }
 });
 
 describe("buildArticleUnderstandingDirectPrompt", () => {

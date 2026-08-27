@@ -304,6 +304,58 @@ export function topicsFingerprint(priorities: TopicPriorities): string {
 }
 
 /**
+ * The semantics of the classifier itself, as a number that participates in the
+ * classification hash.
+ *
+ * ── Why this exists ─────────────────────────────────────────────────────────
+ *
+ * The hash answers "would asking again produce the same verdict?", and it used
+ * to describe only the ARTICLE and the CONFIGURATION. That silently assumed the
+ * third input — the rulebook the model is judged by — never changes. When it
+ * does, every stored verdict was produced by a classifier that no longer exists,
+ * and nothing in the system can tell.
+ *
+ * That assumption is what would otherwise strand a fix. Reopening an article
+ * (a Brand Settings save, the "Reclassify articles" button, the ingest
+ * follow-up) does not by itself re-ask the model: the drain recomputes the hash,
+ * finds it unchanged, and settles the row straight back to `completed` with the
+ * OLD verdict and no model call — see `classify-feed-item.service.ts`'s
+ * `item.classificationHash === hash` branch. Without this constant, a corrected
+ * classifier would leave every previously misclassified article permanently
+ * misclassified, and pressing Reclassify would look like it worked while
+ * changing nothing.
+ *
+ * ── The contract ────────────────────────────────────────────────────────────
+ *
+ * Bump this ONLY when the classifier's own semantics change — the system prompt's
+ * matching rules, the worked examples, the reply contract, or the vetting in
+ * `parseClassificationResponse`. Do NOT bump it for wording that cannot change a
+ * verdict, and never bump it per deploy.
+ *
+ * A bump makes stale verdicts ELIGIBLE for re-evaluation; it does not perform
+ * one. Nothing reclassifies on deploy — the existing reopen paths
+ * (`reclassify-feed-items.service.ts`) still decide WHICH rows are reopened and
+ * WHEN, and this only decides whether a reopened row is genuinely re-asked or
+ * settled for free. That separation is what keeps a version bump from being a
+ * database-wide model spend, and what keeps ordinary runs idempotent: after one
+ * re-evaluation the row stores the new hash, so every later reopen settles
+ * without a call again. There is no loop, because the version is a constant and
+ * not derived from anything the run writes.
+ *
+ * Deliberately NOT part of the translation hash — see `computeTranslationHash`.
+ * Reclassifying is one cheap call against text that already exists; re-translating
+ * would be a far larger spend for a change that cannot affect a translation.
+ *
+ * History:
+ *   1 — the original classifier.
+ *   2 — explicit cross-lingual matching: an article and a topic list in
+ *       different languages/scripts match on meaning, the difference in language
+ *       is never itself grounds for OUT_OF_SCOPE, and the configured topic is
+ *       always written back verbatim. Precision rules unchanged.
+ */
+export const CLASSIFICATION_SEMANTIC_VERSION = 2;
+
+/**
  * The exact input a stored verdict was derived from: the text that was sent, plus
  * the configuration it was judged against.
  *
@@ -331,6 +383,10 @@ export function computeClassificationHash(
         (text.body ?? "").trim(),
         topicsFingerprint(context.priorities),
         companyContextFingerprint(context),
+        // The rulebook the verdict was made under — see
+        // CLASSIFICATION_SEMANTIC_VERSION. Last so the field order of everything
+        // that came before it is untouched.
+        String(CLASSIFICATION_SEMANTIC_VERSION),
       ].join("")
     )
     .digest("hex");
@@ -975,14 +1031,23 @@ export function buildClassificationSystemPrompt(mode: ClassificationMode): strin
     "1. Read the MAIN SUBJECT and CENTRAL THESIS/CENTRAL CONFLICT (if any) below — this is what the article is actually about. SECONDARY TOPICS are discussed in service of that subject but are not themselves the point; INCIDENTAL TOPICS are passing mentions. Ignore SECONDARY and INCIDENTAL topics when deciding the verdict — they exist only so you are not misled by something the article merely touches on.",
     "2. Compare the MAIN SUBJECT (and CENTRAL THESIS/CENTRAL CONFLICT) with the company's configured topics below.",
     "3. A topic matches when the MAIN SUBJECT IS that topic, a synonym of it, a specific kind of it, or the direct choice, use, installation, repair or care of it. The topic word does not have to appear in the text: an article whose main subject is choosing latex for a child's room is about paints, and one about descaling a water heater is about water heaters. Judge the meaning, never the spelling.",
+    // Placed immediately after the semantic-match rule and before the strictness
+    // rule, so "different language" is settled as a NON-reason before the model
+    // reaches the rule that tells it to default to rejection.
+    "4. The article and the configured topics may be written in DIFFERENT LANGUAGES or different scripts. That difference is NEVER, on its own, a reason to reject: a topic written in one language matches an article written in another whenever the meanings correspond — the topic's translation, a synonym of that translation, a specific kind of it, or its direct choice, use, installation, repair or care. Not recognising a word is not the same as the article being out of scope; translate the topic in your head and judge the meaning. Whatever you decide, always write the configured topic back EXACTLY as it appears in the lists below — never translate it, transliterate it, re-spell it, or replace it with the article's own wording.",
     mode === "blacklist_only"
-      ? "4. Industry relevance is not enough, and neither is a SECONDARY or INCIDENTAL topic overlapping a configured one. The MAIN SUBJECT itself must be substantially about one of the configured topics."
-      : '4. Industry relevance is not enough, and neither is a SECONDARY or INCIDENTAL topic overlapping a configured one. The MAIN SUBJECT itself must be SUBSTANTIALLY about one of the configured topics. Sharing a broad field with them — home improvement, the household, construction, renovation, the garden, DIY, or simply being the sort of thing this company might sell — is NOT a match. If your reasoning is "this is related to the same industry" or "this company\'s customers would find it interesting", that is not a match: the answer is OUT_OF_SCOPE.',
-    "5. Never invent a topic. Every topic you cite must be copied verbatim from the lists below. If the MAIN SUBJECT is not on any list, say so instead of naming the nearest one — a near-miss is worse than an honest rejection.",
+      ? "5. Industry relevance is not enough, and neither is a SECONDARY or INCIDENTAL topic overlapping a configured one. The MAIN SUBJECT itself must be substantially about one of the configured topics."
+      : '5. Industry relevance is not enough, and neither is a SECONDARY or INCIDENTAL topic overlapping a configured one. The MAIN SUBJECT itself must be SUBSTANTIALLY about one of the configured topics. Sharing a broad field with them — home improvement, the household, construction, renovation, the garden, DIY, or simply being the sort of thing this company might sell — is NOT a match. If your reasoning is "this is related to the same industry" or "this company\'s customers would find it interesting", that is not a match: the answer is OUT_OF_SCOPE.',
+    // Stated straight after the strictness rule so the two are read together:
+    // crossing a language barrier relaxes NOTHING about how central the subject
+    // must be. Without this, rule 4 can be misread as a general licence to match
+    // loosely whenever the languages differ.
+    "6. Rules 4 and 5 are independent, and rule 4 never weakens rule 5. Reading the topic in another language tells you WHAT to look for; it does not lower the bar for how central it must be. A foreign-language article that is merely adjacent to a configured topic is still OUT_OF_SCOPE, exactly as a same-language one would be.",
+    "7. Never invent a topic. Every topic you cite must be copied verbatim from the lists below. If the MAIN SUBJECT is not on any list, say so instead of naming the nearest one — a near-miss is worse than an honest rejection.",
     mode === "blacklist_only"
-      ? '6. Pick the ONE configured topic the MAIN SUBJECT is mainly about and put it in "primaryTopic", or null if there is none.'
-      : '6. Pick the ONE configured topic the MAIN SUBJECT is mainly about and put it in "primaryTopic", or null if there is none. That single topic decides your verdict.',
-    "7. If UNDERSTANDING CONFIDENCE (below) is low, the article's own central subject is not well-established. Do not answer HIGH on a low-confidence understanding unless the topic match would be unmistakable regardless — prefer MEDIUM or OUT_OF_SCOPE when in doubt.",
+      ? '8. Pick the ONE configured topic the MAIN SUBJECT is mainly about and put it in "primaryTopic", or null if there is none.'
+      : '8. Pick the ONE configured topic the MAIN SUBJECT is mainly about and put it in "primaryTopic", or null if there is none. That single topic decides your verdict.',
+    "9. If UNDERSTANDING CONFIDENCE (below) is low, the article's own central subject is not well-established. Do not answer HIGH on a low-confidence understanding unless the topic match would be unmistakable regardless — prefer MEDIUM or OUT_OF_SCOPE when in doubt.",
   ];
 
   if (mode !== "blacklist_only") {
@@ -996,7 +1061,12 @@ export function buildClassificationSystemPrompt(mode: ClassificationMode): strin
       '- MAIN SUBJECT "choosing paint for a child\'s room" → primaryTopic "paints", HIGH, matchedTopics ["paints"]. Latex IS a paint; the main subject is choosing one.',
       '- MAIN SUBJECT "fast-growing trees available free from a municipal scheme", SECONDARY TOPICS ["gardening", "spring planting"] → primaryTopic null, REJECTED / OUT_OF_SCOPE, matchedTopics []. Trees belong to the same home-and-garden world, but no configured topic is about trees. Industry proximity is not a match.',
       '- MAIN SUBJECT "a general spring home-refresh round-up" → primaryTopic null, REJECTED / OUT_OF_SCOPE, matchedTopics []. A general home-improvement round-up is not substantially about any configured topic, even though it touches the same field.',
-      '- MAIN SUBJECT "installing a window air conditioner", INCIDENTAL TOPICS ["repainting the frame afterwards"] → primaryTopic "air conditioners", MEDIUM, matchedTopics ["air conditioners", "paints"]. The main subject is the air conditioner; the paint is only an incidental mention. Citing "paints" is correct, but it is NOT the primary topic and must not raise this to HIGH.'
+      '- MAIN SUBJECT "installing a window air conditioner", INCIDENTAL TOPICS ["repainting the frame afterwards"] → primaryTopic "air conditioners", MEDIUM, matchedTopics ["air conditioners", "paints"]. The main subject is the air conditioner; the paint is only an incidental mention. Citing "paints" is correct, but it is NOT the primary topic and must not raise this to HIGH.',
+      "",
+      'Now suppose the SAME company had written its topics in Bulgarian instead, so the TOP PRIORITY list were: "бои". The articles are still in English. The topic list being in another language changes NOTHING about which articles match:',
+      "",
+      '- MAIN SUBJECT "choosing paint colours and paint finishes for a bedroom" → primaryTopic "бои", HIGH, matchedTopics ["бои"]. "бои" is the Bulgarian word for paints and the main subject is choosing paint; a different alphabet is not a different subject. Note the topic is written back EXACTLY as configured — "бои", not "paints" and not "boi".',
+      '- MAIN SUBJECT "how a room\'s orientation changes the amount of natural daylight it receives" → primaryTopic null, REJECTED / OUT_OF_SCOPE, matchedTopics []. Daylight and room orientation are interior-design context, not paint — this is the same OUT_OF_SCOPE it would be if the topic said "paints" in English. Crossing a language barrier never lowers the bar: the MAIN SUBJECT must still BE the configured topic, not merely a subject that advice about it often appears beside.'
     );
   }
 

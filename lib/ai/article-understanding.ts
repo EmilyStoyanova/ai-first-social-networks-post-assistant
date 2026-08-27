@@ -145,11 +145,71 @@ function invalid(problem: string, feedback: string): ArticleUnderstandingOutcome
 }
 
 /**
+ * Words in one comma-separated segment above which that segment is a CLAUSE
+ * rather than a tag.
+ *
+ * This is the language-agnostic half of the check below, and the half that
+ * carries it. A keyword list is many SHORT segments — "paint, brushes, rollers,
+ * primer" is four segments of one word each — while prose, in any language and
+ * any script, puts several words between its commas. Five is comfortably above
+ * the longest noun phrase a tag list realistically holds and comfortably below
+ * the shortest clause a descriptive sentence realistically writes.
+ */
+const MIN_CLAUSE_WORDS = 5;
+
+/**
+ * Function words that mark connected prose rather than a list of tags.
+ *
+ * English AND Bulgarian, because both are languages this system classifies in.
+ * The list was English-only, which was not a gap in coverage so much as a
+ * silent failure: it meant a grammatically perfect Bulgarian sentence with
+ * three or more comma-separated clauses could not possibly contain a
+ * "connector" and was therefore always judged a keyword dump. That rejection
+ * costs a repair call and can fail the article's understanding outright, which
+ * is the opposite of what a cheap sanity guard should do.
+ */
+const CONNECTOR_WORDS = [
+  // English
+  "is are was were about that which who whose to of in on with for amid amidst over",
+  "against after before as because while during",
+  // Bulgarian
+  "е са бе беше бил била било били за на в във с със от до по при като че",
+  "който която което които защото докато след преди върху между срещу около",
+  "чрез без под над и или но се да не този тази това тези където когато",
+]
+  .flatMap((line) => line.split(" "))
+  .filter(Boolean);
+
+/**
+ * Unicode-aware boundaries rather than `\b`.
+ *
+ * Load-bearing, and the mechanical root of the bug above: JavaScript defines
+ * `\b` over `[A-Za-z0-9_]` only, so a Cyrillic letter is a NON-word character
+ * to it and `\bи\b` can never match the Bulgarian word "и" at all. Lookarounds
+ * on `\p{L}\p{N}` express the intended "not glued to another word" in every
+ * script instead of only in ASCII.
+ */
+const CONNECTOR_RE = new RegExp(
+  `(?<![\\p{L}\\p{N}])(?:${CONNECTOR_WORDS.join("|")})(?![\\p{L}\\p{N}])`,
+  "iu"
+);
+
+/**
  * A cheap, deterministic proxy for "this reads as one precise sentence about
  * the article" rather than a bag of keywords: too few words, or a run of
  * short comma-separated fragments with no connecting word anywhere, is what a
  * keyword list looks like when a model is asked for a sentence and reaches
  * for its topic tags instead.
+ *
+ * Two independent signals, and a subject has to fail BOTH to be refused: it
+ * must have no segment long enough to be a clause AND no function word
+ * anywhere. Deliberately conjunctive rather than either alone, because the two
+ * error directions are not symmetric. A false negative lets a slightly worse
+ * mainSubject through, which the downstream verdict call can still work with; a
+ * false positive burns a repair call and can fail the whole article, which is
+ * exactly the production failure this guard was found causing on Bulgarian
+ * text. Requiring both is therefore strictly safer than the previous single
+ * connector test, and refuses strictly less.
  */
 function looksLikeBagOfKeywords(subject: string): boolean {
   const words = subject.trim().split(/\s+/).filter(Boolean);
@@ -159,14 +219,15 @@ function looksLikeBagOfKeywords(subject: string): boolean {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  if (segments.length >= 3) {
-    const hasConnector =
-      /\b(is|are|was|were|about|that|which|who|whose|to|of|in|on|with|for|amid|amidst|over|against|after|before|as|because|while|during)\b/i.test(
-        subject
-      );
-    if (!hasConnector) return true;
-  }
-  return false;
+  // Fewer than three segments is not list-shaped at all.
+  if (segments.length < 3) return false;
+
+  const longestSegmentWords = Math.max(
+    ...segments.map((s) => s.split(/\s+/).filter(Boolean).length)
+  );
+  if (longestSegmentWords >= MIN_CLAUSE_WORDS) return false;
+
+  return !CONNECTOR_RE.test(subject);
 }
 
 function normalizeNullableField(value: unknown, cap: number): string | null | "invalid" {
@@ -506,6 +567,8 @@ export function buildArticleUnderstandingSystemPrompt(mode: ArticleUnderstanding
     "   - SUPPORTING (secondaryTopics): subjects the article substantively discusses in service of the central subject, but which are not themselves the point.",
     "   - INCIDENTAL (incidentalTopics): things mentioned in passing — scene-setting, colour, an aside — that do not carry the article's own argument, however often they are mentioned.",
     "3. A topic mentioned often is not automatically central, and a topic mentioned once is not automatically incidental. Judge by what the article IS ABOUT, never by frequency or by how much text surrounds a mention.",
+    '4. Keep the concrete subject CONCRETE. When the article is about choosing, buying, using, installing, repairing or caring for a particular product, material or practice, name that product, material or practice in "mainSubject". Do not abstract it away into the phenomenon behind it, the feeling it produces, or the field it belongs to: an article recommending which wall colour suits a north-facing room is about choosing a wall colour, not about "how daylight direction affects colour perception" — the phenomenon is why the advice works, not what the article is for. Naming the abstraction instead of the thing is the single most common way a correct-sounding mainSubject becomes useless downstream.',
+    '5. If the concrete product, material or practice genuinely does not belong in "mainSubject", it must still appear in "secondaryTopics" or "entities". Never let it disappear from your answer altogether.',
     "",
     "## Worked example",
     "",

@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
+  CLASSIFICATION_SEMANTIC_VERSION,
   MAX_CLASSIFICATION_ATTEMPTS,
   MAX_CLASSIFICATION_CONTENT_CHARS,
   MAX_COMPANY_CONTEXT_CHARS,
@@ -26,6 +28,7 @@ import {
 } from "./feed-item-classification";
 import type { ArticleUnderstanding } from "./article-understanding";
 import { resolveTopicPriorities, type TopicPriorities } from "./topic-priorities";
+import { resolveFeedItemContent } from "./feed-item-translation";
 
 const SCOPED: TopicPriorities = resolveTopicPriorities({
   topPriorityTopics: ["бои", "бойлери"],
@@ -205,6 +208,54 @@ describe("computeClassificationHash", () => {
       computeClassificationHash({ title: "t", body: `${base} MARKER_ONE` }, ctx(SCOPED)),
       computeClassificationHash({ title: "t", body: `${base} MARKER_TWO` }, ctx(SCOPED))
     );
+  });
+
+  // ── The classifier's own semantics are part of the identity ───────────────
+  //
+  // Without this, a corrected classifier could never reach an already-classified
+  // article: reopening it recomputes the hash, finds it unchanged, and settles
+  // the row straight back to `completed` carrying the OLD verdict and spending
+  // no model call. The fix would look deployed and change nothing.
+
+  it("participates in the hash, so a semantics change makes stored verdicts stale", () => {
+    // Recomputed the way `computeClassificationHash` does, but at the PREVIOUS
+    // version — proving the constant is genuinely part of the digest rather than
+    // merely exported beside it.
+    const atVersion = (version: number) =>
+      createHash("sha256")
+        .update(
+          [
+            text.title,
+            text.body,
+            topicsFingerprint(SCOPED),
+            companyContextFingerprint(ctx(SCOPED)),
+            String(version),
+          ].join("")
+        )
+        .digest("hex");
+
+    assert.equal(
+      computeClassificationHash(text, ctx(SCOPED)),
+      atVersion(CLASSIFICATION_SEMANTIC_VERSION)
+    );
+    assert.notEqual(
+      computeClassificationHash(text, ctx(SCOPED)),
+      atVersion(CLASSIFICATION_SEMANTIC_VERSION - 1)
+    );
+  });
+
+  /**
+   * Idempotency, which is what stops a version bump from becoming a permanent
+   * reclassification loop: the version is a CONSTANT, so once a row has been
+   * re-judged and stored the new hash, every later reopen settles it for free
+   * again. Two runs at the same version must agree exactly.
+   */
+  it("is unchanged between runs at the same semantic version", () => {
+    assert.equal(
+      computeClassificationHash(text, ctx(SCOPED)),
+      computeClassificationHash(text, ctx(SCOPED))
+    );
+    assert.equal(typeof CLASSIFICATION_SEMANTIC_VERSION, "number");
   });
 });
 
@@ -899,6 +950,240 @@ describe("buildClassificationSystemPrompt — the strictness rule", () => {
     assert.ok(!blacklistOnly.includes("Worked examples"));
     // OUT_OF_SCOPE survives only as the prohibition in the Verdicts section.
     assert.match(blacklistOnly, /do NOT use "OUT_OF_SCOPE"/);
+  });
+});
+
+// ─── Cross-lingual matching ──────────────────────────────────────────────────
+//
+// The production failure: an English article understanding judged against a
+// Bulgarian topic list came back OUT_OF_SCOPE with no matched topics, because
+// nothing in the rulebook said that a topic in another language is still the
+// same subject — and the rulebook's DEFAULT answer is rejection. The fix is
+// additive: it names the language difference as a non-reason, and leaves every
+// precision rule exactly where it was.
+
+describe("buildClassificationSystemPrompt — cross-lingual matching", () => {
+  const scoped = buildClassificationSystemPrompt("scoped");
+
+  it("says a different language or script is never itself a reason to reject", () => {
+    assert.match(scoped, /DIFFERENT LANGUAGES or different scripts/);
+    assert.match(scoped, /NEVER, on its own, a reason to reject/);
+    assert.match(
+      scoped,
+      /Not recognising a word is not the same as the article being out of scope/
+    );
+  });
+
+  it("keeps the semantic categories when crossing a language", () => {
+    assert.match(scoped, /translation, a synonym of that translation, a specific kind of it/);
+    assert.match(scoped, /direct choice, use, installation, repair or care/);
+  });
+
+  it("demands the configured topic be written back verbatim, never translated", () => {
+    assert.match(scoped, /EXACTLY as it appears in the lists below/);
+    assert.match(scoped, /never translate it, transliterate it, re-spell it/);
+  });
+
+  it("carries a positive cross-lingual worked example", () => {
+    assert.match(scoped, /choosing paint colours and paint finishes for a bedroom/);
+    assert.match(scoped, /primaryTopic "бои", HIGH, matchedTopics \["бои"\]/);
+    // And spells out that the answer keeps the configured spelling.
+    assert.match(scoped, /"бои", not "paints" and not "boi"/);
+  });
+
+  /**
+   * The counterweight, and the reason this is not just a loosening. The same
+   * Bulgarian topic against a merely-adjacent English article must still be
+   * OUT_OF_SCOPE — otherwise "cross-lingual" would have become a licence to
+   * match anything in the neighbourhood.
+   */
+  it("carries a negative cross-lingual worked example that stays OUT_OF_SCOPE", () => {
+    assert.match(scoped, /how a room's orientation changes the amount of natural daylight/);
+    assert.match(scoped, /Crossing a language barrier never lowers the bar/);
+  });
+
+  it("states outright that the cross-lingual rule does not weaken the strictness rule", () => {
+    assert.match(scoped, /rule 4 never weakens rule 5/);
+    assert.match(scoped, /still OUT_OF_SCOPE, exactly as a same-language one would be/);
+  });
+
+  /** Precision is preserved, not traded away — the pre-existing rules survive verbatim. */
+  it("keeps every strictness rule it had before", () => {
+    assert.match(scoped, /Industry relevance is not enough/);
+    assert.match(scoped, /SUBSTANTIALLY about one of the configured topics/);
+    assert.match(scoped, /DEFAULT answer/);
+    assert.match(scoped, /Industry proximity is not a match/);
+    for (const category of ["home improvement", "construction", "garden", "DIY"]) {
+      assert.ok(scoped.includes(category), `expected the prompt to still rule out "${category}"`);
+    }
+  });
+
+  it("carries the cross-lingual rule in blacklist-only mode too, without the examples", () => {
+    const blacklistOnly = buildClassificationSystemPrompt("blacklist_only");
+    assert.match(blacklistOnly, /DIFFERENT LANGUAGES or different scripts/);
+    assert.ok(!blacklistOnly.includes("Worked examples"));
+  });
+});
+
+describe("cross-lingual verdicts — the exact configured spelling survives", () => {
+  /**
+   * An English article understanding, a Bulgarian topic list, one prompt. This is
+   * the shape every Domestico classification actually has, and the prompt has to
+   * carry both halves intact for the model to have any chance of matching them.
+   */
+  it("renders an English understanding beside the Bulgarian topic lists", () => {
+    const prompt = buildClassificationUserPrompt({
+      understanding: understanding({
+        mainSubject: "Choosing paint colours and paint finishes for a bedroom",
+        secondaryTopics: ["colour psychology"],
+      }),
+      context: ctx(SCOPED),
+    });
+    assert.match(prompt, /Choosing paint colours and paint finishes for a bedroom/);
+    assert.match(prompt, /- бои/);
+    assert.match(prompt, /- вентилация/);
+  });
+
+  it("accepts a HIGH built on a Bulgarian topic from an English subject", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "HIGH",
+        rejectionReason: null,
+        matchedTopics: ["бои"],
+        reason: "The main subject is choosing paint, which is what бои means.",
+      }),
+      SCOPED
+    );
+    assert.equal(out.status, "ok");
+    if (out.status === "ok") {
+      // The stored spelling, byte for byte — not a translation of it.
+      assert.equal(out.primaryTopic, "бои");
+      assert.deepEqual(out.matchedTopics, ["бои"]);
+    }
+  });
+
+  /**
+   * The model answering in the ARTICLE's language instead of copying the topic
+   * is the failure mode the verbatim rule exists to prevent. It must be refused
+   * rather than quietly resolved, because "paints" is not a configured topic and
+   * a verdict resting on it rests on nothing.
+   */
+  it("refuses a verdict that translated the topic into the article's language", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "HIGH",
+        rejectionReason: null,
+        matchedTopics: ["paints"],
+        reason: "The article is about paints.",
+      }),
+      SCOPED
+    );
+    assert.equal(out.status, "invalid");
+    if (out.status === "invalid") assert.match(out.feedback, /VERBATIM/);
+  });
+
+  it("keeps a merely-adjacent English article OUT_OF_SCOPE against Bulgarian topics", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "REJECTED",
+        rejectionReason: "OUT_OF_SCOPE",
+        matchedTopics: [],
+        reason: "Room orientation and daylight are not any configured topic.",
+      }),
+      SCOPED
+    );
+    assert.equal(out.status, "ok");
+    if (out.status === "ok") {
+      assert.equal(out.classification, "REJECTED");
+      assert.equal(out.rejectionReason, "OUT_OF_SCOPE");
+      assert.equal(out.primaryTopic, null);
+      assert.deepEqual(out.matchedTopics, []);
+    }
+  });
+
+  it("matches a MEDIUM topic across languages, with its spelling intact", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "MEDIUM",
+        rejectionReason: null,
+        matchedTopics: ["вентилация"],
+        reason: "The subject is home ventilation.",
+      }),
+      SCOPED
+    );
+    assert.equal(out.status, "ok");
+    if (out.status === "ok") {
+      assert.equal(out.classification, "MEDIUM");
+      assert.equal(out.primaryTopic, "вентилация");
+    }
+  });
+
+  /** BLACKLIST semantics are untouched by any of this. */
+  it("still blacklists an English article that IS about an avoided Bulgarian topic", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "REJECTED",
+        rejectionReason: "BLACKLIST",
+        matchedTopics: ["камини"],
+        reason: "The article is about choosing a fireplace.",
+      }),
+      SCOPED
+    );
+    assert.equal(out.status, "ok");
+    if (out.status === "ok") {
+      assert.equal(out.rejectionReason, "BLACKLIST");
+      assert.equal(out.primaryTopic, "камини");
+    }
+  });
+
+  it("still refuses BLACKLIST that cites no avoided topic, cross-lingual or not", () => {
+    const out = parseClassificationResponse(
+      reply({
+        classification: "REJECTED",
+        rejectionReason: "BLACKLIST",
+        primaryTopic: null,
+        matchedTopics: [],
+        reason: "Felt wrong.",
+      }),
+      SCOPED
+    );
+    assert.equal(out.status, "invalid");
+  });
+});
+
+describe("untranslated articles are judged deliberately, not accidentally", () => {
+  /**
+   * `resolveFeedItemContent` falls back to the ORIGINAL text whenever the
+   * translation has not completed — so a pending or failed translation is
+   * exactly how an English article reaches a Bulgarian topic list. That is a
+   * deliberate design decision (a verdict on the real article beats no verdict),
+   * and it is the reason the cross-lingual rule above has to exist at all rather
+   * than being a case that "cannot happen".
+   */
+  for (const translationStatus of ["pending", "failed", "translating", null]) {
+    it(`uses the original English text when translation is ${translationStatus ?? "absent"}`, () => {
+      const resolved = resolveFeedItemContent({
+        title: "Choosing paint colours for a bedroom",
+        content: "Which finish suits a north-facing room.",
+        translatedTitle: null,
+        translatedContent: null,
+        translationStatus,
+      });
+      assert.equal(resolved.usedTranslation, false);
+      assert.equal(resolved.title, "Choosing paint colours for a bedroom");
+    });
+  }
+
+  it("prefers the Bulgarian translation once it has completed", () => {
+    const resolved = resolveFeedItemContent({
+      title: "Choosing paint colours for a bedroom",
+      content: "Which finish suits a north-facing room.",
+      translatedTitle: "Избор на цвят боя за спалня",
+      translatedContent: "Кой финиш е подходящ за стая на север.",
+      translationStatus: "completed",
+    });
+    assert.equal(resolved.usedTranslation, true);
+    assert.equal(resolved.title, "Избор на цвят боя за спалня");
   });
 });
 
