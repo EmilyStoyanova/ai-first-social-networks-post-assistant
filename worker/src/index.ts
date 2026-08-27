@@ -132,11 +132,71 @@ async function main(): Promise<void> {
   // secret is configured.
   const wakeSignal = new WakeSignal();
 
+  /**
+   * Whether the wake listener is actually accepting requests.
+   *
+   * Distinct from "a WakeSignal exists", which is unconditionally true and so
+   * tells an operator nothing. This is what the `dormant` log reports, and the
+   * difference between the two is exactly the case worth being able to read off
+   * a log: a worker whose wake port never opened.
+   */
+  let wakeListenerReady = false;
+
+  /**
+   * Back-reference filled in once the runner exists, so the wake handler can say
+   * whether the signal it just received actually found a sleeping worker. A wake
+   * that arrives while the loop is already claiming is not a problem — it is
+   * absorbed by the claim that was going to happen anyway — but it looks
+   * identical in the log to one that mattered unless the distinction is written
+   * down. Needed because the listener is deliberately opened first.
+   */
+  let runnerRef: PollingRunner<JobRecord> | null = null;
+
+  // ── Wake listener, opened BEFORE the loop starts ──────────────────────────
+  //
+  // Ordered this way so the socket is accepting before the worker can reach its
+  // first dormancy, and so `wakeListenerReady` is settled before anything reads
+  // it. Optional by design — without it the worker still runs every job, just on
+  // the fallback interval, so a missing secret degrades latency not correctness.
+  const wakeServer = config.wakeSecret
+    ? createWakeServer({
+        guard: new WakeGuard({
+          secret: config.wakeSecret,
+          rateMaxPerWindow: config.wakeMaxPerMinute,
+        }),
+        logger,
+        host: config.wakeHost,
+        port: config.wakePort,
+        onWake: () => {
+          // One line per authorized wake. Wakes are enqueue-driven and rate
+          // limited, so this cannot become the recurring noise dormancy exists
+          // to remove — and without it a wake that arrived and a wake that never
+          // did are indistinguishable from the worker's side.
+          logger.info("wake received", { dormant: runnerRef?.isDormant() ?? false });
+          wakeSignal.notify();
+        },
+      })
+    : null;
+
+  if (wakeServer) {
+    try {
+      await wakeServer.listen();
+      wakeListenerReady = true;
+    } catch (err) {
+      // A port already in use must not take the worker down with it. The queue
+      // still drains on the fallback interval.
+      logger.error("wake listener failed to start", { error: String(err) });
+    }
+  } else {
+    logger.warn("wake listener disabled", { reason: "WORKER_WAKE_SECRET not set" });
+  }
+
   const runner = new PollingRunner<JobRecord>({
     config,
     logger,
     registry,
     wakeSignal,
+    wakeable: () => wakeListenerReady,
     claim: () => orchestrator.claim(),
     processJob: (job) => orchestrator.process(job),
     // The last thing before the loop stops touching the database. Closing the
@@ -159,37 +219,14 @@ async function main(): Promise<void> {
       logger.info("active", { reason });
     },
   });
+  runnerRef = runner;
   runner.start();
 
-  // The wake listener. Optional by design — without it the worker still runs
-  // every job, just on the fallback interval, so a missing secret degrades
-  // latency rather than correctness.
-  const wakeServer = config.wakeSecret
-    ? createWakeServer({
-        guard: new WakeGuard({
-          secret: config.wakeSecret,
-          rateMaxPerWindow: config.wakeMaxPerMinute,
-        }),
-        logger,
-        host: config.wakeHost,
-        port: config.wakePort,
-        onWake: () => wakeSignal.notify(),
-      })
-    : null;
-
-  if (wakeServer) {
-    try {
-      await wakeServer.listen();
-    } catch (err) {
-      // A port already in use must not take the worker down with it. The queue
-      // still drains on the fallback interval.
-      logger.error("wake listener failed to start", { error: String(err) });
-    }
-  } else {
-    logger.warn("wake listener disabled", { reason: "WORKER_WAKE_SECRET not set" });
-  }
-
-  logger.info("ready", { status: registry.currentStatus(), handlers: handlers.types() });
+  logger.info("ready", {
+    status: registry.currentStatus(),
+    handlers: handlers.types(),
+    wakeable: wakeListenerReady,
+  });
 
   // Periodic stale-lease recovery, off by default. A timer here would be a
   // recurring query on an otherwise silent database — precisely what dormancy

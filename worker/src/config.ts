@@ -73,6 +73,23 @@ const envSchema = z.object({
   WORKER_FALLBACK_POLL_MS: z.coerce.number().int().positive().default(1_800_000),
 
   /**
+   * How long the worker waits for its dormant cleanup — `prisma.$disconnect()` —
+   * before leaving it to finish on its own.
+   *
+   * It needs a bound because that call can genuinely never return. Disconnecting
+   * ends the Neon pool, and the pool's `end()` resolves only once every
+   * checked-out client has been released; a client leaked by a socket that died
+   * mid-query never is. The loop does not wait on it indefinitely, and does not
+   * need to: the fallback timer and the wake subscription are both already armed
+   * by the time the disconnect starts, so abandoning it costs at most one cycle
+   * of a connection that should have been closed.
+   *
+   * Ten seconds is far longer than a healthy pool drain and far shorter than the
+   * fallback interval, which is the only span it has to fit inside.
+   */
+  WORKER_DORMANT_CLEANUP_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+
+  /**
    * Periodic stale-lease reaping.
    *
    * `0` — the default — means reap on startup and at the start of each active
@@ -112,6 +129,7 @@ export interface WorkerConfig {
   bulkBudgetMs: number;
   dormantAfterMs: number;
   fallbackPollMs: number;
+  dormantCleanupTimeoutMs: number;
   reapIntervalMs: number;
   wakeSecret: string | undefined;
   wakePort: number;
@@ -138,6 +156,7 @@ export function loadWorkerConfig(
     bulkBudgetMs: parsed.WORKER_BULK_BUDGET_MS,
     dormantAfterMs: parsed.WORKER_DORMANT_AFTER_MS,
     fallbackPollMs: parsed.WORKER_FALLBACK_POLL_MS,
+    dormantCleanupTimeoutMs: parsed.WORKER_DORMANT_CLEANUP_TIMEOUT_MS,
     reapIntervalMs: parsed.WORKER_REAP_INTERVAL_MS,
     // Normalised to undefined here so every consumer tests one thing rather than
     // each deciding for itself whether "" counts as configured.

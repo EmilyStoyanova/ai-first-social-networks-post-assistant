@@ -19,7 +19,27 @@
 
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/client";
-import { scheduleWakeNotification } from "@/lib/queue/wake-notifier";
+import { scheduleWakeNotification, type WakeDeliveryResult } from "@/lib/queue/wake-notifier";
+
+/**
+ * Report a wake that did not land. Failures only — a successful signal happens
+ * on every enqueue and logging those would be pure noise.
+ *
+ * It is worth a line because this is the one part of the wake path with no
+ * feedback of its own: a funnel that is down, a URL pointing at nothing, or a
+ * secret that stopped matching all look exactly like a healthy system from here,
+ * and the symptom lands half an hour later on a machine somebody else is
+ * watching. The job is unaffected either way — it is committed, and the worker's
+ * fallback tick will find it — so this is a diagnostic, not an error path.
+ */
+function reportWakeFailure(result: WakeDeliveryResult): void {
+  if (result.ok) return;
+  console.warn("[queue] wake signal not delivered", {
+    status: result.status,
+    error: result.error,
+    note: "job is queued; the worker will pick it up on its fallback interval",
+  });
+}
 
 export interface EnqueueJobInput {
   type: string;
@@ -102,7 +122,8 @@ export async function enqueueJob(
   deps: EnqueueJobDeps = {}
 ): Promise<EnqueueJobResult> {
   const insertJob = deps.insertJob ?? defaultInsertJob;
-  const notifyWake = deps.notifyWake ?? (() => scheduleWakeNotification());
+  const notifyWake =
+    deps.notifyWake ?? (() => scheduleWakeNotification({ onResult: reportWakeFailure }));
 
   /**
    * Wrapped rather than called bare so that a notifier which somehow throws —

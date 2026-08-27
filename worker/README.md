@@ -197,6 +197,29 @@ So the worker has two states:
   comes first, then reconnects (`prisma.$connect()`), reaps any stale leases,
   and resumes claiming until the queue drains again.
 
+#### Nothing may be sequenced ahead of the wait
+
+The fallback timer and the wake subscription are armed **before** the connection
+is released, and this ordering is load-bearing rather than stylistic. It was
+originally the other way around, and the disconnect turned out to be capable of
+never returning: `$disconnect()` ends the Neon pool, and `Pool.end()` resolves
+only once every checked-out client has been handed back — one leaked by a socket
+that died mid-query never is. A worker that hit this logged `dormant` and then
+went silent forever, with **no timer armed and no listener subscribed**,
+recoverable only by a restart. Both wake paths were downstream of a call that
+could hang, so both died together.
+
+So the loop now constructs the wait first (synchronously — the timer is ticking
+and the latch has its subscriber before the first `await`), and only then
+releases the connection, bounded by `WORKER_DORMANT_CLEANUP_TIMEOUT_MS`.
+Abandoning a disconnect costs one cycle of a connection that should have been
+closed; abandoning the wait cost the entire queue. A wake arriving while the
+disconnect is still stuck cancels the wait for it outright, since the next thing
+the worker does is reconnect anyway — otherwise a permanently stuck pool would
+add the full bound to every wake. The hook's eventual settlement is still
+observed, so a late failure is logged rather than surfacing as an unhandled
+rejection.
+
 Postgres remains the only source of truth for what work exists. The wake signal
 is a latency optimisation and nothing else — a dropped, blocked, or never-sent
 signal costs at most one fallback interval, never a job. `enqueueJob`
@@ -260,23 +283,24 @@ npx tsx worker/src/index.ts
 
 ## Configuration
 
-| Env var                        | Default        | Meaning                                                                         |
-| ------------------------------ | -------------- | ------------------------------------------------------------------------------- |
-| `DATABASE_URL`                 | — (required)   | Shared with the app                                                             |
-| `WORKER_ID`                    | `hostname:pid` | Stable worker identity; set it when running >1                                  |
-| `WORKER_CONCURRENCY`           | `1`            | Parallel jobs                                                                   |
-| `WORKER_POLL_INTERVAL_MS`      | `2000`         | Idle poll cadence                                                               |
-| `WORKER_HEARTBEAT_INTERVAL_MS` | `15000`        | Heartbeat cadence; keep well under the lease TTL                                |
-| `WORKER_LEASE_TTL_MS`          | `300000`       | Job lease TTL — renewed at ⅓ of it while running                                |
-| `WORKER_SHUTDOWN_GRACE_MS`     | `30000`        | Drain window before force-exit                                                  |
-| `WORKER_BULK_BUDGET_MS`        | `1800000`      | Budget for one bulk-generation attempt                                          |
-| `WORKER_DORMANT_AFTER_MS`      | `60000`        | Empty-queue quiet time before going DORMANT; `0` disables dormancy              |
-| `WORKER_FALLBACK_POLL_MS`      | `1800000`      | Dormant wait ceiling — always recovers a missed wake within this                |
-| `WORKER_REAP_INTERVAL_MS`      | `0`            | Periodic reaper; `0` = burst-only (startup + each wake), correct for one worker |
-| `WORKER_WAKE_SECRET`           | — (optional)   | Shared HMAC secret; unset disables the wake listener entirely                   |
-| `WORKER_WAKE_PORT`             | `3003`         | Loopback port the wake listener binds                                           |
-| `WORKER_WAKE_HOST`             | `127.0.0.1`    | Wake listener bind address — reachability is the tunnel's job                   |
-| `WORKER_WAKE_MAX_PER_MINUTE`   | `60`           | In-memory rate limit on `/wake`, never Neon-backed                              |
+| Env var                             | Default        | Meaning                                                                         |
+| ----------------------------------- | -------------- | ------------------------------------------------------------------------------- |
+| `DATABASE_URL`                      | — (required)   | Shared with the app                                                             |
+| `WORKER_ID`                         | `hostname:pid` | Stable worker identity; set it when running >1                                  |
+| `WORKER_CONCURRENCY`                | `1`            | Parallel jobs                                                                   |
+| `WORKER_POLL_INTERVAL_MS`           | `2000`         | Idle poll cadence                                                               |
+| `WORKER_HEARTBEAT_INTERVAL_MS`      | `15000`        | Heartbeat cadence; keep well under the lease TTL                                |
+| `WORKER_LEASE_TTL_MS`               | `300000`       | Job lease TTL — renewed at ⅓ of it while running                                |
+| `WORKER_SHUTDOWN_GRACE_MS`          | `30000`        | Drain window before force-exit                                                  |
+| `WORKER_BULK_BUDGET_MS`             | `1800000`      | Budget for one bulk-generation attempt                                          |
+| `WORKER_DORMANT_AFTER_MS`           | `60000`        | Empty-queue quiet time before going DORMANT; `0` disables dormancy              |
+| `WORKER_FALLBACK_POLL_MS`           | `1800000`      | Dormant wait ceiling — always recovers a missed wake within this                |
+| `WORKER_DORMANT_CLEANUP_TIMEOUT_MS` | `10000`        | Bound on `$disconnect()` before the loop leaves it to finish on its own         |
+| `WORKER_REAP_INTERVAL_MS`           | `0`            | Periodic reaper; `0` = burst-only (startup + each wake), correct for one worker |
+| `WORKER_WAKE_SECRET`                | — (optional)   | Shared HMAC secret; unset disables the wake listener entirely                   |
+| `WORKER_WAKE_PORT`                  | `3003`         | Loopback port the wake listener binds                                           |
+| `WORKER_WAKE_HOST`                  | `127.0.0.1`    | Wake listener bind address — reachability is the tunnel's job                   |
+| `WORKER_WAKE_MAX_PER_MINUTE`        | `60`           | In-memory rate limit on `/wake`, never Neon-backed                              |
 
 These are also documented in `.env.example`. Every one but `DATABASE_URL` has a
 working default, so an empty configuration is valid — with `WORKER_WAKE_SECRET`
