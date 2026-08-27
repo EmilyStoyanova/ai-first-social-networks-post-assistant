@@ -5,8 +5,12 @@ import {
   type ClassifiableItem,
   type ClassifyFeedItemDeps,
 } from "./classify-feed-item.service";
+import { createHash } from "node:crypto";
 import {
+  CLASSIFICATION_SEMANTIC_VERSION,
+  companyContextFingerprint,
   computeClassificationHash,
+  topicsFingerprint,
   type ClassificationContext,
 } from "@/lib/ai/feed-item-classification";
 import {
@@ -231,6 +235,137 @@ describe("classifyFeedItem — unchanged inputs", () => {
     assert.deepEqual(out, { status: "skipped", reason: "unchanged" });
     assert.equal(rec.prompts.length, 0);
     assert.equal(rec.updateManys[0].data.classificationStatus, "completed");
+  });
+});
+
+// ─── The classifier semantic version, as an invalidation mechanism ────────────
+//
+// `CLASSIFICATION_SEMANTIC_VERSION` bumped 2 → 3 for the `topicCoherence` fix in
+// `article-understanding.ts` (weighted token overlap instead of exact-string
+// Jaccard) — this module's own prompt/rules did not change, but the confidence
+// value it renders and gates on did, for some already-stored verdicts. These
+// tests prove the invalidation contract that bump depends on, independent of
+// what the current constant's value actually is.
+
+describe("classifyFeedItem — a stale semantic version reopens a stored verdict", () => {
+  const text = { title: "Как да изберем латекс", body: "Дълъг текст за боядисване на стени." };
+
+  // `computeClassificationHash` joins its fields with U+001D (Group Separator) —
+  // a literal control character, invisible in an editor and easy to silently drop
+  // when hand-reproducing the join, so it is spelled out as an escape here.
+  const HASH_FIELD_SEPARATOR = String.fromCharCode(0x1d);
+
+  /** The hash exactly as `computeClassificationHash` builds it, but at an arbitrary version. */
+  function hashAtVersion(version: number): string {
+    return createHash("sha256")
+      .update(
+        [
+          text.title,
+          text.body,
+          topicsFingerprint(SCOPED.priorities),
+          companyContextFingerprint(SCOPED),
+          String(version),
+        ].join(HASH_FIELD_SEPARATOR)
+      )
+      .digest("hex");
+  }
+
+  it("does NOT settle for free when only the semantic version changed — text and topics are identical", async () => {
+    const staleHash = hashAtVersion(CLASSIFICATION_SEMANTIC_VERSION - 1);
+    const { deps, rec } = makeDeps({
+      replies: [understandingReply(), verdictReply()],
+    });
+
+    const out = await classifyFeedItem(
+      item({ classificationHash: staleHash, classificationStatus: "pending" }),
+      SCOPED,
+      deps
+    );
+
+    assert.equal(out.status, "classified", "a stale-version row must be genuinely re-asked");
+    assert.ok(rec.prompts.length > 0, "the model is called — this is not a free settle");
+  });
+
+  it("stores the CURRENT version's hash after re-evaluation, so a second reopen settles for free", async () => {
+    const staleHash = hashAtVersion(CLASSIFICATION_SEMANTIC_VERSION - 1);
+    const { deps, rec } = makeDeps({
+      replies: [understandingReply(), verdictReply()],
+    });
+
+    await classifyFeedItem(
+      item({ classificationHash: staleHash, classificationStatus: "pending" }),
+      SCOPED,
+      deps
+    );
+
+    const stored = rec.updateManys.find((u) => "classificationHash" in u.data)?.data
+      .classificationHash;
+    assert.equal(stored, computeClassificationHash(text, SCOPED));
+
+    // Re-run with the row now carrying the freshly-stored (current-version) hash:
+    // this must be the free "unchanged" path, with NO second model call.
+    const { deps: deps2, rec: rec2 } = makeDeps({});
+    const second = await classifyFeedItem(
+      item({ classificationHash: stored as string, classificationStatus: "pending" }),
+      SCOPED,
+      deps2
+    );
+    assert.deepEqual(second, { status: "skipped", reason: "unchanged" });
+    assert.equal(rec2.prompts.length, 0, "no unnecessary second classification call");
+  });
+
+  it("a hash at the CURRENT version still settles for free, unaffected by the bump", async () => {
+    // Guards the ordinary case: an item classified before this session's change,
+    // whose hash already reflects the version in force now, must not be
+    // needlessly reopened by anything in this file.
+    const currentHash = hashAtVersion(CLASSIFICATION_SEMANTIC_VERSION);
+    const { deps, rec } = makeDeps({});
+    const out = await classifyFeedItem(
+      item({ classificationHash: currentHash, classificationStatus: "completed" }),
+      SCOPED,
+      deps
+    );
+    assert.deepEqual(out, { status: "skipped", reason: "unchanged" });
+    assert.equal(rec.prompts.length, 0);
+  });
+
+  it("reopens a stale-version row regardless of which claimable status it sits in — eligibility reads only the hash", async () => {
+    // `ClassifiableItem` never carries the PREVIOUS verdict (no `classification`
+    // field) — only the hash and the status. So "an old REJECTED/HIGH/MEDIUM
+    // row" is, from this function's point of view, indistinguishable from any
+    // other row at a stale hash: `reclassify-feed-items.service.ts` always
+    // reopens to `pending` regardless of the prior verdict (`RECLASSIFY_REOPEN_DATA`),
+    // and a row that failed mid-attempt reaches this function the same way.
+    // There is no separate exemption to accidentally carve out for one verdict kind.
+    for (const claimableStatus of ["pending", "failed"] as const) {
+      const staleHash = hashAtVersion(CLASSIFICATION_SEMANTIC_VERSION - 1);
+      const { deps, rec } = makeDeps({
+        replies: [understandingReply(), verdictReply()],
+      });
+      const out = await classifyFeedItem(
+        item({ classificationHash: staleHash, classificationStatus: claimableStatus }),
+        SCOPED,
+        deps
+      );
+      assert.equal(
+        out.status,
+        "classified",
+        `a stale-version row at status "${claimableStatus}" must still be re-evaluated`
+      );
+      assert.ok(rec.prompts.length > 0);
+    }
+  });
+
+  it("cannot loop: re-evaluating a stale-version row exactly once leaves nothing left to reopen at this version", async () => {
+    // There is no third run in this test because there is nothing left to
+    // prove — `stores the CURRENT version's hash...` above already shows the
+    // second run is the free path. This test documents why: the version is a
+    // constant, not something a run derives or increments, so repeated drains
+    // at the same deployed code converge to zero model calls.
+    assert.equal(typeof CLASSIFICATION_SEMANTIC_VERSION, "number");
+    const v1 = hashAtVersion(CLASSIFICATION_SEMANTIC_VERSION);
+    const v2 = hashAtVersion(CLASSIFICATION_SEMANTIC_VERSION);
+    assert.equal(v1, v2, "the version contributes the same value on every computation");
   });
 });
 

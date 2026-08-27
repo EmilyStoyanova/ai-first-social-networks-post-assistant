@@ -305,6 +305,36 @@ function paragraphWithMarker(marker: string, minChars: number, seed = 0): string
 const BG_FILLER = "Преведен текст на естествен и правилен български език за целите на теста.";
 
 /**
+ * Distinct Bulgarian sentences, cycled to fill a body of a given size.
+ *
+ * A reply must now carry roughly as much text as it was given (see
+ * `assertTranslationCoverage`), so a one-sentence stub is no longer a plausible
+ * translation of a 2,600-character passage — it is the exact production defect.
+ * Distinct sentences rather than one repeated, because a single looping sentence
+ * is what `detectRepetition` exists to reject.
+ */
+const BG_SENTENCES = [
+  "Новата версия идва с преработен корпус и повече възможности за монтаж.",
+  "Ревютата отбелязват по-доброто отвеждане на топлината при продължително натоварване.",
+  "Първите тестове показват осезаемо подобрение спрямо предишното поколение.",
+  "Производителят твърди, че промяната е заради обратната връзка от клиентите.",
+  "Недостигът на компоненти забави пускането на няколко пазара.",
+  "Обновяване на фърмуера отстрани първите сигнали за нестабилност.",
+];
+
+/** A Bulgarian body about as long as `source`, followed by `extras` verbatim. */
+function bgBodyFor(source: string, ...extras: string[]): string {
+  const out: string[] = [BG_FILLER];
+  let len = BG_FILLER.length;
+  for (let i = 0; len < source.length; i += 1) {
+    const sentence = BG_SENTENCES[i % BG_SENTENCES.length];
+    out.push(sentence);
+    len += sentence.length + 1;
+  }
+  return [...out, ...extras.filter(Boolean)].join(" ");
+}
+
+/**
  * A fake ILlmProvider tuned for the chunked path: it reads WHAT was asked (a title
  * call vs. a numbered "Passage N of M" chunk call) from the prompt shape itself,
  * carries through any `[[n]]` placeholder and any known marker word so a test can
@@ -337,7 +367,12 @@ function chunkedLlm(
         return { text: JSON.stringify({ title: BG_FILLER }) };
       }
       if (request.userPrompt.includes("\nContent: ")) {
-        return { text: JSON.stringify({ title: BG_FILLER, content: BG_FILLER }) };
+        const singleCallBody = request.userPrompt.slice(
+          request.userPrompt.indexOf("\nContent: ") + "\nContent: ".length
+        );
+        return {
+          text: JSON.stringify({ title: BG_FILLER, content: bgBodyFor(singleCallBody) }),
+        };
       }
       const body = request.userPrompt.replace(/^Passage \d+ of \d+:\n/, "");
       const marker = markers.find((m) => body.includes(m));
@@ -346,10 +381,12 @@ function chunkedLlm(
         return { text: JSON.stringify({ content: "със със със със със със" }) };
       }
       if (marker && marker === opts.dropPlaceholdersForMarker) {
-        return { text: JSON.stringify({ content: [BG_FILLER, marker].join(" ") }) };
+        // Full-length and fluent, so it clears every other check — the ONLY thing
+        // wrong with it is the missing placeholders.
+        return { text: JSON.stringify({ content: bgBodyFor(body, marker) }) };
       }
       const placeholders = body.match(/\[\[\d+\]\]/g) ?? [];
-      const text = [BG_FILLER, marker ?? "", ...placeholders].filter(Boolean).join(" ");
+      const text = bgBodyFor(body, marker ?? "", ...placeholders);
       return { text: JSON.stringify({ content: text }) };
     },
   };

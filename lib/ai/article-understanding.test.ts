@@ -12,6 +12,7 @@ import {
   parseArticleUnderstandingResponse,
   reduceForSynthesis,
   SAFE_SYNTHESIS_POINT_COUNT,
+  topicPhraseAgreement,
   type EvidencePoint,
 } from "./article-understanding";
 import type { ChunkAnalysis } from "./classification-chunk-analysis";
@@ -388,6 +389,223 @@ describe("computeConfidenceSignals / confidenceCeiling", () => {
     assert.ok(
       withManyRepeatedIncidentals <= withoutRepeats,
       "piling on supporting chunks about an incidental topic must not raise the ceiling"
+    );
+  });
+});
+
+/**
+ * The production defect: `topicCoherence` compared whole freeform topic strings
+ * for EXACT equality, so two sections of one paint article that wrote "wall and
+ * trim colors" and "color combinations" scored 0 agreement — and 0 coherence is
+ * the largest term in `confidenceCeiling`, which pinned every such article at a
+ * 0.4 ceiling. These test the STRUCTURE of the replacement (differently-worded
+ * related phrases agree, generic vocabulary alone does not, unrelated phrases
+ * still score ~0), not the numbers of any one article.
+ */
+describe("topicPhraseAgreement", () => {
+  it("scores differently-worded phrases about the same subject as related", () => {
+    const wallTrim = ["wall and trim colors"];
+    const combinations = ["color combinations"];
+    const selection = ["paint color selection"];
+
+    for (const [a, b] of [
+      [wallTrim, combinations],
+      [wallTrim, selection],
+      [combinations, selection],
+    ]) {
+      const score = topicPhraseAgreement(a, b);
+      assert.ok(score > 0, `expected ${JSON.stringify(a)} ~ ${JSON.stringify(b)} to agree`);
+    }
+  });
+
+  it("does the same for Bulgarian, where the inflection differs rather than the stem", () => {
+    const walls = ["цветове за стени"];
+    const combinations = ["комбинации от цветове"];
+    const choice = ["избор на цветове"];
+
+    for (const [a, b] of [
+      [walls, combinations],
+      [walls, choice],
+      [combinations, choice],
+    ]) {
+      assert.ok(
+        topicPhraseAgreement(a, b) > 0,
+        `expected ${JSON.stringify(a)} ~ ${JSON.stringify(b)} to agree`
+      );
+    }
+  });
+
+  it("matches an inflected form to its stem in either language", () => {
+    assert.ok(topicPhraseAgreement(["paint colours"], ["colour"]) > 0);
+    assert.ok(topicPhraseAgreement(["painting walls"], ["wall"]) > 0);
+    // Bulgarian suffixing, and Bulgarian substitution — the ending changes
+    // without the word getting longer, which a prefix-containment rule misses.
+    assert.ok(topicPhraseAgreement(["цветове"], ["цветовете"]) > 0);
+    assert.ok(topicPhraseAgreement(["цветове"], ["цветови"]) > 0);
+    assert.ok(topicPhraseAgreement(["стени"], ["стена"]) > 0);
+  });
+
+  it("does not join two different words that merely start alike", () => {
+    // The classic truncation-stemmer failure: both become "inter" under a fixed
+    // prefix cut, but neither is a prefix of the other.
+    assert.equal(topicPhraseAgreement(["interior"], ["internal"]), 0);
+    assert.equal(topicPhraseAgreement(["colour"], ["colourblindness"]), 0);
+  });
+
+  /**
+   * KNOWN LIMITATION, deliberately left unfixed — see the module comment above
+   * `tokensMatch`. "pain" is a full 4-character prefix of "paint", and 4 is
+   * both `MIN_STEM_MATCH_CHARS` and (for a 4-letter shorter side) the required
+   * prefix length, so the two unrelated words are indistinguishable from a real
+   * inflection pair by this rule. This is a genuine false positive, not a
+   * tolerated edge case — pinned here as a CURRENT-BEHAVIOR regression, not an
+   * endorsement, so a change to `tokensMatch`'s thresholds is a visible,
+   * deliberate decision rather than a silent tuning drift. Do not "fix" this
+   * assertion by loosening it further; if the threshold changes, this test
+   * should be revisited alongside the module comment and the classifier's own
+   * regression suite, not adjusted in isolation.
+   */
+  it("[KNOWN LIMITATION] a bare near-homograph can still score as a full match", () => {
+    assert.equal(
+      topicPhraseAgreement(["paint"], ["pain"]),
+      1,
+      "if this changes, the near-homograph risk noted in tokensMatch's comment may have been addressed — update the comment, don't just retune this number"
+    );
+    // Diluted, but not eliminated, once the phrase carries a second word — real
+    // topic phrases are rarely a single bare token, which is what keeps this
+    // from being worse in practice than the isolated case above.
+    const diluted = topicPhraseAgreement(["paint colors"], ["pain relief"]);
+    assert.ok(
+      diluted > 0 && diluted < 1,
+      `expected a partial, non-zero false match, got ${diluted}`
+    );
+  });
+
+  it("does not let shared generic vocabulary alone create strong agreement", () => {
+    const generic = topicPhraseAgreement(["interior lighting"], ["interior furniture"]);
+    const real = topicPhraseAgreement(["wall and trim colors"], ["color combinations"]);
+    assert.ok(generic < 0.2, `generic-only overlap should stay weak, got ${generic}`);
+    assert.ok(
+      generic < real,
+      `a shared generic word (${generic}) must score below a shared subject (${real})`
+    );
+  });
+
+  it("keeps unrelated subjects at zero", () => {
+    assert.equal(topicPhraseAgreement(["paint colors"], ["garden irrigation"]), 0);
+    assert.equal(topicPhraseAgreement(["бои за стени"], ["градинско напояване"]), 0);
+  });
+
+  it("ignores stop words in both languages rather than counting them as agreement", () => {
+    // "and"/"for" and "за"/"на" are the only tokens these pairs share.
+    assert.equal(topicPhraseAgreement(["paint and primer"], ["hiking and camping"]), 0);
+    assert.equal(topicPhraseAgreement(["бои за стени"], ["обувки за бягане"]), 0);
+  });
+
+  it("is symmetric and self-identical", () => {
+    const a = ["wall and trim colors", "interior design"];
+    const b = ["color combinations", "paint finishes"];
+    assert.equal(topicPhraseAgreement(a, b), topicPhraseAgreement(b, a));
+    assert.equal(topicPhraseAgreement(a, a), 1);
+  });
+
+  it("does not count one phrase's repeated word-forms as several agreements", () => {
+    const many = ["colour", "colours", "coloured", "colouring"];
+    const once = ["colour"];
+    const score = topicPhraseAgreement(many, once);
+    assert.ok(score > 0, "the shared word should still agree once");
+    assert.ok(score < 1, `four word-forms must not claim perfect agreement, got ${score}`);
+  });
+
+  it("returns 0 when either side has no scoreable token", () => {
+    assert.equal(topicPhraseAgreement([], ["paint colors"]), 0);
+    assert.equal(topicPhraseAgreement(["and the"], ["paint colors"]), 0);
+  });
+});
+
+describe("confidenceCeiling — multi-chunk articles worded differently per chunk", () => {
+  /**
+   * The regression shape itself: several central chunks that agree on the
+   * subject but each describe it in their own words. Before the token-level
+   * comparison this scored `topicCoherence: 0` and a 0.4 ceiling — the floor of
+   * the formula — which is indistinguishable from an article whose sections
+   * genuinely point at different subjects.
+   */
+  const wordedDifferently: ChunkAnalysis[] = [
+    chunk({
+      centrality: "central",
+      topics: ["wall and trim color combinations", "interior design", "color selection"],
+    }),
+    chunk({
+      centrality: "central",
+      topics: ["color combinations", "interior atmosphere", "home design"],
+    }),
+    chunk({
+      centrality: "central",
+      topics: ["choosing paint colours", "colour pairings"],
+    }),
+  ];
+
+  const wordedDifferentlyBg: ChunkAnalysis[] = [
+    chunk({
+      centrality: "central",
+      topics: ["цветове за стени", "интериорен дизайн"],
+    }),
+    chunk({
+      centrality: "central",
+      topics: ["комбинации от цветове", "избор на цветове"],
+    }),
+    chunk({
+      centrality: "central",
+      topics: ["боядисване на стени", "цветови съчетания"],
+    }),
+  ];
+
+  for (const [label, analyses] of [
+    ["English", wordedDifferently],
+    ["Bulgarian", wordedDifferentlyBg],
+  ] as const) {
+    it(`(${label}) agreeing chunks are no longer pinned at the formula's floor`, () => {
+      const signals = computeConfidenceSignals(analyses);
+      assert.ok(
+        signals.topicCoherence > 0,
+        `expected non-zero coherence, got ${signals.topicCoherence}`
+      );
+      // 0.4 is what `0.2 + 0.6 * 0 + 0.2 * 1` produces — the ceiling every such
+      // article used to receive purely because the wording differed.
+      const ceiling = confidenceCeiling(signals);
+      assert.ok(ceiling > 0.4, `expected a ceiling above the 0.4 floor, got ${ceiling}`);
+    });
+  }
+
+  it("still suppresses chunks that genuinely point at different subjects", () => {
+    // Same shape, same chunk count, same centrality — only the subjects differ.
+    const disagreeing: ChunkAnalysis[] = [
+      chunk({ centrality: "central", topics: ["wall and trim color combinations"] }),
+      chunk({ centrality: "central", topics: ["garden irrigation schedules"] }),
+      chunk({ centrality: "central", topics: ["mortgage interest rates"] }),
+    ];
+    const agreeing = confidenceCeiling(computeConfidenceSignals(wordedDifferently));
+    const scattered = confidenceCeiling(computeConfidenceSignals(disagreeing));
+    assert.ok(
+      scattered < agreeing,
+      `disagreement (${scattered}) must still score below agreement (${agreeing})`
+    );
+    assert.ok(scattered <= 0.5, `expected a suppressed ceiling, got ${scattered}`);
+  });
+
+  it("does not let a shared vertical vocabulary pass as agreement", () => {
+    // Every chunk says "interior" and "design" and nothing else in common.
+    const genericOnly: ChunkAnalysis[] = [
+      chunk({ centrality: "central", topics: ["interior lighting", "design"] }),
+      chunk({ centrality: "central", topics: ["interior furniture", "design"] }),
+      chunk({ centrality: "central", topics: ["interior flooring", "design"] }),
+    ];
+    const ceiling = confidenceCeiling(computeConfidenceSignals(genericOnly));
+    const agreeing = confidenceCeiling(computeConfidenceSignals(wordedDifferently));
+    assert.ok(
+      ceiling < agreeing,
+      `shared genericisms (${ceiling}) must score below a shared subject (${agreeing})`
     );
   });
 });

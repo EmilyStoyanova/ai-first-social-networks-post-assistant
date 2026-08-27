@@ -143,6 +143,14 @@ export class OllamaTranslationProvider implements TranslationProvider {
     let currentTitleValues: readonly ProtectedValue[] = request.prompts.titleProtectedValues;
     let currentContentValues: readonly ProtectedValue[] = request.prompts.contentProtectedValues;
     /**
+     * The body text `currentUserPrompt` actually carries, placeholders and all — what
+     * the reply's completeness is measured against. Refreshed alongside the protected
+     * values above for exactly the same reason: after a shrink the reply is answering a
+     * SMALLER article, and measuring it against the original would condemn a complete
+     * translation of the article it was actually given.
+     */
+    let currentSourceContent = request.prompts.contentProtectedText;
+    /**
      * Why the PREVIOUS try was rejected, so the next one can be sampled for the defect it is
      * actually correcting rather than by try number alone — `null` on the first try, which has
      * no previous. See samplingForTry: the escalating temperature/repeat-penalty schedule
@@ -235,7 +243,10 @@ export class OllamaTranslationProvider implements TranslationProvider {
       });
 
       try {
-        const parsedReply = parseTranslationResponse(response.text, request.targetLang, { mode });
+        const parsedReply = parseTranslationResponse(response.text, request.targetLang, {
+          mode,
+          sourceContent: currentSourceContent,
+        });
         // The reply still carries `[[n]]` placeholders wherever a URL, identifier, SKU, or
         // version string was held out of the decoder (see buildTranslationPrompts). Restoring
         // them is not optional cleanup — it is the programmatic check that the model actually
@@ -333,9 +344,12 @@ export class OllamaTranslationProvider implements TranslationProvider {
           );
           baseUserPrompt = shorter.userPrompt;
           // A smaller body is re-protected from scratch, so a later restore must check
-          // against THESE values, not the ones the original (larger) prompt carried.
+          // against THESE values, not the ones the original (larger) prompt carried —
+          // and the completeness check must measure against THIS body for the same
+          // reason.
           currentTitleValues = shorter.titleProtectedValues;
           currentContentValues = shorter.contentProtectedValues;
+          currentSourceContent = shorter.contentProtectedText;
           console.info("[rss-translation] shrinking article for the next try", {
             feedItemId: request.feedItemId,
             try: tries,
@@ -499,7 +513,8 @@ export class OllamaTranslationProvider implements TranslationProvider {
           targetLang,
           context,
           request,
-          label
+          label,
+          built.sourceContent
         );
       } catch (err) {
         // Retries exhausted for THIS unit (or the item's own deadline was crossed
@@ -550,6 +565,9 @@ export class OllamaTranslationProvider implements TranslationProvider {
           schema: built.schema,
           protectedValues: built.titleProtectedValues,
           mode: "title_only",
+          // A title is far below the completeness check's own length floor, and a cut
+          // title is already refused outright by parseTranslationResponse.
+          sourceContent: null,
         };
       });
     }
@@ -568,6 +586,10 @@ export class OllamaTranslationProvider implements TranslationProvider {
           schema: built.schema,
           protectedValues: built.protectedValues,
           mode: "content_only",
+          // THIS chunk's own source text, so a chunk that came back half-translated
+          // fails on its own account rather than being averaged away by its neighbours
+          // once the article is reassembled.
+          sourceContent: built.protectedText,
         };
       });
     }
@@ -641,7 +663,8 @@ export class OllamaTranslationProvider implements TranslationProvider {
     targetLang: string,
     context: ArticleTranslationContext,
     request: ArticleTranslationRequest,
-    label: string
+    label: string,
+    sourceContent: string | null
   ): Promise<UnitOutcome> {
     const { tracer, now, diag } = context;
     const maxTries = MAX_TRANSLATION_RETRIES + 1;
@@ -704,7 +727,10 @@ export class OllamaTranslationProvider implements TranslationProvider {
       });
 
       try {
-        const parsedReply = parseTranslationResponse(response.text, targetLang, { mode });
+        const parsedReply = parseTranslationResponse(response.text, targetLang, {
+          mode,
+          sourceContent,
+        });
         const raw = parsedReply.translatedTitle ?? parsedReply.translatedContent ?? "";
         const restored = restoreTokens(raw, protectedValues, label);
         tracer.setAttempts(tries);
@@ -800,6 +826,12 @@ interface UnitPrompt {
    * can never be misclassified by one.
    */
   mode: "title_only" | "content_only";
+  /**
+   * This unit's own source text in the reply's representation (placeholders and
+   * all), for the completeness check — `null` for a title, which is too short to
+   * measure. See `assessTranslationCoverage`.
+   */
+  sourceContent: string | null;
 }
 
 /** What one unit's (title's, or one chunk's) translation call produced. */

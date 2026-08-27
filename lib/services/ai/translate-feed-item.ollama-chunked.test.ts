@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Prisma } from "@prisma/client";
 import { translateFeedItem } from "./translate-feed-item.service";
 import type { TranslatableItem, TranslateFeedItemDb } from "./translate-feed-item.service";
-import { MAX_TRANSLATION_ATTEMPTS } from "@/lib/ai/feed-item-translation";
+import { MAX_TRANSLATION_ATTEMPTS, MAX_TRANSLATION_RETRIES } from "@/lib/ai/feed-item-translation";
 import type { LlmRequest } from "@/lib/ai/types";
 
 /**
@@ -50,6 +50,37 @@ function paragraphWithMarker(marker: string, minChars: number, seed = 0): string
 
 const BG_FILLER = "Преведен текст на естествен и правилен български език за целите на теста.";
 
+/**
+ * Distinct Bulgarian sentences, cycled to fill a body of a given size.
+ *
+ * A chunk's translation now has to be roughly as long as the chunk (see
+ * `assertTranslationCoverage`), so a one-sentence stub is no longer a valid
+ * reply for a 2,600-character passage — it is the production defect. Distinct
+ * sentences rather than one repeated, because a single sentence looping is what
+ * `detectRepetition` exists to reject.
+ */
+const BG_SENTENCES = [
+  "Новата версия идва с преработен корпус и повече възможности за монтаж.",
+  "Ревютата отбелязват по-доброто отвеждане на топлината при продължително натоварване.",
+  "Първите тестове показват осезаемо подобрение спрямо предишното поколение.",
+  "Производителят твърди, че промяната е заради обратната връзка от клиентите.",
+  "Недостигът на компоненти забави пускането на няколко пазара.",
+  "Обновяване на фърмуера отстрани първите сигнали за нестабилност.",
+];
+
+/** A Bulgarian body about as long as `source` — a plausible translation of it. */
+function bgBodyFor(source: string, suffix = ""): string {
+  const out: string[] = [BG_FILLER];
+  let len = BG_FILLER.length;
+  for (let i = 0; len < source.length; i += 1) {
+    const sentence = BG_SENTENCES[i % BG_SENTENCES.length];
+    out.push(sentence);
+    len += sentence.length + 1;
+  }
+  if (suffix !== "") out.push(suffix);
+  return out.join(" ");
+}
+
 /** Two chunks: ALPHAMARKER always succeeds, BETAMARKER always degenerates into a loop. */
 const CONTENT = [
   paragraphWithMarker("ALPHAMARKER", 2600, 0),
@@ -65,7 +96,7 @@ function alwaysFailsBetaGenerate() {
     if (body.includes("BETAMARKER")) {
       return { text: JSON.stringify({ content: "със със със със със със" }) };
     }
-    return { text: JSON.stringify({ content: `${BG_FILLER} ALPHAMARKER` }) };
+    return { text: JSON.stringify({ content: bgBodyFor(body, "ALPHAMARKER") }) };
   };
 }
 
@@ -76,7 +107,8 @@ function alwaysSucceedsGenerate() {
     if (request.userPrompt.startsWith("Title: ") && !request.userPrompt.includes("\nContent: ")) {
       return { text: JSON.stringify({ title: BG_FILLER }) };
     }
-    return { text: JSON.stringify({ content: BG_FILLER }) };
+    const body = request.userPrompt.replace(/^Passage \d+ of \d+:\n/, "");
+    return { text: JSON.stringify({ content: bgBodyFor(body) }) };
   };
 }
 
@@ -201,7 +233,7 @@ describe("translateFeedItem — chunked Ollama path, a permanently-failing chunk
       const body = request.userPrompt.replace(/^Passage \d+ of \d+:\n/, "");
       return {
         text: JSON.stringify({
-          content: `${BG_FILLER} ${body.includes("BETA") ? "BETAMARKER" : ""}`,
+          content: bgBodyFor(body, body.includes("BETA") ? "BETAMARKER" : ""),
         }),
       };
     };
@@ -262,5 +294,124 @@ describe("translateFeedItem — chunked Ollama path diagnostics", () => {
       Math.abs((fields.translatedBodyChars as number) - CONTENT.length) < 5,
       `expected close to the article's own ${CONTENT.length} chars, got ${fields.translatedBodyChars}`
     );
+  });
+});
+
+/**
+ * The completeness gate, exercised through the same resume/continuation machinery
+ * every other per-chunk defect goes through.
+ *
+ * The gate exists because of a chunk that came back a fifth of its own length as
+ * perfectly valid, perfectly Bulgarian JSON — see `assertTranslationCoverage`. What
+ * has to be true of it is not just that it rejects: it has to reject like every
+ * other unit-level defect, so a half-translated chunk costs only that chunk, never
+ * the ones already banked beside it.
+ */
+function betaComesBackTruncatedGenerate() {
+  let betaCalls = 0;
+  const generate = async (request: LlmRequest) => {
+    if (request.userPrompt.startsWith("Title: ") && !request.userPrompt.includes("\nContent: ")) {
+      return { text: JSON.stringify({ title: BG_FILLER }) };
+    }
+    const body = request.userPrompt.replace(/^Passage \d+ of \d+:\n/, "");
+    if (body.includes("BETAMARKER")) {
+      betaCalls += 1;
+      // Fluent, correct Bulgarian — and a fifth of the passage it was given. The
+      // exact production shape: nothing about this reply is malformed.
+      return { text: JSON.stringify({ content: bgBodyFor(body.slice(0, 400)) }) };
+    }
+    return { text: JSON.stringify({ content: bgBodyFor(body, "ALPHAMARKER") }) };
+  };
+  return { generate, betaCalls: () => betaCalls };
+}
+
+describe("translateFeedItem — chunked Ollama path, a chunk that comes back truncated", () => {
+  it("rejects the short chunk while banking every chunk that came back whole", async () => {
+    const { db, last } = makeDb();
+    const beta = betaComesBackTruncatedGenerate();
+    const item = makeItem({ translationAttemptCount: 1 }); // attempt 2 of 5 — not final
+
+    const outcome = await translateFeedItem(item, "bg", deps(db, beta.generate));
+
+    assert.equal(outcome.status, "partial");
+    const write = last();
+    assert.equal(write.translationStatus, "pending");
+    const progress = write.translationProgress as Record<string, string>;
+    assert.ok("title" in progress, "the title must survive the failing chunk");
+    assert.ok("0" in progress, "the chunk that came back whole must survive it too");
+    assert.equal(Object.keys(progress).length, 2, "the truncated chunk must NOT be banked");
+  });
+
+  it("retries the bad chunk within its limit and then stops — never in a loop", async () => {
+    const { db } = makeDb();
+    const beta = betaComesBackTruncatedGenerate();
+
+    await translateFeedItem(
+      makeItem({ translationAttemptCount: 1 }),
+      "bg",
+      deps(db, beta.generate)
+    );
+
+    assert.equal(
+      beta.betaCalls(),
+      MAX_TRANSLATION_RETRIES + 1,
+      "the failing chunk gets its full in-request retry budget and not one call more"
+    );
+  });
+
+  it("names the defect as its own reason, distinguishable from a malformed reply", async () => {
+    const { db } = makeDb();
+    const beta = betaComesBackTruncatedGenerate();
+    const warns: unknown[][] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => void warns.push(args);
+    try {
+      await translateFeedItem(
+        makeItem({ translationAttemptCount: 1 }),
+        "bg",
+        deps(db, beta.generate)
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+
+    const rejected = warns.filter((a) => a[0] === "[rss-translation] unusable model response");
+    assert.ok(rejected.length > 0, "expected the rejection to be logged");
+    const fields = rejected[0][1] as Record<string, unknown>;
+    assert.equal(fields.reason, "incomplete_translation");
+    assert.equal(fields.truncated, true, "so the retry knows to ask for less, not just re-roll");
+    assert.match(String(fields.error), /carries only \d+ of \d+ source characters/);
+  });
+
+  it("resumes from the banked chunks and only re-sends the one that was truncated", async () => {
+    const { db, last } = makeDb();
+    const failing = betaComesBackTruncatedGenerate();
+    await translateFeedItem(
+      makeItem({ translationAttemptCount: MAX_TRANSLATION_ATTEMPTS - 1 }),
+      "bg",
+      deps(db, failing.generate)
+    );
+    const bankedProgress = last().translationProgress as Record<string, string>;
+
+    // The continuation: this time the model finishes the passage it truncated.
+    let calls = 0;
+    const recovered = async (request: LlmRequest) => {
+      calls += 1;
+      const body = request.userPrompt.replace(/^Passage \d+ of \d+:\n/, "");
+      return { text: JSON.stringify({ content: bgBodyFor(body, "BETAMARKER") }) };
+    };
+
+    const { db: db2, last: last2 } = makeDb();
+    const outcome = await translateFeedItem(
+      makeItem({ translationAttemptCount: 0, translationProgress: bankedProgress }),
+      "bg",
+      deps(db2, recovered)
+    );
+
+    assert.equal(outcome.status, "translated");
+    assert.equal(calls, 1, "only the truncated chunk is re-sent");
+    const stored = String(last2().translatedContent);
+    assert.match(stored, /ALPHAMARKER/, "the banked chunk is still in the finished article");
+    assert.match(stored, /BETAMARKER/, "and so is the one that had to be redone");
   });
 });

@@ -1,4 +1,5 @@
 import {
+  assertTranslationCoverage,
   assessBulgarian,
   detectRepetition,
   isBulgarianTarget,
@@ -30,13 +31,20 @@ export interface TranslatedText {
  * Throws a {@link TranslationParseError} when the translation is unusable.
  *
  * Reasons match the prompt-based path exactly (`empty_translation`, `wrong_language`,
- * `repetition`) so a failure is recorded, logged and retried identically whichever
- * engine produced it.
+ * `repetition`, `incomplete_translation`) so a failure is recorded, logged and retried
+ * identically whichever engine produced it.
+ *
+ * `sourceContent` is the body this translation was made FROM, in the same
+ * representation as `text` — placeholders and all, since this gate is handed the
+ * placeholder form for the language check's own reasons (see the caller). Supplied, the
+ * translation is additionally checked for completeness; omitted, that check is skipped,
+ * so no existing caller changes behaviour by not passing it.
  */
 export function assertUsableTranslation(
   text: TranslatedText,
   targetLang: string,
-  mode: TranslationReplyMode
+  mode: TranslationReplyMode,
+  sourceContent?: string | null
 ): void {
   const title = text.translatedTitle?.trim() ?? "";
 
@@ -65,6 +73,10 @@ export function assertUsableTranslation(
       { repetition: loop }
     );
   }
+
+  // Last, for the same reason as in `parseTranslationResponse`: a reply that is also
+  // in the wrong language, or is a decoding loop, is more usefully named as that.
+  assertTranslationCoverage(sourceContent, content);
 }
 
 /**

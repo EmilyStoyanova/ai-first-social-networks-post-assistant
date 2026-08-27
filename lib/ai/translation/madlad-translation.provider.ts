@@ -524,7 +524,20 @@ export class MadladTranslationProvider implements TranslationProvider {
         );
       }
 
-      assertUsableTranslation(placeholderForm, request.targetLang, request.mode);
+      // The SOURCE folded by the same plan and in the same placeholder form, so the
+      // completeness check compares like with like. Segment-level invariants already
+      // make a silently dropped segment near-impossible here; this is the article-level
+      // net, and the same bar the prompt-based engine now clears.
+      const sourcePlaceholderForm = reassembleArticle(
+        plan,
+        protectedSegments.map((p) => p.text)
+      );
+      assertUsableTranslation(
+        placeholderForm,
+        request.targetLang,
+        request.mode,
+        sourcePlaceholderForm.translatedContent
+      );
     } catch (err) {
       // Same shape of warning the prompt-based engine writes, so a rejected MADLAD
       // translation is greppable alongside a rejected Qwen one. `willRetry` is always

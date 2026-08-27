@@ -487,15 +487,224 @@ export function reduceForSynthesis(
 export interface ConfidenceSignals {
   /** Share of all chunks the per-chunk analysis marked "central". */
   centralShare: number;
-  /** Average pairwise topic overlap (Jaccard) across central chunks — "do they agree". */
+  /** Average pairwise topic overlap across central chunks — "do they agree". */
   topicCoherence: number;
 }
 
-function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
-  if (a.size === 0 && b.size === 0) return 0;
+/**
+ * Function words removed before two topic phrases are compared.
+ *
+ * Deliberately a SEPARATE list from {@link CONNECTOR_WORDS} above, despite the
+ * overlap: that list answers "is this prose or a tag dump", so a word belongs in
+ * it only if its presence proves prose, and adding "and"/"the" to it would
+ * quietly loosen `looksLikeBagOfKeywords`. This list answers "does this word
+ * carry any subject at all", where articles and coordinators plainly do not. The
+ * shared half is spread in from `CONNECTOR_WORDS` rather than retyped, so the
+ * two cannot disagree about the words they both cover.
+ */
+const TOPIC_STOP_WORDS: ReadonlySet<string> = new Set([
+  ...CONNECTOR_WORDS,
+  // English articles, coordinators and possessives — absent above because none
+  // of them alone proves a string is prose.
+  "and",
+  "or",
+  "the",
+  "a",
+  "an",
+  "by",
+  "from",
+  "into",
+  "at",
+  "its",
+  "their",
+  "your",
+  "our",
+  // Bulgarian clitics and short possessives, for the same reason.
+  "си",
+  "му",
+  "им",
+  "ни",
+  "ви",
+  "го",
+  "ги",
+  "ти",
+]);
+
+/**
+ * Words too generic to be evidence that two chunks are about the same thing.
+ *
+ * Two chunks of ANY home-and-interiors article share "interior", "design" and
+ * "room"; two chunks of any manual share "product", "system" and "use". Letting
+ * those count as agreement is how a metric that is supposed to measure "do these
+ * sections point at one subject" degenerates into "are these sections from the
+ * same vertical". They are DOWN-WEIGHTED rather than dropped ({@link
+ * GENERIC_TOKEN_WEIGHT}) because they are not noise either — "interior lighting"
+ * and "interior furniture" really are slightly more related than "paint colours"
+ * and "garden irrigation" — they simply must never carry a coherence score on
+ * their own.
+ *
+ * Both languages this system classifies in, so the rule is symmetric: an English
+ * article and its Bulgarian translation must not score differently for a reason
+ * that is only about which list a word happens to be on.
+ */
+const GENERIC_TOPIC_WORDS: readonly string[] = [
+  "interior",
+  "home",
+  "design",
+  "room",
+  "guide",
+  "product",
+  "system",
+  "use",
+  "интериор",
+  "дом",
+  "дизайн",
+  "стая",
+  "ръководство",
+  "продукт",
+  "система",
+  "употреба",
+];
+
+const GENERIC_TOKEN_WEIGHT = 0.25;
+
+/**
+ * Shortest shared prefix that can stand for a shared root.
+ *
+ * Below four characters a prefix is not evidence of anything — "co" opens
+ * "colour", "coast" and "concrete" alike — so short tokens must match exactly.
+ */
+const MIN_STEM_MATCH_CHARS = 4;
+
+/**
+ * How many characters two forms of the same word may differ by in LENGTH.
+ *
+ * Covers the endings both languages actually add — English "-s"/"-es"/"-ing",
+ * Bulgarian "-те"/"-ите"/"-ове" — and is what keeps "colour"/"colours" together
+ * while leaving "colour"/"colourblindness" (nine characters apart) alone.
+ */
+const MAX_INFLECTION_CHARS = 3;
+
+/**
+ * How many trailing characters of the SHORTER token the shared prefix may miss.
+ *
+ * Bulgarian inflects by substitution as often as by suffixing — "цветове" and
+ * "цветови" are the same word and the same length, differing only in the final
+ * letter — so a rule that demanded one token be a whole prefix of the other
+ * would work for English and quietly fail for the language half this pipeline's
+ * articles are in. Two is enough for that class of ending and far too few to
+ * join two genuinely different words of ordinary length.
+ */
+const MAX_STEM_TRIM = 2;
+
+/** Characters `a` and `b` share from the start. */
+function commonPrefixLength(a: string, b: string): number {
+  const limit = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < limit && a[i] === b[i]) i++;
+  return i;
+}
+
+/**
+ * Whether two normalised tokens name the same thing.
+ *
+ * Shared-root approximation rather than a stemmer, and deliberately so: a real
+ * stemmer is per-language, and this metric has to hold for English and Bulgarian
+ * at once (and not silently misbehave on a third).
+ *
+ * Two conditions, and both must hold — which is what keeps this from becoming
+ * the classic truncation-stemmer failure. Prefix length alone would fuse
+ * "interior" and "internal" (both "inter"); it does not here, because the
+ * required prefix scales with the words' own length, so two eight-letter words
+ * must agree on six characters, not five. Length proximity alone would fuse
+ * "colour" and "colours" correctly but also "paint" and "print"; it does not
+ * here, because the prefix must also survive.
+ *
+ * The known limit, stated rather than hidden: a pair like "paint"/"pain" clears
+ * both tests. Such near-homographs are rare inside topic phrases and can only
+ * nudge one pairwise term, which is a far smaller error than the synonymy
+ * blindness this replaced — where "wall and trim colors" and "color
+ * combinations" scored zero.
+ */
+function tokensMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  const shorter = Math.min(a.length, b.length);
+  if (Math.abs(a.length - b.length) > MAX_INFLECTION_CHARS) return false;
+  const required = Math.max(MIN_STEM_MATCH_CHARS, shorter - MAX_STEM_TRIM);
+  return commonPrefixLength(a, b) >= required;
+}
+
+/** One chunk's topic phrases, reduced to weighted, de-duplicated tokens. */
+interface WeightedToken {
+  token: string;
+  weight: number;
+}
+
+/**
+ * Unicode-aware, script-agnostic tokenisation: runs of letters and digits, in
+ * any script. `\w` and `\b` are defined over ASCII in JavaScript and would treat
+ * every Cyrillic letter as a separator — the exact defect {@link CONNECTOR_RE}'s
+ * comment above documents, reappearing one function later if it were used here.
+ */
+function topicTokens(topics: readonly string[]): WeightedToken[] {
+  const seen = new Map<string, number>();
+  for (const phrase of topics) {
+    for (const raw of phrase.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
+      if (TOPIC_STOP_WORDS.has(raw)) continue;
+      if (seen.has(raw)) continue;
+      const generic = GENERIC_TOPIC_WORDS.some((g) => tokensMatch(g, raw));
+      seen.set(raw, generic ? GENERIC_TOKEN_WEIGHT : 1);
+    }
+  }
+  // Sorted so the greedy pairing below is deterministic for a given pair of
+  // chunks regardless of the order the model happened to list its topics in.
+  return [...seen]
+    .map(([token, weight]) => ({ token, weight }))
+    .sort((x, y) => (x.token < y.token ? -1 : x.token > y.token ? 1 : 0));
+}
+
+/**
+ * Weighted Jaccard over tokens, with one-to-one greedy pairing.
+ *
+ * The generalisation of the plain set Jaccard this replaced: a matched pair
+ * contributes `min` of the two weights to the intersection and `max` to the
+ * union, an unmatched token contributes its own weight to the union alone, and
+ * with every weight at 1 and only exact matches the result is the ordinary
+ * Jaccard again. Pairing is one-to-one so a chunk listing "colour", "colours"
+ * and "coloured" cannot claim three separate agreements with a chunk that says
+ * "colour" once.
+ */
+function weightedTopicOverlap(a: readonly WeightedToken[], b: readonly WeightedToken[]): number {
+  if (a.length === 0 || b.length === 0) return 0;
+
+  const takenB = new Array<boolean>(b.length).fill(false);
   let intersection = 0;
-  for (const x of a) if (b.has(x)) intersection++;
-  const union = a.size + b.size - intersection;
+  let union = 0;
+  let matchedWeightB = 0;
+
+  for (const left of a) {
+    let matched = -1;
+    for (let j = 0; j < b.length; j++) {
+      if (takenB[j]) continue;
+      if (tokensMatch(left.token, b[j].token)) {
+        matched = j;
+        break;
+      }
+    }
+    if (matched === -1) {
+      union += left.weight;
+      continue;
+    }
+    takenB[matched] = true;
+    const right = b[matched];
+    intersection += Math.min(left.weight, right.weight);
+    union += Math.max(left.weight, right.weight);
+    matchedWeightB += right.weight;
+  }
+
+  const totalB = b.reduce((sum, t) => sum + t.weight, 0);
+  union += totalB - matchedWeightB;
+
   return union === 0 ? 0 : intersection / union;
 }
 
@@ -506,6 +715,25 @@ function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
  * NEUTRAL, not full, coherence score); central chunks whose topics barely
  * overlap are chunks pointing at different subjects, which is exactly the
  * "genuinely multi-topic article" case confidence must not paper over.
+ *
+ * ── Why the comparison is over TOKENS, not whole phrases ─────────────────────
+ * A chunk's `topics` are freeform phrases each chunk writes independently, in
+ * its own words (see `ChunkAnalysis.topics`). Comparing them as whole strings —
+ * which this did — asks two chunks to have chosen the SAME WORDING, not the same
+ * subject, and two sections of one paint article routinely write "wall and trim
+ * colors" and "color combinations". Those share a subject and not one character
+ * sequence, so the old metric scored them 0, and 0 coherence is the largest term
+ * in {@link confidenceCeiling}: a coherent chunked article was pinned at a 0.4
+ * ceiling by nothing but synonymy. Measured in production, `topicCoherence` was
+ * effectively never non-zero except by lexical coincidence.
+ *
+ * So the comparison happens one level down, on normalised tokens, and every part
+ * of that is chosen to keep the metric HONEST rather than merely higher:
+ * stop words are dropped, generic vertical vocabulary is down-weighted (see
+ * {@link GENERIC_TOPIC_WORDS}) so shared genericisms cannot manufacture
+ * agreement, and near-forms match by prefix containment rather than by a
+ * per-language stemmer (see {@link tokensMatch}). Fully deterministic, no model
+ * call, no network, and linear in the topic text a chunk already carries.
  */
 export function computeConfidenceSignals(analyses: readonly ChunkAnalysis[]): ConfidenceSignals {
   const total = analyses.length;
@@ -515,16 +743,25 @@ export function computeConfidenceSignals(analyses: readonly ChunkAnalysis[]): Co
   if (central.length === 0) return { centralShare, topicCoherence: 0 };
   if (central.length === 1) return { centralShare, topicCoherence: 0.5 };
 
-  const sets = central.map((a) => new Set(a.topics.map((t) => t.toLowerCase())));
+  const bags = central.map((a) => topicTokens(a.topics));
   let sum = 0;
   let pairs = 0;
-  for (let i = 0; i < sets.length; i++) {
-    for (let j = i + 1; j < sets.length; j++) {
+  for (let i = 0; i < bags.length; i++) {
+    for (let j = i + 1; j < bags.length; j++) {
       pairs++;
-      sum += jaccard(sets[i], sets[j]);
+      sum += weightedTopicOverlap(bags[i], bags[j]);
     }
   }
   return { centralShare, topicCoherence: pairs === 0 ? 0 : sum / pairs };
+}
+
+/**
+ * The pairwise agreement score between two chunks' topic phrase lists, exposed
+ * for tests and diagnostics. `computeConfidenceSignals` is the production entry
+ * point; this is the one pairwise term it averages.
+ */
+export function topicPhraseAgreement(a: readonly string[], b: readonly string[]): number {
+  return weightedTopicOverlap(topicTokens(a), topicTokens(b));
 }
 
 /**

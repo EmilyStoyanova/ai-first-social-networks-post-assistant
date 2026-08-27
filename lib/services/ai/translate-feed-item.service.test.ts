@@ -1135,6 +1135,47 @@ const LONG_ARTICLE =
 /** The reply shape the logs showed: a body cut off mid-string, so the JSON never closes. */
 const TRUNCATED_RESPONSE = `{"title":"Заглавие","content":"Частичен превод`;
 
+/**
+ * Distinct Bulgarian sentences, cycled to build a body of a given size.
+ *
+ * Distinct rather than one sentence repeated, because `detectRepetition` would
+ * (correctly) call a single sentence looping back to back a decoding loop — the
+ * fixture has to look like an article, not like the defect a sibling test asserts.
+ */
+const BG_SENTENCES = [
+  "Новата версия идва с преработен корпус и повече възможности за монтаж.",
+  "Ревютата отбелязват по-доброто отвеждане на топлината при продължително натоварване.",
+  "Първите тестове показват осезаемо подобрение спрямо предишното поколение.",
+  "Производителят твърди, че промяната е заради обратната връзка от клиентите.",
+  "Недостигът на компоненти забави пускането на няколко пазара.",
+  "Обновяване на фърмуера отстрани първите сигнали за нестабилност.",
+];
+
+function bulgarianBody(minChars: number): string {
+  const out: string[] = [];
+  let len = 0;
+  for (let i = 0; len < minChars; i += 1) {
+    const sentence = BG_SENTENCES[i % BG_SENTENCES.length];
+    out.push(sentence);
+    len += sentence.length + 1;
+  }
+  return out.join(" ");
+}
+
+/**
+ * The accepted reply for a LONG article, sized to it.
+ *
+ * `GOOD_RESPONSE`'s one-word body is fine for the short fixtures elsewhere in this
+ * file — those sit below the completeness check's own length floor — but a
+ * ten-character translation of a 2,650-character article is exactly the production
+ * defect `assertTranslationCoverage` now refuses, so the fixture has to be an
+ * article-sized translation rather than a stub.
+ */
+const GOOD_LONG_RESPONSE = JSON.stringify({
+  title: "Заглавие",
+  content: bulgarianBody(2000),
+});
+
 /** The body characters the request actually carried, read back off the prompt. */
 function bodyCharsOf(request: LlmRequest): number {
   const marker = "\nContent: ";
@@ -1149,7 +1190,7 @@ function bodyCharsOf(request: LlmRequest): number {
 describe("translateFeedItem — truncation shrinks the next try", () => {
   it("rebuilds the request with a smaller body after a cut-off reply", async () => {
     const db = makeDb();
-    const p = scriptedProvider([TRUNCATED_RESPONSE, GOOD_RESPONSE]);
+    const p = scriptedProvider([TRUNCATED_RESPONSE, GOOD_LONG_RESPONSE]);
     const cap = captureConsole();
     let outcome;
     try {
@@ -1188,7 +1229,7 @@ describe("translateFeedItem — truncation shrinks the next try", () => {
     const english =
       '{"title":"Modernism on the Watch","content":"The company announced today that the new ' +
       'service will be available next month across every major city in the country."}';
-    const p = scriptedProvider([english, GOOD_RESPONSE]);
+    const p = scriptedProvider([english, GOOD_LONG_RESPONSE]);
     const cap = captureConsole();
     try {
       await translateFeedItem(
@@ -1277,7 +1318,7 @@ describe("translateFeedItem — truncation shrinks the next try", () => {
 
   it("reports the shrink so an operator can see why the retry differed", async () => {
     const db = makeDb();
-    const p = scriptedProvider([TRUNCATED_RESPONSE, GOOD_RESPONSE]);
+    const p = scriptedProvider([TRUNCATED_RESPONSE, GOOD_LONG_RESPONSE]);
     const cap = captureConsole();
     try {
       await translateFeedItem(
@@ -1394,5 +1435,122 @@ describe("translateFeedItem — timeout", () => {
 
     assert.equal(slow.status, "failed");
     assert.equal(fast.status, "translated");
+  });
+});
+
+// ─── Completeness: a well-formed reply that carries only part of the article ──
+
+/**
+ * The production failure the completeness gate was added for, at the single-call
+ * path: valid JSON, the right shape, fluent Bulgarian, no decoding loop — and a
+ * fraction of the article. Nothing about this reply is malformed, which is exactly
+ * why the salvage-based truncation signal could not see it.
+ */
+describe("translateFeedItem — a valid reply that carries only part of the article", () => {
+  const SHORT_BUT_VALID = JSON.stringify({ title: "Заглавие", content: bulgarianBody(200) });
+
+  it("rejects it, names it, and asks for a smaller article on the next try", async () => {
+    const db = makeDb();
+    const p = scriptedProvider([SHORT_BUT_VALID, GOOD_LONG_RESPONSE]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem({ content: LONG_ARTICLE.repeat(15) }),
+        "bg",
+        makeDeps(db, p.generate)
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "translated");
+    assert.equal(p.requests.length, 2);
+
+    const rejected = cap.warns.find((a) => a[0] === "[rss-translation] unusable model response");
+    assert.equal((rejected![1] as Record<string, unknown>).reason, "incomplete_translation");
+    // Routed through the SAME `truncated` flag a cut-off reply uses, so the retry is a
+    // smaller request rather than another roll of the same dice.
+    assert.equal((rejected![1] as Record<string, unknown>).truncated, true);
+    assert.ok(
+      bodyCharsOf(p.requests[1]) < bodyCharsOf(p.requests[0]),
+      "the retry must ask for less than the try that could not finish"
+    );
+  });
+
+  it("measures the retry against the SMALLER body it was actually given", async () => {
+    // ~1200 Bulgarian characters is far too little for the whole ~2650-char article
+    // but a complete translation of the ~1500-char one the shrink actually sent. A
+    // check that kept measuring against the original would condemn it.
+    const db = makeDb();
+    const partialThenWhole = JSON.stringify({
+      title: "Заглавие",
+      content: bulgarianBody(1200),
+    });
+    const p = scriptedProvider([SHORT_BUT_VALID, partialThenWhole]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem({ content: LONG_ARTICLE.repeat(15) }),
+        "bg",
+        makeDeps(db, p.generate)
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "translated");
+    assert.equal(p.requests.length, 2);
+  });
+
+  it("fails the item cleanly when every try comes back short — it never loops", async () => {
+    const db = makeDb();
+    const p = scriptedProvider([SHORT_BUT_VALID, SHORT_BUT_VALID, SHORT_BUT_VALID]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem({ content: LONG_ARTICLE.repeat(15) }),
+        "bg",
+        makeDeps(db, p.generate)
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "failed");
+    assert.equal(
+      p.requests.length,
+      MAX_TRANSLATION_RETRIES + 1,
+      "the in-request budget is spent exactly once, not extended by the new reason"
+    );
+    const final = db.updates.at(-1)!;
+    assert.equal(final.translationStatus, "failed");
+    assert.ok(final.translationNextRetryAt instanceof Date, "and it backs off like any failure");
+    // The article stays readable: generation falls back to the untranslated original
+    // rather than to a ninth of it.
+    assert.equal(final.translatedContent ?? null, null);
+  });
+
+  it("leaves a short article alone — its ratio is not evidence of anything", async () => {
+    // Below the coverage check's own length floor. This is the case where a strict
+    // ratio would do harm, so it must not run at all.
+    const db = makeDb();
+    const p = scriptedProvider([SHORT_BUT_VALID]);
+    const cap = captureConsole();
+    let outcome;
+    try {
+      outcome = await translateFeedItem(
+        makeItem({ content: LONG_ARTICLE }),
+        "bg",
+        makeDeps(db, p.generate)
+      );
+    } finally {
+      cap.stop();
+    }
+
+    assert.equal(outcome.status, "translated");
+    assert.equal(p.requests.length, 1, "no retry — there was nothing wrong with the reply");
   });
 });

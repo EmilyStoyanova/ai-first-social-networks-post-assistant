@@ -327,10 +327,18 @@ export function topicsFingerprint(priorities: TopicPriorities): string {
  *
  * ── The contract ────────────────────────────────────────────────────────────
  *
- * Bump this ONLY when the classifier's own semantics change — the system prompt's
+ * Bump this when the classifier's own semantics change — the system prompt's
  * matching rules, the worked examples, the reply contract, or the vetting in
- * `parseClassificationResponse`. Do NOT bump it for wording that cannot change a
- * verdict, and never bump it per deploy.
+ * `parseClassificationResponse` — OR when the ArticleUnderstanding signal the
+ * verdict is judged against changes in a way that can move a verdict. The two
+ * calls this module documents as "one flow" (`classify-feed-item.service.ts`)
+ * are a single question — "would asking again produce the same verdict?" — so a
+ * fix upstream, in `article-understanding.ts`'s confidence computation, is
+ * exactly as invalidating as a fix to this file's own prompt: neither changes
+ * the article text or the topic configuration the hash otherwise fingerprints,
+ * so without a bump a stale verdict settles back to `completed` for free,
+ * forever, having never actually been re-asked under the fix. Do NOT bump it for
+ * wording that cannot change a verdict, and never bump it per deploy.
  *
  * A bump makes stale verdicts ELIGIBLE for re-evaluation; it does not perform
  * one. Nothing reclassifies on deploy — the existing reopen paths
@@ -352,8 +360,16 @@ export function topicsFingerprint(priorities: TopicPriorities): string {
  *       different languages/scripts match on meaning, the difference in language
  *       is never itself grounds for OUT_OF_SCOPE, and the configured topic is
  *       always written back verbatim. Precision rules unchanged.
+ *   3 — `computeConfidenceSignals`'s `topicCoherence` (article-understanding.ts)
+ *       stopped using exact-string Jaccard over freeform per-chunk topics and
+ *       started using weighted token overlap, so multi-chunk articles whose
+ *       chunks describe the same subject in different words are no longer
+ *       pinned to a confidence ceiling of 0.40. This module's own code did not
+ *       change, but the confidence value it renders into the prompt and gates
+ *       on in `parseClassificationResponse` did, for some already-stored
+ *       verdicts — hence the bump.
  */
-export const CLASSIFICATION_SEMANTIC_VERSION = 2;
+export const CLASSIFICATION_SEMANTIC_VERSION = 3;
 
 /**
  * The exact input a stored verdict was derived from: the text that was sent, plus

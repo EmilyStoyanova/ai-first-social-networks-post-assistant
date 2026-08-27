@@ -10,9 +10,13 @@ import {
   shrinkTranslationContentBudget,
   TRANSLATION_TITLE_JSON_SCHEMA,
   TRANSLATION_CONTENT_ONLY_JSON_SCHEMA,
+  assertTranslationCoverage,
   assessBulgarian,
+  assessTranslationCoverage,
   buildContentChunkPrompt,
   buildTranslationPrompts,
+  MIN_SOURCE_CHARS_FOR_COVERAGE_CHECK,
+  MIN_TRANSLATION_COVERAGE_RATIO,
   buildTranslationRetryPrompt,
   capTranslationContent,
   classifyTranslationInput,
@@ -54,6 +58,19 @@ describe("computeTranslationHash", () => {
 
   it("treats null title/content as empty rather than throwing", () => {
     assert.equal(computeTranslationHash(null, null, "bg"), computeTranslationHash("", "", "bg"));
+  });
+
+  it("is not affected by CLASSIFICATION_SEMANTIC_VERSION — the two hashes are independent", () => {
+    // A pinned digest for a fixed input. This module reads no classification
+    // constant and has no reason to: a classifier semantic-version bump (see
+    // `CLASSIFICATION_SEMANTIC_VERSION` in feed-item-classification.ts) must
+    // reopen stale VERDICTS, never re-spend a translation that already
+    // completed against text that has not changed. If this hash ever grew a
+    // dependency on classification state, this literal would break.
+    assert.equal(
+      computeTranslationHash("Title", "Body", "bg"),
+      "ac74d0d0aa4857b680c9069a67de7f11a46660c75d7590c0ddfd517d52184a33"
+    );
   });
 });
 
@@ -1685,5 +1702,221 @@ describe("assessBulgarian — non-Latin drift", () => {
         "month across every major city, and the price remains unchanged for existing customers."
     );
     assert.equal(a.verdict, "not_cyrillic");
+  });
+});
+
+// ─── Completeness (coverage) ──────────────────────────────────────────────────
+
+/**
+ * The production defect this gate was added for, reproduced from the stored
+ * trace of feed item 37067335: a 2,452-character English article came back as a
+ * 218-character Bulgarian one. The reply was VALID — the model wrote a Bulgarian
+ * opening quote „ and then an unescaped ASCII quote, which closed its own JSON
+ * string, and Ollama's schema-constrained decoder legally finished the object and
+ * stopped. Complete JSON, right shape, right language, no decoding loop: every
+ * check the pipeline had passed it, and 9 % of an article was stored as if it
+ * were the whole thing.
+ */
+const BG_PROSE = [
+  "Новата версия идва с преработен корпус и повече възможности за монтаж.",
+  "Ревютата отбелязват по-доброто отвеждане на топлината при продължително натоварване.",
+  "Първите тестове показват осезаемо подобрение спрямо предишното поколение.",
+  "Производителят твърди, че промяната е заради обратната връзка от клиентите.",
+  "Недостигът на компоненти забави пускането на няколко пазара.",
+  "Обновяване на фърмуера отстрани първите сигнали за нестабилност.",
+];
+
+const EN_PROSE = [
+  "The new revision brings a redesigned chassis and a wider range of mounting options.",
+  "Reviewers noted the improved thermal performance under sustained load.",
+  "Early benchmarks show a measurable gain over the previous generation.",
+  "The manufacturer says the change was driven directly by customer feedback.",
+  "Supply constraints delayed the rollout in several regional markets.",
+  "A firmware update addressed the initial reports of instability.",
+];
+
+/** Prose of at least `minChars`, cycled from `pool` so nothing looks like a loop. */
+function proseOf(pool: readonly string[], minChars: number): string {
+  const out: string[] = [];
+  let len = 0;
+  for (let i = 0; len < minChars; i += 1) {
+    out.push(pool[i % pool.length]);
+    len += pool[i % pool.length].length + 1;
+  }
+  return out.join(" ");
+}
+
+describe("assessTranslationCoverage", () => {
+  it("passes a normal English to Bulgarian translation, which is slightly LONGER", () => {
+    const source = proseOf(EN_PROSE, 2400);
+    // The measured healthy band across the stored corpus is 1.00–1.13× the source.
+    const translated = proseOf(BG_PROSE, Math.round(source.length * 1.1));
+    const coverage = assessTranslationCoverage(source, translated);
+    assert.equal(coverage.checked, true);
+    assert.equal(coverage.complete, true);
+  });
+
+  it("passes a translation that is somewhat shorter but still the whole article", () => {
+    const source = proseOf(EN_PROSE, 2400);
+    const translated = proseOf(BG_PROSE, Math.round(source.length * 0.85));
+    assert.equal(assessTranslationCoverage(source, translated).complete, true);
+  });
+
+  it("fails the observed defect — a fraction of the article", () => {
+    const source = proseOf(EN_PROSE, 2452);
+    const coverage = assessTranslationCoverage(source, BG_PROSE.join(" ").slice(0, 218));
+    assert.equal(coverage.checked, true);
+    assert.equal(coverage.complete, false);
+    assert.ok(coverage.ratio < 0.2, `expected a tiny ratio, got ${coverage.ratio}`);
+  });
+
+  it("fails the chunk-level shape too — one chunk of an article cut in half", () => {
+    // The second defective article in the corpus: chunk 1 of 2 came back at 0.60,
+    // which the whole-article ratio (0.73) alone would have averaged away.
+    const source = proseOf(EN_PROSE, 2582);
+    const translated = proseOf(BG_PROSE, Math.round(source.length * 0.6));
+    assert.equal(assessTranslationCoverage(source, translated).complete, false);
+  });
+
+  it("does not judge a source too short for the ratio to mean anything", () => {
+    const source = "A short stub of an article body.".repeat(3);
+    assert.ok(source.length < MIN_SOURCE_CHARS_FOR_COVERAGE_CHECK);
+    const coverage = assessTranslationCoverage(source, "Кратко.");
+    assert.equal(coverage.checked, false);
+    assert.equal(coverage.complete, true, "an unmeasurable source must never be condemned");
+  });
+
+  it("does not count paragraph handling as lost text", () => {
+    const source = proseOf(EN_PROSE, 1200).split(" ").join("\n\n");
+    const translated = proseOf(BG_PROSE, 1200);
+    assert.equal(assessTranslationCoverage(source, translated).complete, true);
+  });
+
+  it("treats a missing source or translation honestly rather than throwing", () => {
+    assert.equal(assessTranslationCoverage(null, "нещо").complete, true);
+    assert.equal(assessTranslationCoverage(proseOf(EN_PROSE, 1200), null).complete, false);
+  });
+
+  it("sits below every healthy observation and above both defects", () => {
+    // Guards the calibration itself: the constant is meaningful only if it
+    // separates the two populations its comment claims it does.
+    assert.ok(MIN_TRANSLATION_COVERAGE_RATIO < 1.0, "healthy EN to BG never contracted");
+    assert.ok(MIN_TRANSLATION_COVERAGE_RATIO > 0.6, "the 0.60 chunk defect must be caught");
+  });
+});
+
+describe("assertTranslationCoverage", () => {
+  it("raises incomplete_translation, flagged truncated so the retry asks for less", () => {
+    const source = proseOf(EN_PROSE, 2400);
+    try {
+      assertTranslationCoverage(source, proseOf(BG_PROSE, 200));
+      assert.fail("expected a rejection");
+    } catch (err) {
+      assert.ok(err instanceof TranslationParseError);
+      assert.equal(err.reason, "incomplete_translation");
+      assert.equal(err.truncated, true);
+      assert.match(err.message, /source characters/);
+    }
+  });
+
+  it("is retriable — a fresh sample really can finish the article", () => {
+    assert.equal(isRetriableParseFailure("incomplete_translation"), true);
+  });
+
+  it("says nothing when the translation is complete", () => {
+    const source = proseOf(EN_PROSE, 2400);
+    assert.doesNotThrow(() => assertTranslationCoverage(source, proseOf(BG_PROSE, 2400)));
+  });
+});
+
+describe("parseTranslationResponse — completeness", () => {
+  const SOURCE = proseOf(EN_PROSE, 2452);
+
+  /** The reply shape from the trace: the string ended early, the object did not. */
+  const CUT_BY_QUOTE = JSON.stringify({
+    title: "Максимизиране на цвета в максималистични пространства",
+    content: proseOf(BG_PROSE, 200),
+  });
+
+  it("accepts the defective reply when no source is given — behaviour is unchanged", () => {
+    // Every existing caller that does not pass `sourceContent` must keep working
+    // exactly as it did; the check is opt-in per call site.
+    const parsed = parseTranslationResponse(CUT_BY_QUOTE, "bg", { mode: "full" });
+    assert.ok((parsed.translatedContent ?? "").length > 0);
+  });
+
+  it("rejects it once the source it was asked to translate is known", () => {
+    try {
+      parseTranslationResponse(CUT_BY_QUOTE, "bg", { mode: "full", sourceContent: SOURCE });
+      assert.fail("expected a rejection");
+    } catch (err) {
+      assert.ok(err instanceof TranslationParseError);
+      assert.equal(err.reason, "incomplete_translation");
+      assert.equal(err.truncated, true);
+    }
+  });
+
+  it("applies to one chunk of a large article as well as to a whole one", () => {
+    const chunk = JSON.stringify({ content: proseOf(BG_PROSE, 300) });
+    try {
+      parseTranslationResponse(chunk, "bg", { mode: "content_only", sourceContent: SOURCE });
+      assert.fail("expected a rejection");
+    } catch (err) {
+      assert.ok(err instanceof TranslationParseError);
+      assert.equal(err.reason, "incomplete_translation");
+    }
+  });
+
+  it("accepts a complete translation of the same source", () => {
+    const whole = JSON.stringify({ title: "Заглавие", content: proseOf(BG_PROSE, 2600) });
+    const parsed = parseTranslationResponse(whole, "bg", { mode: "full", sourceContent: SOURCE });
+    assert.equal(parsed.translatedTitle, "Заглавие");
+    assert.ok((parsed.translatedContent ?? "").length > 2000);
+  });
+
+  it("never applies to a title, whatever the source says", () => {
+    const title = JSON.stringify({ title: "Кратко заглавие" });
+    const parsed = parseTranslationResponse(title, "bg", {
+      mode: "title_only",
+      sourceContent: SOURCE,
+    });
+    assert.equal(parsed.translatedTitle, "Кратко заглавие");
+  });
+
+  it("still names the more specific defect when a reply is both short AND wrong", () => {
+    // A short ENGLISH reply is a language failure first — that is the actionable
+    // diagnosis, and the retry feedback differs.
+    const english = JSON.stringify({ title: "Title", content: EN_PROSE.join(" ") });
+    let reason: string | null = null;
+    try {
+      parseTranslationResponse(english, "bg", { mode: "full", sourceContent: SOURCE });
+    } catch (err) {
+      assert.ok(err instanceof TranslationParseError);
+      reason = err.reason;
+    }
+    assert.equal(reason, "wrong_language");
+  });
+
+  it("measures the reply against the SAME representation it is written in", () => {
+    // A body dense with URLs is sent as short `[[n]]` placeholders and comes back
+    // carrying them; comparing the reply against the UNprotected source would
+    // measure the protection scheme, not the translation.
+    const body = Array.from(
+      { length: 12 },
+      (_, i) => `${EN_PROSE[i % EN_PROSE.length]} See https://example.com/a-fairly-long-path-${i}.`
+    ).join(" ");
+    const prompts = buildTranslationPrompts("A title", body, "bg");
+    assert.ok(prompts.contentProtectedValues.length > 0, "fixture needs protected values");
+    assert.ok(
+      prompts.contentProtectedText.length < body.length,
+      "placeholders are shorter than the URLs they replace"
+    );
+
+    const placeholders = prompts.contentProtectedValues.map((_, i) => `[[${i}]]`).join(" ");
+    const translated = `${proseOf(BG_PROSE, prompts.contentProtectedText.length)} ${placeholders}`;
+    assert.equal(
+      assessTranslationCoverage(prompts.contentProtectedText, translated).complete,
+      true
+    );
   });
 });

@@ -1022,6 +1022,18 @@ export interface TranslationPrompts {
    */
   titleProtectedValues: ProtectedValue[];
   contentProtectedValues: ProtectedValue[];
+  /**
+   * The body text as it appears in `userPrompt` — sanitised, capped, and still
+   * carrying its `[[n]]` placeholders. Empty string in title_only mode.
+   *
+   * Exposed so the completeness check can compare the reply against the text that
+   * was actually sent, in the reply's own representation — see
+   * {@link assessTranslationCoverage}. `contentChars` above is deliberately NOT
+   * that number: it measures the body BEFORE protection, so a spec-heavy article
+   * where placeholders are much shorter than the URLs they replaced would appear
+   * to have lost text it never had.
+   */
+  contentProtectedText: string;
 }
 
 export interface BuildTranslationPromptsOptions {
@@ -1145,6 +1157,7 @@ export function buildTranslationPrompts(
     derivedTitle,
     titleProtectedValues: titleProtection?.values ?? [],
     contentProtectedValues: contentProtection?.values ?? [],
+    contentProtectedText: mode === "full" ? protectedContentText : "",
   };
 }
 
@@ -1179,6 +1192,12 @@ export interface ContentChunkPrompt {
   schema: typeof TRANSLATION_CONTENT_ONLY_JSON_SCHEMA;
   /** Values held out of the decoder for THIS chunk alone — see the module comment below. */
   protectedValues: ProtectedValue[];
+  /**
+   * This chunk's source text as it appears in `userPrompt`, placeholders and all —
+   * what the reply is measured against for completeness. See
+   * {@link assessTranslationCoverage}.
+   */
+  protectedText: string;
 }
 
 /**
@@ -1246,6 +1265,7 @@ export function buildContentChunkPrompt(
     userPrompt,
     schema: TRANSLATION_CONTENT_ONLY_JSON_SCHEMA,
     protectedValues: protection.values,
+    protectedText: protection.text,
   };
 }
 
@@ -1256,7 +1276,9 @@ export function buildContentChunkPrompt(
  *   • schema_validation — valid JSON but the wrong shape (missing/!string title|content);
  *   • empty_translation — the right shape, but the model returned no text to store;
  *   • wrong_language    — right shape, but the text is not Bulgarian (drifted language);
- *   • repetition        — right shape and language, but the body is a decoding loop.
+ *   • repetition        — right shape and language, but the body is a decoding loop;
+ *   • incomplete_translation — right shape, right language, no loop, but only a fraction
+ *     of the article came back (see {@link assessTranslationCoverage}).
  */
 export type TranslationParseFailure =
   | "invalid_json"
@@ -1264,6 +1286,14 @@ export type TranslationParseFailure =
   | "empty_translation"
   | "wrong_language"
   | "repetition"
+  /**
+   * The model stopped translating part-way through and the reply is a PREFIX of the
+   * article rather than the whole of it. Distinct from `invalid_json` with
+   * `truncated: true`, which is the same event caught by a different signal: there the
+   * JSON itself was cut and the salvage pass saw it, here the JSON is complete and
+   * well-formed and only the CONTENT is short. See {@link assertTranslationCoverage}.
+   */
+  | "incomplete_translation"
   /**
    * A value that was held OUT of the decoder — a URL, an e-mail address, a model
    * code — did not come back intact, so the translation cannot be reassembled without
@@ -1288,6 +1318,8 @@ const DEFAULT_FEEDBACK: Record<TranslationParseFailure, string> = {
     "Your translation broke down and repeated the same word or phrase over and over. Translate the text once, from the beginning, as normal continuous prose.",
   protected_token:
     "Your translation did not reproduce the placeholders exactly. Copy every [[n]] placeholder through unchanged, once each, and translate only the words around them.",
+  incomplete_translation:
+    'You stopped part-way through and translated only the beginning of the text. Translate the WHOLE text, from the first word to the last, keeping every paragraph — do not summarise it and do not stop early. If the text contains a quotation mark, write it as \\" inside the JSON string so it does not end the string.',
 };
 
 export class TranslationParseError extends Error {
@@ -1345,7 +1377,8 @@ export function isRetriableParseFailure(reason: TranslationParseFailure): boolea
     reason === "empty_translation" ||
     reason === "wrong_language" ||
     reason === "repetition" ||
-    reason === "protected_token"
+    reason === "protected_token" ||
+    reason === "incomplete_translation"
   );
 }
 
@@ -1630,6 +1663,135 @@ function extractJson(raw: string): { text: string; repairs: JsonRepair[] } {
   return { text: repaired.text, repairs: [...repairs, ...repaired.repairs] };
 }
 
+// ─── Completeness (coverage) ──────────────────────────────────────────────────
+
+/**
+ * Shortest source body a coverage ratio may be computed from.
+ *
+ * Below this the ratio is noise rather than evidence: on a two-sentence stub one
+ * compound word, one dropped parenthetical, or one differently-punctuated
+ * sentence moves it further than a genuine defect would, and the cost of being
+ * wrong (a retried, then failed, then English-fallback article) is the same
+ * either way. Sized above every stub in the observed corpus and well below the
+ * article lengths where a lost half is unmistakable.
+ */
+export const MIN_SOURCE_CHARS_FOR_COVERAGE_CHECK = 600;
+
+/**
+ * Least share of the source a translation must carry, measured in characters.
+ *
+ * ── What this is calibrated against ─────────────────────────────────────────
+ * Measured across the stored corpus (English → Bulgarian, both the single-call
+ * and the chunked engine), a HEALTHY translation runs 1.00–1.13× its source:
+ * Cyrillic is slightly longer than the Latin it renders, and no healthy article
+ * in the corpus came back shorter than its source at all. The two defective ones
+ * sat at 0.60 (one chunk of a two-chunk article) and 0.09 — both the same fault,
+ * a model that emitted an unescaped `"` in the middle of a Bulgarian quotation
+ * and thereby closed its own JSON string early. 0.7 sits below every healthy
+ * observation with a wide margin and above both defects.
+ *
+ * ── What it does NOT claim ──────────────────────────────────────────────────
+ * This is a floor on how much of the source a translation may fail to carry, not
+ * a model of any particular language pair. A target language that legitimately
+ * CONTRACTS its source below this share in characters — Chinese and Japanese
+ * being the obvious cases — needs this number revisited before it is used, and
+ * this comment is where that is recorded. Every target this pipeline translates
+ * to today expands.
+ *
+ * ── Why erring on the strict side is safe ───────────────────────────────────
+ * A false positive costs a regeneration, then (if it persists) the item's normal
+ * backoff schedule, and finally a `failed` translation — at which point
+ * {@link resolveFeedItemContent} falls back to the ORIGINAL article, which is
+ * exactly what a company without translation reads anyway. A false NEGATIVE
+ * stores 9 % of an article as if it were the whole thing and every downstream
+ * step — understanding, classification, generation — silently believes it.
+ */
+export const MIN_TRANSLATION_COVERAGE_RATIO = 0.7;
+
+export interface TranslationCoverage {
+  sourceChars: number;
+  translatedChars: number;
+  /** translatedChars / sourceChars, or 0 when there is no source to divide by. */
+  ratio: number;
+  /** False when the source was too short for the ratio to mean anything. */
+  checked: boolean;
+  /** True when the check did not run, or ran and passed. */
+  complete: boolean;
+}
+
+/**
+ * How much of the source a translation actually carries.
+ *
+ * Both sides must be given in the SAME representation — in practice both still
+ * carrying their `[[n]]` placeholders, since a restored URL is a long run of
+ * characters on one side and a five-character placeholder on the other, and
+ * comparing across that difference measures the protection scheme rather than
+ * the translation. Callers inside the parse path have the protected form of both
+ * to hand; see `buildTranslationPrompts().contentProtectedText`.
+ *
+ * Whitespace is normalised away on both sides so paragraph handling — a model
+ * that writes `\n` where the source had `\n\n` — cannot register as lost text.
+ */
+export function assessTranslationCoverage(
+  sourceContent: string | null | undefined,
+  translatedContent: string | null | undefined
+): TranslationCoverage {
+  const normalise = (text: string | null | undefined): string =>
+    (text ?? "").replace(/\s+/gu, " ").trim();
+
+  const sourceChars = normalise(sourceContent).length;
+  const translatedChars = normalise(translatedContent).length;
+  const ratio = sourceChars === 0 ? 0 : translatedChars / sourceChars;
+  const checked = sourceChars >= MIN_SOURCE_CHARS_FOR_COVERAGE_CHECK;
+
+  return {
+    sourceChars,
+    translatedChars,
+    ratio,
+    checked,
+    complete: !checked || ratio >= MIN_TRANSLATION_COVERAGE_RATIO,
+  };
+}
+
+/**
+ * Throws `incomplete_translation` when a well-formed reply carries only a
+ * fraction of the article it was given.
+ *
+ * ── Why this had to be a new signal rather than a stricter old one ──────────
+ * The pipeline already had a truncation gate, and it is genuinely good at the
+ * defect it was built for: a reply CUT OFF mid-object is spotted by the JSON
+ * salvage pass (`closed_string`, `dropped_partial_member`, …), reported through
+ * `TranslationParseError.truncated`, and answered by shrinking the body for the
+ * next try. It could not see the failure that produced a 218-character
+ * translation of a 2,452-character article, because that reply needed no salvage
+ * at all: the model wrote a Bulgarian opening quote and then an unescaped ASCII
+ * `"`, which closed its own JSON string, and Ollama's schema-constrained decoder
+ * then legally finished the object and stopped. Valid JSON, right shape, right
+ * language, no decoding loop — every existing check passed, including the
+ * `MIN_REPAIRED_CONTENT_CHARS` fragment floor, which only applies to a reply the
+ * salvage had to close.
+ *
+ * So the gate is repaired by giving it a second, INDEPENDENT signal — length —
+ * that does not depend on the reply having been malformed, and routing it into
+ * the SAME mechanism: the same error type, the same retry loop, the same
+ * `truncated` flag, so the next try asks for a smaller body exactly as it
+ * already does for a cut-off reply. Nothing new is bolted alongside it.
+ */
+export function assertTranslationCoverage(
+  sourceContent: string | null | undefined,
+  translatedContent: string | null | undefined
+): void {
+  const coverage = assessTranslationCoverage(sourceContent, translatedContent);
+  if (coverage.complete) return;
+  throw new TranslationParseError(
+    `Translation carries only ${coverage.translatedChars} of ${coverage.sourceChars} source characters ` +
+      `(${Math.round(coverage.ratio * 100)}%, floor ${Math.round(MIN_TRANSLATION_COVERAGE_RATIO * 100)}%) — ` +
+      "the model stopped before the end of the text.",
+    "incomplete_translation",
+    { truncated: true }
+  );
+}
+
 // ─── Reply validation ─────────────────────────────────────────────────────────
 
 export interface ParseTranslationOptions {
@@ -1640,6 +1802,18 @@ export interface ParseTranslationOptions {
    * with `translatedTitle` always null.
    */
   mode?: TranslationReplyMode;
+  /**
+   * The exact body text this reply was asked to translate, in the SAME
+   * representation the reply is in — placeholders and all. Supplied, the reply is
+   * additionally checked for COMPLETENESS (see {@link assertTranslationCoverage});
+   * omitted, that check is skipped, which is what keeps every existing caller and
+   * every existing test behaving exactly as before.
+   *
+   * Never applied in `title_only` mode: a title is far below
+   * {@link MIN_SOURCE_CHARS_FOR_COVERAGE_CHECK}, and a cut title already has its
+   * own, stricter rejection below.
+   */
+  sourceContent?: string | null;
 }
 
 export interface ParsedTranslation {
@@ -1749,6 +1923,11 @@ export function parseTranslationResponse(
         { repetition: loop }
       );
     }
+    // Last, deliberately: a reply that is BOTH short and in the wrong language is
+    // more usefully reported as the language failure it is, and a decoding loop is
+    // long rather than short. Only a reply that has passed every other check can be
+    // diagnosed purely on its length.
+    assertTranslationCoverage(options.sourceContent, content);
     return {
       translatedTitle: null,
       translatedContent: content,
@@ -1841,6 +2020,9 @@ export function parseTranslationResponse(
       { repetition: loop }
     );
   }
+
+  // See the same call on the content_only branch for why this is last.
+  assertTranslationCoverage(options.sourceContent, content);
 
   return {
     translatedTitle: normalisedTitle,
