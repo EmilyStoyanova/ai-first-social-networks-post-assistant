@@ -69,6 +69,62 @@ describe("parseArticleUnderstandingResponse", () => {
     if (out.status === "invalid") assert.match(out.feedback, /JSON/);
   });
 
+  // ─── JSON wrapper recovery ────────────────────────────────────────────────
+
+  it("accepts pure valid JSON with no wrapper", () => {
+    const out = parseArticleUnderstandingResponse(okReply(), 1);
+    assert.equal(out.status, "ok");
+  });
+
+  it("accepts one valid JSON object wrapped in a fenced ```json block", () => {
+    const out = parseArticleUnderstandingResponse("```json\n" + okReply() + "\n```", 1);
+    assert.equal(out.status, "ok");
+  });
+
+  it("accepts one valid JSON object preceded by harmless prose", () => {
+    const out = parseArticleUnderstandingResponse("Here is the result:\n" + okReply(), 1);
+    assert.equal(out.status, "ok");
+  });
+
+  it("rejects malformed JSON rather than repairing it silently", () => {
+    // Structurally balanced braces (findJsonObject extracts it), but a trailing
+    // comma makes it invalid JSON — the JSON.parse failure path, not the "no
+    // object found at all" path exercised by the prose test above.
+    const malformed = '{"mainSubject": "x",}';
+    const out = parseArticleUnderstandingResponse(malformed, 1);
+    assert.equal(out.status, "invalid");
+    if (out.status === "invalid") assert.match(out.problem, /could not be parsed/);
+  });
+
+  it("rejects a reply that contains more than one competing JSON object", () => {
+    const out = parseArticleUnderstandingResponse(okReply() + "\n" + okReply(), 1);
+    assert.equal(out.status, "invalid");
+    if (out.status === "invalid") assert.match(out.problem, /more than one/);
+  });
+
+  it("rejects two competing JSON objects even when only the first is schema-valid", () => {
+    const out = parseArticleUnderstandingResponse(
+      okReply() + "\n" + JSON.stringify({ note: "an unrelated second object" }),
+      1
+    );
+    assert.equal(out.status, "invalid");
+    if (out.status === "invalid") assert.match(out.problem, /more than one/);
+  });
+
+  it("still rejects valid JSON that fails ArticleUnderstanding's own schema", () => {
+    const out = parseArticleUnderstandingResponse(JSON.stringify({ not: "the right shape" }), 1);
+    assert.equal(out.status, "invalid");
+  });
+
+  it("never invents a missing semantic field while recovering a wrapped reply", () => {
+    const out = parseArticleUnderstandingResponse(
+      "Here you go:\n" + okReply({ centralThesis: null }),
+      1
+    );
+    assert.equal(out.status, "ok");
+    if (out.status === "ok") assert.equal(out.centralThesis, null);
+  });
+
   it("rejects a missing mainSubject", () => {
     const out = parseArticleUnderstandingResponse(okReply({ mainSubject: undefined }), 3);
     assert.equal(out.status, "invalid");

@@ -57,11 +57,23 @@ export interface UnderstandArticleInput {
 
 export interface UnderstandArticleDeps {
   provider: ILlmProvider;
+  /**
+   * Provider/model labels for rejection diagnostics only — never read to decide
+   * behavior. Omitted callers (tests, mostly) log "unknown" rather than failing.
+   */
+  providerLabel?: string;
+  model?: string;
   now?: () => Date;
   /** Wall-clock cap for ONE model call. Overridable so tests need not wait. */
   attemptTimeoutMs?: number;
   /** Extra calls one step (a chunk, or the synthesis) may spend repairing its own reply. */
   maxRepairAttempts?: number;
+}
+
+/** First N characters of a model reply, bounded so a rejection log never carries the whole article back out through its echo. */
+const RESPONSE_PREVIEW_CHARS = 500;
+function previewOf(text: string | null | undefined): string {
+  return (text ?? "").slice(0, RESPONSE_PREVIEW_CHARS);
 }
 
 export type UnderstandArticleOutcome =
@@ -114,7 +126,9 @@ async function analyzeOneChunk(
   title: string | null,
   provider: ILlmProvider,
   attemptTimeoutMs: number,
-  maxRepairs: number
+  maxRepairs: number,
+  providerLabel: string,
+  model: string
 ): Promise<ChunkAnalysis | null> {
   const systemPrompt = buildChunkAnalysisSystemPrompt();
   let userPrompt = buildChunkAnalysisUserPrompt({ title, chunkText, chunkIndex, chunkCount });
@@ -166,9 +180,12 @@ async function analyzeOneChunk(
     const willRepair = call <= maxRepairs;
     if (!willRepair) {
       console.warn("[article-understanding] chunk analysis untrustworthy after repair", {
+        provider: providerLabel,
+        model,
         chunkIndex,
         chunkCount,
         problem: parsed.problem,
+        responsePreview: previewOf(text),
       });
       return null;
     }
@@ -189,7 +206,9 @@ async function askUnderstandingUntilUsable(
   totalChunkCount: number,
   provider: ILlmProvider,
   attemptTimeoutMs: number,
-  maxRepairs: number
+  maxRepairs: number,
+  providerLabel: string,
+  model: string
 ): Promise<ArticleUnderstandingOutcome> {
   let prompt = userPrompt;
   let last: ArticleUnderstandingOutcome | null = null;
@@ -212,8 +231,11 @@ async function askUnderstandingUntilUsable(
     last = parsed;
     const willRepair = call <= maxRepairs;
     console.warn("[article-understanding] synthesis reply rejected", {
+      provider: providerLabel,
+      model,
       call,
       problem: parsed.problem,
+      responsePreview: previewOf(response.text),
       willRepair,
     });
     if (!willRepair) break;
@@ -233,6 +255,8 @@ export async function understandArticle(
 ): Promise<UnderstandArticleOutcome> {
   const attemptTimeoutMs = deps.attemptTimeoutMs ?? UNDERSTANDING_ATTEMPT_TIMEOUT_MS;
   const maxRepairs = deps.maxRepairAttempts ?? MAX_UNDERSTANDING_REPAIR_ATTEMPTS;
+  const providerLabel = deps.providerLabel ?? "unknown";
+  const model = deps.model ?? "unknown";
   const body = input.body.trim();
   const articleChars = body.length;
 
@@ -249,7 +273,9 @@ export async function understandArticle(
         1,
         deps.provider,
         attemptTimeoutMs,
-        maxRepairs
+        maxRepairs,
+        providerLabel,
+        model
       );
       if (outcome.status !== "ok") {
         return { status: "failed", error: outcome.problem };
@@ -276,7 +302,9 @@ export async function understandArticle(
         input.title,
         deps.provider,
         attemptTimeoutMs,
-        maxRepairs
+        maxRepairs,
+        providerLabel,
+        model
       );
       if (analysis === null) {
         return {
@@ -314,7 +342,9 @@ export async function understandArticle(
       chunkCount,
       deps.provider,
       attemptTimeoutMs,
-      maxRepairs
+      maxRepairs,
+      providerLabel,
+      model
     );
     if (outcome.status !== "ok") {
       return { status: "failed", error: outcome.problem };

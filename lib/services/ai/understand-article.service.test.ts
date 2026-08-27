@@ -44,6 +44,41 @@ function scriptedProvider(replies: string[]): { provider: ILlmProvider; prompts:
   };
 }
 
+/** Like `scriptedProvider`, but captures the FULL request so tests can assert on `format`/`temperature`. */
+function requestCapturingProvider(replies: string[]): {
+  provider: ILlmProvider;
+  requests: LlmRequest[];
+} {
+  const queue = [...replies];
+  const requests: LlmRequest[] = [];
+  return {
+    provider: {
+      generate: async (req: LlmRequest): Promise<LlmResponse> => {
+        requests.push(req);
+        return { text: queue.shift() ?? "" };
+      },
+    },
+    requests,
+  };
+}
+
+/** Captures every `console.warn` call made during `work`, then restores it. */
+async function withCapturedWarn<T>(
+  work: () => Promise<T>
+): Promise<{ result: T; warnings: Array<[string, ...unknown[]]> }> {
+  const warnings: Array<[string, ...unknown[]]> = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args as [string, ...unknown[]]);
+  };
+  try {
+    const result = await work();
+    return { result, warnings };
+  } finally {
+    console.warn = original;
+  }
+}
+
 /** Well under MAX_CLASSIFICATION_CONTENT_CHARS — takes the direct (unchunked) path. */
 const SHORT_BODY = "A short article about choosing paint colours for a nursery room.";
 
@@ -355,5 +390,97 @@ describe("understandArticle — chunked path", () => {
     const centralSection = synthesisPrompt.split("CONTEXT —")[0];
     assert.match(centralSection, /protest development in a protected coastal area/);
     assert.doesNotMatch(centralSection, /record tourist numbers/);
+  });
+});
+
+// ─── Provider-level structured output ──────────────────────────────────────
+
+describe("understandArticle — structured-output request options", () => {
+  it("requests the ArticleUnderstanding JSON schema and temperature 0 on the direct path", async () => {
+    const { provider, requests } = requestCapturingProvider([understandingReply()]);
+    await understandArticle({ title: null, body: SHORT_BODY }, { provider });
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].temperature, 0);
+    assert.ok(requests[0].format, "a JSON schema must be sent as `format`");
+  });
+
+  it("requests the schema and temperature 0 on every chunk call and the synthesis call", async () => {
+    const replies = [
+      ...Array.from({ length: CHUNK_COUNT }, () => chunkReply()),
+      understandingReply(),
+    ];
+    const { provider, requests } = requestCapturingProvider(replies);
+    await understandArticle({ title: null, body: longBody() }, { provider });
+
+    assert.equal(requests.length, CHUNK_COUNT + 1);
+    for (const req of requests) {
+      assert.equal(req.temperature, 0);
+      assert.ok(req.format, "every structured-output call must send `format`");
+    }
+  });
+});
+
+// ─── Rejection diagnostics ──────────────────────────────────────────────────
+
+describe("understandArticle — rejection diagnostics", () => {
+  it("logs provider, model, and a bounded responsePreview when the synthesis reply is rejected", async () => {
+    const badReply = "This is prose, not JSON, and it goes on for a while so the preview matters.";
+    const { provider } = scriptedProvider([badReply, badReply]);
+
+    const { warnings } = await withCapturedWarn(() =>
+      understandArticle(
+        { title: null, body: SHORT_BODY },
+        { provider, providerLabel: "TEXT_WORKER", model: "qwen3:8b" }
+      )
+    );
+
+    const rejected = warnings.filter(
+      ([msg]) => msg === "[article-understanding] synthesis reply rejected"
+    );
+    assert.equal(rejected.length, 2, "one for the initial call, one for the failed repair");
+
+    const [, diag] = rejected[0] as [string, Record<string, unknown>];
+    assert.equal(diag.provider, "TEXT_WORKER");
+    assert.equal(diag.model, "qwen3:8b");
+    assert.equal(diag.responsePreview, badReply);
+    assert.equal(diag.call, 1);
+    assert.equal(diag.willRepair, true);
+
+    const [, diag2] = rejected[1] as [string, Record<string, unknown>];
+    assert.equal(diag2.call, 2);
+    assert.equal(diag2.willRepair, false);
+  });
+
+  it("bounds responsePreview so a very long reply is not echoed in full", async () => {
+    const hugeProse = "x".repeat(5000);
+    const { provider } = scriptedProvider([hugeProse, hugeProse]);
+
+    const { warnings } = await withCapturedWarn(() =>
+      understandArticle({ title: null, body: SHORT_BODY }, { provider })
+    );
+
+    const [, diag] = warnings.find(
+      ([msg]) => msg === "[article-understanding] synthesis reply rejected"
+    ) as [string, Record<string, unknown>];
+    assert.ok(
+      (diag.responsePreview as string).length <= 500,
+      `expected a bounded preview, got ${(diag.responsePreview as string).length} chars`
+    );
+  });
+
+  it("logs `unknown` provider/model rather than throwing when the caller omits them", async () => {
+    const badReply = "not json";
+    const { provider } = scriptedProvider([badReply, badReply]);
+
+    const { warnings } = await withCapturedWarn(() =>
+      understandArticle({ title: null, body: SHORT_BODY }, { provider })
+    );
+
+    const [, diag] = warnings.find(
+      ([msg]) => msg === "[article-understanding] synthesis reply rejected"
+    ) as [string, Record<string, unknown>];
+    assert.equal(diag.provider, "unknown");
+    assert.equal(diag.model, "unknown");
   });
 });

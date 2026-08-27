@@ -361,6 +361,36 @@ describe("classifyFeedItem — failure is never a rejection", () => {
   });
 });
 
+describe("classifyFeedItem — call counts", () => {
+  it("a short article needing one understanding repair costs exactly 3 model calls total (2 understanding + 1 verdict)", async () => {
+    const { deps, rec } = makeDeps({
+      replies: ["not json", understandingReply(), verdictReply()],
+    });
+    const out = await classifyFeedItem(item(), SCOPED, deps);
+
+    assert.equal(out.status, "classified");
+    assert.equal(
+      rec.prompts.length,
+      3,
+      "one failed understanding call + one repaired understanding call + one verdict call"
+    );
+    assert.equal(rec.updateManys[1].data.classification, "HIGH");
+  });
+
+  it("does not rerun the whole understanding phase within one execution after it fails for good", async () => {
+    // Understanding fails after its own single repair (2 calls) — this ONE
+    // classifyFeedItem execution must stop there rather than re-entering
+    // understandArticle again. The outer attempt counter still advances by
+    // exactly one, for the next drain to pick up later — not by looping here.
+    const { deps, rec } = makeDeps({ replies: ["not json", "still not json"] });
+    const out = await classifyFeedItem(item({ classificationAttemptCount: 0 }), SCOPED, deps);
+
+    assert.equal(out.status, "failed");
+    assert.equal(rec.prompts.length, 2, "understanding's own repair, never a second full pass");
+    assert.equal(rec.updateManys[0].data.classificationAttemptCount, 1);
+  });
+});
+
 describe("classifyFeedItem — a successful run", () => {
   it("understands the article once, then classifies from that understanding alone", async () => {
     const { deps, rec } = makeDeps({

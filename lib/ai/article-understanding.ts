@@ -76,7 +76,17 @@ export const MAX_UNDERSTANDING_ENTITIES = 12;
 export const MAX_EVIDENCE_REASON_CHARS = 200;
 export const MAX_EVIDENCE = 6;
 
-export const MAX_UNDERSTANDING_OUTPUT_TOKENS = 500;
+/**
+ * Bounds `num_predict` on the structured-output call (see `understand-article.service.ts`
+ * and `TextWorkerProvider`). Sized from the schema's OWN worst case, not a guess: up to
+ * 6 evidence entries at 200 chars each, two 8-item topic lists, 12 entities, plus
+ * mainSubject/centralThesis/centralConflict — the answer alone can approach ~900-1000
+ * tokens before counting a single token of reasoning. The previous cap (500) left a
+ * capable local model no room to finish a maximal answer, let alone one that also emits
+ * a thinking preamble before its JSON — see the transport's own comment on qwen3
+ * "thinking" builds for why that preamble cannot be assumed away.
+ */
+export const MAX_UNDERSTANDING_OUTPUT_TOKENS = 1200;
 
 // ─── The reply contract ─────────────────────────────────────────────────────
 
@@ -189,6 +199,18 @@ export function parseArticleUnderstandingResponse(
     return invalid(
       "The article-understanding model replied with prose instead of the required JSON object.",
       "Your reply was not JSON. Answer with a SINGLE JSON object and nothing else — no prose before or after it, no markdown fences."
+    );
+  }
+
+  // A second, independent JSON object after the first is an AMBIGUOUS reply — the
+  // model restated its answer, appended a worked example, or similar — and is refused
+  // rather than guessed at. `findJsonObject` alone would silently take only the first
+  // object, which is exactly the "guess which one was meant" this refuses to do.
+  const firstObjectEnd = text.indexOf("{") + json.length;
+  if (findJsonObject(text.slice(firstObjectEnd)) !== null) {
+    return invalid(
+      "The article-understanding model's reply contained more than one JSON object.",
+      "Answer with exactly ONE JSON object and nothing else — remove any duplicate, example, or restated object."
     );
   }
 

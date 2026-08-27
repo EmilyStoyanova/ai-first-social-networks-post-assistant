@@ -630,6 +630,8 @@ export async function classifyFeedItem(
         { title: text.title, body: understandingBody },
         {
           provider: provider.instance,
+          providerLabel: provider.provider,
+          model: provider.model,
           now,
           attemptTimeoutMs,
           maxRepairAttempts: maxRepairs,
