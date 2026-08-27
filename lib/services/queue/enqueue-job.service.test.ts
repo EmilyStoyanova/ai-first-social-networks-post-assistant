@@ -127,3 +127,104 @@ describe("enqueueJob", () => {
     assert.equal(table.rows.length, 2);
   });
 });
+
+// ─── The wake signal ────────────────────────────────────────────────────────
+
+/**
+ * The contract is narrow and entirely one-directional: the job row is what makes
+ * the job real, and the signal only decides whether a dormant worker finds it in
+ * seconds or on its next fallback tick. So the signal must happen after the
+ * write, and must be incapable of affecting the write's outcome.
+ */
+describe("enqueueJob wake signalling", () => {
+  it("signals after a successful insert", async () => {
+    const order: string[] = [];
+    const res = await enqueueJob(
+      { type: "t" },
+      {
+        insertJob: async () => {
+          order.push("insert");
+          return { id: "job-1" };
+        },
+        notifyWake: () => void order.push("wake"),
+      }
+    );
+
+    assert.deepEqual(order, ["insert", "wake"], "the row exists before anything is told about it");
+    assert.equal(res.enqueued, true);
+  });
+
+  it("does not signal when the insert fails", async () => {
+    let woken = 0;
+    await assert.rejects(() =>
+      enqueueJob(
+        { type: "t" },
+        {
+          insertJob: async () => {
+            throw new Error("connection reset");
+          },
+          notifyWake: () => (woken += 1),
+        }
+      )
+    );
+    assert.equal(woken, 0, "there is no job to wake anyone for");
+  });
+
+  it("signals on a dedupe, because the colliding job may be queued and unclaimed", async () => {
+    // If the existing job is `active` the worker is busy and this costs a no-op.
+    // If it is `queued`, then a worker IS dormant and missed the signal sent when
+    // that job was created — this is the path that recovers it before the
+    // fallback tick.
+    let woken = 0;
+    const res = await enqueueJob(
+      { type: "t", dedupeKey: "k" },
+      {
+        insertJob: async () => {
+          throw uniqueViolation();
+        },
+        notifyWake: () => (woken += 1),
+      }
+    );
+    assert.deepEqual(res, { enqueued: false, deduplicated: true, jobId: null });
+    assert.equal(woken, 1);
+  });
+
+  it("a throwing notifier does not fail a committed enqueue", async () => {
+    const res = await enqueueJob(
+      { type: "t" },
+      {
+        insertJob: async () => ({ id: "job-1" }),
+        notifyWake: () => {
+          throw new Error("wake URL unreachable");
+        },
+      }
+    );
+    assert.deepEqual(res, { enqueued: true, deduplicated: false, jobId: "job-1" });
+  });
+
+  it("a throwing notifier does not turn a dedupe into an error either", async () => {
+    const res = await enqueueJob(
+      { type: "t", dedupeKey: "k" },
+      {
+        insertJob: async () => {
+          throw uniqueViolation();
+        },
+        notifyWake: () => {
+          throw new Error("wake URL unreachable");
+        },
+      }
+    );
+    assert.deepEqual(res, { enqueued: false, deduplicated: true, jobId: null });
+  });
+
+  it("signals exactly once per enqueue", async () => {
+    let woken = 0;
+    const deps = {
+      insertJob: async () => ({ id: "job-1" }),
+      notifyWake: () => (woken += 1),
+    };
+    await enqueueJob({ type: "a" }, deps);
+    await enqueueJob({ type: "b" }, deps);
+    assert.equal(woken, 2);
+  });
+});

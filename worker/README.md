@@ -176,6 +176,80 @@ the run already in flight is not the run that was asked for.
 Single-post manual generation is **not** migrated and stays a synchronous request
 path, which it comfortably fits in.
 
+## ACTIVE / DORMANT — why the worker stops polling
+
+The queue lives on a serverless Postgres (Neon) whose compute suspends after a
+few minutes without activity, and the original 2-second claim poll was activity
+every two seconds — permanently. Not merely wasteful: it made scale-to-zero
+structurally impossible, because suspension is triggered by a GAP with no query
+in it, and any fixed poll interval shorter than the suspend threshold keeps
+resetting that gap forever. **Slowing the poll down does not help** — a poll
+every 60s resets the timer exactly as reliably as one every 2s, only less often.
+Nothing short of not polling stops the clock.
+
+So the worker has two states:
+
+- **ACTIVE** — claiming every `WORKER_POLL_INTERVAL_MS`, same as before, until
+  the queue has been empty for `WORKER_DORMANT_AFTER_MS`.
+- **DORMANT** — the Prisma connection is explicitly closed
+  (`prisma.$disconnect()`) and **zero** queries are sent. The worker waits for
+  either an authenticated wake request or `WORKER_FALLBACK_POLL_MS`, whichever
+  comes first, then reconnects (`prisma.$connect()`), reaps any stale leases,
+  and resumes claiming until the queue drains again.
+
+Postgres remains the only source of truth for what work exists. The wake signal
+is a latency optimisation and nothing else — a dropped, blocked, or never-sent
+signal costs at most one fallback interval, never a job. `enqueueJob`
+(`lib/services/queue/enqueue-job.service.ts`) fires it, best-effort, strictly
+**after** the job row is committed; see that file and
+`lib/queue/wake-notifier.ts` for why a wake can never fail an enqueue, and for
+why the worker process itself never sends one (`WORKER_PROCESS=1` — a worker
+enqueueing its own follow-up is already ACTIVE and claims it on the next poll).
+
+### The wake listener
+
+`worker/src/wake-server.ts` runs one route, `POST /wake`, bound to
+`WORKER_WAKE_HOST` (loopback by default — reachability is the tunnel's job, not
+this socket's). It carries no job id, no payload, and no second route: the only
+thing a valid request can mean is "look at the queue now", which the worker was
+always going to do anyway on its fallback tick. That is what keeps the
+authentication proportionate to what's actually at stake — the blast radius of a
+forged request is one in-memory boolean flipped a few minutes early.
+
+Requests are HMAC-SHA256 signed (`lib/security/wake-auth.ts`, shared by both
+ends) over a version tag, a millisecond timestamp, and a single-use nonce —
+never over anything request-specific, since there is nothing request-specific to
+sign. A `WakeGuard` per worker process checks, in order: a fixed-window rate
+limit (so flooding costs an integer increment, not an HMAC), a ±60s clock-skew
+window, the signature (`timingSafeEqual`), then an in-memory replay cache keyed
+by nonce. All of it lives in process memory — deliberately never in Postgres,
+since a rate limiter that queried Neon would defeat the entire point by waking
+the database to decide whether to wake the worker.
+
+### Heartbeats and the reaper, revisited
+
+**Heartbeats now run only while the worker is `busy`.** No code in this
+repository reads `workers.last_heartbeat_at` outside a manual diagnostic query
+(below); stale-lease detection is driven by each job's own `lease_expires_at`,
+maintained independently by lease renewal. An idle heartbeat proved nothing
+anyone consumed while costing a write every `WORKER_HEARTBEAT_INTERVAL_MS`,
+forever — so `WorkerRegistry.setStatus` now starts/stops the timer with the
+status transition instead of running it unconditionally from boot.
+
+**The periodic reaper is off by default** (`WORKER_REAP_INTERVAL_MS=0`).
+Stale-lease recovery instead runs once at process boot and once at the start of
+every active burst (on waking, before the first claim). With the verified
+single-worker deployment that is complete: the only lease this process could
+find expired is one it abandoned by crashing, and a crashed process is not the
+one that would be running the reaper. A **positive** `WORKER_REAP_INTERVAL_MS`
+restores the old timer-based behaviour for a multi-worker deployment, where a
+lease abandoned by a _different_ process needs recovering without waiting for
+this one to wake or restart.
+
+Lease renewal itself — the ⅓-of-TTL loop described above, under "Lease renewal
+and progress" — is **unchanged**. It runs only while a job is held, was already
+independent of the poll loop's cadence, and has nothing to do with dormancy.
+
 ## Run
 
 From the repo root (so the shared client and root `.env` resolve):
@@ -186,19 +260,34 @@ npx tsx worker/src/index.ts
 
 ## Configuration
 
-| Env var                        | Default        | Meaning                                          |
-| ------------------------------ | -------------- | ------------------------------------------------ |
-| `DATABASE_URL`                 | — (required)   | Shared with the app                              |
-| `WORKER_ID`                    | `hostname:pid` | Stable worker identity; set it when running >1   |
-| `WORKER_CONCURRENCY`           | `1`            | Parallel jobs                                    |
-| `WORKER_POLL_INTERVAL_MS`      | `2000`         | Idle poll cadence                                |
-| `WORKER_HEARTBEAT_INTERVAL_MS` | `15000`        | Heartbeat cadence; keep well under the lease TTL |
-| `WORKER_LEASE_TTL_MS`          | `300000`       | Job lease TTL — renewed at ⅓ of it while running |
-| `WORKER_SHUTDOWN_GRACE_MS`     | `30000`        | Drain window before force-exit                   |
-| `WORKER_BULK_BUDGET_MS`        | `1800000`      | Budget for one bulk-generation attempt           |
+| Env var                        | Default        | Meaning                                                                         |
+| ------------------------------ | -------------- | ------------------------------------------------------------------------------- |
+| `DATABASE_URL`                 | — (required)   | Shared with the app                                                             |
+| `WORKER_ID`                    | `hostname:pid` | Stable worker identity; set it when running >1                                  |
+| `WORKER_CONCURRENCY`           | `1`            | Parallel jobs                                                                   |
+| `WORKER_POLL_INTERVAL_MS`      | `2000`         | Idle poll cadence                                                               |
+| `WORKER_HEARTBEAT_INTERVAL_MS` | `15000`        | Heartbeat cadence; keep well under the lease TTL                                |
+| `WORKER_LEASE_TTL_MS`          | `300000`       | Job lease TTL — renewed at ⅓ of it while running                                |
+| `WORKER_SHUTDOWN_GRACE_MS`     | `30000`        | Drain window before force-exit                                                  |
+| `WORKER_BULK_BUDGET_MS`        | `1800000`      | Budget for one bulk-generation attempt                                          |
+| `WORKER_DORMANT_AFTER_MS`      | `60000`        | Empty-queue quiet time before going DORMANT; `0` disables dormancy              |
+| `WORKER_FALLBACK_POLL_MS`      | `1800000`      | Dormant wait ceiling — always recovers a missed wake within this                |
+| `WORKER_REAP_INTERVAL_MS`      | `0`            | Periodic reaper; `0` = burst-only (startup + each wake), correct for one worker |
+| `WORKER_WAKE_SECRET`           | — (optional)   | Shared HMAC secret; unset disables the wake listener entirely                   |
+| `WORKER_WAKE_PORT`             | `3003`         | Loopback port the wake listener binds                                           |
+| `WORKER_WAKE_HOST`             | `127.0.0.1`    | Wake listener bind address — reachability is the tunnel's job                   |
+| `WORKER_WAKE_MAX_PER_MINUTE`   | `60`           | In-memory rate limit on `/wake`, never Neon-backed                              |
 
 These are also documented in `.env.example`. Every one but `DATABASE_URL` has a
-working default, so an empty configuration is valid.
+working default, so an empty configuration is valid — with `WORKER_WAKE_SECRET`
+unset the worker still runs correctly, just without the latency optimisation:
+every job is picked up within `WORKER_POLL_INTERVAL_MS` while ACTIVE or within
+`WORKER_FALLBACK_POLL_MS` after going DORMANT.
+
+**On the Next app side**, `WORKER_WAKE_URL` (pointing at the worker's `/wake`,
+reachable e.g. via a Tailscale Funnel) and the same `WORKER_WAKE_SECRET` make
+`enqueueJob` signal the worker after every commit. Neither is required for
+correctness — see "ACTIVE / DORMANT" above.
 
 ## Deployment
 

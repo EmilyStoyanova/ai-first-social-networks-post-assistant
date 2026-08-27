@@ -4,10 +4,12 @@
  * Boots a worker process that:
  *   1. loads + validates config from the environment,
  *   2. registers itself in the `workers` table (status: starting),
- *   3. starts heartbeats,
+ *   3. opens the wake listener, if a secret is configured,
  *   4. recovers any stale-leased jobs, then starts the polling loop (idle),
  *   5. claims + dispatches jobs through the orchestrator (Phase 2),
- *   6. shuts down cleanly on SIGTERM/SIGINT (draining → stopped).
+ *   6. goes dormant when the queue stays empty — connection closed, nothing sent
+ *      to the database — until a wake signal or the fallback interval,
+ *   7. shuts down cleanly on SIGTERM/SIGINT (draining → stopped).
  *
  * The worker is an ORCHESTRATOR ONLY: it manages the queue, claiming, retries,
  * diagnostics and persistence. All real work lives in the registered handlers,
@@ -59,6 +61,9 @@ import {
   PRODUCT_PAGE_EXTRACTION_JOB_TYPE,
 } from "./product-page-extraction-handler";
 import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
+import { WakeSignal } from "./wake-signal";
+import { createWakeServer } from "./wake-server";
+import { WakeGuard } from "@/lib/security/wake-auth";
 import type { JobRecord } from "./job-store";
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -73,6 +78,10 @@ async function main(): Promise<void> {
     pollIntervalMs: config.pollIntervalMs,
     heartbeatIntervalMs: config.heartbeatIntervalMs,
     leaseTtlMs: config.leaseTtlMs,
+    dormantAfterMs: config.dormantAfterMs,
+    fallbackPollMs: config.fallbackPollMs,
+    reapIntervalMs: config.reapIntervalMs,
+    wakeListener: config.wakeSecret ? `${config.wakeHost}:${config.wakePort}` : "disabled",
   });
 
   // Import the shared client AFTER config validation so a bad env fails with a
@@ -112,24 +121,83 @@ async function main(): Promise<void> {
   });
 
   await registry.register();
-  registry.startHeartbeat();
+  // Heartbeats are no longer started here: the registry runs them only while
+  // BUSY, driven by setStatus. An idle worker writes nothing.
 
   // Recover anything a previous crashed worker left leased, then poll.
   await orchestrator.reapOnce();
+
+  // The latch between the wake listener and the poll loop. Always constructed —
+  // it costs nothing and keeps the runner's wiring identical whether or not a
+  // secret is configured.
+  const wakeSignal = new WakeSignal();
 
   const runner = new PollingRunner<JobRecord>({
     config,
     logger,
     registry,
+    wakeSignal,
     claim: () => orchestrator.claim(),
     processJob: (job) => orchestrator.process(job),
+    // The last thing before the loop stops touching the database. Closing the
+    // connection is required, not tidy: an open pooled connection can keep a
+    // serverless compute from suspending even with no queries flowing, so
+    // skipping this would leave the bill unchanged.
+    onDormant: () => prisma.$disconnect(),
+    onActiveBurst: async (reason) => {
+      // Explicit rather than relying on Prisma's lazy reconnect, so a broken
+      // connection surfaces here — logged, at the start of the burst — instead
+      // of as a failed claim.
+      await prisma.$connect();
+      // Stale-lease recovery at the head of each burst. With one worker this is
+      // complete: the only expired lease it can find is one this process
+      // abandoned by crashing, and a crashed process is not the one polling.
+      // Multi-worker deployments set WORKER_REAP_INTERVAL_MS instead, where a
+      // lease abandoned by a DIFFERENT process needs recovering without waiting
+      // for this one to wake.
+      await orchestrator.reapOnce();
+      logger.info("active", { reason });
+    },
   });
   runner.start();
+
+  // The wake listener. Optional by design — without it the worker still runs
+  // every job, just on the fallback interval, so a missing secret degrades
+  // latency rather than correctness.
+  const wakeServer = config.wakeSecret
+    ? createWakeServer({
+        guard: new WakeGuard({
+          secret: config.wakeSecret,
+          rateMaxPerWindow: config.wakeMaxPerMinute,
+        }),
+        logger,
+        host: config.wakeHost,
+        port: config.wakePort,
+        onWake: () => wakeSignal.notify(),
+      })
+    : null;
+
+  if (wakeServer) {
+    try {
+      await wakeServer.listen();
+    } catch (err) {
+      // A port already in use must not take the worker down with it. The queue
+      // still drains on the fallback interval.
+      logger.error("wake listener failed to start", { error: String(err) });
+    }
+  } else {
+    logger.warn("wake listener disabled", { reason: "WORKER_WAKE_SECRET not set" });
+  }
+
   logger.info("ready", { status: registry.currentStatus(), handlers: handlers.types() });
 
-  // Periodic stale-lease recovery. Cheap; runs independently of the poll loop.
-  const reapIntervalMs = Math.max(30_000, Math.floor(config.leaseTtlMs / 2));
-  const reaper = setInterval(() => void orchestrator.reapOnce(), reapIntervalMs);
+  // Periodic stale-lease recovery, off by default. A timer here would be a
+  // recurring query on an otherwise silent database — precisely what dormancy
+  // exists to remove — so it is opt-in for the multi-worker case that needs it.
+  const reaper =
+    config.reapIntervalMs > 0
+      ? setInterval(() => void orchestrator.reapOnce(), config.reapIntervalMs)
+      : null;
 
   let shuttingDown = false;
   const shutdown = async (signal: NodeJS.Signals) => {
@@ -137,7 +205,9 @@ async function main(): Promise<void> {
     shuttingDown = true;
     logger.info("shutdown", { signal });
     try {
-      clearInterval(reaper);
+      if (reaper) clearInterval(reaper);
+      // Closed first, so nothing can wake the loop while it is unwinding.
+      await wakeServer?.close();
       await registry.setStatus("draining");
       await Promise.race([runner.stop(), delay(config.shutdownGraceMs)]);
       await registry.markStopped();

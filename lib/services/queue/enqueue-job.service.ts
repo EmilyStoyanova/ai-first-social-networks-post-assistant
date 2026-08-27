@@ -6,10 +6,20 @@
  * read-then-write race: a `dedupeKey` collides with the partial unique index
  * `jobs_dedupe_active_key` (WHERE status IN ('queued','active')) and Prisma raises
  * P2002, which we translate into a `deduplicated` result rather than an error.
+ *
+ * ── The wake signal ─────────────────────────────────────────────────────────
+ *
+ * The worker closes its database connection once the queue has been quiet for a
+ * minute, so an idle system stops paying for compute. Enqueueing therefore ends
+ * by poking it — strictly AFTER the row is committed, strictly best-effort. The
+ * row is what makes the job exist; the signal only decides whether it starts in
+ * seconds or on the worker's next fallback tick. See `lib/queue/wake-notifier.ts`
+ * for why that indirection exists and why the worker never signals itself.
  */
 
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/client";
+import { scheduleWakeNotification } from "@/lib/queue/wake-notifier";
 
 export interface EnqueueJobInput {
   type: string;
@@ -57,6 +67,13 @@ export interface JobInsert {
 export interface EnqueueJobDeps {
   /** Insert seam — defaults to Prisma; tests inject a fake to simulate P2002. */
   insertJob?: (data: JobInsert) => Promise<{ id: string }>;
+  /**
+   * Wake seam — defaults to the notifier, which is itself a no-op unless the
+   * process is a Next server with a wake URL and secret configured. Must be
+   * synchronous and must not throw; the enqueue does not wait for it and does
+   * not care whether it worked.
+   */
+  notifyWake?: () => void;
 }
 
 async function defaultInsertJob(data: JobInsert): Promise<{ id: string }> {
@@ -85,6 +102,23 @@ export async function enqueueJob(
   deps: EnqueueJobDeps = {}
 ): Promise<EnqueueJobResult> {
   const insertJob = deps.insertJob ?? defaultInsertJob;
+  const notifyWake = deps.notifyWake ?? (() => scheduleWakeNotification());
+
+  /**
+   * Wrapped rather than called bare so that a notifier which somehow throws —
+   * an injected fake, a future implementation — cannot turn a committed job into
+   * a failed request. The row is already in Postgres by the time this runs; the
+   * worker will find it either way.
+   */
+  const signal = () => {
+    try {
+      notifyWake();
+    } catch {
+      // Deliberately silent. Nothing here is recoverable and nothing here matters
+      // to the caller.
+    }
+  };
+
   try {
     const job = await insertJob({
       type: input.type,
@@ -96,10 +130,20 @@ export async function enqueueJob(
       companyId: input.companyId ?? null,
       createdBy: input.createdBy ?? null,
     });
+    signal();
     return { enqueued: true, deduplicated: false, jobId: job.id };
   } catch (err) {
     if (isUniqueViolation(err)) {
       // A non-terminal job with this dedupeKey already exists — treat as success.
+      //
+      // Signalled anyway, and that is not belt-and-braces. The job this
+      // collided with is `queued` or `active`; if it is `active` the worker is
+      // busy and the signal costs a no-op, but if it is `queued` then a worker
+      // is dormant and MISSED the signal sent when that job was created. This is
+      // the path that recovers it — without it, a dropped signal would strand a
+      // deduped job until the fallback tick, and every retrying caller would be
+      // told "already queued" while nothing moved.
+      signal();
       return { enqueued: false, deduplicated: true, jobId: null };
     }
     throw err;

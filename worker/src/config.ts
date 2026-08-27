@@ -41,6 +41,63 @@ const envSchema = z.object({
    * and the job COMPLETES.
    */
   WORKER_BULK_BUDGET_MS: z.coerce.number().int().positive().default(1_800_000),
+
+  /**
+   * How long the queue must stay empty before the worker goes DORMANT: stops
+   * polling and closes its database connection.
+   *
+   * The whole point is that a serverless Postgres suspends its compute after a
+   * few minutes without activity, and a 2-second claim poll resets that timer
+   * forever. Polling more slowly does not help — anything under the suspend
+   * threshold keeps it awake just as effectively — so the worker has to stop
+   * entirely, not stop often.
+   *
+   * A minute of quiet before that happens keeps a burst of related jobs (an
+   * ingestion enqueueing its translation, which enqueues its classification) on
+   * the fast path, since each follow-up lands well inside the window.
+   *
+   * `0` disables dormancy and restores continuous polling.
+   */
+  WORKER_DORMANT_AFTER_MS: z.coerce.number().int().nonnegative().default(60_000),
+
+  /**
+   * How long the worker sleeps while DORMANT before waking to check the queue
+   * regardless of whether anything signalled it.
+   *
+   * This is what makes the HTTP wake an optimisation rather than a dependency:
+   * a signal that is dropped, blocked, or never sent costs at most one of these
+   * intervals of latency, never a job. It must therefore stay comfortably under
+   * the 90-minute window a manually scheduled post remains publishable for (see
+   * `lib/scheduling/publish-window.ts`), which 30 minutes is.
+   */
+  WORKER_FALLBACK_POLL_MS: z.coerce.number().int().positive().default(1_800_000),
+
+  /**
+   * Periodic stale-lease reaping.
+   *
+   * `0` — the default — means reap on startup and at the start of each active
+   * burst instead of on a timer. With a single worker that is complete: the only
+   * lease this process could find expired is one IT abandoned by crashing, and
+   * it cannot crash and keep polling. A timer would also be a recurring query,
+   * which is exactly the thing dormancy exists to remove.
+   *
+   * Set a positive interval when running more than one worker, where a lease
+   * abandoned by a DIFFERENT process needs recovering without waiting for this
+   * one to restart or wake.
+   */
+  WORKER_REAP_INTERVAL_MS: z.coerce.number().int().nonnegative().default(0),
+
+  /** Shared secret for the wake listener. Unset disables the listener entirely. */
+  WORKER_WAKE_SECRET: z.string().optional(),
+  /**
+   * Loopback port for the wake listener. Bound to `WORKER_WAKE_HOST` only; the
+   * tunnel (Tailscale Funnel) is what makes it reachable, so the socket itself
+   * never faces the network.
+   */
+  WORKER_WAKE_PORT: z.coerce.number().int().positive().max(65_535).default(3_003),
+  WORKER_WAKE_HOST: z.string().min(1).default("127.0.0.1"),
+  /** Wake requests accepted per minute before the listener starts refusing. */
+  WORKER_WAKE_MAX_PER_MINUTE: z.coerce.number().int().positive().default(60),
 });
 
 export interface WorkerConfig {
@@ -53,6 +110,13 @@ export interface WorkerConfig {
   leaseTtlMs: number;
   shutdownGraceMs: number;
   bulkBudgetMs: number;
+  dormantAfterMs: number;
+  fallbackPollMs: number;
+  reapIntervalMs: number;
+  wakeSecret: string | undefined;
+  wakePort: number;
+  wakeHost: string;
+  wakeMaxPerMinute: number;
 }
 
 export function loadWorkerConfig(
@@ -72,5 +136,17 @@ export function loadWorkerConfig(
     leaseTtlMs: parsed.WORKER_LEASE_TTL_MS,
     shutdownGraceMs: parsed.WORKER_SHUTDOWN_GRACE_MS,
     bulkBudgetMs: parsed.WORKER_BULK_BUDGET_MS,
+    dormantAfterMs: parsed.WORKER_DORMANT_AFTER_MS,
+    fallbackPollMs: parsed.WORKER_FALLBACK_POLL_MS,
+    reapIntervalMs: parsed.WORKER_REAP_INTERVAL_MS,
+    // Normalised to undefined here so every consumer tests one thing rather than
+    // each deciding for itself whether "" counts as configured.
+    wakeSecret:
+      parsed.WORKER_WAKE_SECRET && parsed.WORKER_WAKE_SECRET.length > 0
+        ? parsed.WORKER_WAKE_SECRET
+        : undefined,
+    wakePort: parsed.WORKER_WAKE_PORT,
+    wakeHost: parsed.WORKER_WAKE_HOST,
+    wakeMaxPerMinute: parsed.WORKER_WAKE_MAX_PER_MINUTE,
   };
 }

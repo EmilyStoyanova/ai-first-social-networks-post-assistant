@@ -4,6 +4,21 @@
  *
  * Depends only on WorkerStore + WorkerConfig + Logger, so its lifecycle logic is
  * unit-testable with an in-memory fake and no database.
+ *
+ * ── Heartbeats run while BUSY and only while BUSY ────────────────────────────
+ *
+ * A heartbeat answers one question: is the process holding this job still
+ * alive? That question only exists while a job is held. An idle worker's
+ * heartbeat proves nothing anyone reads — no code path in this repository reads
+ * `lastHeartbeatAt`, and stale-lease recovery is driven by `leaseExpiresAt`,
+ * which lease renewal maintains independently — while costing a write every
+ * fifteen seconds, forever, against a database that bills for being awake.
+ *
+ * So the timer is bound to the status rather than to the process: `setStatus`
+ * starts it on `busy` and stops it on everything else. That makes "no heartbeats
+ * while idle" a property of the state machine instead of a rule callers have to
+ * remember, which matters because the worker now spends nearly all of its time
+ * idle and then dormant with no connection at all.
  */
 
 import type { WorkerConfig } from "./config";
@@ -51,22 +66,42 @@ export class WorkerRegistry {
     });
   }
 
-  /** Transition to a new lifecycle status, stamping a heartbeat alongside it. */
+  /**
+   * Transition to a new lifecycle status, stamping a heartbeat alongside it.
+   *
+   * The heartbeat timer follows the status: running while `busy`, stopped
+   * otherwise. The timer is adjusted only AFTER the write lands, so a failed
+   * transition does not leave the process beating for a state it never reached.
+   */
   async setStatus(status: WorkerLifecycle): Promise<void> {
     this.status = status;
     await this.deps.store.update(this.deps.config.workerId, {
       status,
       lastHeartbeatAt: this.now(),
     });
+    if (status === "busy") this.startHeartbeat();
+    else this.stopHeartbeat();
     this.deps.logger.info("status", { status });
   }
 
-  /** Begin periodic heartbeats. Idempotent — a second call is a no-op. */
+  /**
+   * Begin periodic heartbeats. Idempotent — a second call is a no-op.
+   *
+   * Called by `setStatus` rather than at boot; calling it directly is for tests.
+   */
   startHeartbeat(): void {
     if (this.heartbeatTimer) return;
     this.heartbeatTimer = setInterval(() => {
       void this.heartbeatOnce();
     }, this.deps.config.heartbeatIntervalMs);
+    // The job this beats for is always awaited, so the timer must never be the
+    // reason the process stays up.
+    this.heartbeatTimer.unref?.();
+  }
+
+  /** Whether the heartbeat timer is currently running. For tests and diagnostics. */
+  isHeartbeating(): boolean {
+    return this.heartbeatTimer !== null;
   }
 
   /** One heartbeat write, preserving the current status. Public for testing. */
