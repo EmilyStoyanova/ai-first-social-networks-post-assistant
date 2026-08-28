@@ -16,15 +16,20 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { inspect } from "node:util";
+import { createServer } from "node:net";
+import type { AddressInfo } from "node:net";
 
 import {
   planWakeNotification,
   deliverWakeNotification,
   describeWakeDns,
+  formatWakeFailure,
   scheduleWakeNotification,
   setWakeScheduler,
   type WakeDnsLookup,
   type WakeNotifierEnv,
+  type WakeProbe,
 } from "./wake-notifier";
 import {
   WAKE_NONCE_HEADER,
@@ -58,6 +63,20 @@ function recordingFetch(status = 202) {
  */
 function stubLookup(addresses: Array<{ address: string; family: number }> = []): WakeDnsLookup {
   return async () => addresses;
+}
+
+/**
+ * A connectivity probe stub. Needed by any test whose resolver returns an
+ * address, for the same reason as `stubLookup` — the real probe opens a socket.
+ */
+function stubProbe(connected = false): WakeProbe {
+  return async (target) => ({
+    address: target.address,
+    family: target.family,
+    connected,
+    elapsedMs: 1,
+    ...(connected ? { tcpMs: 1, reached: "tls" as const } : { errorName: "TimeoutError" }),
+  });
 }
 
 /** Runs scheduled tasks immediately and hands back their promise. */
@@ -443,6 +462,7 @@ describe("failure-class diagnostics", () => {
     const result = await deliverWakeNotification(plan, {
       fetchImpl: timeoutAbort(),
       lookupImpl: stubLookup([{ address: "185.40.234.37", family: 4 }]),
+      probeImpl: stubProbe(),
       now,
     });
 
@@ -460,6 +480,7 @@ describe("failure-class diagnostics", () => {
         { address: "2a00:dd80:20::ae9", family: 6 },
         { address: "185.40.234.37", family: 4 },
       ]),
+      probeImpl: stubProbe(),
     });
 
     assert.deepEqual(result.dns?.addresses, [
@@ -543,6 +564,7 @@ describe("failure-class diagnostics", () => {
             headers: { authorization: "Bearer " + SECRET },
           },
         ] as unknown as Array<{ address: string; family: number }>,
+      probeImpl: stubProbe(),
     });
 
     assert.deepEqual(result.dns?.addresses, [{ address: "185.40.234.37", family: 4 }]);
@@ -567,9 +589,468 @@ describe("failure-class diagnostics", () => {
           address: string;
           family: number;
         }>,
+      probeImpl: stubProbe(),
     });
 
     assert.deepEqual(result.dns?.addresses, [{ address: "5.6.7.8", family: 6 }]);
+  });
+});
+
+// ─── Which family is actually reachable ───────────────────────────────────────
+
+/**
+ * The question `fetch` refuses to answer.
+ *
+ * A wake that times out could mean the worker is down, the Funnel is down, or
+ * one address family is being dropped on the floor — and `fetch` picks the
+ * address itself and then reports the same three words either way. These probes
+ * dial one address of each family directly, after the fact, so the three cases
+ * stop being the same observation.
+ */
+describe("per-family connectivity probes", () => {
+  const plan = { deliver: true as const, url: configured.WORKER_WAKE_URL!, secret: SECRET };
+  const dualStack = stubLookup([
+    { address: "2a00:dd80:20::274", family: 6 },
+    { address: "2a00:dd80:20::ae9", family: 6 },
+    { address: "185.40.234.37", family: 4 },
+    { address: "185.40.234.172", family: 4 },
+  ]);
+
+  function timeoutAbort(): typeof fetch {
+    return (async () => {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    }) as unknown as typeof fetch;
+  }
+
+  it("probes exactly one address per family, never all of them", async () => {
+    const dialled: Array<{ address: string; family: number }> = [];
+    const result = await deliverWakeNotification(plan, {
+      fetchImpl: timeoutAbort(),
+      lookupImpl: dualStack,
+      probeImpl: async (target) => {
+        dialled.push({ address: target.address, family: target.family });
+        return { address: target.address, family: target.family, connected: false, elapsedMs: 1 };
+      },
+    });
+
+    assert.deepEqual(dialled.map((d) => d.family).sort(), [4, 6], "one of each, and only one");
+    assert.equal(result.probes?.ipv4?.address, "185.40.234.37", "the FIRST v4, as resolved");
+    assert.equal(result.probes?.ipv6?.address, "2a00:dd80:20::274", "the first v6");
+  });
+
+  it("carries the wake URL's port and SNI into the probe", async () => {
+    // Otherwise the probe would test an unrelated socket condition rather than
+    // the Funnel path the wake actually uses — the Funnel routes on SNI.
+    const targets: Array<{ port: number; servername?: string }> = [];
+    await deliverWakeNotification(plan, {
+      fetchImpl: timeoutAbort(),
+      lookupImpl: dualStack,
+      probeImpl: async (target) => {
+        targets.push({ port: target.port, servername: target.servername });
+        return { address: target.address, family: target.family, connected: false, elapsedMs: 1 };
+      },
+    });
+
+    for (const target of targets) {
+      assert.equal(target.port, 10000, "the configured wake port, not 443");
+      assert.equal(target.servername, "worker.example.ts.net", "SNI for the Funnel");
+    }
+  });
+
+  it("reports the families independently — the signature we are looking for", async () => {
+    // IPv4 reachable, IPv6 silently dropped: exactly what would explain a wake
+    // that hangs to its deadline against a host that answers fine over IPv4.
+    const result = await deliverWakeNotification(plan, {
+      fetchImpl: timeoutAbort(),
+      lookupImpl: dualStack,
+      probeImpl: async (target) =>
+        target.family === 4
+          ? {
+              address: target.address,
+              family: 4,
+              connected: true,
+              elapsedMs: 412,
+              tcpMs: 128,
+              reached: "tls" as const,
+            }
+          : {
+              address: target.address,
+              family: 6,
+              connected: false,
+              elapsedMs: 2000,
+              errorName: "TimeoutError",
+              errorMessage: "no TCP handshake within 2000ms",
+            },
+    });
+
+    assert.equal(result.probes?.ipv4?.connected, true);
+    assert.equal(result.probes?.ipv4?.reached, "tls");
+    assert.equal(result.probes?.ipv6?.connected, false);
+    assert.equal(result.probes?.ipv6?.tcpMs, undefined, "never got a TCP handshake");
+  });
+
+  it("distinguishes an unroutable address from a TLS failure", async () => {
+    // `tcpMs` present is the whole tell: the packets landed, so whatever failed
+    // afterwards is not a routing problem.
+    const result = await deliverWakeNotification(plan, {
+      fetchImpl: timeoutAbort(),
+      lookupImpl: stubLookup([{ address: "185.40.234.37", family: 4 }]),
+      probeImpl: async (target) => ({
+        address: target.address,
+        family: target.family,
+        connected: false,
+        elapsedMs: 300,
+        tcpMs: 120,
+        reached: "tcp" as const,
+        errorCode: "ERR_TLS_CERT_ALTNAME_INVALID",
+        errorMessage: "tls: hostname mismatch",
+      }),
+    });
+
+    const line = formatWakeFailure(result);
+    assert.match(String(line.ipv4Probe), /reachable \(TCP in 120ms\) but TLS failed/);
+    assert.doesNotMatch(String(line.ipv4Probe), /NO TCP/);
+  });
+
+  it("does not probe when the wake succeeds", async () => {
+    let probes = 0;
+    const { impl } = recordingFetch(202);
+    await deliverWakeNotification(plan, {
+      fetchImpl: impl,
+      lookupImpl: dualStack,
+      probeImpl: async (target) => {
+        probes += 1;
+        return { address: target.address, family: target.family, connected: false, elapsedMs: 1 };
+      },
+    });
+    assert.equal(probes, 0);
+  });
+
+  it("does not probe when the resolver returned nothing to probe", async () => {
+    let probes = 0;
+    const result = await deliverWakeNotification(plan, {
+      fetchImpl: timeoutAbort(),
+      lookupImpl: stubLookup([]),
+      probeImpl: async (target) => {
+        probes += 1;
+        return { address: target.address, family: target.family, connected: false, elapsedMs: 1 };
+      },
+    });
+    assert.equal(probes, 0);
+    assert.equal(result.probes, undefined);
+  });
+
+  it("survives a probe that hangs, and still reports the wake failure", async () => {
+    const result = await deliverWakeNotification(plan, {
+      fetchImpl: timeoutAbort(),
+      lookupImpl: dualStack,
+      probeImpl: () => new Promise(() => {}),
+      probeTimeoutMs: 20,
+    });
+
+    assert.equal(result.ok, false, "the wake failure is still what comes back");
+    assert.equal(result.error, "The operation was aborted due to timeout");
+    assert.equal(result.probes?.ipv4?.connected, false);
+    assert.equal(result.probes?.ipv4?.errorName, "ProbeError");
+  });
+
+  it("survives a probe that throws", async () => {
+    const result = await deliverWakeNotification(plan, {
+      fetchImpl: timeoutAbort(),
+      lookupImpl: dualStack,
+      probeImpl: async () => {
+        throw new Error("socket module exploded");
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.errorName, "TimeoutError", "the original failure is intact");
+    assert.equal(result.probes?.ipv6?.errorName, "ProbeError");
+  });
+
+  it("tears down a TLS upgrade without taking the process with it", async () => {
+    // A REAL socket test, deliberately: destroying a TLSSocket *and* the raw
+    // socket it wraps segfaults Node (0xC0000005, reproduced 3/3), and only the
+    // real probe can catch that — a stub proves nothing about handle teardown.
+    // A plain TCP server is enough: the upgrade is attempted, so the TLSSocket
+    // exists, and the handshake then fails. No certificate needed.
+    const server = createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      const result = await deliverWakeNotification(
+        { deliver: true, url: `https://127.0.0.1:${port}/wake`, secret: SECRET },
+        {
+          fetchImpl: (async () => {
+            throw new TypeError("fetch failed");
+          }) as unknown as typeof fetch,
+          // Real resolver and real probe — that is the point of this test.
+          probeTimeoutMs: 500,
+        }
+      );
+
+      assert.equal(result.probes?.ipv4?.connected, false, "the TLS handshake could not complete");
+      assert.equal(
+        typeof result.probes?.ipv4?.tcpMs,
+        "number",
+        "but TCP did — proving the split between routing and handshake faults"
+      );
+      assert.equal(result.probes?.ipv4?.reached, "tcp");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("runs the two probes in parallel, not one after the other", async () => {
+    // Sequential probes would double the delay added to an invocation that has
+    // already blown its budget.
+    let live = 0;
+    let peak = 0;
+    await deliverWakeNotification(plan, {
+      fetchImpl: timeoutAbort(),
+      lookupImpl: dualStack,
+      probeImpl: async (target) => {
+        live += 1;
+        peak = Math.max(peak, live);
+        await new Promise((r) => setTimeout(r, 10));
+        live -= 1;
+        return { address: target.address, family: target.family, connected: false, elapsedMs: 10 };
+      },
+    });
+
+    assert.equal(peak, 2, "both were in flight at once");
+  });
+});
+
+// ─── Making it readable in a log ──────────────────────────────────────────────
+
+/**
+ * A diagnostic nobody can read is not a diagnostic.
+ *
+ * Production captured all six resolved addresses and printed
+ * `[ [Object], [Object], [Object], [Object], [Object], [Object] ]`, because
+ * `console.warn` inspects to depth 2 and the address objects sit at depth 3.
+ * These tests pin the flattening that fixes it.
+ */
+describe("formatWakeFailure", () => {
+  it("renders every address as a readable string, in resolver order", () => {
+    const line = formatWakeFailure({
+      ok: false,
+      error: "The operation was aborted due to timeout",
+      dns: {
+        elapsedMs: 54,
+        addresses: [
+          { address: "2a00:dd80:20::274", family: 6 },
+          { address: "185.40.234.37", family: 4 },
+        ],
+      },
+    });
+
+    assert.deepEqual(line.dnsAddresses, ["IPv6 2a00:dd80:20::274", "IPv4 185.40.234.37"]);
+    assert.equal(line.dnsElapsedMs, 54);
+  });
+
+  it("nests nothing deep enough for console.warn to hide it", () => {
+    const line = formatWakeFailure({
+      ok: false,
+      error: "boom",
+      dns: {
+        elapsedMs: 1,
+        addresses: [
+          { address: "2a00:dd80:20::274", family: 6 },
+          { address: "185.40.234.37", family: 4 },
+        ],
+      },
+      probes: {
+        ipv4: { address: "185.40.234.37", family: 4, connected: true, elapsedMs: 9, tcpMs: 3 },
+      },
+    });
+
+    // The real check: reproduce console.warn's own depth-2 formatting and assert
+    // the word that meant "this diagnostic was lost" never appears.
+    const rendered = inspect(line, { depth: 2 });
+    assert.doesNotMatch(rendered, /\[Object\]/);
+    assert.doesNotMatch(rendered, /\[Array\]/);
+    assert.match(rendered, /IPv6 2a00:dd80:20::274/);
+    assert.match(rendered, /185\.40\.234\.37/);
+  });
+
+  it("says plainly when an address never completed a TCP handshake", () => {
+    const line = formatWakeFailure({
+      ok: false,
+      error: "boom",
+      probes: {
+        ipv6: {
+          address: "2a00:dd80:20::274",
+          family: 6,
+          connected: false,
+          elapsedMs: 2000,
+          errorName: "TimeoutError",
+          errorMessage: "no TCP handshake within 2000ms",
+        },
+      },
+    });
+
+    assert.match(String(line.ipv6Probe), /IPv6 2a00:dd80:20::274 FAILED after 2000ms/);
+    assert.match(String(line.ipv6Probe), /NO TCP — unreachable, filtered, or silently dropped/);
+  });
+
+  it("does not call a refused connection unreachable — it is the opposite", () => {
+    // ECONNREFUSED also has no TCP handshake, but it PROVES the address routes.
+    // Reading it as "unreachable" would point the investigation backwards.
+    const line = formatWakeFailure({
+      ok: false,
+      error: "boom",
+      probes: {
+        ipv4: {
+          address: "185.40.234.37",
+          family: 4,
+          connected: false,
+          elapsedMs: 2,
+          errorCode: "ECONNREFUSED",
+          errorMessage: "tcp: connect ECONNREFUSED",
+        },
+      },
+    });
+
+    assert.match(String(line.ipv4Probe), /routable, but the port refused the connection/);
+    assert.doesNotMatch(String(line.ipv4Probe), /unreachable/);
+  });
+
+  it("carries the timing fields that explain an overshooting deadline", () => {
+    const line = formatWakeFailure({
+      ok: false,
+      error: "The operation was aborted due to timeout",
+      errorName: "TimeoutError",
+      elapsedMs: 5716,
+      timeoutMs: 3000,
+      abortAfterMs: 3001,
+      cpuMs: 12,
+    });
+
+    assert.equal(line.elapsedMs, 5716);
+    assert.equal(line.timeoutMs, 3000);
+    assert.equal(line.abortAfterMs, 3001);
+    assert.equal(line.cpuMs, 12);
+  });
+
+  it("omits every field it has nothing to say about", () => {
+    const line = formatWakeFailure({ ok: false, status: 500 });
+    assert.deepEqual(Object.keys(line), ["status", "error"]);
+  });
+
+  it("leaks nothing, whatever the result carries", () => {
+    const line = formatWakeFailure({
+      ok: false,
+      error: "fetch failed",
+      cause: { code: "ENETUNREACH", message: "connect ENETUNREACH", address: "2a00:dd80:20::274" },
+      dns: { elapsedMs: 1, addresses: [{ address: "185.40.234.37", family: 4 }] },
+      probes: {
+        ipv4: {
+          address: "185.40.234.37",
+          family: 4,
+          connected: false,
+          elapsedMs: 1,
+          errorMessage: "tcp: connect ECONNREFUSED",
+        },
+      },
+    });
+
+    const serialised = JSON.stringify(line);
+    assert.equal(serialised.includes(SECRET), false);
+    assert.equal(serialised.toLowerCase().includes("authorization"), false);
+    assert.equal(serialised.includes(WAKE_SIGNATURE_HEADER), false);
+    assert.equal(serialised.includes(WAKE_NONCE_HEADER), false);
+  });
+});
+
+// ─── Why a 3-second budget took 5.7 seconds ───────────────────────────────────
+
+/**
+ * Production reported `elapsedMs: 5716` against a 3000ms `AbortSignal.timeout`.
+ *
+ * Three things could produce that, and they have different fixes: the timer
+ * fired on time and the rejection arrived late (undici teardown); the timer
+ * itself fired late because the event loop was saturated; or the timer fired
+ * late because the process was not running at all. `abortAfterMs` splits the
+ * first from the other two, and `cpuMs` splits those two from each other.
+ */
+describe("overshooting the abort deadline", () => {
+  const plan = { deliver: true as const, url: configured.WORKER_WAKE_URL!, secret: SECRET };
+
+  it("records when the signal fired, separately from when the request settled", async () => {
+    // A fetch that observes the real abort and then takes its time rejecting —
+    // the "punctual timer, late rejection" case.
+    const impl = (async (_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          setTimeout(() => reject(new DOMException("aborted", "TimeoutError")), 40);
+        });
+      })) as unknown as typeof fetch;
+
+    const result = await deliverWakeNotification(plan, {
+      fetchImpl: impl,
+      timeoutMs: 30,
+      lookupImpl: stubLookup(),
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(typeof result.abortAfterMs, "number");
+    assert.ok(
+      result.abortAfterMs! < result.elapsedMs!,
+      `the signal fired at ${result.abortAfterMs}ms, the request settled at ${result.elapsedMs}ms`
+    );
+    assert.equal(result.timeoutMs, 30, "the budget is reported next to the measurement");
+  });
+
+  it("leaves abortAfterMs absent when the failure was not an abort at all", async () => {
+    const impl = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+
+    const result = await deliverWakeNotification(plan, {
+      fetchImpl: impl,
+      lookupImpl: stubLookup(),
+    });
+
+    assert.equal(result.abortAfterMs, undefined, "nothing aborted, so nothing to report");
+    assert.equal(result.timeoutMs, 3000, "the default budget is still reported");
+  });
+
+  it("reports CPU time, which separates a busy loop from a frozen process", async () => {
+    const impl = (async () => {
+      throw new TypeError("fetch failed");
+    }) as unknown as typeof fetch;
+
+    const result = await deliverWakeNotification(plan, {
+      fetchImpl: impl,
+      lookupImpl: stubLookup(),
+    });
+
+    assert.equal(typeof result.cpuMs, "number");
+    assert.ok(result.cpuMs! >= 0);
+  });
+
+  it("still aborts the real request on the configured budget", async () => {
+    // The listener is passive: the signal must still do its job.
+    let sawAbort = false;
+    const impl = (async (_input: unknown, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          sawAbort = true;
+          reject(new DOMException("aborted", "TimeoutError"));
+        });
+      })) as unknown as typeof fetch;
+
+    const result = await deliverWakeNotification(plan, {
+      fetchImpl: impl,
+      timeoutMs: 20,
+      lookupImpl: stubLookup(),
+    });
+
+    assert.equal(sawAbort, true, "the request still receives the abort");
+    assert.equal(result.ok, false);
   });
 });
 

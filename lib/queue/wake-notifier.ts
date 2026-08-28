@@ -49,6 +49,16 @@ const WAKE_REQUEST_TIMEOUT_MS = 3_000;
  */
 const WAKE_DNS_TIMEOUT_MS = 1_000;
 
+/**
+ * Budget for each per-family connectivity probe.
+ *
+ * Generous enough that a HEALTHY path completes — a TLS handshake to a European
+ * ingress from a US region is comfortably under this — because a probe that
+ * times out on a working address would answer the wrong question. Both probes
+ * run in parallel, so this is the total they can add, not twice it.
+ */
+const WAKE_PROBE_TIMEOUT_MS = 2_000;
+
 /** The path the worker listens on. Appended when the configured URL omits it. */
 const WAKE_PATH = "/wake";
 
@@ -174,11 +184,87 @@ export interface WakeDeliveryResult {
    * only a clock that keeps running while the process does not can show it.
    */
   elapsedMs?: number;
+  /** The budget that was configured, so `elapsedMs` can be read against it. */
+  timeoutMs?: number;
+  /**
+   * When the abort signal actually fired, relative to the request start.
+   *
+   * The one measurement that splits a late abort from a late rejection. If this
+   * lands on the budget but `elapsedMs` overshoots it, the timer was punctual and
+   * the delay is downstream of it — teardown, or a promise that resumed late. If
+   * this overshoots too, the timer itself was starved, and `cpuMs` says whether
+   * that was because the process was busy or because it was not running at all.
+   */
+  abortAfterMs?: number;
+  /**
+   * CPU milliseconds consumed during the request (user + system).
+   *
+   * Distinguishes the two ways wall-clock time disappears on a serverless host.
+   * CPU near the elapsed time means the event loop was saturated and timers were
+   * starved. CPU near zero across a long elapsed time means the process was idle
+   * — waiting on a socket, or frozen by the platform between the response and the
+   * end of the deferred work.
+   */
+  cpuMs?: number;
   /** Present only on a transport failure that carried a usable `cause`. */
   cause?: WakeTransportCause;
   /** Present only on a transport failure — see `WakeDnsDiagnostic`. */
   dns?: WakeDnsDiagnostic;
+  /** Per-family reachability, probed only after the real request has failed. */
+  probes?: WakeProbes;
 }
+
+/**
+ * One address, dialled directly, after the real request already failed.
+ *
+ * `fetch` picks an address for us and then tells us nothing about which one it
+ * used. These probes take that decision back for the length of one measurement:
+ * dial a known IPv4 and a known IPv6 and report each separately, so "the worker
+ * is unreachable" and "the worker is unreachable OVER ONE FAMILY" stop looking
+ * identical.
+ */
+export interface WakeProbeResult {
+  address: string;
+  /** 4 or 6. */
+  family: number;
+  /** True only if the probe got as far as `reached` says it should. */
+  connected: boolean;
+  elapsedMs: number;
+  /** Milliseconds to complete the TCP handshake, when it completed at all. */
+  tcpMs?: number;
+  /**
+   * How far the probe got. The whole diagnostic value is here: `"tcp"` present
+   * at all means the address is ROUTABLE and something is listening, so a
+   * failure after it is a TLS/Funnel problem, not a network one. No `tcpMs`
+   * means the packets never landed — routing, filtering, or no route at all.
+   */
+  reached?: "tcp" | "tls";
+  errorName?: string;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+export interface WakeProbes {
+  ipv4?: WakeProbeResult;
+  ipv6?: WakeProbeResult;
+}
+
+export interface WakeProbeTarget {
+  address: string;
+  family: number;
+  port: number;
+  /**
+   * TLS server name. Set for an `https:` wake URL, absent for `http:`.
+   *
+   * Present means the probe completes a real TLS handshake with SNI, which is
+   * what the Funnel routes on — a raw TCP connect to the ingress would prove
+   * only that Tailscale's front door is up, not that it can find this tailnet.
+   */
+  servername?: string;
+  timeoutMs: number;
+}
+
+export type WakeProbe = (target: WakeProbeTarget) => Promise<WakeProbeResult>;
 
 /** Read one property off an unknown value without asserting its shape. */
 function read(source: object, key: string): unknown {
@@ -346,11 +432,162 @@ export async function describeWakeDns(
   }
 }
 
-/** The host a plan points at, or undefined if it somehow no longer parses. */
-function hostnameOf(url: string): string | undefined {
+/** Where a plan points, or undefined if the URL somehow no longer parses. */
+function targetOf(
+  url: string
+): { hostname: string; port: number; servername?: string } | undefined {
   try {
-    return new URL(url).hostname || undefined;
+    const parsed = new URL(url);
+    if (!parsed.hostname) return undefined;
+    const secure = parsed.protocol === "https:";
+    return {
+      hostname: parsed.hostname,
+      port: Number(parsed.port) || (secure ? 443 : 80),
+      servername: secure ? parsed.hostname : undefined,
+    };
   } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Dial one address in two explicit phases. Never throws, never outlives its budget.
+ *
+ * Split into TCP-then-TLS rather than one `tls.connect` so the two failure modes
+ * cannot be confused. A single call that fails tells you only "it did not work";
+ * connecting the socket first and upgrading it after means `tcpMs` is present
+ * exactly when the address was reachable, which is the difference between a
+ * routing fault and a handshake fault — and routing is the open question here.
+ */
+async function nodeProbe(): Promise<WakeProbe> {
+  const [net, tls] = await Promise.all([import("node:net"), import("node:tls")]);
+
+  return (target) =>
+    new Promise<WakeProbeResult>((resolve) => {
+      const started = Date.now();
+      let tcpMs: number | undefined;
+      let settled = false;
+
+      const socket = net.connect({ host: target.address, port: target.port });
+      let upgraded: import("node:tls").TLSSocket | undefined;
+
+      const finish = (fields: Partial<WakeProbeResult>) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        // The OUTERMOST handle only, and this is not a style choice: destroying
+        // a TLSSocket AND the raw socket it wraps segfaults Node (reproduced
+        // 3/3, exit 0xC0000005). Destroying the TLSSocket tears down its
+        // transport anyway, so one call closes everything.
+        (upgraded ?? socket).destroy();
+        resolve({
+          address: target.address,
+          family: target.family,
+          connected: false,
+          elapsedMs: Date.now() - started,
+          ...(tcpMs !== undefined ? { tcpMs } : {}),
+          ...fields,
+        });
+      };
+
+      const fail = (err: unknown, phase: string) =>
+        finish({
+          connected: false,
+          ...(tcpMs !== undefined ? { reached: "tcp" as const } : {}),
+          errorName: typeof err === "object" && err !== null ? readString(err, "name") : undefined,
+          errorCode: typeof err === "object" && err !== null ? readString(err, "code") : undefined,
+          errorMessage: `${phase}: ${err instanceof Error ? err.message : String(err)}`,
+        });
+
+      // A hard backstop independent of the socket's own timeout, so a stall in
+      // any phase — connect, TLS, or a listener that never fires — is bounded.
+      const timer = setTimeout(
+        () =>
+          finish({
+            connected: false,
+            ...(tcpMs !== undefined ? { reached: "tcp" as const } : {}),
+            errorName: "TimeoutError",
+            errorMessage:
+              tcpMs === undefined
+                ? `no TCP handshake within ${target.timeoutMs}ms`
+                : `TCP connected but no TLS handshake within ${target.timeoutMs}ms`,
+          }),
+        target.timeoutMs
+      );
+      if (typeof timer.unref === "function") timer.unref();
+
+      socket.on("error", (err) => fail(err, "tcp"));
+      socket.on("connect", () => {
+        tcpMs = Date.now() - started;
+        if (!target.servername) {
+          finish({ connected: true, reached: "tcp" });
+          return;
+        }
+        upgraded = tls.connect({ socket, servername: target.servername });
+        upgraded.on("error", (err) => fail(err, "tls"));
+        upgraded.on("secureConnect", () => finish({ connected: true, reached: "tls" }));
+      });
+    });
+}
+
+/**
+ * Probe the first address of each family, in parallel. Never throws.
+ *
+ * Parallel because they are independent and the invocation is already over
+ * budget by the time this runs — two sequential 2s probes would add four
+ * seconds to a request that has nothing left to wait for.
+ */
+async function probeFamilies(
+  target: { port: number; servername?: string },
+  addresses: readonly WakeDnsAddress[],
+  deps: DeliverWakeDeps
+): Promise<WakeProbes | undefined> {
+  const first = (family: number) => addresses.find((a) => a.family === family);
+  const picks = [first(4), first(6)].filter((a): a is WakeDnsAddress => a !== undefined);
+  if (picks.length === 0) return undefined;
+
+  try {
+    const probe = deps.probeImpl ?? (await nodeProbe());
+    const timeoutMs = deps.probeTimeoutMs ?? WAKE_PROBE_TIMEOUT_MS;
+
+    const settled = await Promise.all(
+      picks.map(async (pick) => {
+        try {
+          return await withBudget(
+            Promise.resolve(
+              probe({
+                address: pick.address,
+                family: pick.family,
+                port: target.port,
+                servername: target.servername,
+                timeoutMs,
+              })
+            ),
+            // Slack over the probe's own budget: the probe is expected to police
+            // itself, and this only catches one that does not.
+            timeoutMs + 500
+          );
+        } catch (err) {
+          return {
+            address: pick.address,
+            family: pick.family,
+            connected: false,
+            elapsedMs: timeoutMs,
+            errorName: "ProbeError",
+            errorMessage: err instanceof Error ? err.message : String(err),
+          } satisfies WakeProbeResult;
+        }
+      })
+    );
+
+    const probes: WakeProbes = {};
+    for (const result of settled) {
+      if (result.family === 4) probes.ipv4 = result;
+      if (result.family === 6) probes.ipv6 = result;
+    }
+    return Object.keys(probes).length > 0 ? probes : undefined;
+  } catch {
+    // The probe module would not even load. The wake failure is still the story.
     return undefined;
   }
 }
@@ -359,6 +596,26 @@ export interface DeliverWakeDeps extends DescribeWakeDnsDeps {
   fetchImpl?: typeof fetch;
   now?: () => number;
   timeoutMs?: number;
+  probeImpl?: WakeProbe;
+  probeTimeoutMs?: number;
+}
+
+/**
+ * CPU time consumed so far, in milliseconds, where the runtime offers it.
+ *
+ * Read through `globalThis` rather than the `process` global so this module
+ * stays loadable in a runtime that has no `process` at all.
+ */
+function readCpuMs(): number | undefined {
+  const proc = (globalThis as { process?: { cpuUsage?: () => { user: number; system: number } } })
+    .process;
+  if (typeof proc?.cpuUsage !== "function") return undefined;
+  try {
+    const { user, system } = proc.cpuUsage();
+    return (user + system) / 1000;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -380,6 +637,13 @@ export async function deliverWakeNotification(
   // the moment the request starts, so there is nothing to reconcile.
   const startedAt = now();
   const credentials = createWakeCredentials(plan.secret, startedAt);
+  const cpuStartedAt = readCpuMs();
+
+  // Hoisted only to be observed. Created at the same point in the same order as
+  // before, and the listener is passive — the request behaves identically.
+  const signal = AbortSignal.timeout(timeoutMs);
+  let abortedAt: number | undefined;
+  signal.addEventListener("abort", () => void (abortedAt = now()), { once: true });
 
   try {
     const response = await fetchImpl(plan.url, {
@@ -392,20 +656,31 @@ export async function deliverWakeNotification(
         // proxy from inventing one.
         "content-length": "0",
       },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal,
     });
     return { ok: response.ok, status: response.status };
   } catch (err) {
-    // Measured before the DNS probe, so `elapsedMs` reports the request and only
-    // the request. The probe's own cost is reported separately, under `dns`.
+    // Every measurement is taken before any diagnostic runs, so `elapsedMs`
+    // reports the request and only the request. The diagnostics that follow
+    // each report their own cost separately.
     const elapsedMs = now() - startedAt;
+    const cpuEndedAt = readCpuMs();
+    const cpuMs =
+      cpuStartedAt !== undefined && cpuEndedAt !== undefined
+        ? Math.round(cpuEndedAt - cpuStartedAt)
+        : undefined;
+
     const cause = describeTransportError(err);
     const errorName = typeof err === "object" && err !== null ? readString(err, "name") : undefined;
 
     // Strictly after the failure, so nothing here can affect a delivery that was
     // going to work, and nothing on the success path pays for it.
-    const host = hostnameOf(plan.url);
-    const dns = host ? await describeWakeDns(host, deps) : undefined;
+    const target = targetOf(plan.url);
+    const dns = target ? await describeWakeDns(target.hostname, deps) : undefined;
+    const probes =
+      target?.port && dns?.addresses?.length
+        ? await probeFamilies(target, dns.addresses, deps)
+        : undefined;
 
     return {
       ok: false,
@@ -414,10 +689,81 @@ export async function deliverWakeNotification(
       // does not show up in the log as a key with no value.
       ...(errorName ? { errorName } : {}),
       elapsedMs,
+      timeoutMs,
+      ...(abortedAt !== undefined ? { abortAfterMs: abortedAt - startedAt } : {}),
+      ...(cpuMs !== undefined ? { cpuMs } : {}),
       ...(cause ? { cause } : {}),
       ...(dns ? { dns } : {}),
+      ...(probes ? { probes } : {}),
     };
   }
+}
+
+/** `IPv6 2a00:dd80:20::274` — family first, because family is the question. */
+function formatAddress(entry: WakeDnsAddress): string {
+  return `IPv${entry.family} ${entry.address}`;
+}
+
+function formatProbe(probe: WakeProbeResult): string {
+  const who = `IPv${probe.family} ${probe.address}`;
+
+  if (probe.connected) {
+    const how = probe.reached === "tls" ? "TCP+TLS" : "TCP only";
+    const tcp = probe.tcpMs !== undefined ? `, TCP handshake ${probe.tcpMs}ms` : "";
+    return `${who} CONNECTED in ${probe.elapsedMs}ms (${how}${tcp})`;
+  }
+
+  // `tcpMs` present means the address is routable and something answered, so the
+  // fault is above the network. Absent means the packets never arrived — with one
+  // exception worth spelling out: a REFUSED connection also has no handshake, but
+  // it proves the address is perfectly routable, which is the opposite reading.
+  const phase =
+    probe.tcpMs !== undefined
+      ? `reachable (TCP in ${probe.tcpMs}ms) but TLS failed`
+      : probe.errorCode === "ECONNREFUSED"
+        ? "routable, but the port refused the connection"
+        : "NO TCP — unreachable, filtered, or silently dropped";
+  const why = [probe.errorCode, probe.errorName, probe.errorMessage].filter(Boolean).join(" ");
+  return `${who} FAILED after ${probe.elapsedMs}ms — ${phase}${why ? `: ${why}` : ""}`;
+}
+
+/**
+ * Flatten a failed delivery into something a log will actually print.
+ *
+ * This exists because of a concrete defect: `console.warn` formats objects with
+ * `util.inspect` at depth 2, so `dns.addresses[i]` — three levels down — came
+ * out of production as `[ [Object], [Object], [Object], … ]`. Six addresses were
+ * captured and not one of them was readable, which is the entire diagnostic
+ * lost to a formatting default.
+ *
+ * So nothing nested survives here. Addresses and probes become strings, which
+ * `util.inspect` never truncates by depth, and the structured values stay on the
+ * result for callers that want to branch on them.
+ */
+export function formatWakeFailure(result: WakeDeliveryResult): Record<string, unknown> {
+  const line: Record<string, unknown> = {
+    status: result.status,
+    error: result.error,
+  };
+
+  if (result.errorName) line.errorName = result.errorName;
+  if (result.elapsedMs !== undefined) line.elapsedMs = result.elapsedMs;
+  if (result.timeoutMs !== undefined) line.timeoutMs = result.timeoutMs;
+  if (result.abortAfterMs !== undefined) line.abortAfterMs = result.abortAfterMs;
+  if (result.cpuMs !== undefined) line.cpuMs = result.cpuMs;
+  // One level deep with scalar values — inside the depth limit, unlike `dns`.
+  if (result.cause) line.cause = result.cause;
+
+  if (result.dns) {
+    line.dnsElapsedMs = result.dns.elapsedMs;
+    if (result.dns.error) line.dnsError = result.dns.error;
+    if (result.dns.addresses) line.dnsAddresses = result.dns.addresses.map(formatAddress);
+  }
+
+  if (result.probes?.ipv4) line.ipv4Probe = formatProbe(result.probes.ipv4);
+  if (result.probes?.ipv6) line.ipv6Probe = formatProbe(result.probes.ipv6);
+
+  return line;
 }
 
 /**

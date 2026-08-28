@@ -19,7 +19,11 @@
 
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/client";
-import { scheduleWakeNotification, type WakeDeliveryResult } from "@/lib/queue/wake-notifier";
+import {
+  formatWakeFailure,
+  scheduleWakeNotification,
+  type WakeDeliveryResult,
+} from "@/lib/queue/wake-notifier";
 
 /**
  * Report a wake that did not land. Failures only — a successful signal happens
@@ -35,20 +39,14 @@ import { scheduleWakeNotification, type WakeDeliveryResult } from "@/lib/queue/w
 function reportWakeFailure(result: WakeDeliveryResult): void {
   if (result.ok) return;
   console.warn("[queue] wake signal not delivered", {
-    status: result.status,
-    error: result.error,
-    // `error` alone is "fetch failed" for every connection-level fault, and "the
-    // operation was aborted due to timeout" for every stall, which distinguishes
-    // nothing. The three fields below are where the answer actually is:
-    // `errorName` separates an abort from a connect failure, `elapsedMs`
-    // separates "gave up at the deadline" from "failed instantly", and `dns`
-    // says which address family the connection would have tried first. `cause`
-    // is allow-listed by `describeTransportError` so nothing from the signed
-    // request can travel with it.
-    ...(result.errorName ? { errorName: result.errorName } : {}),
-    ...(result.elapsedMs !== undefined ? { elapsedMs: result.elapsedMs } : {}),
-    ...(result.cause ? { cause: result.cause } : {}),
-    ...(result.dns ? { dns: result.dns } : {}),
+    // Flattened deliberately. `error` alone is "fetch failed" for every
+    // connection-level fault and "aborted due to timeout" for every stall, so
+    // the detail is the whole point — and `console.warn` prints nested objects
+    // past two levels as `[Object]`, which already cost us one production
+    // capture. `formatWakeFailure` renders addresses and probes as strings so
+    // every one of them survives into the log, and allow-lists the fields so
+    // nothing from the signed request can travel with them.
+    ...formatWakeFailure(result),
     note: "job is queued; the worker will pick it up on its fallback interval",
   });
 }
