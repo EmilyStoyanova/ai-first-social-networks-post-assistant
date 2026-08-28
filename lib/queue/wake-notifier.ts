@@ -42,6 +42,13 @@ import {
 /** How long to wait on the wake request before giving up on it. */
 const WAKE_REQUEST_TIMEOUT_MS = 3_000;
 
+/**
+ * Budget for the post-mortem DNS lookup. Small on purpose: it runs only after a
+ * delivery has ALREADY failed, so it is pure diagnosis and must never become a
+ * second thing that hangs.
+ */
+const WAKE_DNS_TIMEOUT_MS = 1_000;
+
 /** The path the worker listens on. Appended when the configured URL omits it. */
 const WAKE_PATH = "/wake";
 
@@ -120,12 +127,57 @@ export interface WakeTransportCause {
   port?: number;
 }
 
+/** One address the resolver returned, in the order it returned it. */
+export interface WakeDnsAddress {
+  address: string;
+  /** 4 or 6. The whole question, in one number. */
+  family: number;
+}
+
+/**
+ * What the resolver says about the wake host, captured after a failed delivery.
+ *
+ * The point is the ORDER. `fetch` connects to whatever the resolver lists first,
+ * and a host with both A and AAAA records behaves completely differently
+ * depending on which one that is — a caller with no IPv6 route gets an instant
+ * ENETUNREACH, and one whose IPv6 packets are silently dropped gets a hang that
+ * looks exactly like a dead worker. Neither is distinguishable from the error
+ * alone, and both are distinguishable from this.
+ */
+export interface WakeDnsDiagnostic {
+  elapsedMs: number;
+  /** Resolver order preserved — index 0 is what the connection would have used. */
+  addresses?: WakeDnsAddress[];
+  /** Set instead of `addresses` when the lookup itself failed or ran out of time. */
+  error?: string;
+}
+
 export interface WakeDeliveryResult {
   ok: boolean;
   status?: number;
   error?: string;
+  /**
+   * The error's constructor/DOM name — `TimeoutError`, `TypeError`, `AbortError`.
+   *
+   * Carries information the message does not. An abort and a connect failure are
+   * different faults with different fixes, and `AbortSignal.timeout` rejects
+   * with a `DOMException` whose ONLY distinguishing mark is this name: it has no
+   * `code`, and no `cause` for `describeTransportError` to reach.
+   */
+  errorName?: string;
+  /**
+   * Wall-clock milliseconds spent on the request, on the failure path only.
+   *
+   * Deliberately wall clock rather than monotonic. On a serverless host the gap
+   * between "we waited out the 3s budget" (≈3000) and "the sandbox was frozen
+   * mid-request and thawed later" (arbitrarily large) is itself a diagnosis, and
+   * only a clock that keeps running while the process does not can show it.
+   */
+  elapsedMs?: number;
   /** Present only on a transport failure that carried a usable `cause`. */
   cause?: WakeTransportCause;
+  /** Present only on a transport failure — see `WakeDnsDiagnostic`. */
+  dns?: WakeDnsDiagnostic;
 }
 
 /** Read one property off an unknown value without asserting its shape. */
@@ -202,7 +254,108 @@ export function describeTransportError(err: unknown): WakeTransportCause | undef
   );
 }
 
-export interface DeliverWakeDeps {
+/** Resolve a hostname to every address, in resolver order. */
+export type WakeDnsLookup = (
+  hostname: string
+) => Promise<ReadonlyArray<{ address: string; family: number }>>;
+
+/**
+ * Imported lazily, inside the failure path, and never at module scope.
+ *
+ * `node:dns` is a Node-only builtin while this module is reachable from bundles
+ * that are not — the Edge runtime boots the instrumentation file too. A dynamic
+ * import keeps the dependency out of every graph that never fails a wake, which
+ * is all of them on the happy path.
+ */
+async function nodeDnsLookup(): Promise<WakeDnsLookup> {
+  const { lookup } = await import("node:dns/promises");
+  // `verbatim` pins resolver order explicitly. It is the default from Node 17,
+  // but the ORDER is the entire point of this probe, so it is not left implied.
+  return (hostname) => lookup(hostname, { all: true, verbatim: true });
+}
+
+/**
+ * Reject if `work` outlives `ms`.
+ *
+ * Both handlers are attached before the race can settle, so a lookup that
+ * resolves or rejects after the budget has expired is already accounted for and
+ * cannot surface as an unhandled rejection. The timer is unref'd so a pending
+ * probe never holds a process open.
+ */
+function withBudget<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+    if (typeof timer.unref === "function") timer.unref();
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    );
+  });
+}
+
+export interface DescribeWakeDnsDeps {
+  lookupImpl?: WakeDnsLookup;
+  now?: () => number;
+  dnsTimeoutMs?: number;
+}
+
+/**
+ * Ask the resolver what it would have handed the connection. Never throws.
+ *
+ * Total by construction — a resolver that fails, hangs, or returns something
+ * unexpected produces a diagnostic saying so, because the caller is already
+ * reporting a failure and a diagnostic that can fail is worse than none.
+ */
+export async function describeWakeDns(
+  hostname: string,
+  deps: DescribeWakeDnsDeps = {}
+): Promise<WakeDnsDiagnostic> {
+  const now = deps.now ?? Date.now;
+  const startedAt = now();
+
+  try {
+    const lookupImpl = deps.lookupImpl ?? (await nodeDnsLookup());
+    const entries = await withBudget(
+      Promise.resolve(lookupImpl(hostname)),
+      deps.dnsTimeoutMs ?? WAKE_DNS_TIMEOUT_MS
+    );
+
+    // Rebuilt field by field rather than passed through: the resolver's entries
+    // are the only part of this diagnostic that comes from outside, and an
+    // allow-list is the same defence used for the transport cause.
+    const addresses: WakeDnsAddress[] = [];
+    for (const entry of entries ?? []) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const address = readString(entry, "address");
+      const family = readNumber(entry, "family");
+      if (address !== undefined && family !== undefined) addresses.push({ address, family });
+    }
+
+    return { elapsedMs: now() - startedAt, addresses };
+  } catch (err) {
+    return {
+      elapsedMs: now() - startedAt,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** The host a plan points at, or undefined if it somehow no longer parses. */
+function hostnameOf(url: string): string | undefined {
+  try {
+    return new URL(url).hostname || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface DeliverWakeDeps extends DescribeWakeDnsDeps {
   fetchImpl?: typeof fetch;
   now?: () => number;
   timeoutMs?: number;
@@ -223,7 +376,10 @@ export async function deliverWakeNotification(
   const now = deps.now ?? Date.now;
   const timeoutMs = deps.timeoutMs ?? WAKE_REQUEST_TIMEOUT_MS;
 
-  const credentials = createWakeCredentials(plan.secret, now());
+  // One reading, used both to sign and to measure. The credential timestamp IS
+  // the moment the request starts, so there is nothing to reconcile.
+  const startedAt = now();
+  const credentials = createWakeCredentials(plan.secret, startedAt);
 
   try {
     const response = await fetchImpl(plan.url, {
@@ -240,13 +396,26 @@ export async function deliverWakeNotification(
     });
     return { ok: response.ok, status: response.status };
   } catch (err) {
+    // Measured before the DNS probe, so `elapsedMs` reports the request and only
+    // the request. The probe's own cost is reported separately, under `dns`.
+    const elapsedMs = now() - startedAt;
     const cause = describeTransportError(err);
+    const errorName = typeof err === "object" && err !== null ? readString(err, "name") : undefined;
+
+    // Strictly after the failure, so nothing here can affect a delivery that was
+    // going to work, and nothing on the success path pays for it.
+    const host = hostnameOf(plan.url);
+    const dns = host ? await describeWakeDns(host, deps) : undefined;
+
     return {
       ok: false,
       error: err instanceof Error ? err.message : String(err),
-      // Omitted rather than set to undefined so the result stays deep-equal to
-      // what it was for errors that carry nothing useful.
+      // Omitted rather than set to undefined, so a field that had nothing to say
+      // does not show up in the log as a key with no value.
+      ...(errorName ? { errorName } : {}),
+      elapsedMs,
       ...(cause ? { cause } : {}),
+      ...(dns ? { dns } : {}),
     };
   }
 }

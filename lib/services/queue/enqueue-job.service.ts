@@ -37,12 +37,18 @@ function reportWakeFailure(result: WakeDeliveryResult): void {
   console.warn("[queue] wake signal not delivered", {
     status: result.status,
     error: result.error,
-    // `error` alone is "fetch failed" for every connection-level fault, which
-    // does not distinguish an unreachable network from a refused port from a
-    // bad certificate. `cause` is where the answer actually is — see
-    // `describeTransportError`, which allow-lists the fields so nothing from the
-    // signed request can travel with it.
+    // `error` alone is "fetch failed" for every connection-level fault, and "the
+    // operation was aborted due to timeout" for every stall, which distinguishes
+    // nothing. The three fields below are where the answer actually is:
+    // `errorName` separates an abort from a connect failure, `elapsedMs`
+    // separates "gave up at the deadline" from "failed instantly", and `dns`
+    // says which address family the connection would have tried first. `cause`
+    // is allow-listed by `describeTransportError` so nothing from the signed
+    // request can travel with it.
+    ...(result.errorName ? { errorName: result.errorName } : {}),
+    ...(result.elapsedMs !== undefined ? { elapsedMs: result.elapsedMs } : {}),
     ...(result.cause ? { cause: result.cause } : {}),
+    ...(result.dns ? { dns: result.dns } : {}),
     note: "job is queued; the worker will pick it up on its fallback interval",
   });
 }
