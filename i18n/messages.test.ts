@@ -123,6 +123,43 @@ describe("i18n messages", () => {
     }
   });
 
+  it("names the calendar's publishing windows section and its weekdays", () => {
+    // The section heading plus the seven day names it renders each window with.
+    // Both are asked for by name at render time — `channels.days.${day}` from a
+    // stored token — and a missing one throws in place of the section.
+    for (const [locale, messages] of [
+      ["en", en],
+      ["bg", bg],
+    ] as const) {
+      const title = lookup(messages, "planner.calendar.publishingWindows");
+      assert.equal(
+        typeof title,
+        "string",
+        `planner.calendar.publishingWindows missing from ${locale}`
+      );
+      assert.ok(
+        (title as string).trim().length > 0,
+        `planner.calendar.publishingWindows is blank in ${locale}`
+      );
+
+      for (const day of [
+        "MONDAY",
+        "TUESDAY",
+        "WEDNESDAY",
+        "THURSDAY",
+        "FRIDAY",
+        "SATURDAY",
+        "SUNDAY",
+      ]) {
+        assert.equal(
+          typeof lookup(messages, `channels.days.${day}`),
+          "string",
+          `channels.days.${day} missing from ${locale}`
+        );
+      }
+    }
+  });
+
   it("names every part of the channel analytics dashboard in both locales", () => {
     // Every one of these is asked for by name at render time, several from a
     // list (`period.${option}`, `sources.avg`), and next-intl throws in place of

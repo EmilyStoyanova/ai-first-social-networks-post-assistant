@@ -32,6 +32,19 @@ export interface GenerationChannelOption {
 }
 
 /**
+ * Whether one config row is a channel this company can actually publish to.
+ *
+ * The two halves of the rule, spelled out under `resolveGenerationChannels`
+ * below. Exported because it is asked PER ROW elsewhere — the calendar's
+ * publishing-windows section reads every eligible row of a network rather than
+ * one per network — and a second copy of "enabled and Buffer-backed" would
+ * eventually disagree with this one about which channels exist.
+ */
+export function isPublishableChannelConfig(config: ChannelConfigItem): boolean {
+  return config.enabled && config.bufferProfileId !== null;
+}
+
+/**
  * Derives the channels a user may generate for from the company's channel
  * configs.
  *
@@ -59,7 +72,7 @@ export function resolveGenerationChannels(
   const byChannel = new Map<string, GenerationChannelOption>();
 
   for (const config of configs) {
-    if (!config.enabled || config.bufferProfileId === null) continue;
+    if (!isPublishableChannelConfig(config)) continue;
 
     const channel = config.channel.toUpperCase();
     if (byChannel.has(channel)) continue;

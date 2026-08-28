@@ -28,6 +28,15 @@ describe("formatPostingWindow", () => {
     );
   });
 
+  it("separates the day from its hours however the caller asks", () => {
+    // The calendar's publishing-windows section reads its lines inside chips
+    // beside a channel name, where a bare space stops separating anything.
+    assert.equal(
+      formatPostingWindow({ day: "MONDAY", start: "09:00", end: "17:00" }, bg, " · "),
+      "Понеделник · 09:00–17:00"
+    );
+  });
+
   it("falls through to the stored token for a day the locale has no name for", () => {
     // next-intl throws on a missing key, so the card checks before asking. A
     // recognisable MONDAY beats a thrown message in place of the whole row.

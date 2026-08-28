@@ -1182,6 +1182,7 @@
       "emptyDesc": "Публикациите стоят в деня, за който са планирани, или в деня, в който са излезли.",
       "moreOnDay": "{count, plural, one {още #} other {още #}}",
       "postDetail": "Детайли за публикацията",
+      "publishingWindows": "Прозорци за публикуване",
       "timeZoneNote": "Всички часове са в {zone}."
     },
     "analytics": {

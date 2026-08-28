@@ -5,8 +5,10 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ChannelsShell } from "@/components/company/channels-shell";
 import { CalendarToolbar } from "@/components/company/calendar-toolbar";
 import { PostCalendar } from "@/components/company/post-calendar";
+import { PublishingWindowsPanel } from "@/components/company/publishing-windows-panel";
 import { listCalendarPosts } from "@/lib/services/company/list-calendar-posts.service";
 import { channelScopeFilter, channelScopeSlug } from "@/lib/channels/channel-scope";
+import { publishingWindowGroups } from "@/lib/channels/publishing-windows";
 import {
   CALENDAR_DATE_PARAM,
   CALENDAR_VIEW_PARAM,
@@ -56,7 +58,12 @@ export default async function ChannelCalendarPage({ params, searchParams }: Prop
   }).toString();
 
   const context = await loadChannelsContext(slug, channelParam, "calendar", query);
-  const { company, scopes, scope, role, canDelete, bufferConnected, user } = context;
+  const { company, scopes, scope, configs, role, canDelete, bufferConnected, user } = context;
+
+  // The saved schedule behind this scope, from the configs the switcher was
+  // built from — no second query, no second source of truth. Empty for a scope
+  // whose channels have configured nothing, which renders as no section at all.
+  const windowGroups = publishingWindowGroups(configs, scope);
 
   const range = buildCalendarRange(view, anchor);
   const window = calendarWindowInstants(range);
@@ -108,6 +115,10 @@ export default async function ChannelCalendarPage({ params, searchParams }: Prop
             status={status}
             counts={counts}
           />
+          {/* Between the controls and the grid: the toolbar names the period and
+              the zone, and the windows say when anything would be planned inside
+              it — read before the cells, not after them. */}
+          <PublishingWindowsPanel groups={windowGroups} />
           <PostCalendar
             slug={slug}
             view={range.view}

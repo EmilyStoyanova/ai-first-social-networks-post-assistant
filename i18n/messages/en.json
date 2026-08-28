@@ -1182,6 +1182,7 @@
       "emptyDesc": "Posts appear on the day they are scheduled for, or the day they went out.",
       "moreOnDay": "{count, plural, one {# more} other {# more}}",
       "postDetail": "Post details",
+      "publishingWindows": "Publishing windows",
       "timeZoneNote": "All times are in {zone}."
     },
     "analytics": {

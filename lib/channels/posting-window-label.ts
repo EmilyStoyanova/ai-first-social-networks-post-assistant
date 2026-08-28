@@ -26,9 +26,24 @@ export type DayLabel = (day: string) => string;
 /** En dash: a range, matching how times are shown everywhere else in the app. */
 const RANGE_SEPARATOR = "–";
 
+/**
+ * What sits between the day and its hours.
+ *
+ * A plain space on the settings card, where each line stands alone in a column
+ * of its own. The calendar sets a middot instead, because there the lines run
+ * beside a channel name and inside chips, and a space alone stops separating
+ * anything. Formatting stays in one place either way — the alternative was the
+ * calendar assembling its own string and the two drifting apart.
+ */
+const DEFAULT_DAY_SEPARATOR = " ";
+
 /** One window as a single line, e.g. `Понеделник 09:00–17:00`. */
-export function formatPostingWindow(window: PostingWindow, dayLabel: DayLabel): string {
-  return `${dayLabel(window.day)} ${window.start}${RANGE_SEPARATOR}${window.end}`;
+export function formatPostingWindow(
+  window: PostingWindow,
+  dayLabel: DayLabel,
+  daySeparator: string = DEFAULT_DAY_SEPARATOR
+): string {
+  return `${dayLabel(window.day)}${daySeparator}${window.start}${RANGE_SEPARATOR}${window.end}`;
 }
 
 /**
@@ -42,7 +57,8 @@ export function formatPostingWindow(window: PostingWindow, dayLabel: DayLabel): 
  */
 export function postingWindowLines(
   windows: readonly PostingWindow[],
-  dayLabel: DayLabel
+  dayLabel: DayLabel,
+  daySeparator: string = DEFAULT_DAY_SEPARATOR
 ): string[] {
-  return windows.map((window) => formatPostingWindow(window, dayLabel));
+  return windows.map((window) => formatPostingWindow(window, dayLabel, daySeparator));
 }

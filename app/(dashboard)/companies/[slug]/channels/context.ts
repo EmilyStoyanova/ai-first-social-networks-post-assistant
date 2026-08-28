@@ -2,7 +2,10 @@ import { notFound, redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { getCompany, type CompanyDetails } from "@/lib/services/company/get-company.service";
 import { getBufferConnection } from "@/lib/services/buffer/get-buffer-connection.service";
-import { listChannelConfigs } from "@/lib/services/company/list-channel-configs.service";
+import {
+  listChannelConfigs,
+  type ChannelConfigItem,
+} from "@/lib/services/company/list-channel-configs.service";
 import {
   channelScopeOptions,
   channelScopeSlug,
@@ -32,6 +35,16 @@ export interface ChannelsContext {
   /** The switcher's options — `ALL_CHANNELS` first. */
   scopes: ChannelScope[];
   scope: ChannelScope;
+  /**
+   * The company's channel configs, as loaded for the switcher.
+   *
+   * Handed on rather than re-queried: the scopes above are already derived from
+   * these rows, and a page that needs the per-channel settings behind a scope
+   * (the calendar shows the saved posting windows) would otherwise run the same
+   * query a second time and be free to disagree with the switcher about what
+   * exists.
+   */
+  configs: ChannelConfigItem[];
   /** Owner or global admin. Drives the card's actions and the delete button. */
   role: PostRole;
   canDelete: boolean;
@@ -76,6 +89,7 @@ export async function loadChannelsContext(
     company,
     scopes,
     scope,
+    configs,
     role: canManage ? "owner" : "editor",
     canDelete: canManage,
     bufferConnected: bufferConnection.connected,
