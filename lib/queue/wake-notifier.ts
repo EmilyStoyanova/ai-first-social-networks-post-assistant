@@ -40,7 +40,7 @@ import {
 } from "@/lib/security/wake-auth";
 
 /** How long to wait on the wake request before giving up on it. */
-const WAKE_REQUEST_TIMEOUT_MS = 3_000;
+const WAKE_REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * Budget for the post-mortem DNS lookup. Small on purpose: it runs only after a
