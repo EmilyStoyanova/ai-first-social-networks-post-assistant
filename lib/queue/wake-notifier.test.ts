@@ -206,6 +206,128 @@ describe("deliverWakeNotification", () => {
   });
 });
 
+// ─── Seeing WHY a delivery failed ─────────────────────────────────────────────
+
+/**
+ * The diagnostic that turns "fetch failed" into an answer.
+ *
+ * undici reports every connection-level fault — no route, refused, DNS, TLS —
+ * with the same three-word message and hides the real one in `cause`. These
+ * tests pin the extraction to the shapes Node actually produces, and pin the
+ * allow-list that keeps a signed request's headers out of a log.
+ */
+describe("transport diagnostics on a failed wake", () => {
+  const plan = { deliver: true as const, url: configured.WORKER_WAKE_URL!, secret: SECRET };
+
+  /** The exact shape `fetch` throws when a connect() fails. */
+  function fetchFailed(cause: unknown): typeof fetch {
+    return (async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause });
+    }) as unknown as typeof fetch;
+  }
+
+  it("surfaces the nested cause behind an unreachable network", async () => {
+    const cause = Object.assign(new Error("connect ENETUNREACH 2a00:dd80:20::274:10000"), {
+      code: "ENETUNREACH",
+      syscall: "connect",
+      address: "2a00:dd80:20::274",
+      port: 10000,
+    });
+
+    const result = await deliverWakeNotification(plan, { fetchImpl: fetchFailed(cause) });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.error, "fetch failed", "the useless message is still reported");
+    assert.equal(result.cause?.code, "ENETUNREACH", "and the useful one now is too");
+    assert.equal(result.cause?.syscall, "connect");
+    assert.equal(result.cause?.address, "2a00:dd80:20::274");
+    assert.equal(result.cause?.port, 10000);
+  });
+
+  it("digs through an AggregateError to the first real failure", async () => {
+    // What a multi-address connect produces once every address has failed —
+    // the outer error carries no code at all.
+    const inner = Object.assign(new Error("connect ECONNREFUSED 185.40.234.172:10000"), {
+      code: "ECONNREFUSED",
+      syscall: "connect",
+      address: "185.40.234.172",
+      port: 10000,
+    });
+    const aggregate = Object.assign(new AggregateError([inner], "all attempts failed"), {
+      errors: [inner],
+    });
+
+    const result = await deliverWakeNotification(plan, { fetchImpl: fetchFailed(aggregate) });
+
+    assert.equal(result.cause?.code, "ECONNREFUSED");
+    assert.equal(result.cause?.address, "185.40.234.172");
+  });
+
+  it("never lets the request's own credentials travel with the diagnostic", async () => {
+    // The realistic hazard: an error shape that carries the request back with
+    // it. A generic serialisation of `cause` would put the signature in a log;
+    // the allow-list must not.
+    const cause = Object.assign(new Error("connect ETIMEDOUT"), {
+      code: "ETIMEDOUT",
+      syscall: "connect",
+      headers: {
+        [WAKE_SIGNATURE_HEADER]: "deadbeefsignature",
+        [WAKE_NONCE_HEADER]: "nonce-value",
+      },
+      secret: SECRET,
+      request: { headers: { authorization: "Bearer " + SECRET } },
+    });
+
+    const result = await deliverWakeNotification(plan, { fetchImpl: fetchFailed(cause) });
+
+    assert.equal(result.cause?.code, "ETIMEDOUT");
+
+    const serialised = JSON.stringify(result);
+    assert.equal(serialised.includes(SECRET), false, "the shared secret never appears");
+    assert.equal(serialised.includes("deadbeefsignature"), false, "nor the signature");
+    assert.equal(serialised.includes("nonce-value"), false, "nor the nonce");
+    assert.equal(serialised.includes("Bearer"), false, "nor any authorization header");
+    assert.deepEqual(
+      Object.keys(result.cause ?? {}).sort(),
+      ["code", "message", "name", "syscall"],
+      "only allow-listed fields are carried"
+    );
+  });
+
+  it("leaves an ordinary error without a cause exactly as it was", async () => {
+    const impl = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+
+    const result = await deliverWakeNotification(plan, { fetchImpl: impl });
+
+    // Deep-equal, not merely "cause is undefined": the key must be absent, so
+    // nothing downstream sees a shape change for the no-cause case.
+    assert.deepEqual(result, { ok: false, error: "ECONNREFUSED" });
+  });
+
+  it("does not change delivery behaviour — a success is untouched", async () => {
+    const { calls, impl } = recordingFetch(202);
+    const result = await deliverWakeNotification(plan, { fetchImpl: impl });
+
+    assert.deepEqual(result, { ok: true, status: 202 }, "no cause key on the happy path");
+    assert.equal(calls.length, 1, "still exactly one request");
+    // The signed headers are still built and sent, unchanged.
+    const headers = calls[0].init.headers as Record<string, string>;
+    assert.ok(headers[WAKE_SIGNATURE_HEADER], "still signed");
+    assert.ok(headers[WAKE_TIMESTAMP_HEADER], "still timestamped");
+    assert.ok(headers[WAKE_NONCE_HEADER], "still nonced");
+  });
+
+  it("reports nothing rather than noise when the cause is empty or absent", async () => {
+    for (const cause of [undefined, null, "a string", 42, {}]) {
+      const result = await deliverWakeNotification(plan, { fetchImpl: fetchFailed(cause) });
+      assert.equal(result.ok, false);
+      assert.equal(result.cause, undefined, `no cause reported for ${String(cause)}`);
+    }
+  });
+});
+
 // ─── Scheduling: never the caller's problem ───────────────────────────────────
 
 describe("scheduleWakeNotification", () => {

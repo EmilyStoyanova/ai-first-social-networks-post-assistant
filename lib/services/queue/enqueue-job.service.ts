@@ -37,6 +37,12 @@ function reportWakeFailure(result: WakeDeliveryResult): void {
   console.warn("[queue] wake signal not delivered", {
     status: result.status,
     error: result.error,
+    // `error` alone is "fetch failed" for every connection-level fault, which
+    // does not distinguish an unreachable network from a refused port from a
+    // bad certificate. `cause` is where the answer actually is — see
+    // `describeTransportError`, which allow-lists the fields so nothing from the
+    // signed request can travel with it.
+    ...(result.cause ? { cause: result.cause } : {}),
     note: "job is queued; the worker will pick it up on its fallback interval",
   });
 }

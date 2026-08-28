@@ -92,10 +92,114 @@ export function planWakeNotification(env: WakeNotifierEnv = process.env): WakePl
   return { deliver: true, url: parsed.toString(), secret };
 }
 
+/**
+ * The transport-level detail behind a failed delivery.
+ *
+ * Exists because `fetch` is uninformative in exactly the case that matters.
+ * undici reports EVERY connection-level failure — no route, refused, DNS,
+ * timeout, TLS — as an Error whose message is the literal string
+ * `"fetch failed"`, and puts the real fault in `cause`. Recording only the
+ * message therefore turns "the network is unreachable over IPv6", "nothing is
+ * listening", and "the certificate is wrong" into the same three words, which is
+ * the difference between diagnosing a broken wake path and guessing at it.
+ *
+ * Every field is optional because `cause` is untyped by contract: it is whatever
+ * the failing layer chose to attach, and different failures populate different
+ * subsets.
+ */
+export interface WakeTransportCause {
+  /** Constructor name, e.g. `Error`, `AggregateError`, `TypeError`. */
+  name?: string;
+  /** The libuv/undici code — `ENETUNREACH`, `ECONNREFUSED`, `ETIMEDOUT`, … */
+  code?: string;
+  message?: string;
+  /** The failing call, e.g. `connect`, `getaddrinfo`. */
+  syscall?: string;
+  hostname?: string;
+  address?: string;
+  port?: number;
+}
+
 export interface WakeDeliveryResult {
   ok: boolean;
   status?: number;
   error?: string;
+  /** Present only on a transport failure that carried a usable `cause`. */
+  cause?: WakeTransportCause;
+}
+
+/** Read one property off an unknown value without asserting its shape. */
+function read(source: object, key: string): unknown {
+  return (source as Record<string, unknown>)[key];
+}
+
+function readString(source: object, key: string): string | undefined {
+  const value = read(source, key);
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readNumber(source: object, key: string): number | undefined {
+  const value = read(source, key);
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * Pull the transport fault out of an unknown error, safely.
+ *
+ * Deliberately an ALLOW-LIST of seven scalar fields rather than a serialisation
+ * of `cause`. The error being described was produced while sending a signed
+ * request, and a generic dump could reach a `request`/`options` object carrying
+ * the very headers this module builds — the signature and the nonce. Naming the
+ * fields means a future error shape can add whatever it likes without any of it
+ * reaching a log.
+ *
+ * Follows one level of nesting (`cause.cause`) because undici wraps: the outer
+ * error is the useless "fetch failed", its cause is often an `AggregateError`
+ * whose own cause holds the syscall detail.
+ */
+export function describeTransportError(err: unknown): WakeTransportCause | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+
+  const direct = read(err, "cause");
+  const candidates: unknown[] = [direct];
+
+  // `AggregateError.errors` — what a multi-address connect attempt produces when
+  // every address failed. The first is representative; they differ only by peer.
+  if (typeof direct === "object" && direct !== null) {
+    const errors = read(direct, "errors");
+    if (Array.isArray(errors) && errors.length > 0) candidates.push(errors[0]);
+    candidates.push(read(direct, "cause"));
+  }
+
+  const described = candidates.map((candidate) => {
+    if (typeof candidate !== "object" || candidate === null) return undefined;
+
+    const fields: WakeTransportCause = {
+      name: readString(candidate, "name"),
+      code: readString(candidate, "code"),
+      message: readString(candidate, "message"),
+      syscall: readString(candidate, "syscall"),
+      hostname: readString(candidate, "hostname"),
+      address: readString(candidate, "address"),
+      port: readNumber(candidate, "port"),
+    };
+
+    // Drop the undefined keys so a log line shows only what was actually known.
+    const populated = Object.fromEntries(
+      Object.entries(fields).filter(([, value]) => value !== undefined)
+    ) as WakeTransportCause;
+
+    return Object.keys(populated).length > 0 ? populated : undefined;
+  });
+
+  // Two passes, and the order matters. An AggregateError sits at the head of the
+  // chain carrying a summary message ("all attempts failed") and no code, while
+  // the error that actually knows the syscall and the address is one of its
+  // children — so a first-match-wins scan would consistently return the least
+  // useful link. Prefer a candidate that names the fault; settle for a message.
+  return (
+    described.find((c) => c?.code || c?.syscall) ?? described.find((c) => c?.message) ?? undefined
+  );
 }
 
 export interface DeliverWakeDeps {
@@ -136,7 +240,14 @@ export async function deliverWakeNotification(
     });
     return { ok: response.ok, status: response.status };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    const cause = describeTransportError(err);
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      // Omitted rather than set to undefined so the result stays deep-equal to
+      // what it was for errors that carry nothing useful.
+      ...(cause ? { cause } : {}),
+    };
   }
 }
 
