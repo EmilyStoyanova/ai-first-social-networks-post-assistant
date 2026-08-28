@@ -39,8 +39,24 @@ import {
   WAKE_TIMESTAMP_HEADER,
 } from "@/lib/security/wake-auth";
 
-/** How long to wait on the wake request before giving up on it. */
-const WAKE_REQUEST_TIMEOUT_MS = 10_000;
+/**
+ * How long to wait on the wake request before giving up on it.
+ *
+ * Three seconds is roughly four times what a healthy signal costs — a measured
+ * TCP+TLS handshake to the Funnel ingress plus the round trip lands between 90ms
+ * and 750ms, the upper end being a cold connection.
+ *
+ * It is deliberately NOT larger, and that is worth stating because it was once
+ * raised to ten while a stall was being chased. The stall turned out to be a
+ * suspended serverless sandbox rather than a slow network (see the scheduler
+ * section at the foot of this file), so a bigger budget bought nothing — and it
+ * costs something real: this runs inside `after()`, which shares the route's
+ * function duration. The whole failure path is budget + DNS + probes, so ten
+ * seconds here means up to 13.5s of deferred work on a route whose platform
+ * default duration is around ten, i.e. an invocation killed before it can even
+ * log why the wake failed.
+ */
+const WAKE_REQUEST_TIMEOUT_MS = 3_000;
 
 /**
  * Budget for the post-mortem DNS lookup. Small on purpose: it runs only after a
@@ -778,11 +794,51 @@ function detachedScheduler(task: () => Promise<void>): void {
   void task().catch(() => {});
 }
 
-let scheduler: WakeScheduler = detachedScheduler;
+/**
+ * Where the installed scheduler lives: a slot on `globalThis`, not a binding in
+ * this module.
+ *
+ * This is the fix for a real production defect, so it is worth being exact about
+ * rather than reading as paranoia.
+ *
+ * `let scheduler = detachedScheduler` at module scope is correct in every mental
+ * model where a module exists once. In the Turbopack build it does not. The
+ * bundler MERGES this file into the chunk that `enqueue-job.service.ts` lives in
+ * — the copy every route reaches through `enqueueJob` — and emits a SECOND,
+ * standalone copy in the chunk `instrumentation.ts` dynamically imports. Two
+ * copies, two `scheduler` bindings. `register()` installed the `after()` wrapper
+ * on one of them; every enqueue in the application read the other, which had
+ * never been assigned and so was still `detachedScheduler`.
+ *
+ * The consequence was invisible from here and expensive there: the wake fetch
+ * ran as a dangling promise with nothing holding the invocation open, so Vercel
+ * suspended the sandbox the moment the 202 was written — mid-TLS-handshake. The
+ * request did not fail on the network. It failed because the process stopped
+ * running: a 3000ms abort that fired at 5703ms, 62ms of CPU across 5.7 seconds
+ * of wall clock, and a 2000ms probe timer that fired at 5433ms, all while TCP to
+ * the ingress had completed in 96ms.
+ *
+ * A registered symbol is the one slot every copy of this module agrees on,
+ * whatever the bundler does to the graph — which is exactly why Next.js hands
+ * `waitUntil` across the same boundary the same way, through
+ * `Symbol.for("@next/request-context")`.
+ */
+const SCHEDULER_SLOT: unique symbol = Symbol.for("app.queue.wake-scheduler");
+
+interface SchedulerHost {
+  [SCHEDULER_SLOT]?: WakeScheduler;
+}
+
+/** The host's scheduler if one was installed, else the detached default. */
+function currentScheduler(): WakeScheduler {
+  return (globalThis as SchedulerHost)[SCHEDULER_SLOT] ?? detachedScheduler;
+}
 
 /** Install the host's scheduler. Passing null restores the detached default. */
 export function setWakeScheduler(next: WakeScheduler | null): void {
-  scheduler = next ?? detachedScheduler;
+  const host = globalThis as SchedulerHost;
+  if (next) host[SCHEDULER_SLOT] = next;
+  else delete host[SCHEDULER_SLOT];
 }
 
 export interface ScheduleWakeDeps extends DeliverWakeDeps {
@@ -809,7 +865,7 @@ export function scheduleWakeNotification(deps: ScheduleWakeDeps = {}): void {
       deps.onResult?.(result);
     };
 
-    (deps.scheduler ?? scheduler)(run);
+    (deps.scheduler ?? currentScheduler())(run);
   } catch {
     // Signalling is an optimisation; it does not get to break its caller.
   }

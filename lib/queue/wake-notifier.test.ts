@@ -1147,3 +1147,85 @@ describe("scheduleWakeNotification", () => {
     );
   });
 });
+
+// ─── The scheduler must survive a duplicated module ───────────────────────────
+
+/**
+ * The production defect this section exists for.
+ *
+ * Everything above loads `./wake-notifier` exactly once, which is the one shape
+ * the bug could not appear in — and so it shipped. In the Turbopack build this
+ * file is MERGED into the chunk `enqueue-job.service.ts` occupies AND emitted
+ * again, standalone, in the chunk `instrumentation.ts` imports. `register()`
+ * installed the `after()` wrapper on the second copy; every enqueue read the
+ * first, still holding the detached default. The wake fetch therefore ran with
+ * nothing keeping the serverless invocation alive, and Vercel suspended the
+ * sandbox mid-handshake: an abort budgeted at 3000ms firing at 5703ms, 62ms of
+ * CPU across 5.7s, while TCP to the ingress had completed in 96ms.
+ *
+ * A `?copy=` query gives the ESM loader a second module key for the same file,
+ * which is the closest a single process gets to what the bundler emits: two live
+ * instances, each with its own module scope, sharing one `globalThis`.
+ */
+async function loadSecondInstance(): Promise<typeof import("./wake-notifier")> {
+  return import(`./wake-notifier.ts?copy=${Math.random()}`) as Promise<
+    typeof import("./wake-notifier")
+  >;
+}
+
+describe("scheduler installation across module instances", () => {
+  it("a scheduler installed on one instance is used by another", async () => {
+    const other = await loadSecondInstance();
+    assert.notEqual(other.scheduleWakeNotification, scheduleWakeNotification);
+
+    const installed: Array<() => Promise<void>> = [];
+    // Installed HERE — standing in for `instrumentation.ts`'s copy.
+    setWakeScheduler((task) => void installed.push(task));
+    try {
+      // Scheduled THERE — standing in for the copy merged into the enqueue path.
+      other.scheduleWakeNotification({ env: configured, fetchImpl: recordingFetch().impl });
+      assert.equal(
+        installed.length,
+        1,
+        "the other instance fell back to the detached scheduler — `after()` would never run and Vercel would freeze the request"
+      );
+    } finally {
+      setWakeScheduler(null);
+    }
+  });
+
+  it("clearing on one instance restores the detached default on the other", async () => {
+    const other = await loadSecondInstance();
+
+    const installed: Array<() => Promise<void>> = [];
+    setWakeScheduler((task) => void installed.push(task));
+    setWakeScheduler(null);
+
+    // Detached means the task runs itself rather than being handed anywhere, so
+    // the delivery still happens — it is only nobody's job to wait for it.
+    const { calls, impl } = recordingFetch();
+    other.scheduleWakeNotification({ env: configured, fetchImpl: impl });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(installed.length, 0, "a cleared scheduler must not still be collecting tasks");
+    assert.equal(calls.length, 1, "the detached default must still deliver");
+  });
+
+  it("the worker's copy still refuses to signal itself, whatever is installed", async () => {
+    const other = await loadSecondInstance();
+
+    const installed: Array<() => Promise<void>> = [];
+    setWakeScheduler((task) => void installed.push(task));
+    try {
+      other.scheduleWakeNotification({
+        env: { ...configured, WORKER_PROCESS: "1" },
+        fetchImpl: recordingFetch().impl,
+      });
+      // A shared slot must not become a way for the worker to reach a scheduler
+      // it was always meant to skip: the plan refuses before scheduling at all.
+      assert.equal(installed.length, 0);
+    } finally {
+      setWakeScheduler(null);
+    }
+  });
+});
