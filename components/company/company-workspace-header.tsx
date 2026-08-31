@@ -7,6 +7,7 @@ import {
   FileText,
   Image as ImageIcon,
   LayoutGrid,
+  Palette,
   Rss,
   Settings2,
   Sparkles,
@@ -40,10 +41,15 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
   // badge here would be pulling toward a queue nothing actively feeds (see
   // lib/posts/post-status-filter.ts).
   //
-  // Channels is the seventh, and it is a place rather than a filter: Posts is
-  // the whole company's output as a grid, Channels is one network at a time,
-  // laid out on a calendar. Its own sub-navigation (Posts / Calendar /
-  // Analytics) is why it cannot be a control on the Posts tab.
+  // Channels is a place rather than a filter: Posts is the whole company's
+  // output as a grid, Channels is one network at a time, laid out on a
+  // calendar. Its own sub-navigation (Posts / Calendar / Analytics) is why it
+  // cannot be a control on the Posts tab.
+  //
+  // Brand is a direct tab, not nested under Settings — promoted out of the
+  // Settings sub-nav so it reads as a first-class workspace surface rather
+  // than two levels deep; Settings keeps Channels/Buffer/Team, which stay
+  // rare-touch configuration in a way Brand (edited far more often) is not.
   const tabs: WorkspaceTab[] = [
     { key: "overview", label: t("tabs.overview"), href: `/companies/${slug}`, icon: LayoutGrid },
     {
@@ -60,6 +66,12 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
     },
     { key: "media", label: t("tabs.media"), href: `/companies/${slug}/media`, icon: ImageIcon },
     { key: "sources", label: t("tabs.sources"), href: `/companies/${slug}/sources`, icon: Rss },
+    {
+      key: "brand",
+      label: t("tabs.brand"),
+      href: `/companies/${slug}/settings/brand`,
+      icon: Palette,
+    },
     {
       key: "settings",
       label: t("tabs.settings"),
@@ -130,14 +142,16 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
         </div>
 
         {/* The workspace's one primary action, in the header's action slot so
-            it never floats over content (§9.3). Posts owns generation, so the
-            button routes there rather than opening a panel from any tab. */}
+            it never floats over content (§9.3). Generation now lives in the
+            global Content Creation module, so this is a cross-link into it —
+            not duplicate navigation — rather than a route inside this
+            workspace. */}
         <Link
-          href={`/companies/${slug}/posts`}
+          href={`/create/${slug}`}
           className="bg-accent rounded-control duration-fast focus-visible:outline-accent inline-flex shrink-0 items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2"
         >
           <Sparkles className="h-4 w-4" aria-hidden="true" />
-          {t("generatePost")}
+          {t("createContent")}
         </Link>
       </div>
 

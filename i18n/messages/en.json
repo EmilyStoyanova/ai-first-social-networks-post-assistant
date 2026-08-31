@@ -168,6 +168,8 @@
   "navigation": {
     "dashboard": "Dashboard",
     "companies": "Companies",
+    "contentCreation": "Content Creation",
+    "competitiveAnalysis": "Competitive Analysis",
     "posts": "Posts",
     "mediaGallery": "Media Gallery",
     "analytics": "Analytics",
@@ -176,16 +178,23 @@
     "adminPanel": "Admin Panel",
     "mainNavigation": "Main navigation"
   },
-  "sidebar": {
-    "logoName": "New Post",
-    "logoTagline": "Post Assistant"
-  },
   "header": {
+    "logoName": "New Post",
     "openMenu": "Open navigation menu",
     "logout": "Logout",
     "signOut": "Sign out of your account",
     "breadcrumb": "Breadcrumb",
-    "userFallback": "User"
+    "userFallback": "User",
+    "companySelector": {
+      "label": "Company",
+      "noCompany": "No company selected",
+      "loading": "Loading…",
+      "noCompanies": "No companies yet",
+      "manageCurrent": "Manage current company",
+      "manageCompanies": "Manage companies",
+      "addCompany": "+ Add company",
+      "switchTo": "Switch to {name}"
+    }
   },
   "languageSwitcher": {
     "switchTo": "Switch language"
@@ -253,19 +262,36 @@
       "media": "Media",
       "sources": "Sources",
       "team": "Team",
-      "settings": "Brand Setup",
+      "brand": "Brand",
+      "settings": "Settings",
       "activity": "Activity",
       "channels": "Channels"
     },
     "setupHint": "Start here — fill in your brand identity, then connect Buffer and configure your channels. The AI uses this information when generating posts.",
-    "generatePost": "Generate post"
+    "createContent": "Create content"
+  },
+  "contentCreation": {
+    "title": "Content Creation",
+    "noCompaniesTitle": "No companies yet",
+    "noCompaniesDesc": "Create a company to start generating posts.",
+    "createCompany": "Create a company",
+    "placeholderDescription": "Generation for {company} is moving here.",
+    "comingSoon": "Coming soon — single, topic, and bulk generation for this company will live here."
+  },
+  "competitiveAnalysis": {
+    "title": "Competitive Analysis",
+    "noCompaniesTitle": "No companies yet",
+    "noCompaniesDesc": "Create a company to start tracking competitors.",
+    "createCompany": "Create a company",
+    "placeholderDescription": "Competitor tracking for {company} is coming here.",
+    "comingSoon": "Coming soon — competitors, content, and trends for this company will live here."
   },
   "companyPage": {
     "sections": {
       "brand": "Brand",
       "members": "Members",
       "integrations": "Integrations",
-      "channels": "Channels",
+      "channels": "Channel Settings",
       "channelsDesc": "Configure how each social network should be used for this company.",
       "contentSources": "Content Sources",
       "contentSourcesDesc": "Define the sources the AI will draw on when generating posts.",

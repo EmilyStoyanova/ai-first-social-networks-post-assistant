@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 
-export type SettingsSection = "brand" | "channels" | "buffer" | "team";
+export type SettingsSection = "channels" | "buffer" | "team";
 
 interface Props {
   slug: string;
@@ -16,9 +16,10 @@ interface Props {
  *
  * A list on desktop and a select below `lg`, rather than a second row of tabs:
  * the workspace tab bar sits directly above, and two tab treatments stacked
- * would leave "which level am I on?" unanswerable. The order is the onboarding
- * order — Brand, then Channels (which needs Buffer), then Buffer, then Team,
- * which is optional.
+ * would leave "which level am I on?" unanswerable. Brand was moved out to its
+ * own direct workspace tab (edited far more often than these three) — what
+ * remains here is genuinely rare-touch: Channels (which needs Buffer), then
+ * Buffer, then Team, which is optional.
  *
  * The active section is passed in rather than derived from the pathname: every
  * settings page already knows which one it is, and reading it from props keeps
@@ -30,7 +31,6 @@ export function SettingsNav({ slug, active }: Props) {
   const tWorkspace = useTranslations("workspace");
 
   const items: { key: SettingsSection; label: string; href: string }[] = [
-    { key: "brand", label: t("brand"), href: `/companies/${slug}/settings/brand` },
     { key: "channels", label: t("channels"), href: `/companies/${slug}/settings/channels` },
     { key: "buffer", label: t("integrations"), href: `/companies/${slug}/settings/buffer` },
     { key: "team", label: tWorkspace("tabs.team"), href: `/companies/${slug}/settings/team` },

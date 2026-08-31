@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { getTranslations } from "next-intl/server";
 import Link from "next/link";
 import { auth } from "@/lib/auth";
 import { getDashboardData } from "@/lib/services/dashboard/get-dashboard-data.service";
+import { resolveActiveCompany } from "@/lib/services/company/resolve-active-company.service";
 import {
   getSetupStatuses,
   isSetupComplete,
@@ -60,6 +62,17 @@ export default async function DashboardPage() {
     user.isGlobalAdmin
   );
 
+  // Display-only, for the header's company selector — Dashboard itself stays
+  // cross-company regardless of which company this resolves to (verified:
+  // `getDashboardData` above already aggregates across every company the user
+  // can see, and nothing below reads `activeCompany` to filter anything).
+  const cookieSlug = (await cookies()).get("active_company")?.value ?? null;
+  const activeCompany = await resolveActiveCompany({
+    cookieSlug,
+    userId: user.id,
+    isGlobalAdmin: user.isGlobalAdmin,
+  });
+
   // Personal preferred-LLM control — only shown when admins have configured at
   // least one active model to choose from.
   const llmSettings = await getUserLlmSettings(user.id);
@@ -82,6 +95,7 @@ export default async function DashboardPage() {
   return (
     <DashboardLayout
       user={{ name: user?.name, email: user?.email, isGlobalAdmin: user?.isGlobalAdmin }}
+      activeCompany={activeCompany}
     >
       <div className="space-y-8">
         {/* Header */}

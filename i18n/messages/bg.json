@@ -168,6 +168,8 @@
   "navigation": {
     "dashboard": "Табло",
     "companies": "Компании",
+    "contentCreation": "Създаване на съдържание",
+    "competitiveAnalysis": "Конкурентен анализ",
     "posts": "Публикации",
     "mediaGallery": "Медийна галерия",
     "analytics": "Анализи",
@@ -176,16 +178,23 @@
     "adminPanel": "Администраторски панел",
     "mainNavigation": "Основна навигация"
   },
-  "sidebar": {
-    "logoName": "New Post",
-    "logoTagline": "Помощник за публикации"
-  },
   "header": {
+    "logoName": "New Post",
     "openMenu": "Отвори навигационното меню",
     "logout": "Изход",
     "signOut": "Излез от акаунта си",
     "breadcrumb": "Навигационна пътека",
-    "userFallback": "Потребител"
+    "userFallback": "Потребител",
+    "companySelector": {
+      "label": "Компания",
+      "noCompany": "Няма избрана компания",
+      "loading": "Зареждане…",
+      "noCompanies": "Все още няма компании",
+      "manageCurrent": "Управление на текущата компания",
+      "manageCompanies": "Управление на компании",
+      "addCompany": "+ Добави компания",
+      "switchTo": "Превключи към {name}"
+    }
   },
   "languageSwitcher": {
     "switchTo": "Смени езика"
@@ -253,19 +262,36 @@
       "media": "Медия",
       "sources": "Източници",
       "team": "Екип",
-      "settings": "Настройка на марката",
+      "brand": "Марка",
+      "settings": "Настройки",
       "activity": "Активност",
       "channels": "Канали"
     },
     "setupHint": "Започни от тук — попълни идентичността на марката, после свържи Buffer и конфигурирай каналите. AI използва тази информация при генерирането на публикации.",
-    "generatePost": "Генерирай публикация"
+    "createContent": "Създаване на съдържание"
+  },
+  "contentCreation": {
+    "title": "Създаване на съдържание",
+    "noCompaniesTitle": "Все още няма компании",
+    "noCompaniesDesc": "Създай компания, за да започнеш да генерираш публикации.",
+    "createCompany": "Създай компания",
+    "placeholderDescription": "Генерирането за {company} се пренася тук.",
+    "comingSoon": "Очаквайте скоро — единично, тематично и групово генериране за тази компания ще се извършва тук."
+  },
+  "competitiveAnalysis": {
+    "title": "Конкурентен анализ",
+    "noCompaniesTitle": "Все още няма компании",
+    "noCompaniesDesc": "Създай компания, за да започнеш да следиш конкуренти.",
+    "createCompany": "Създай компания",
+    "placeholderDescription": "Следенето на конкуренти за {company} предстои тук.",
+    "comingSoon": "Очаквайте скоро — конкуренти, съдържание и тенденции за тази компания ще бъдат тук."
   },
   "companyPage": {
     "sections": {
       "brand": "Марка",
       "members": "Членове",
       "integrations": "Интеграции",
-      "channels": "Канали",
+      "channels": "Настройки на каналите",
       "channelsDesc": "Конфигурирай как да се използва всяка социална мрежа за тази компания.",
       "contentSources": "Източници на съдържание",
       "contentSourcesDesc": "Дефинирай изворите, от които AI ще черпи при генерирането на публикации.",

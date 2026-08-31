@@ -3,10 +3,9 @@ import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
-import { listCompanyAuditLogs } from "@/lib/services/audit/audit-log.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
-import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
-import { AuditLogTimeline } from "@/components/company/audit-log-timeline";
+import { PageHeader } from "@/components/ui/PageHeader";
+import { Card } from "@/components/ui/Card";
 
 interface Props {
   params: Promise<{ slug: string }>;
@@ -14,21 +13,23 @@ interface Props {
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
-  return { title: `Activity – ${slug} – AI-First Post Assistant` };
+  return { title: `Competitive Analysis – ${slug} – AI-First Post Assistant` };
 }
 
-export default async function AuditLogPage({ params }: Props) {
+/**
+ * The Competitive Analysis module for one company (its own route root).
+ * Placeholder for Part 1 only — the Overview/Competitors/Content/Trends
+ * sub-tabs, the data model, and every service are Part 3's job.
+ */
+export default async function CompetitiveAnalysisPage({ params }: Props) {
   const session = await auth();
   if (!session) redirect("/login");
 
   const { slug } = await params;
-
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
-  const tNav = await getTranslations("navigation");
-
-  const logs = await listCompanyAuditLogs(company.id, { limit: 50 });
+  const t = await getTranslations("competitiveAnalysis");
 
   return (
     <DashboardLayout
@@ -38,14 +39,15 @@ export default async function AuditLogPage({ params }: Props) {
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
       activeCompany={{ slug: company.slug, name: company.name }}
-      breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
-      <div>
-        <CompanyWorkspaceHeader company={company} activeTab="activity" />
-
-        <div className="mt-8">
-          <AuditLogTimeline logs={logs} />
-        </div>
+      <div className="space-y-6">
+        <PageHeader
+          title={t("title")}
+          description={t("placeholderDescription", { company: company.name })}
+        />
+        <Card className="px-6 py-14 text-center">
+          <p className="text-body text-fg-muted">{t("comingSoon")}</p>
+        </Card>
       </div>
     </DashboardLayout>
   );

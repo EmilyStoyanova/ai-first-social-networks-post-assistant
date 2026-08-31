@@ -7,11 +7,12 @@ interface Props {
 
 /**
  * Settings has no page of its own — it is a group of sub-pages (§2.4), so this
- * sends the visitor to the first one.
+ * sends the visitor to the first one. Brand was promoted out to its own
+ * direct workspace tab, so Channels is now first in the Settings group.
  *
  * The exception is a Buffer OAuth result. `?buffer=` is only meaningful to the
  * Integrations page, and legacy links still carry it here by way of
- * `?tab=settings&buffer=connected`; landing that on Brand would drop the
+ * `?tab=settings&buffer=connected`; landing that on Channels would drop the
  * outcome of a connection the user just authorized.
  *
  * A temporary redirect, not permanent: Settings gains a General sub-page when
@@ -25,5 +26,5 @@ export default async function SettingsIndexPage({ params, searchParams }: Props)
     redirect(`/companies/${slug}/settings/buffer?buffer=${encodeURIComponent(buffer)}`);
   }
 
-  redirect(`/companies/${slug}/settings/brand`);
+  redirect(`/companies/${slug}/settings/channels`);
 }

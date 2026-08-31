@@ -8,7 +8,13 @@ const { auth } = NextAuth({
   providers: [],
 });
 
-const PROTECTED_PREFIXES = ["/dashboard", "/companies", "/admin"] as const;
+const PROTECTED_PREFIXES = [
+  "/dashboard",
+  "/companies",
+  "/admin",
+  "/create",
+  "/competitive-analysis",
+] as const;
 const AUTH_PAGES = ["/login", "/register"] as const;
 
 function matchesProtected(pathname: string): boolean {

@@ -78,6 +78,7 @@ export async function ChannelsShell({
   return (
     <DashboardLayout
       user={user}
+      activeCompany={{ slug: company.slug, name: company.name }}
       breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
       <div>

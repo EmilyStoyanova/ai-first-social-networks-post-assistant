@@ -1,28 +1,36 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
+import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { resolveActiveCompany } from "@/lib/services/company/resolve-active-company.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
-import { CreateCompanyForm } from "@/components/company/create-company-form";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { Button } from "@/components/ui/Button";
 
 export const metadata: Metadata = {
-  title: "New Company – AI-First Post Assistant",
+  title: "Competitive Analysis – AI-First Post Assistant",
 };
 
-export default async function NewCompanyPage() {
+/**
+ * Global landing for the Competitive Analysis module — mirrors
+ * `/create/page.tsx` exactly (see its comment for why there is no
+ * multi-company picker branch).
+ */
+export default async function CompetitiveAnalysisLandingPage() {
   const session = await auth();
   if (!session) redirect("/login");
 
-  // Display-only, same as Dashboard/Companies/Admin — this page has no
-  // company of its own (it's creating one), so the selector falls back to
-  // whatever was last active.
   const cookieSlug = (await cookies()).get("active_company")?.value ?? null;
   const activeCompany = await resolveActiveCompany({
     cookieSlug,
     userId: session.user.id,
     isGlobalAdmin: session.user.isGlobalAdmin,
   });
+
+  if (activeCompany) redirect(`/competitive-analysis/${activeCompany.slug}`);
+
+  const t = await getTranslations("competitiveAnalysis");
 
   return (
     <DashboardLayout
@@ -31,10 +39,12 @@ export default async function NewCompanyPage() {
         email: session.user.email,
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
-      activeCompany={activeCompany}
-      breadcrumb={[{ label: "Companies", href: "/companies" }, { label: "New Company" }]}
     >
-      <CreateCompanyForm />
+      <EmptyState
+        title={t("noCompaniesTitle")}
+        description={t("noCompaniesDesc")}
+        action={<Button href="/companies/new">{t("createCompany")}</Button>}
+      />
     </DashboardLayout>
   );
 }

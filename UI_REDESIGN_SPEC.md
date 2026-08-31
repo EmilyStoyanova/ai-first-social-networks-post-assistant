@@ -409,76 +409,115 @@ The direction is unchanged: **the company becomes a workspace with tabs; setup m
 
 Status markers: ✅ shipped as specified · ⚠️ shipped divergently · ⬜ not built.
 
-```
-Global shell (persistent left sidebar, 240px)                        ✅
-├── Dashboard                  → /dashboard          "what needs my attention"
-├── Companies                  → /companies          switch / create workspaces
-├── ── divider ──
-├── Admin (global admins only) → /admin              users · companies · LLM
-└── Footer: user menu (name, email, language EN/BG, log out)
+**Superseded (2026-08-31): the persistent left sidebar is gone.** The global shell is now task-oriented, not company-oriented — a company is the _context_ a task runs in, not a task itself, so "Companies" is no longer a primary nav item. It is represented instead by a persistent company selector in the header, separate from the nav. Nothing about company management's own scope changed; only how it is reached did.
 
-Company workspace (opened from Companies; header + horizontal tabs)
+```
+GLOBAL PRODUCT NAV (single horizontal bar, no sidebar)                       ✅
+├── Dashboard              → /dashboard                "what needs my attention" — cross-company, unaffected by the selector
+├── Content Creation       → /create → /create/[slug]   generation workflow for the active company
+├── Competitive Analysis   → /competitive-analysis → /competitive-analysis/[slug]/...   competitor tracking for the active company
+├── Admin (global admins only) → /admin               users · companies · LLM
+└── Right cluster: Current Company selector · language EN/BG · user name · log out
+
+GLOBAL CONTEXT
+Current Company selector (header, visually distinct from the nav): shows the
+active company, lets the user switch (preserving the current sub-route where
+the destination has one — /competitive-analysis/domestico/trends →
+/competitive-analysis/travelnest/trends), and offers Manage current company /
+Manage companies / + Add company. Resolution order: route slug → persisted
+`active_company` cookie (re-validated) → first accessible company → picker /
+empty state. Never trusts a slug — routed or persisted — without re-validating
+the user's access.
+
+COMPANY MANAGEMENT (opened from the selector's "Manage current/companies
+company"; header + horizontal tabs — unchanged in scope from the prior
+sidebar-era spec, just no longer the default entry point for creation or
+competitor tracking)
 /companies/[slug]
 ├── Overview     (default tab)      health, setup checklist, this week      ⚠️ ?tab=, module grid
-├── /posts                          all posts, filterable, full lifecycle   ✅
-│                                   incl. the approval queue as a filter
-│                                   (?status=pending_approval) + badge count
+├── /posts                          MANAGE already-created posts, filterable, ✅
+│                                   full lifecycle — creating NEW posts moved
+│                                   to Content Creation (below)
+├── /channels                       one network at a time: calendar/posts/analytics ✅
 ├── /media                          gallery: uploads + AI generations       ✅
 ├── /sources                        content sources + feed items/ingestion  ⚠️ ?tab=sources
+├── /settings/brand                 brand guidelines — a DIRECT tab now      ✅ (2026-08-31)
 ├── /activity                       audit log timeline                      ⚠️ at /audit-log
-└── /settings                       setup: everything configuration         ⬜ not split
-    ├── General        name, website, default language, automation mode, danger zone
-    ├── Brand          brand guidelines form
-    ├── Channels       per-channel configs (FB/LI/IG/TT) + content mix quotas
-    ├── Buffer         OAuth connection, profiles, disconnect + analytics API key
-    └── Team           members, invites, roles                    ⚠️ currently ?tab=team
+└── /settings                       setup: everything else                  ⬜ not split
+    ├── General          name, website, default language, automation mode, danger zone
+    ├── Channel Settings  per-channel configs (FB/LI/IG/TT) + content mix quotas —
+    │                     renamed from "Channels" (2026-08-31) to disambiguate
+    │                     from the workspace's own Channels tab above, which
+    │                     is a browsing surface (calendar/posts/analytics for
+    │                     one network at a time), not configuration
+    ├── Buffer           OAuth connection, profiles, disconnect + analytics API key
+    └── Team             members, invites, roles                    ⚠️ currently ?tab=team
+
+CONTENT CREATION (its own route root, not a company-workspace tab)
+/create → /create/[slug]
+Generation workflow for the active company: single / topic / bulk. Reuses
+GeneratePostForm and the existing generation pipeline unchanged — a
+navigation and page-composition change, not a new generator. Reached from the
+global nav, or via a "Create content" cross-link from the company workspace
+header (not duplicate navigation — the workspace has no generation UI of its
+own). ⬜ Placeholder page shipped 2026-08-31; moving GeneratePostForm itself is
+a later phase, tracked separately.
+
+COMPETITIVE ANALYSIS (its own route root, not a company-workspace tab)
+/competitive-analysis → /competitive-analysis/[slug]/...
+├── Overview      active competitors, analyzed content count, key topics, cross-competitor insights, period selector
+├── Competitors   CRUD + archive/restore, labeled RSS feeds, reference social links
+├── Content       unified content list, filters, item detail, manual entries, "Generate inspired post"
+└── Trends        aggregate + cross-competitor trend views
+⬜ Placeholder page shipped 2026-08-31; the module itself (data model, services,
+routes, UI) is a separate, later phase.
 ```
 
-**Removed:** the disabled global "Posts / Media Gallery / Analytics / Settings" sidebar links. Placeholder navigation is worse than none — it teaches users that the nav lies. _(Shipped — the sidebar has contained only real links since Phase 2.)_
+**Removed:** the disabled global "Posts / Media Gallery / Analytics / Settings" sidebar links (Phase 2) — and, as of 2026-08-31, the sidebar itself and "Companies" as a nav item. Placeholder navigation is worse than none, and a company is context rather than a task; the mental model is now _global = a task across companies, or the task-agnostic Dashboard — workspace = managing one company._ _(Shipped.)_
 
 **No Analytics tab.** v1.0 deferred analytics to "Phase 9", which §12 never defined — an unresolved thread now closed. Post metrics shipped in v2-7 and live **inline on published post cards** (§4.5), not on a page of their own. A tab holding four numbers per post would re-create the module-card problem this IA exists to remove. Analytics earns a tab when it answers a question a user cannot answer from the post list — cross-post trends over time — and not before. See §2.6.
 
 ### 2.3 Rationale for each decision
 
-| Decision                                                               | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Global sidebar has only Dashboard, Companies, Admin                    | Posts, media, sources are company-scoped resources — a global "Posts" link would force a company picker anyway. Keeping the global level tiny makes the mental model unambiguous: _global = across companies, workspace = inside one._                                                                                                                                                                                                                                             |
-| Company uses horizontal tabs, not a second sidebar                     | Two sidebars (global + company) waste horizontal space and create "which nav am I in?" confusion. Tabs under a persistent company header keep company identity visible and match GitHub's repo model — a familiar pattern for one-entity-many-facets.                                                                                                                                                                                                                              |
-| Overview is the default tab                                            | Daily users land on status, not settings or a raw post list. Overview routes them: pending approvals → Posts filtered to Pending approval, setup incomplete → checklist → Settings.                                                                                                                                                                                                                                                                                                |
-| Approvals is a filter on Posts, not a tab _(v2.1, reversed)_           | **Reverses the v2.0 decision.** The original argument — "burying it one filter deep adds a click to the hottest path" — priced the click but not the duplication: the queue and the Posts tab rendered the same posts from the same service through two UIs (§2.1 row 5), so every card change had two homes and could drift. One filter click is cheaper than one wrong card. The count badge, which was the tab's real contribution, moved to the Posts tab and survives (§9.1). |
-| Settings groups five sub-pages                                         | Brand (36-field-capacity form), channels (4 config cards), Buffer, and team are all _rarely touched after onboarding_. Grouping them keeps daily surfaces clean (Principle 3) and gives each form room (Principle 1).                                                                                                                                                                                                                                                              |
-| "Audit log" renamed to "Activity"                                      | Plain language; "audit log" is compliance vocabulary. Functionality unchanged.                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Admin stays a global sidebar item, visually separated                  | It is cross-company by definition and gated by `isGlobalAdmin`. A divider + section label prevents editors from ever seeing it.                                                                                                                                                                                                                                                                                                                                                    |
-| Content mix lives in Settings → Channels, not Sources _(v2.0)_         | A mix is a weekly _quota policy_ ("5 posts/week from this feed, 2 from company mission"), set once at setup and rarely revisited. Sources is a daily-work-adjacent list you fetch and debug. Putting a policy form on an operational page repeats the setup/daily-work blend this IA removes. It sits under Channels because the quota it divides is the per-channel cadence.                                                                                                      |
-| Post metrics render inline on post cards, with no tab _(v2.0)_         | Metrics answer "how did this post do?" — a question about a post the user is already looking at. A separate page forces re-navigation to the same object. Only a cross-post question would justify its own surface.                                                                                                                                                                                                                                                                |
-| The Buffer analytics key lives in Settings → Buffer _(v2.0)_           | It is a second Buffer credential (Personal API Key) with its own lifecycle — next to the OAuth connection it depends on, but in its own card, so removing it never reads as breaking publishing.                                                                                                                                                                                                                                                                                   |
-| The post status filter is 5 choices over 7 statuses _(v2.1)_           | The grid's question is "where is this in the workflow?", not "what enum is this?" — the StatusBadge already answers the second. The fifth choice, Pending approval, exists because the filter absorbed the Approvals tab's job. Grouping and rationale in §4.5.                                                                                                                                                                                                                    |
-| Danger zone (delete company) lives at the bottom of Settings → General | Standard placement (GitHub/Vercel); destructive actions are findable but never adjacent to daily actions.                                                                                                                                                                                                                                                                                                                                                                          |
+| Decision                                                                                                                                                      | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Global nav is Dashboard, Content Creation, Competitive Analysis, Admin — no sidebar, no "Companies" item _(2026-08-31, supersedes the sidebar-era row below)_ | A company is not a task, it is the context a task runs in. The two real global tasks are creating content and analyzing competitors; both need a company but are not "about" any one company the way the management workspace is. Representing the company as a persistent header selector, not a nav destination, keeps the nav answering "what am I doing" rather than "where am I."                                                                                             |
+| Company uses horizontal tabs, not a second sidebar                                                                                                            | Two sidebars (global + company) waste horizontal space and create "which nav am I in?" confusion. Tabs under a persistent company header keep company identity visible and match GitHub's repo model — a familiar pattern for one-entity-many-facets. This holds even after the global sidebar's own removal: the company workspace's tab bar is unchanged, only what sits above it changed.                                                                                       |
+| Overview is the default tab                                                                                                                                   | Daily users land on status, not settings or a raw post list. Overview routes them: pending approvals → Posts filtered to Pending approval, setup incomplete → checklist → Settings.                                                                                                                                                                                                                                                                                                |
+| Approvals is a filter on Posts, not a tab _(v2.1, reversed)_                                                                                                  | **Reverses the v2.0 decision.** The original argument — "burying it one filter deep adds a click to the hottest path" — priced the click but not the duplication: the queue and the Posts tab rendered the same posts from the same service through two UIs (§2.1 row 5), so every card change had two homes and could drift. One filter click is cheaper than one wrong card. The count badge, which was the tab's real contribution, moved to the Posts tab and survives (§9.1). |
+| Settings groups four sub-pages _(Brand promoted out 2026-08-31)_                                                                                              | Channel Settings (4 config cards), Buffer, and Team are all _rarely touched after onboarding_. Brand was moved out to its own direct workspace tab — a 36-field-capacity form edited far more often than the other three, so nesting it two levels deep under Settings cost more than the grouping saved. Grouping the remaining rare-touch pages keeps daily surfaces clean (Principle 3) and gives each form room (Principle 1).                                                 |
+| "Audit log" renamed to "Activity"                                                                                                                             | Plain language; "audit log" is compliance vocabulary. Functionality unchanged.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Admin stays a global sidebar item, visually separated                                                                                                         | It is cross-company by definition and gated by `isGlobalAdmin`. A divider + section label prevents editors from ever seeing it.                                                                                                                                                                                                                                                                                                                                                    |
+| Content mix lives in Settings → Channels, not Sources _(v2.0)_                                                                                                | A mix is a weekly _quota policy_ ("5 posts/week from this feed, 2 from company mission"), set once at setup and rarely revisited. Sources is a daily-work-adjacent list you fetch and debug. Putting a policy form on an operational page repeats the setup/daily-work blend this IA removes. It sits under Channels because the quota it divides is the per-channel cadence.                                                                                                      |
+| Post metrics render inline on post cards, with no tab _(v2.0)_                                                                                                | Metrics answer "how did this post do?" — a question about a post the user is already looking at. A separate page forces re-navigation to the same object. Only a cross-post question would justify its own surface.                                                                                                                                                                                                                                                                |
+| The Buffer analytics key lives in Settings → Buffer _(v2.0)_                                                                                                  | It is a second Buffer credential (Personal API Key) with its own lifecycle — next to the OAuth connection it depends on, but in its own card, so removing it never reads as breaking publishing.                                                                                                                                                                                                                                                                                   |
+| The post status filter is 5 choices over 7 statuses _(v2.1)_                                                                                                  | The grid's question is "where is this in the workflow?", not "what enum is this?" — the StatusBadge already answers the second. The fifth choice, Pending approval, exists because the filter absorbed the Approvals tab's job. Grouping and rationale in §4.5.                                                                                                                                                                                                                    |
+| Danger zone (delete company) lives at the bottom of Settings → General                                                                                        | Standard placement (GitHub/Vercel); destructive actions are findable but never adjacent to daily actions.                                                                                                                                                                                                                                                                                                                                                                          |
 
 ### 2.4 Settings hierarchy detail
 
 Settings uses a **left sub-navigation within the tab content area** (not nested tabs) on desktop; a select dropdown on mobile:
 
 ```
-Settings
-├── General   — company name, slug (read-only), website, default language,
-│               automation mode (semi/fully automated) with explanation,
-│               Danger zone: delete company (owner/admin only)
-├── Brand     — logo, colors, fonts, tones, forbidden words, audience, competitors
-├── Channels  — one expandable config card per channel (enable, Buffer profile,
-│               posting language, cadence, windows, image rule, auto-image,
-│               hashtag style, automation override)
-│            — Content mix (v2-8): weekly quota per source + company-mission
-│               quota, with a running total against channel cadence
-├── Buffer    — connection status card, connect/reconnect (OAuth), profile list,
-│               disconnect (confirm)
-│            — Analytics key (v2-7): separate Personal API Key card —
-│               add / replace / remove, last4 + added date, validation state
-└── Team      — member table (name, email, role, joined), invite form,
-                change role, remove (confirm)
+Settings                       (Brand lives one level up now — a direct workspace
+                                 tab, /settings/brand, not nested here — 2026-08-31)
+├── General          — company name, slug (read-only), website, default language,
+│                       automation mode (semi/fully automated) with explanation,
+│                       Danger zone: delete company (owner/admin only)
+├── Channel Settings  — one expandable config card per channel (enable, Buffer profile,
+│                       posting language, cadence, windows, image rule, auto-image,
+│                       hashtag style, automation override)
+│                    — Content mix (v2-8): weekly quota per source + company-mission
+│                       quota, with a running total against channel cadence
+├── Buffer            — connection status card, connect/reconnect (OAuth), profile list,
+│                       disconnect (confirm)
+│                    — Analytics key (v2-7): separate Personal API Key card —
+│                       add / replace / remove, last4 + added date, validation state
+└── Team              — member table (name, email, role, joined), invite form,
+                        change role, remove (confirm)
 ```
 
-Order = onboarding order: General → Brand → Channels needs Buffer → Buffer → Team is optional. The setup checklist (Overview) deep-links into each.
+Order = onboarding order: General → Brand (its own tab now) → Channel Settings needs Buffer → Buffer → Team is optional. The setup checklist (Overview) deep-links into each.
 
 **Content mix placement (v2.0).** The mix distributes a weekly budget across content sources plus a company-mission quota (`Company.companyContentPostsPerWeek` and `ContentSource.postsPerWeek`). It renders as a section _below_ the channel cards, not inside one — it is company-wide, not per-channel — and stays hidden until at least one source exists, since there is nothing to distribute otherwise. Note the domain rule the UI must respect: `NULL` and `0` are different. `NULL` means "no quota configured" (legacy pooling behavior); `0` means "no mission posts". A numeric input that coerces empty to zero would silently change behavior, so the field needs an explicit "not set" state.
 
@@ -512,7 +551,7 @@ Four features shipped between 2026-07-06 and 2026-07-20 with no entry in this sp
 
 A distinction v1.0 did not need and the product now does. **Preferred LLM** (`User.preferredLlmConfigId`, `/api/v1/me/llm-preference`) is a personal preference that applies across every company the user belongs to — it is not company configuration and must not sit in a company's Settings, nor on the Dashboard, where it competes with operational content for the most valuable space on the busiest page.
 
-It belongs in the **sidebar user menu**, alongside language and log out — the established home for "settings about me". It appears only when an admin has activated at least one LLM config, and disappears entirely otherwise rather than rendering an empty control.
+It belongs in the **global header's right-hand cluster**, alongside language and log out — the established home for "settings about me", carried over from the sidebar user footer once the sidebar itself was removed (2026-08-31). It appears only when an admin has activated at least one LLM config, and disappears entirely otherwise rather than rendering an empty control.
 
 ---
 
@@ -694,7 +733,7 @@ Two paths, both preserved:
 
 **Goal:** Global admin manages users, companies, and the active LLM.
 
-1. Sidebar → **Admin** ⇒ page with three tabs: **Users**, **Companies**, **LLM providers** (replaces one long stacked page).
+1. Global nav → **Admin** ⇒ page with three tabs: **Users**, **Companies**, **LLM providers** (replaces one long stacked page).
 2. Users: table (name, email, admin badge, companies count, created) + search.
 3. Companies: table (name, owner, members, posts, mode, created) + search; row click → company workspace (admin bypasses membership).
 4. LLM providers: list of provider rows (provider logo, model, base URL, **Active** badge on exactly one) + **Add configuration**; row actions: Activate (confirm — "Switch active provider to X?"), Edit, Delete (blocked with message if active).
@@ -1133,7 +1172,7 @@ Base unit 4px; raw steps 4, 8, 12, 16, 24, 32, 40, 48, 64 — allowed **only ins
 | `space-label`         | 6                                        | Label → input                    |
 | `space-inline`        | 8                                        | Icon ↔ text, badge ↔ title       |
 
-Containers: sidebar fixed 240px; content max-width 1200px centered; reading and forms 640px; approval queue 720px; tables/grids full content width. Card grids: 24px gutters, 3/2/1 columns at ≥1024 / ≥640 / below.
+Containers: global header 56px, full-width, no sidebar (2026-08-31); content max-width 1200px centered; reading and forms 640px; approval queue 720px; tables/grids full content width. Card grids: 24px gutters, 3/2/1 columns at ≥1024 / ≥640 / below.
 
 **PR rule:** a margin or padding not expressible in these tokens is a design change and requires a spec edit — reviewers reject it.
 
@@ -1169,7 +1208,7 @@ Containers: sidebar fixed 240px; content max-width 1200px centered; reading and 
 
 ### 6.7 Navigation components
 
-- **Sidebar item:** 32px row, radius 4, `small` `fg-muted`; active = `surface-subtle` bg + `fg` text + 2px `accent` left indicator; hover = `fg` text.
+- **Global nav item (horizontal, 2026-08-31 — supersedes the sidebar-item spec):** inline pill, radius 4, `small` `fg-muted`; active = `surface-subtle` bg + `fg` text `font-semibold`; hover = `fg` text. No left indicator — a horizontal bar has no "left edge" to anchor one against.
 - **TabBar:** text tabs in `body` `fg-muted`; active = `fg` `body-strong` + 2px `accent` underline; count inline in `data` ("Approvals · 4"); horizontal scroll with fade hint on overflow.
 - **Breadcrumb:** `small` `fg-muted`, "/" separators, current page `fg`, no link on current.
 
@@ -1227,8 +1266,9 @@ _(values as of 2026-07 — verify against each network at implementation time)_
 
 Format: **Purpose · Props · Variants · States · Used in**. All in `components/ui/` unless noted; existing primitives (Card, Button, Modal, Alert, Badge, Input, PageHeader, EmptyState, Section) are restyled to §6 and extended as below.
 
-1. **AppShell** — global layout: sidebar + content region. Props: `user`, `children`. States: sidebar collapsed (mobile drawer). Used: every authenticated page.
-2. **SidebarNav** — global nav list + admin section + user footer. Props: `isGlobalAdmin`, `activeHref`, `attentionCount?`. States: item active/hover/focus. Used: AppShell.
+1. **AppShell** — global layout: header (nav + selector) + content region, no sidebar (2026-08-31). Props: `user`, `activeCompany`, `children`. States: mobile nav open (inline disclosure panel under the header, not a drawer). Used: every authenticated page.
+2. **Navigation** — global nav list (Dashboard / Content Creation / Competitive Analysis / Admin), horizontal. Props: `isGlobalAdmin`. States: item active/hover/focus. Used: AppShell header, both desktop (horizontal) and mobile (vertical) variants of the same component.
+   2a. **CompanySelector** — persistent "Current Company" control, visually distinct from the nav. Props: `activeCompany`. States: closed/open, loading (lazy-fetched company list), switching. Menu: company list with current-company check, Manage current company, Manage companies, + Add company (RBAC-gated). Used: AppShell header.
 3. **PageHeader** — title + optional description + actions slot. Props: `title`, `description?`, `actions?`, `breadcrumb?`. Used: every page.
 4. **TabBar** — workspace/admin tabs. Props: `tabs: {label, href, count?}[]`, `active`. Variants: line (default). States: active, hover, overflow-scroll. Used: company workspace, Admin.
 5. **CompanyHeader** — workspace identity strip. Props: `name`, `automationMode`, `bufferStatus`. Used: all workspace tabs.
@@ -1260,16 +1300,16 @@ Format: **Purpose · Props · Variants · States · Used in**. All in `component
 31. **Skeleton** — shape primitives (line, card, tile, row). Props: `variant`, `count`. Used: every loading state.
 32. **EmptyState** — icon + line + one action (per §6.6). Props: `icon`, `title`, `body?`, `action?`. Used: every list/queue.
 33. **KeyboardHelpSheet** — "?"-triggered shortcut overlay. Used: Approvals, Posts.
-34. **LanguageSwitcher** — EN/BG (existing, moves into sidebar user footer + auth pages).
+34. **LanguageSwitcher** — EN/BG (existing; lives in the global header's right-hand cluster + auth pages — moved out of the sidebar user footer, which no longer exists, 2026-08-31).
 35. **CompanyCard** — workspace switch card. Props: `company` (name, role, automationMode, pendingCount, bufferStatus, memberCount). States: hover (interactive-card lift, §6.4). Used: Companies grid, Dashboard companies strip.
 
 #### Added in v2.0
 
 36. **PostMetricsStrip** — inline engagement figures on a published post. Props: `metrics` (nullable per field), `syncStatus`, `channel`. Variants: by network (FB/IG field sets). States: synced, pending, not-found, unauthorized, failed (§3.9a table). Renders only non-null metrics; labels engagement rate with its denominator; never averages across channels. Used: PostCard.
 37. **AnalyticsKeyCard** — Buffer Personal API Key lifecycle. Props: `status` (`configured`, `last4`, `addedAt`, `lastValidAt`), `canManage`. Variants: not-configured / configured / invalid / read-only-editor. Used: Settings → Buffer.
-38. **ContentMixSection** — per-source weekly quota editor + company-mission row + running total against cadence. Props: `mix`, `sources`, `canManage`. States: unset (`NULL`) vs zero must be distinguishable; over-allocation warns without blocking. Used: Settings → Channels.
+38. **ContentMixSection** — per-source weekly quota editor + company-mission row + running total against cadence. Props: `mix`, `sources`, `canManage`. States: unset (`NULL`) vs zero must be distinguishable; over-allocation warns without blocking. Used: Settings → Channel Settings.
 39. **FeedItemList** — expandable per-source article list with enable/disable toggles. Props: `sourceId`, `items`, `canManage`. States: empty ("nothing new"), all-disabled, loading. Used: SourceCard.
-40. **LlmPreferenceControl** — personal preferred-model select. Props: `llms`, `preferredLlmConfigId`. Hidden entirely when no LLM configs are active. Used: sidebar user menu (§2.7).
+40. **LlmPreferenceControl** — personal preferred-model select. Props: `llms`, `preferredLlmConfigId`. Hidden entirely when no LLM configs are active. Used: global header's right-hand cluster (§2.7).
 41. **VerifyEmailCard** — four-state confirmation card (§4.12). Props: `state`, `onResend`. Used: `/verify-email`.
 
 **Status.** Shipped in `components/ui/`: Alert, Badge, Button, Card, ChannelChip, ColorField, ConfirmDialog, ConnectionDot, Container, DataTable, EmptyState, FilterBar, Input, LanguageSwitcher, LinkifiedText, Modal, PageHeader, RoleBadge, SaveBar, Section, SectionHeader, Select, Skeleton, StatusBadge, TabBar, Textarea, Toast. Components 36–41 exist as feature components under `components/company/` and are promoted to the library here so their states are specified rather than improvised. **Not yet built:** SearchInput (12), AttentionCard (25), KeyboardHelpSheet (33), GeneratePanel (16) as a side panel, ApprovalCard (15) as distinct from PostCard.
@@ -1353,7 +1393,7 @@ This table is the working map for Phase 4b. Left column = where the component li
 | `ApprovalQueueSection` (`/approval`)          | Deleted in Phase 4c — the queue is a filter    | ✅ **deleted**                |
 | Overview module-card grid                     | Removed — the tab bar is the navigation        | **delete**                    |
 | `company-section-card.tsx`                    | Removed — already dead code, imported nowhere  | **delete**                    |
-| `LlmPreferenceCard` (Dashboard) _(v2.0)_      | Sidebar user menu (§2.7)                       | **relocate out of workspace** |
+| `LlmPreferenceCard` (Dashboard) _(v2.0)_      | Global header's right-hand cluster (§2.7)      | **relocate out of workspace** |
 
 Nothing is dropped except the Overview metadata list (slug and creation date are not decisions anyone makes) and the two deletions marked above, both of which are duplicate navigation.
 
@@ -1428,11 +1468,11 @@ Breakpoints (Tailwind defaults): **desktop ≥1024** · **tablet 640–1023** ·
 
 ### 10.1 Desktop (≥1024)
 
-Reference layout: fixed 240px sidebar, content max-width 1200px, two-column regions where specified (Overview), full `FilterBar`, side panels 420px overlaying from the right, hover states + keyboard shortcuts active.
+Reference layout: single global header (nav + company selector, no sidebar — 2026-08-31), content max-width 1200px, two-column regions where specified (Overview), full `FilterBar`, side panels 420px overlaying from the right, hover states + keyboard shortcuts active.
 
 ### 10.2 Tablet (640–1023)
 
-- **Sidebar → icon rail (64px)** with tooltips on hover/focus; user footer collapses to avatar menu. Content keeps 24px padding.
+- Global nav stays in the header; the company selector may drop its "Company:" label to save width, keeping the company name and chevron. Content keeps 24px padding.
 - Two-column regions stack (Overview: This week above Recent activity). Card grids drop to 2 columns; media grid 3–4.
 - Settings keeps left sub-nav until 768px, then switches to the mobile select pattern.
 - Tables (Admin, Team) scroll horizontally inside the card with a right-edge fade cue; sticky first column for identity.
@@ -1440,7 +1480,7 @@ Reference layout: fixed 240px sidebar, content max-width 1200px, two-column regi
 
 ### 10.3 Mobile (<640)
 
-- **Sidebar → hidden; top app bar** (44px): hamburger (opens full-height drawer with the same nav), page title, contextual action. Drawer traps focus, closes on route change.
+- **No sidebar to hide** (removed 2026-08-31) — the header itself is already the compact form: logo + hamburger, the company selector (moves into the disclosure panel below `sm`), language, log out. Hamburger opens an **inline disclosure panel** under the header (not an overlay drawer) with the same nav links plus the company selector's full contents; closes on route change.
 - **Workspace TabBar → horizontally scrollable** pill row under the company header, active tab auto-scrolled into view; count badge preserved.
 - Cards go full-bleed-minus-16px; `PostCard` metadata wraps to a second line; row actions collapse to overflow ⋯ (§4.5).
 - `ApprovalCard` buttons become a full-width 3-button row pinned at card bottom; Approve rightmost (thumb zone).
@@ -1459,7 +1499,7 @@ Target: **WCAG 2.2 AA**. These are acceptance criteria, not aspirations — PRs 
 - **Focus:** visible 2px accent ring (`:focus-visible`) on light and dark surfaces; modals/sheets/drawers trap focus and restore it to the trigger on close; after a queue card is removed, focus moves to the next card (or the empty state heading).
 - **Contrast:** text ≥4.5:1, large text and UI borders/icons ≥3:1. Token pairs in §6.2 are pre-validated; tinted badge backgrounds must keep their solid-color text ≥4.5:1. Status never conveyed by color alone (badge text, dot + label).
 - **Touch targets:** ≥44×44px on touch devices (24px visual icons get padding); ≥24×24 with spacing exceptions per WCAG 2.2 §2.5.8 on desktop-density tables.
-- **ARIA & semantics:** native elements first (`button`, `a`, `select`, `table`); landmarks: `nav` (sidebar, labeled), `main`, `header`. TabBar = `tablist` pattern when panels swap in place, plain links when tabs are routes (workspace tabs are routes → links with `aria-current="page"`). Counts in accessible names ("Approvals, 4 pending"). Toasts `aria-live="polite"`; attention/error alerts `role="alert"`. Icons `aria-hidden` (text carries meaning, §6.8).
+- **ARIA & semantics:** native elements first (`button`, `a`, `select`, `table`); landmarks: `nav` (the global header's nav, labeled — no sidebar landmark since 2026-08-31), `main`, `header`. The company selector is a `menu`/`menuitem` pattern (`aria-haspopup`, `aria-expanded`), not a nav landmark — it is context, not navigation. TabBar = `tablist` pattern when panels swap in place, plain links when tabs are routes (workspace tabs are routes → links with `aria-current="page"`). Counts in accessible names ("Approvals, 4 pending"). Toasts `aria-live="polite"`; attention/error alerts `role="alert"`. Icons `aria-hidden` (text carries meaning, §6.8).
 - **Screen readers:** every page has a unique `h1` (PageHeader title); heading levels never skip; tables use `th scope`; timeline times use `<time datetime>`; form errors referenced by `aria-describedby` and announced on submit by moving focus to the first error or the form-level alert. Language switch updates `<html lang>` (en/bg) so pronunciation follows.
 - **Reduced motion:** `prefers-reduced-motion: reduce` disables shimmer, collapse, and slide animations — replaced by instant state change or opacity fade ≤80ms (§6.9).
 - **Forms:** visible labels always (no placeholder-as-label); `autocomplete` on auth/profile fields; `ConfirmDialog` typed-name confirmation is case-insensitive and paste-allowed (a11y over ceremony).

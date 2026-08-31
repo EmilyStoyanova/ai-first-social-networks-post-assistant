@@ -4,7 +4,8 @@ import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { getBrandGuidelines } from "@/lib/services/company/get-brand-guidelines.service";
-import { SettingsShell } from "@/components/company/settings-shell";
+import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
+import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
 import { BrandGuidelinesForm } from "@/components/company/brand-guidelines-form";
 import { Section } from "@/components/ui/Section";
 
@@ -30,25 +31,30 @@ export default async function BrandSettingsPage({ params }: Props) {
   const brandGuidelines = await getBrandGuidelines(company.id);
 
   return (
-    <SettingsShell
-      company={company}
+    <DashboardLayout
       user={{
         name: session.user.name,
         email: session.user.email,
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
-      active="brand"
+      activeCompany={{ slug: company.slug, name: company.name }}
     >
-      <Section id="brand" title={t("sections.brand")}>
-        <BrandGuidelinesForm
-          slug={slug}
-          initialValues={brandGuidelines}
-          initialAutomationMode={company.automationMode ?? "semi_automated"}
-          initialDefaultLang={company.defaultLang === "bg" ? "bg" : "en"}
-          role={company.role ?? null}
-          isGlobalAdmin={false}
-        />
-      </Section>
-    </SettingsShell>
+      <div>
+        <CompanyWorkspaceHeader company={company} activeTab="brand" />
+
+        <div className="mt-8 lg:max-w-[640px]">
+          <Section id="brand" title={t("sections.brand")}>
+            <BrandGuidelinesForm
+              slug={slug}
+              initialValues={brandGuidelines}
+              initialAutomationMode={company.automationMode ?? "semi_automated"}
+              initialDefaultLang={company.defaultLang === "bg" ? "bg" : "en"}
+              role={company.role ?? null}
+              isGlobalAdmin={false}
+            />
+          </Section>
+        </div>
+      </div>
+    </DashboardLayout>
   );
 }

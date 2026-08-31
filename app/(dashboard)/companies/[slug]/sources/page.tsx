@@ -44,6 +44,7 @@ export default async function CompanySourcesPage({ params }: Props) {
         email: session.user.email,
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
+      activeCompany={{ slug: company.slug, name: company.name }}
       breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
       <div>

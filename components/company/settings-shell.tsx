@@ -28,6 +28,7 @@ export async function SettingsShell({ company, user, active, children }: Props) 
   return (
     <DashboardLayout
       user={user}
+      activeCompany={{ slug: company.slug, name: company.name }}
       breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
       <div>

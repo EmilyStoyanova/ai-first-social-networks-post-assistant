@@ -118,6 +118,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         email: session.user.email,
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
+      activeCompany={{ slug: company.slug, name: company.name }}
       breadcrumb={[{ label: tNav("companies"), href: "/companies" }, { label: company.name }]}
     >
       <div>

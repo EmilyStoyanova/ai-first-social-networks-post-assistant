@@ -1,10 +1,12 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { listAdminUsers } from "@/lib/services/admin/list-users.service";
 import { listAdminCompanies } from "@/lib/services/admin/list-companies.service";
 import { listLlmProviders } from "@/lib/services/admin/list-llm-providers.service";
+import { resolveActiveCompany } from "@/lib/services/company/resolve-active-company.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Section } from "@/components/ui/Section";
@@ -37,6 +39,16 @@ export default async function AdminPage() {
 
   const providers = providersResult.success ? providersResult.providers : [];
 
+  // Display-only — a global admin may hold no company membership at all, in
+  // which case the selector shows its "no company" state; that is expected
+  // here, not an error.
+  const cookieSlug = (await cookies()).get("active_company")?.value ?? null;
+  const activeCompany = await resolveActiveCompany({
+    cookieSlug,
+    userId: session.user.id,
+    isGlobalAdmin: session.user.isGlobalAdmin,
+  });
+
   return (
     <DashboardLayout
       user={{
@@ -44,6 +56,7 @@ export default async function AdminPage() {
         email: session.user.email,
         isGlobalAdmin: session.user.isGlobalAdmin,
       }}
+      activeCompany={activeCompany}
       breadcrumb={[{ label: tNav("admin") }]}
     >
       <div className="space-y-8">
