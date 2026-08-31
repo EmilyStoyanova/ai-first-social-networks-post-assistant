@@ -193,8 +193,18 @@ export interface GenerationWarnings {
  *   • jaccard_duplicate  — wording stayed near-verbatim to a recent post
  *   • semantic_duplicate — the central claim repeated a recent post's
  *   • topic_repeated     — the conceptual topic was already used recently
+ *   • opening_repeated   — the opening line was a near-exact repeat of a
+ *     recent post's opening. Deliberately the ONLY opening-diversity signal
+ *     that can abort: `repeated_form` (same rhetorical device, different
+ *     words) and `saturated_form` (questions dominating the window) are
+ *     softer, stylistic reads of the same window and stay retry-only even
+ *     after every attempt is exhausted — see quality/opening-diversity.ts.
+ *     A near-exact match is different in kind: it is the same textual
+ *     evidence Jaccard already treats as a hard duplicate, just measured over
+ *     the opening instead of the whole post.
  */
-export type UniquenessFailureReason = "jaccard_duplicate" | "semantic_duplicate" | "topic_repeated";
+export type UniquenessFailureReason =
+  "jaccard_duplicate" | "semantic_duplicate" | "topic_repeated" | "opening_repeated";
 
 /**
  * Every way one generation can fail. Named so callers that orchestrate REPEATED
@@ -1341,7 +1351,12 @@ async function runGeneration(
           channel: context.channel.channel,
           feedItemId: claimedFeedItemId,
           contentGroupId: options.contentGroupId ?? null,
-        }
+        },
+        // Enables the compliance gate's language dimension — malformed Bulgarian
+        // constructions and wrong-script output. The same resolved value the
+        // prompt was built with, so the gate can never enforce a language the
+        // model was never asked for.
+        contentLanguage ?? context.channel.postingLanguage
       )
     );
   } catch (err) {
@@ -1381,30 +1396,49 @@ async function runGeneration(
     coreMessageGeneric,
     topicRepeated,
     complianceResult,
+    openingResult,
     attempts,
     selectedAngle,
     selectedPattern,
     selectedAspect,
   } = generationResult;
 
+  // A near-exact opening repeat is treated as the SAME kind of failure as a
+  // Jaccard duplicate — it is the same textual evidence, just measured over
+  // the opening instead of the whole post. `repeated_form` (same rhetorical
+  // device, different words) and `saturated_form` (questions dominating the
+  // window) are deliberately excluded: they are softer, contextual reads of
+  // the same window, and must not be able to block a post that survived
+  // three honest attempts to satisfy them. See quality/opening-diversity.ts.
+  const openingHardViolation = openingResult.flagged && openingResult.matchType === "near_exact";
+
   // ── Uniqueness abort ──────────────────────────────────────────────────────
   // The retry loop always returns its last candidate. If that candidate is
   // STILL a duplicate after every attempt — a near-verbatim (Jaccard) match, a
-  // semantic "regenerate", or a repeated conceptual topic — we refuse to persist
-  // it. Generation is aborted with a dedicated error and the claimed source
-  // article is released so it can back a future (unique) post. Note: a skipped
-  // semantic gate reports decision "accept", so fail-open never triggers this.
-  // (A generic coreMessage is a fail-safe signal only and never aborts here.)
-  if (duplicateResult.flagged || semanticResult.decision === "regenerate" || topicRepeated) {
+  // semantic "regenerate", a repeated conceptual topic, or a near-exact
+  // repeated OPENING — we refuse to persist it. Generation is aborted with a
+  // dedicated error and the claimed source article is released so it can back
+  // a future (unique) post. Note: a skipped semantic gate reports decision
+  // "accept", so fail-open never triggers this. (A generic coreMessage is a
+  // fail-safe signal only and never aborts here.)
+  if (
+    duplicateResult.flagged ||
+    semanticResult.decision === "regenerate" ||
+    topicRepeated ||
+    openingHardViolation
+  ) {
     await releaseClaimedFeedItem();
     const reason: UniquenessFailureReason = duplicateResult.flagged
       ? "jaccard_duplicate"
       : semanticResult.decision === "regenerate"
         ? "semantic_duplicate"
-        : "topic_repeated";
+        : topicRepeated
+          ? "topic_repeated"
+          : "opening_repeated";
     console.warn(
       `[generation] Aborted after ${attempts} attempts → code=CANNOT_GENERATE_UNIQUE_POST reason=${reason}` +
         (duplicateResult.flagged ? ` matchedPostId=${duplicateResult.matchedPostId}` : "") +
+        (openingHardViolation ? ` matchedOpeningPostId=${openingResult.matchedPostId}` : "") +
         ` (post not saved).`
     );
     // The abort itself, as its own step. Every attempt is already on the record
@@ -1423,6 +1457,9 @@ async function runGeneration(
         jaccardSimilarity: duplicateResult.similarityScore,
         semanticDecision: semanticResult.decision,
         topicRepeated,
+        openingHardViolation,
+        openingMatchType: openingResult.matchType,
+        openingMatchedPostId: openingHardViolation ? openingResult.matchedPostId : null,
         claimReleased: ownedClaimId !== null,
       },
     });
@@ -1499,6 +1536,20 @@ async function runGeneration(
     },
   });
 
+  // A SOFT opening-diversity signal (repeated_form / saturated_form) that
+  // survived every attempt. Logged, never fatal — a near-exact match already
+  // aborted above and never reaches this line. Style must not be able to
+  // destroy content, but a run of these lines is the signal that the hook
+  // rotation is being ignored again, which is exactly the evidence that was
+  // missing before.
+  if (openingResult.flagged) {
+    console.warn(
+      `[generation-diversity] opening still repeated after ${attempts} attempts (post SAVED — soft signal): ` +
+        `matchType=${openingResult.matchType} candidateShape=${openingResult.candidateForm} ` +
+        `matchedPostId=${openingResult.matchedPostId} requestedHook=${selectedPattern?.hookType ?? "none"}`
+    );
+  }
+
   // Log (calibration) the fail-open skip and the gray zone; never block.
   if (semanticResult.skipped) {
     console.warn(
@@ -1519,6 +1570,18 @@ async function runGeneration(
     safety: {
       flagged: safetyResult.flagged,
       matchedTerms: safetyResult.matchedTerms,
+    },
+    // Realised opening vs. recent openings. Read alongside `contentPattern`
+    // above, which records the hook the post was ASKED for: this says what it
+    // actually wrote. `status: "repeated"` on a saved post means the retries ran
+    // out, not that a rule was ignored — this is a trigger, never a gate.
+    openingDiversity: {
+      status: openingResult.flagged ? "repeated" : "distinct",
+      candidateShape: openingResult.candidateForm,
+      matchType: openingResult.matchType,
+      matchedRecentPostId: openingResult.matchedPostId,
+      similarity: openingResult.similarity,
+      retryTriggered: openingResult.flagged,
     },
     semanticDuplicate: {
       decision: semanticResult.decision,

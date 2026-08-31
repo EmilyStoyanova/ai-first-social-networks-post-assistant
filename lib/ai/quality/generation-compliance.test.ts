@@ -73,6 +73,9 @@ describe("validateGenerationCompliance — unenforced dimensions report as unche
       structure: false,
       cta: false,
       bannedWords: true,
+      // No language was declared by this caller, so the language dimension did
+      // not run — and says so, rather than reporting a pass it never earned.
+      language: false,
     });
   });
 
@@ -216,6 +219,7 @@ describe("NO_COMPLIANCE_CHECK", () => {
       cta: false,
       structure: false,
       bannedWords: false,
+      language: false,
     });
   });
 });

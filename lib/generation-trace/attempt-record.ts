@@ -19,6 +19,7 @@ import type { PostPattern } from "@/lib/ai/post-pattern";
 import type { ParsedLlmPost } from "@/lib/ai/parse-llm-post";
 import type { DuplicateCheckResult } from "@/lib/ai/quality/duplicate-detection";
 import type { ComplianceResult } from "@/lib/ai/quality/generation-compliance";
+import type { OpeningDiversityResult } from "@/lib/ai/quality/opening-diversity";
 import type { SemanticGateResult } from "@/lib/ai/generate-with-retry";
 
 /** Why an attempt was not accepted. Mirrors the loop's own retry triggers. */
@@ -27,6 +28,8 @@ export type AttemptRejectionReason =
   | "semantic_duplicate"
   | "generic_core_message"
   | "repeated_topic"
+  /** The realised first line repeated a recent post's first line. */
+  | "opening_repeated"
   | "compliance_failed"
   | "parse_error"
   | "provider_error";
@@ -57,6 +60,12 @@ export interface GenerationAttemptRecord {
   topicRepeated?: boolean;
   /** Post-generation compliance gate (Step 2) — did the text follow its own angle/hook/CTA? */
   compliance?: ComplianceResult;
+  /**
+   * Realised-opening diversity — what the candidate ACTUALLY opened with, versus
+   * recent posts. The counterpart to `pattern` above, which records only what
+   * the post was ASKED to open with.
+   */
+  openingDiversity?: OpeningDiversityResult;
   /** The diversity levers this attempt actually used. */
   angle?: ContentAngle;
   pattern?: PostPattern;

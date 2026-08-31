@@ -12,7 +12,11 @@ import type { GenerationWarnings } from "@/lib/services/ai/generate-draft-post.s
 import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
 import type { GenerationChannelOption } from "@/lib/posts/generation-channels";
 import { COMPANY_MISSION_VALUE, COMPANY_RULES_VALUE } from "@/lib/ai/manual-content-source";
-import { BulkGenerateFields, type BulkPlanState } from "./bulk-generate-fields";
+import {
+  BulkGenerateFields,
+  type BulkPlanState,
+  type ChannelSchedule,
+} from "./bulk-generate-fields";
 import { BatchContentMixFields } from "./batch-content-mix-fields";
 import { BulkResultSummary } from "./bulk-result-summary";
 import { BulkJobProgress } from "./bulk-job-progress";
@@ -71,11 +75,10 @@ import {
 import {
   MAX_BULK_POSTS,
   isStartDateInPast,
-  planBulkSlots,
   planCustomSlots,
+  planEvenDistribution,
   validateCustomDistribution,
 } from "@/lib/scheduling/bulk-schedule";
-import { hasPostingWindows } from "@/lib/scheduling/posting-windows";
 import { appZoneToday, fromAppDateTimeLocal } from "@/lib/scheduling/app-datetime-local";
 import { refuseScheduleTime } from "@/lib/scheduling/reschedule-policy";
 import { SLOT_MINUTES } from "@/lib/scheduling/time-slots";
@@ -103,7 +106,7 @@ interface AvailableLlm {
 interface GenerateApiError {
   code?: string;
   message?: string;
-  reason?: "jaccard_duplicate" | "semantic_duplicate" | "topic_repeated";
+  reason?: "jaccard_duplicate" | "semantic_duplicate" | "topic_repeated" | "opening_repeated";
   attempts?: number;
 }
 
@@ -112,6 +115,7 @@ const UNIQUE_ERROR_KEY: Record<NonNullable<GenerateApiError["reason"]>, string> 
   topic_repeated: "uniqueErrorTopicRepeated",
   semantic_duplicate: "uniqueErrorSemanticDuplicate",
   jaccard_duplicate: "uniqueErrorJaccardDuplicate",
+  opening_repeated: "uniqueErrorOpeningRepeated",
 };
 
 /**
@@ -350,32 +354,61 @@ export function GeneratePostForm({
    */
   const primaryChannel = channelOptions.find((c) => c.value === channels[0]) ?? null;
 
-  // The channel's own posting windows decide the times in both distribution
-  // modes. Server-authored, carried down with the channel option purely so the
-  // preview below can be computed without a round trip.
-  //
-  // Each selected channel is scheduled into ITS OWN windows by the server, so a
-  // multi-channel batch cannot be previewed as one timetable. The preview shows
-  // the first channel's, labelled as such — an honest sample of the period
-  // rather than a promise about all of them.
+  /**
+   * The first selected channel's windows, used ONLY to seed the custom editor's
+   * time inputs. Nothing schedules from this — see `channelSchedules` for what
+   * an even spread actually plans, per channel.
+   */
   const postingWindows = primaryChannel?.config.postingWindows ?? [];
 
-  /**
-   * Selected channels with no publishing times configured, by label.
-   *
-   * An even distribution is derived entirely from those times, so a channel
-   * without any cannot be planned for — and the app will not pick an hour on its
-   * owner's behalf. Every selected channel is checked, not just the previewed
-   * one: each plans its own slots server-side, so one unconfigured channel is
-   * enough to make the request unanswerable, and the API refuses it with
-   * `NO_POSTING_WINDOWS`. Custom mode is exempt — there the user names the times.
-   */
-  const channelsWithoutWindows = useMemo(
-    () =>
-      channelOptions
-        .filter((c) => channels.includes(c.value) && !hasPostingWindows(c.config.postingWindows))
-        .map((c) => c.label),
+  /** The channel options currently selected, in the order they are offered. */
+  const selectedChannels = useMemo(
+    () => channelOptions.filter((c) => channels.includes(c.value)),
     [channelOptions, channels]
+  );
+
+  /**
+   * What an even spread would schedule, PER SELECTED CHANNEL — or why it cannot.
+   *
+   * Each channel plans its own slots from its own windows on the server, so a
+   * multi-channel batch is genuinely several timetables and is previewed as
+   * several. This used to show the first channel's alone with a note underneath
+   * saying the others might differ, which is a promise the form could not keep:
+   * a channel with a different schedule could be refused outright and the user
+   * would see nothing about it until the request came back.
+   *
+   * Computed with the SAME pure planner the service runs, so a preview cannot
+   * drift from what gets written — and so the reasons shown here are exactly the
+   * codes the API would answer with (`NO_POSTING_WINDOWS`,
+   * `NO_POSTING_DAYS_IN_PERIOD`, `INSUFFICIENT_POSTING_SLOTS`).
+   *
+   * Windows are server-authored and carried down with the channel option purely
+   * so this needs no round trip.
+   */
+  const channelSchedules = useMemo<ChannelSchedule[]>(
+    () =>
+      selectedChannels.map((channel) => {
+        const planned = planEvenDistribution({
+          startDate: plan.startDate,
+          endDate: plan.endDate,
+          count: plan.numberOfPosts,
+          postingWindows: channel.config.postingWindows,
+          // The clock this form opened on, for the same reason `minDate` and the
+          // custom editor's `time_in_past` check use it: a preview must not
+          // start rewriting itself while it is being read. The server measures
+          // against its own and is the authority, so a form left open long
+          // enough for a slot to go by is refused on submit — which is the same
+          // answer custom mode has always given.
+          now: openedAt,
+        });
+        return {
+          channel: channel.value,
+          label: channel.label,
+          slots: planned.ok ? planned.slots : [],
+          problem: planned.ok ? null : planned.problem,
+        };
+      }),
+    [selectedChannels, plan.startDate, plan.endDate, plan.numberOfPosts, openedAt]
   );
 
   /**
@@ -411,31 +444,25 @@ export function GeneratePostForm({
   );
 
   /**
-   * The exact instants this plan would schedule.
+   * The exact instants a CUSTOM plan would schedule — one timetable, shared by
+   * every selected channel, because the user named the times for the topic
+   * rather than for a channel.
    *
    * Computed with the SAME pure planner the service runs, so the preview is not
    * a second implementation that can drift — it is the answer, shown early. A
    * custom plan that does not yet add up previews nothing rather than previewing
    * a schedule the request would be refused for.
    *
-   * Note that only the even branch is given the channel's posting windows.
-   * Custom slots come from the user's own times and nothing else, on both sides
-   * of the wire.
+   * The channel's posting windows are deliberately not consulted: custom slots
+   * come from the user's own times and nothing else, on both sides of the wire.
    */
-  const slots = useMemo(() => {
-    if (plan.distribution === "custom") {
-      return distributionError === null ? planCustomSlots(customDistribution) : [];
-    }
-    return planBulkSlots({
-      startDate: plan.startDate,
-      endDate: plan.endDate,
-      count: plan.numberOfPosts,
-      postingWindows,
-    });
-    // `postingWindows` is a fresh array each render; the channel it came from is
-    // what actually changes, so that is what the memo watches.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan, distributionError, customDistribution, channels[0]]);
+  const customSlots = useMemo(
+    () =>
+      plan.distribution === "custom" && distributionError === null
+        ? planCustomSlots(customDistribution)
+        : [],
+    [plan.distribution, distributionError, customDistribution]
+  );
 
   /**
    * The instant the single-post fields name, or null when they name none.
@@ -508,12 +535,12 @@ export function GeneratePostForm({
     // Literally the same function the service runs: a period that has already
     // begun is refused there, so the button must not offer it here.
     !isStartDateInPast(plan.startDate, openedAt) &&
-    slots.length > 0 &&
-    // An even spread needs every selected channel to have publishing times —
-    // each plans its own slots server-side, and the preview above only shows the
-    // first one's. The API refuses the request for the same reason
-    // (NO_POSTING_WINDOWS); this is what stops it being made at all.
-    (plan.distribution === "custom" || channelsWithoutWindows.length === 0) &&
+    // An even spread needs EVERY selected channel to be plannable — each plans
+    // its own slots server-side, and the API refuses the whole request if any
+    // one of them cannot be. This is what stops it being made at all.
+    (plan.distribution === "custom"
+      ? customSlots.length > 0
+      : channelSchedules.length > 0 && channelSchedules.every((s) => s.problem === null)) &&
     // The mix IS the batch when it applies, so one that does not add up would
     // ask for a different number of posts than the button promises. The service
     // refuses it too; this is what stops the request being made at all.
@@ -1569,31 +1596,18 @@ export function GeneratePostForm({
         <BulkGenerateFields
           plan={plan}
           onChange={setPlan}
-          slots={slots}
+          customSlots={customSlots}
+          channelSchedules={channelSchedules}
           distributionError={distributionError}
           minDate={minDate}
           now={openedAt}
           postingWindows={postingWindows}
-          channelsWithoutWindows={channelsWithoutWindows}
           channelSettingsHref={`/companies/${slug}/settings/channels`}
           onLeaveForSettings={rememberDraft}
           disabled={generating || bulkRunning || topicRunning || noChannels}
           locale={locale}
         />
       )}
-
-      {/* The preview above is one channel's timetable. Every other selected
-          channel is scheduled into its OWN posting windows, so a topic's
-          versions can legitimately go out at different times — said here rather
-          than discovered when the drafts appear with times nobody previewed. */}
-      {mode === "multiple" &&
-        plan.distribution === "even" &&
-        channels.length > 1 &&
-        primaryChannel && (
-          <p className="text-fg-faint mt-3 text-xs">
-            {tBulk("previewPerChannel", { channel: primaryChannel.label })}
-          </p>
-        )}
 
       {/* Where the posts come from, beside when they go out. Shown only for a
           batch — a single post already answers this with the dropdown above —

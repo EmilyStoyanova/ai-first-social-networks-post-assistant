@@ -23,6 +23,15 @@
  * A banned word is different in kind: a hard product prohibition with an exact,
  * unambiguous textual signal. It keeps the full retry-then-abort behaviour.
  *
+ * LANGUAGE joined it on the same terms, and for the same reason. A post whose
+ * Bulgarian is malformed ("Има ли ти мислил") or that arrives in English on a
+ * Bulgarian channel is not a stylistic near-miss to be tolerated — it cannot be
+ * published at all. Both have exact textual signals and no judgement in them
+ * (see language-quality.ts), which is what separates them from the four
+ * stylistic dimensions above. Note the boundary: WHETHER a phrase is good
+ * Bulgarian is enforced here; whether it REPEATS last week's opening is not —
+ * that is opening-diversity.ts, which only ever asks for another attempt.
+ *
  * RESULT SEMANTICS. `passed: true` alone never meant "verified" — an
  * all-unsupported pattern produced it too. `status` separates the two:
  * `not_checked` means compliance was never verified. Since the banned-word
@@ -37,6 +46,8 @@
  *                   (retry, then POST_FAILED_COMPLIANCE).
  * - `not_checked` — no text was measured at all. Compliance was NOT verified.
  */
+import { checkLanguageQuality } from "./language-quality";
+
 export type ComplianceStatus = "passed" | "failed" | "not_checked";
 
 /**
@@ -46,10 +57,11 @@ export type ComplianceStatus = "passed" | "failed" | "not_checked";
  * than silently omit — that they were not verified. Only `bannedWords` is ever
  * evaluated; see `EnforcedComplianceDimension`.
  */
-export type ComplianceDimension = "angle" | "hook" | "structure" | "cta" | "bannedWords";
+export type ComplianceDimension =
+  "angle" | "hook" | "structure" | "cta" | "bannedWords" | "language";
 
 /** The dimensions that are actually enforced, and so the only ones that can fail. */
-export type EnforcedComplianceDimension = "bannedWords";
+export type EnforcedComplianceDimension = "bannedWords" | "language";
 
 export interface ComplianceFailure {
   dimension: EnforcedComplianceDimension;
@@ -77,19 +89,13 @@ export interface ComplianceResult {
 
 export interface ComplianceCheckParams {
   text: string;
+  /**
+   * The language the post was required to be in ("BG" / "EN"). Omitted or
+   * unrecognised means the language dimension does not run — and `checked`
+   * reports it as unchecked rather than as a pass.
+   */
+  language?: string | null;
 }
-
-/**
- * Which dimensions a real run evaluates. Stylistic dimensions are guidance
- * only, so they are reported as unchecked rather than as a pass.
- */
-const CHECKED_DIMENSIONS: Record<ComplianceDimension, boolean> = {
-  angle: false,
-  hook: false,
-  structure: false,
-  cta: false,
-  bannedWords: true,
-};
 
 /** Neutral result for callers with no text to check at all. */
 export const NO_COMPLIANCE_CHECK: ComplianceResult = {
@@ -98,7 +104,14 @@ export const NO_COMPLIANCE_CHECK: ComplianceResult = {
   passed: true,
   reasons: [],
   failures: [],
-  checked: { angle: false, hook: false, structure: false, cta: false, bannedWords: false },
+  checked: {
+    angle: false,
+    hook: false,
+    structure: false,
+    cta: false,
+    bannedWords: false,
+    language: false,
+  },
 };
 
 // ─── Banned word: "Стоп" ────────────────────────────────────────────────────
@@ -145,6 +158,15 @@ export function validateGenerationCompliance(params: ComplianceCheckParams): Com
     failures.push({ dimension: "bannedWords", reason: bannedWords.reason });
   }
 
+  // Malformed constructions and wrong-script output. Runs only when the caller
+  // states which language was required — a language check with nothing to check
+  // against would be a guess, and a guess must not be able to block a save.
+  const language = checkLanguageQuality({ text: params.text, language: params.language });
+  for (const failure of language.failures) {
+    reasons.push(failure.reason);
+    failures.push({ dimension: "language", reason: failure.reason });
+  }
+
   const passed = reasons.length === 0;
 
   return {
@@ -153,6 +175,16 @@ export function validateGenerationCompliance(params: ComplianceCheckParams): Com
     passed,
     reasons,
     failures,
-    checked: { ...CHECKED_DIMENSIONS },
+    // Stylistic dimensions are guidance only, so they are reported as unchecked
+    // rather than as a pass. `language` reports honestly too: it is `true` only
+    // when a supported language was actually declared and evaluated.
+    checked: {
+      angle: false,
+      hook: false,
+      structure: false,
+      cta: false,
+      bannedWords: true,
+      language: language.evaluated,
+    },
   };
 }

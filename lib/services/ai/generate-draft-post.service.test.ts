@@ -2925,3 +2925,332 @@ describe("generatePostFromContext — compliance abort", () => {
     assert.equal(created(), null);
   });
 });
+
+describe("generatePostFromContext — opening-diversity and language hardening", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  const bulgarianFacebookContext = () =>
+    makeContext({
+      channel: {
+        channel: "facebook",
+        postingLanguage: "bg",
+        imageRequired: false,
+        automationModeOverride: null,
+        maxTextLength: null,
+        includeSourceLink: false,
+        autoGenerateImage: false,
+      },
+    });
+
+  /**
+   * Runs the REAL generateWithRetry against a scripted provider, forwarding
+   * every parameter the service actually passes — including `contentLanguage`,
+   * which the compliance-abort tests above predate and therefore never had to
+   * forward. Dropping it here would silently disable the language dimension
+   * under test.
+   */
+  function scriptDepsWithLanguage(script: string[], base: GenerateDraftPostDeps) {
+    let calls = 0;
+    const deps: GenerateDraftPostDeps = { ...base };
+    deps.generateWithRetry = async (
+      _provider,
+      system,
+      user,
+      recent,
+      diversity,
+      gate,
+      max,
+      recorder,
+      candidateContext,
+      contentLanguage
+    ) => {
+      const { generateWithRetry } = await import("@/lib/ai/generate-with-retry");
+      const scripted = {
+        generate: async () => {
+          const text = script[Math.min(calls, script.length - 1)];
+          calls++;
+          return { text };
+        },
+      };
+      return generateWithRetry(
+        scripted,
+        system,
+        user,
+        recent,
+        diversity,
+        gate,
+        max,
+        recorder,
+        candidateContext,
+        contentLanguage
+      );
+    };
+    return { deps, calls: () => calls };
+  }
+
+  // ── 1. near-exact repeated opening — HARD ────────────────────────────────
+
+  const RECENT_OPENING_TEXT =
+    "Most people assume a team should stay quiet before a launch. But teams who show early momentum " +
+    "build significantly more trust with their community over time.\n" +
+    "Join our mailing list for the reveal, and forward this to anyone you think might be curious.";
+
+  const NEAR_EXACT_OPENING = JSON.stringify({
+    text:
+      "Most people assume a team should stay quiet before a launch. Actually, sharing early progress " +
+      "publicly builds far more credibility than staying silent ever could.\n" +
+      "Subscribe to our newsletter to catch the announcement first, and pass it along if you think a " +
+      "friend would care.",
+    hashtags: ["launch"],
+    coreMessage:
+      "Sharing progress publicly builds more audience trust than staying silent before launch.",
+    imagePrompt: "A team celebrating around a laptop",
+  });
+
+  it("does NOT save a candidate whose opening is a near-exact repeat of a recent post, on every attempt", async () => {
+    const rows: RecentRow[] = [
+      { id: "recent-1", content: RECENT_OPENING_TEXT, promptSnapshot: null },
+    ];
+    const { deps: base, created, embedded } = makeDeps(rows, ACCEPT_GATE);
+    const { deps, calls } = scriptDepsWithLanguage([NEAR_EXACT_OPENING], base);
+
+    const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
+
+    assert.equal(result.success, false, "a near-exact repeated opening must not be persisted");
+    if (!result.success) {
+      assert.equal(result.code, "CANNOT_GENERATE_UNIQUE_POST");
+      assert.equal(result.reason, "opening_repeated");
+      assert.equal(result.attempts, 3);
+    }
+    assert.equal(created(), null, "the post must NOT be saved");
+    assert.equal(embedded(), null, "no embedding for an aborted post");
+    assert.equal(calls(), 3, "every attempt was spent before aborting");
+  });
+
+  // ── 2. malformed Bulgarian — HARD (via the existing compliance abort) ────
+
+  const MALFORMED_BG = JSON.stringify({
+    text: "Има ли ти мислил, че един смесител може да промени банята? #bathroom",
+    hashtags: ["bathroom"],
+    coreMessage: "A single-lever mixer changes how a bathroom feels day to day.",
+    imagePrompt: "A modern bathroom faucet",
+  });
+
+  it("does NOT save malformed Bulgarian on every attempt", async () => {
+    const { deps: base, created, embedded } = makeDeps([], ACCEPT_GATE);
+    const { deps, calls } = scriptDepsWithLanguage([MALFORMED_BG], base);
+
+    const result = await generatePostFromContext(bulgarianFacebookContext(), "co-1", {}, deps);
+
+    assert.equal(result.success, false, "malformed Bulgarian must not be persisted");
+    if (!result.success) {
+      assert.equal(result.code, "POST_FAILED_COMPLIANCE");
+      assert.equal(result.attempts, 3);
+      assert.ok(
+        result.complianceReasons?.some((r) => /Има ли ти мислил/.test(r)),
+        `expected a language reason, got ${JSON.stringify(result.complianceReasons)}`
+      );
+    }
+    assert.equal(created(), null, "the post must NOT be saved");
+    assert.equal(embedded(), null, "no embedding for an aborted post");
+    assert.equal(calls(), 3, "every attempt was spent before aborting");
+  });
+
+  // ── 3. English output on a Bulgarian channel — HARD ──────────────────────
+
+  const ENGLISH_ON_BG = JSON.stringify({
+    text:
+      "Ever found yourself fumbling with two separate taps just to get the temperature right? " +
+      "A single-lever mixer solves that in one movement and uses noticeably less water over a year.",
+    hashtags: ["design"],
+    coreMessage: "A single-lever mixer saves water compared to two separate taps.",
+    imagePrompt: "A modern bathroom faucet",
+  });
+
+  it("does NOT save predominantly English output when Bulgarian is required, on every attempt", async () => {
+    const { deps: base, created, embedded } = makeDeps([], ACCEPT_GATE);
+    const { deps, calls } = scriptDepsWithLanguage([ENGLISH_ON_BG], base);
+
+    const result = await generatePostFromContext(bulgarianFacebookContext(), "co-1", {}, deps);
+
+    assert.equal(
+      result.success,
+      false,
+      "English output must not be persisted on a Bulgarian channel"
+    );
+    if (!result.success) {
+      assert.equal(result.code, "POST_FAILED_COMPLIANCE");
+      assert.equal(result.attempts, 3);
+      assert.ok(
+        result.complianceReasons?.some((r) => /written in Bulgarian/.test(r)),
+        `expected a wrong-language reason, got ${JSON.stringify(result.complianceReasons)}`
+      );
+    }
+    assert.equal(created(), null, "the post must NOT be saved");
+    assert.equal(embedded(), null, "no embedding for an aborted post");
+    assert.equal(calls(), 3, "every attempt was spent before aborting");
+  });
+
+  // ── 4 & 5. soft opening-diversity signals — intentionally SOFT ───────────
+
+  const REPEATED_FORM_RECENT: RecentRow[] = [
+    {
+      id: "rf-1",
+      content:
+        "Замислял ли си се дали правилният смесител променя банята? Той решава наглед дребни, но важни " +
+        "неща в ежедневието. #bathroom #renovation",
+      promptSnapshot: null,
+    },
+  ];
+
+  const REPEATED_FORM_CANDIDATE = JSON.stringify({
+    text:
+      "Мислил ли си някога дали смесителят в банята ти има значение? Отговорът често изненадва хората. " +
+      "#faucet #design",
+    hashtags: ["faucet"],
+    coreMessage: "The choice of faucet has a measurable effect on daily bathroom comfort.",
+    imagePrompt: "A close-up of a bathroom faucet",
+  });
+
+  it("SAVES a candidate that only repeats the rhetorical-question FORM after every attempt (soft signal)", async () => {
+    const { deps: base, created, embedded } = makeDeps(REPEATED_FORM_RECENT, ACCEPT_GATE);
+    const { deps, calls } = scriptDepsWithLanguage([REPEATED_FORM_CANDIDATE], base);
+
+    // Bulgarian context: both fixtures are Bulgarian, and the new wrong-language
+    // guard would otherwise flag Cyrillic output against the default "en" channel.
+    const result = await generatePostFromContext(bulgarianFacebookContext(), "co-1", {}, deps);
+
+    assert.ok(result.success, "a repeated_form opening miss must never block the save");
+    assert.equal(calls(), 3, "every attempt was spent retrying the soft signal");
+    assert.ok(created(), "the post was saved");
+    assert.ok(embedded(), "the accepted post was embedded, as on any normal success");
+  });
+
+  const SATURATED_FORM_RECENT: RecentRow[] = [
+    {
+      id: "s1",
+      content: "Колко вода спестява модерен смесител всеки месец? #savings",
+      promptSnapshot: null,
+    },
+    {
+      id: "s2",
+      content: "Защо картушите се развалят толкова бързо през зимата? #maintenance",
+      promptSnapshot: null,
+    },
+    {
+      id: "s3",
+      content: "Кога е най-добре да смениш старата ръчка? #renovation",
+      promptSnapshot: null,
+    },
+    {
+      id: "s4",
+      content: "Откъде да купиш качествена арматура за банята? #shopping",
+      promptSnapshot: null,
+    },
+  ];
+
+  const SATURATED_FORM_CANDIDATE = JSON.stringify({
+    text: "Струва ли си по-скъпият смесител на дългосрочен план? #value",
+    hashtags: ["value"],
+    coreMessage: "A pricier mixer can be worth it over a long enough ownership period.",
+    imagePrompt: "A premium bathroom faucet",
+  });
+
+  it("SAVES a candidate that only saturates the question-form window after every attempt (soft signal)", async () => {
+    const { deps: base, created, embedded } = makeDeps(SATURATED_FORM_RECENT, ACCEPT_GATE);
+    const { deps, calls } = scriptDepsWithLanguage([SATURATED_FORM_CANDIDATE], base);
+
+    const result = await generatePostFromContext(bulgarianFacebookContext(), "co-1", {}, deps);
+
+    assert.ok(result.success, "a saturated_form opening miss must never block the save");
+    assert.equal(calls(), 3, "every attempt was spent retrying the soft signal");
+    assert.ok(created(), "the post was saved");
+    assert.ok(embedded(), "the accepted post was embedded, as on any normal success");
+  });
+
+  // ── 6. a valid later retry still persists normally ───────────────────────
+
+  const DISTINCT_OPENING_RETRY = JSON.stringify({
+    text:
+      "A single-lever mixer with a ceramic cartridge tends to outlast a rubber-washer tap by years, " +
+      "not months.\nCompare the two before your next renovation.",
+    hashtags: ["renovation"],
+    coreMessage: "A ceramic-cartridge mixer typically lasts far longer than a rubber-washer tap.",
+    imagePrompt: "A close-up of a ceramic cartridge",
+  });
+
+  it("saves normally once a retry produces a genuinely distinct opening", async () => {
+    const rows: RecentRow[] = [
+      { id: "recent-1", content: RECENT_OPENING_TEXT, promptSnapshot: null },
+    ];
+    const { deps: base, created, embedded } = makeDeps(rows, ACCEPT_GATE);
+    const { deps, calls } = scriptDepsWithLanguage(
+      [NEAR_EXACT_OPENING, DISTINCT_OPENING_RETRY],
+      base
+    );
+
+    const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
+
+    assert.ok(result.success, "a genuinely distinct retry must be saved like any other post");
+    assert.equal(calls(), 2, "one retry, then accepted");
+    assert.ok(created(), "the post was saved");
+    assert.match(created()!.content as string, /ceramic cartridge/);
+    assert.ok(embedded(), "the accepted post was embedded, as on any normal success");
+  });
+
+  // ── 7. existing banned-word behaviour is unaffected ──────────────────────
+
+  it("still aborts on a banned word after every attempt, unaffected by the new hard/soft split", async () => {
+    const BANNED_NO_LANGUAGE_DECLARED = JSON.stringify({
+      text: "Стоп на ръчния експорт. Новата версия е достъпна за всички клиенти още днес.",
+      hashtags: ["release"],
+      coreMessage: "The new release removes the manual export step customers asked about.",
+      imagePrompt: "A laptop showing a changelog",
+    });
+    const { deps: base, created, embedded } = makeDeps([], ACCEPT_GATE);
+    // No contentLanguage forwarded here — mirrors every pre-existing banned-word
+    // test above, which never declared a language either. The banned-word
+    // dimension must fire exactly as it always did, independent of `language`.
+    const { deps, calls } = localScriptDeps([BANNED_NO_LANGUAGE_DECLARED], base);
+
+    const result = await generatePostFromContext(makeContext(), "co-1", {}, deps);
+
+    assert.equal(result.success, false, "a banned term must still be blocked");
+    if (!result.success) {
+      assert.equal(result.code, "POST_FAILED_COMPLIANCE");
+      assert.equal(result.attempts, 3);
+      assert.ok(result.complianceReasons?.some((r) => /Стоп/.test(r)));
+    }
+    assert.equal(created(), null);
+    assert.equal(embedded(), null);
+    assert.equal(calls(), 3);
+  });
+
+  /** Local re-declaration: the original `scriptDeps` above is scoped to its own describe block. */
+  function localScriptDeps(script: string[], base: GenerateDraftPostDeps) {
+    let calls = 0;
+    const deps: GenerateDraftPostDeps = { ...base };
+    deps.generateWithRetry = async (_provider, system, user, recent, diversity, gate, max) => {
+      const { generateWithRetry } = await import("@/lib/ai/generate-with-retry");
+      const scripted = {
+        generate: async () => {
+          const text = script[Math.min(calls, script.length - 1)];
+          calls++;
+          return { text };
+        },
+      };
+      return generateWithRetry(scripted, system, user, recent, diversity, gate, max);
+    };
+    return { deps, calls: () => calls };
+  }
+});

@@ -240,6 +240,33 @@ export function recordAttemptSteps(
     });
   }
 
+  // The counterpart to the pattern the attempt was GIVEN: what it actually
+  // opened with, and whether that repeats the channel's recent output. Recorded
+  // separately from `contentPattern` on purpose — the whole defect this closes
+  // was a trace that showed perfect hook rotation above eleven identical
+  // openings, because only the request was ever written down.
+  if (record.openingDiversity) {
+    const opening = record.openingDiversity;
+    tracer.step({
+      type: "validation",
+      label: "Opening diversity (realised first line)",
+      attempt,
+      status: opening.flagged ? "failed" : "success",
+      output: {
+        passed: !opening.flagged,
+        candidateShape: opening.candidateForm,
+        matchType: opening.matchType,
+        matchedRecentPostId: opening.matchedPostId,
+        similarity: opening.similarity,
+        retryTriggered: opening.flagged,
+      },
+      metadata: {
+        requestedHook: record.pattern?.hookType ?? null,
+        note: "A retry trigger only — never blocks the save. Compare requestedHook against candidateShape.",
+      },
+    });
+  }
+
   if (record.compliance) {
     const compliance = record.compliance;
     // A run that checked nothing certified nothing. It must read as "not

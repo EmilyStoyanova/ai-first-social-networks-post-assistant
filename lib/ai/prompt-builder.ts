@@ -110,7 +110,7 @@ function lines(...parts: string[]): string {
 /**
  * How to fix each enforced compliance failure.
  *
- * Keyed by the dimensions that can actually fail — which is only `bannedWords`.
+ * Keyed by the dimensions that can actually fail — `bannedWords` and `language`.
  * The angle/hook/structure/CTA remediations that used to live here were
  * unreachable once those dimensions stopped being gated (see
  * quality/generation-compliance.ts): they are generation guidance now, and a
@@ -119,6 +119,11 @@ function lines(...parts: string[]): string {
 const REMEDIATION_GUIDANCE: Record<ComplianceFailure["dimension"], string> = {
   bannedWords:
     "Remove the banned word entirely and rewrite the section so the meaning is preserved without it.",
+  // Deliberately not "fix the phrase": the failing constructions are ones the
+  // model reaches for repeatedly, so patching the words in place tends to
+  // produce the same shape again. Rebuilding the sentence is the fix.
+  language:
+    "Rewrite the affected sentence from scratch in correct, natural language for a native speaker — do not patch individual words in the existing phrasing.",
 };
 
 function getRemediationGuidance(failure: ComplianceFailure): string {
@@ -692,6 +697,18 @@ export interface RetryContext {
    */
   repeatedTopic?: string;
   /**
+   * Present when the retry was triggered because the previous attempt's FIRST
+   * LINE repeated one already used in a recent post — the same sentence shape,
+   * not the same claim. Carries only short signatures of the two openings, never
+   * the historical post they came from.
+   */
+  repeatedOpening?: {
+    matchType: "near_exact" | "repeated_form" | "saturated_form";
+    candidateForm: "rhetorical_question" | "question" | "statement";
+    candidateOpening: string;
+    matchedOpening: string | null;
+  };
+  /**
    * Present when the retry was triggered by a failed post-generation compliance
    * check — in practice, a banned term in the text. Unlike every other retry
    * reason, this one must NOT change the angle, pattern, or content aspect:
@@ -767,6 +784,48 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
       ].join("\n")
     : "";
 
+  // Repeated-opening block — the first LINE reused a shape already published.
+  // Note what this block does not say: it never tells the model that questions
+  // are forbidden. It names the shape that collided and demands a different one,
+  // because the rule is contextual — a rhetorical question is a good hook until
+  // it is the fourth in a row.
+  const repeatedOpeningBlock = retry.repeatedOpening
+    ? (() => {
+        const { matchType, candidateForm, candidateOpening, matchedOpening } =
+          retry.repeatedOpening;
+        const diagnosis =
+          matchType === "near_exact"
+            ? "Your opening line is nearly identical to the opening of a recent post on this channel."
+            : matchType === "repeated_form"
+              ? "Your opening uses the same rhetorical device as a recent post on this channel — a question asking the reader whether they have ever thought/known/heard something. The words differ; the formula does not."
+              : "Question openings have taken over the recent posts on this channel, and yours is another one.";
+
+        const rhetorical = candidateForm === "rhetorical_question";
+
+        return [
+          "## Your opening repeats recent posts",
+          diagnosis,
+          "",
+          "Your opening:",
+          `- "${candidateOpening}"`,
+          ...(matchedOpening ? ["Already used recently:", `- "${matchedOpening}"`] : []),
+          "",
+          "Rewrite the FIRST PARAGRAPH from scratch using a different rhetorical form.",
+          ...(rhetorical
+            ? [
+                "- Do NOT open with a rhetorical question of any kind. Not a reworded one, not a shorter one, not one moved to the second sentence.",
+                "- Open instead with a concrete statement, a specific fact or number, a direct observation, a contrast, or an instruction — whichever fits the hook style assigned above.",
+              ]
+            : [
+                "- Do NOT open with a question. Open with a statement, a fact, an observation, a contrast, or an instruction.",
+              ]),
+          "- Start from a different first word and a different sentence construction, not a paraphrase of the line above.",
+          "- Keep the topic and the central claim; only the opening's FORM has to change.",
+          "",
+        ].join("\n");
+      })()
+    : "";
+
   // Semantic-duplicate block — the central CLAIM was repeated, not just wording.
   const semanticBlock = retry.semanticDuplicate
     ? [
@@ -809,6 +868,7 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     !retry.semanticDuplicate &&
     !retry.genericCoreMessage &&
     !retry.repeatedTopic &&
+    !retry.repeatedOpening &&
     !retry.matchedText;
 
   if (complianceOnly) {
@@ -846,6 +906,7 @@ export function buildRetryUserPrompt(baseUserPrompt: string, retry: RetryContext
     semanticBlock,
     genericCoreBlock,
     repeatedTopicBlock,
+    repeatedOpeningBlock,
     complianceBlock,
     forcedBlock,
     "## What you must NOT do",

@@ -551,6 +551,7 @@ describe("generateWithRetry — a missed stylistic requirement never triggers a 
       cta: false,
       structure: false,
       bannedWords: true,
+      language: false,
     });
     assert.strictEqual(result.complianceResult.evaluated, true);
   });
@@ -718,6 +719,7 @@ describe("generateWithRetry — the real TravelNest post is accepted, not discar
       cta: false,
       structure: false,
       bannedWords: true,
+      language: false,
     });
   });
 
@@ -884,5 +886,219 @@ describe("generateWithRetry — [jaccard_duplicate] diagnostics", () => {
       ),
       false
     );
+  });
+});
+
+// ─── Opening diversity ────────────────────────────────────────────────────────
+//
+// The gap this closes: the loop rotated hook archetypes perfectly and recorded
+// the rotation, while the model opened eleven consecutive posts with the same
+// sentence. Nothing compared the REALISED first line to recent output — Jaccard
+// saw different posts, the semantic gate saw different claims, and compliance
+// only banned words. These tests pin the new trigger, and pin equally hard that
+// it can never destroy a post.
+
+// The trailing Latin hashtags are load-bearing, and not for realism alone.
+// `checkDuplicatePost` normalises with `[^\w\s]`, and JS `\w` is ASCII-only, so
+// a post written purely in Cyrillic reduces to an EMPTY token set — and
+// `jaccard` scores two empty sets as 1.0, a perfect duplicate. Without a Latin
+// token these fixtures would be flagged by the Jaccard gate before the opening
+// check was ever reached, and `jaccard_duplicate` would mask the reason under
+// test. Real posts carry hashtags, which is why production does not abort every
+// Bulgarian generation outright — but the same defect means Jaccard is
+// comparing little more than hashtag sets on Bulgarian text.
+const BG_RHETORICAL_A =
+  "Има ли ти мислил, че един смесител може да промени цялата атмосфера на банята? #bathroom #design";
+const BG_RHETORICAL_B =
+  "Има ли ти мислил, че изборът на ръчка може да промени цялата визуална структура на банята? #bathroom #interior";
+const BG_STATEMENT =
+  "Керамичният картуш издържа над десет години при ежедневна употреба, а гуменият — две. #cartridge #quality";
+
+const bgRecent: RecentPost[] = [{ id: "bg-1", text: BG_RHETORICAL_A }];
+
+const QUESTION_PATTERN = {
+  hookType: "Question",
+  structure: "Story Arc",
+  ctaType: "Share",
+} as const;
+
+describe("generateWithRetry — opening diversity", () => {
+  it("retries a candidate whose opening repeats a recent post's opening", async () => {
+    const provider = makeProvider([jsonPost(BG_RHETORICAL_B), jsonPost(BG_STATEMENT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      bgRecent,
+      styleDiversity(QUESTION_PATTERN)
+    );
+
+    assert.strictEqual(provider.callCount, 2);
+    assert.strictEqual(result.openingResult.flagged, false);
+    assert.strictEqual(result.parsed.text, BG_STATEMENT);
+  });
+
+  it("reports the trigger as its own rejection reason, not as duplication", async () => {
+    const attempts: Array<{ reason: string | null; accepted: boolean }> = [];
+    const provider = makeProvider([jsonPost(BG_RHETORICAL_B), jsonPost(BG_STATEMENT)]);
+
+    await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      bgRecent,
+      styleDiversity(QUESTION_PATTERN),
+      undefined,
+      undefined,
+      (record) => attempts.push({ reason: record.rejectionReason, accepted: record.accepted })
+    );
+
+    assert.strictEqual(attempts[0].reason, "opening_repeated");
+    assert.strictEqual(attempts[0].accepted, false);
+    assert.strictEqual(attempts[1].accepted, true);
+  });
+
+  it("tells the model, in the retry prompt, to abandon the rhetorical-question opening", async () => {
+    const provider = recordingProvider([jsonPost(BG_RHETORICAL_B), jsonPost(BG_STATEMENT)]);
+    await generateWithRetry(provider, "sys", "user", bgRecent, styleDiversity(QUESTION_PATTERN));
+
+    const retryPrompt = provider.prompts[1];
+    assert.match(retryPrompt, /Your opening repeats recent posts/);
+    assert.match(retryPrompt, /Do NOT open with a rhetorical question of any kind/);
+    assert.match(retryPrompt, /Rewrite the FIRST PARAGRAPH from scratch/);
+  });
+
+  it("names the colliding opening without pasting the historical post into the prompt", async () => {
+    const longHistory: RecentPost[] = [
+      { id: "bg-1", text: `${BG_RHETORICAL_A}\n\n${"Дълъг исторически текст. ".repeat(40)}` },
+    ];
+    const provider = recordingProvider([jsonPost(BG_RHETORICAL_B), jsonPost(BG_STATEMENT)]);
+    await generateWithRetry(provider, "sys", "user", longHistory, styleDiversity(QUESTION_PATTERN));
+
+    const retryPrompt = provider.prompts[1];
+    assert.match(retryPrompt, /Има ли ти мислил/);
+    assert.doesNotMatch(retryPrompt, /Дълъг исторически текст. Дълъг исторически текст/);
+  });
+
+  it("accepts a retry that genuinely changed the opening form", async () => {
+    const provider = makeProvider([jsonPost(BG_RHETORICAL_B), jsonPost(BG_STATEMENT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      bgRecent,
+      styleDiversity(QUESTION_PATTERN)
+    );
+
+    assert.strictEqual(result.parsed.text, BG_STATEMENT);
+    assert.strictEqual(result.openingResult.flagged, false);
+    assert.strictEqual(result.openingResult.candidateForm, "statement");
+  });
+
+  it("keeps retrying a rewording that still opens the same way", async () => {
+    const provider = makeProvider([jsonPost(BG_RHETORICAL_B)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      bgRecent,
+      styleDiversity(QUESTION_PATTERN)
+    );
+
+    assert.strictEqual(provider.callCount, MAX_GENERATION_ATTEMPTS);
+    // Exhausted, and the post SURVIVES. A repeated opening is a stylistic miss,
+    // and style must never be able to destroy usable content.
+    assert.strictEqual(result.openingResult.flagged, true);
+    assert.strictEqual(result.openingResult.matchType, "near_exact");
+    assert.strictEqual(result.parsed.text, BG_RHETORICAL_B);
+    assert.strictEqual(result.complianceResult.status, "passed");
+  });
+
+  it("does not retry when the opening is genuinely different", async () => {
+    const provider = makeProvider([jsonPost(BG_STATEMENT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      bgRecent,
+      styleDiversity({ hookType: "Bold Statement", structure: "Story Arc", ctaType: "Share" })
+    );
+
+    assert.strictEqual(provider.callCount, 1);
+    assert.strictEqual(result.openingResult.flagged, false);
+  });
+
+  it("carries the realised-opening verdict onto every attempt record", async () => {
+    const shapes: Array<string | undefined> = [];
+    const provider = makeProvider([jsonPost(BG_RHETORICAL_B), jsonPost(BG_STATEMENT)]);
+
+    await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      bgRecent,
+      styleDiversity(QUESTION_PATTERN),
+      undefined,
+      undefined,
+      (record) => shapes.push(record.openingDiversity?.candidateForm)
+    );
+
+    assert.deepEqual(shapes, ["rhetorical_question", "statement"]);
+  });
+});
+
+// ─── Language quality through the compliance gate ─────────────────────────────
+
+describe("generateWithRetry — language quality", () => {
+  it("retries malformed Bulgarian and resolves it", async () => {
+    const provider = makeProvider([jsonPost(BG_RHETORICAL_A), jsonPost(BG_STATEMENT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      undefined,
+      undefined,
+      MAX_GENERATION_ATTEMPTS,
+      undefined,
+      undefined,
+      "BG"
+    );
+
+    assert.strictEqual(provider.callCount, 2);
+    assert.strictEqual(result.complianceResult.status, "passed");
+    assert.strictEqual(result.parsed.text, BG_STATEMENT);
+  });
+
+  it("leaves the language dimension unchecked when no language is declared", async () => {
+    const provider = makeProvider([jsonPost(BG_RHETORICAL_A)]);
+    const result = await generateWithRetry(provider, "sys", "user", []);
+
+    assert.strictEqual(provider.callCount, 1);
+    assert.strictEqual(result.complianceResult.checked.language, false);
+    assert.strictEqual(result.complianceResult.status, "passed");
+  });
+
+  it("retries an English post on a Bulgarian channel", async () => {
+    const english =
+      "Ever found yourself fumbling with two separate taps just to get the temperature right? " +
+      "A single-lever mixer solves that in one movement and uses noticeably less water.";
+    const provider = makeProvider([jsonPost(english), jsonPost(BG_STATEMENT)]);
+    const result = await generateWithRetry(
+      provider,
+      "sys",
+      "user",
+      [],
+      undefined,
+      undefined,
+      MAX_GENERATION_ATTEMPTS,
+      undefined,
+      undefined,
+      "BG"
+    );
+
+    assert.strictEqual(provider.callCount, 2);
+    assert.strictEqual(result.complianceResult.status, "passed");
+    assert.strictEqual(result.parsed.text, BG_STATEMENT);
   });
 });

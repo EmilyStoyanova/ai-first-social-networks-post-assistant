@@ -8,6 +8,11 @@ import {
   type RecentPost,
 } from "./quality/duplicate-detection";
 import { type SemanticDecision } from "./quality/semantic-duplicate";
+import {
+  checkOpeningDiversity,
+  extractOpeningSignature,
+  type OpeningDiversityResult,
+} from "./quality/opening-diversity";
 import { assessCoreMessage } from "./quality/core-message-quality";
 import {
   validateGenerationCompliance,
@@ -103,6 +108,29 @@ function logJaccardDuplicate(
   );
 }
 
+/** Neutral opening-diversity verdict for a run that never evaluated one. */
+const NO_OPENING_CHECK: OpeningDiversityResult = {
+  flagged: false,
+  matchType: null,
+  matchedPostId: null,
+  similarity: null,
+  candidateForm: "statement",
+  matchedOpening: null,
+};
+
+/**
+ * Concise, and deliberately so: the opening excerpt is capped at 120 characters
+ * by the signature extractor, so this can never spill a historical post into the
+ * logs the way a full-text diff would.
+ */
+function logOpeningConflict(result: OpeningDiversityResult, attempt: number): void {
+  console.warn(
+    `[generation-diversity] opening conflict: attempt=${attempt} matchType=${result.matchType} ` +
+      `candidateShape=${result.candidateForm} matchedPostId=${result.matchedPostId} ` +
+      `similarity=${result.similarity ?? "n/a"} matchedOpening="${result.matchedOpening ?? ""}"`
+  );
+}
+
 // ─── Semantic duplicate gate (Phase 1.4) ──────────────────────────────────────
 // The gate embeds a candidate's coreMessage and compares it against recent
 // accepted embeddings. It is injected (the DB + embedding provider live in the
@@ -194,6 +222,19 @@ export interface GenerationLoopResult {
    * carries a banned term (POST_FAILED_COMPLIANCE).
    */
   complianceResult: ComplianceResult;
+  /**
+   * Realised-opening diversity of the accepted (or last) candidate: did its
+   * actual first line repeat a recent post's first line?
+   *
+   * A retry trigger here, and nothing more — this loop never aborts on it,
+   * whatever `matchType` says. The CALLER decides what survives exhaustion:
+   * `generate-draft-post.service.ts` persists a `repeated_form` or
+   * `saturated_form` miss (a contextual, stylistic read that must not be able
+   * to destroy usable content) but refuses to save a `near_exact` one — the
+   * same textual evidence Jaccard already treats as a hard duplicate, just
+   * measured over the opening. See quality/opening-diversity.ts.
+   */
+  openingResult: OpeningDiversityResult;
   /** Number of generation attempts actually made (1..maxAttempts). */
   attempts: number;
   /** The content angle that produced the accepted (or last) result. */
@@ -230,7 +271,13 @@ export async function generateWithRetry(
   maxAttempts = MAX_GENERATION_ATTEMPTS,
   recorder?: GenerationAttemptRecorder,
   /** Identifies THIS generation for `[jaccard_duplicate]` diagnostics only. */
-  candidateContext?: DuplicateCandidateContext
+  candidateContext?: DuplicateCandidateContext,
+  /**
+   * The language the post was required to be in ("BG" / "EN"). Enables the
+   * compliance gate's language dimension; omitted, that dimension is reported as
+   * unchecked rather than as a pass.
+   */
+  contentLanguage?: string | null
 ): Promise<GenerationLoopResult> {
   let lastParsed: ParsedLlmPost | null = null;
   let lastDuplicateResult: DuplicateCheckResult = {
@@ -242,6 +289,7 @@ export async function generateWithRetry(
   let lastCoreMessageGeneric = false;
   let lastTopicRepeated = false;
   let lastComplianceResult: ComplianceResult = NO_COMPLIANCE_CHECK;
+  let lastOpeningResult: OpeningDiversityResult = NO_OPENING_CHECK;
   let lastRejectionReason: AttemptRejectionReason | null = null;
 
   // Track angles, patterns, and aspects tried during this run so retries pick fresh ones.
@@ -338,6 +386,19 @@ export async function generateWithRetry(
       // picks a genuinely different subject (Topic Memory).
       const repeatedTopic = lastTopicRepeated && lastParsed.topic ? lastParsed.topic : undefined;
 
+      // When the previous attempt's opening repeated recent output, hand back
+      // the repeated shape — and ONLY the shape. A short signature of the
+      // colliding opening is enough for the model to steer away from it; the
+      // historical posts themselves stay out of the prompt.
+      const repeatedOpening = lastOpeningResult.flagged
+        ? {
+            matchType: lastOpeningResult.matchType!,
+            candidateForm: lastOpeningResult.candidateForm,
+            candidateOpening: extractOpeningSignature(lastParsed.text).excerpt,
+            matchedOpening: lastOpeningResult.matchedOpening,
+          }
+        : undefined;
+
       // When the previous attempt failed the compliance gate, name exactly what
       // it violated so the model can fix it directly.
       const complianceFailure =
@@ -352,6 +413,7 @@ export async function generateWithRetry(
         semanticDuplicate,
         genericCoreMessage,
         repeatedTopic,
+        repeatedOpening,
         complianceFailure,
         forcedAngle: retryAngle,
         forcedPattern: retryPattern,
@@ -453,7 +515,21 @@ export async function generateWithRetry(
     // Post-generation compliance gate: is the text free of banned terms? The
     // angle/hook/structure/CTA it was generated under are NOT re-verified here —
     // they are generation guidance and never a gate (see generation-compliance.ts).
-    lastComplianceResult = validateGenerationCompliance({ text: lastParsed.text });
+    lastComplianceResult = validateGenerationCompliance({
+      text: lastParsed.text,
+      language: contentLanguage,
+    });
+    // Realised-opening diversity: does the first line this candidate ACTUALLY
+    // wrote repeat a recent post's first line? Deterministic, no extra LLM call,
+    // and it reuses the recent-post window already loaded for Jaccard — which is
+    // why it inherits that window's company+channel scoping for free.
+    lastOpeningResult = checkOpeningDiversity({
+      candidateText: lastParsed.text,
+      recentPosts,
+    });
+    if (lastOpeningResult.flagged) {
+      logOpeningConflict(lastOpeningResult, attempt);
+    }
 
     // Diagnostic compliance logging. `enforced` names the dimensions that can
     // actually block; everything absent from it (angle/hook/structure/CTA) is
@@ -482,15 +558,22 @@ export async function generateWithRetry(
 
     // Retry on a near-verbatim (Jaccard) hit, a semantic-duplicate "regenerate",
     // a generic coreMessage (broad praise hides real repetition), a repeated
-    // conceptual topic, OR a failed compliance check. The loop itself never
-    // throws: the last candidate is returned with every verdict attached, and
-    // the caller decides which verdicts are fatal (the generation service
-    // aborts on an unresolved duplicate and on unresolved noncompliance).
+    // conceptual topic, a repeated OPENING, OR a failed compliance check. The
+    // loop itself never throws: the last candidate is returned with every
+    // verdict attached, and the caller decides which verdicts are fatal (the
+    // generation service aborts on an unresolved duplicate and on unresolved
+    // noncompliance — never on a repeated opening).
+    //
+    // Opening diversity is its own trigger on purpose. It is not semantic
+    // duplication (the claims differ), not Jaccard (the posts differ), and not
+    // compliance (nothing is prohibited) — it is the same sentence shape twice
+    // running, which every other gate is blind to by construction.
     const needsRetry =
       lastDuplicateResult.flagged ||
       lastSemanticResult.decision === "regenerate" ||
       lastCoreMessageGeneric ||
       lastTopicRepeated ||
+      lastOpeningResult.flagged ||
       lastComplianceResult.status === "failed";
 
     // Diagnostic: which of the triggers fired, and whether retries remain.
@@ -504,7 +587,9 @@ export async function generateWithRetry(
             ? "generic_core_message"
             : lastTopicRepeated
               ? "repeated_topic"
-              : "compliance_failed";
+              : lastOpeningResult.flagged
+                ? "opening_repeated"
+                : "compliance_failed";
     lastRejectionReason = rejectionReason;
     const willRetry = needsRetry && attempt < maxAttempts;
 
@@ -528,6 +613,7 @@ export async function generateWithRetry(
       coreMessageGeneric: lastCoreMessageGeneric,
       topicRepeated: lastTopicRepeated,
       compliance: lastComplianceResult,
+      openingDiversity: lastOpeningResult,
       accepted: !needsRetry,
       rejectionReason,
       willRetry,
@@ -544,6 +630,7 @@ export async function generateWithRetry(
     coreMessageGeneric: lastCoreMessageGeneric,
     topicRepeated: lastTopicRepeated,
     complianceResult: lastComplianceResult,
+    openingResult: lastOpeningResult,
     attempts: attemptsMade,
     selectedAngle: currentAngle,
     selectedPattern: currentPattern,

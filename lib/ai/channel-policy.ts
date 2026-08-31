@@ -83,8 +83,16 @@ export const CHANNEL_POLICIES: Record<SocialChannel, ChannelPolicy> = {
         id: "facebook_first_line_hook",
         description:
           "The first 1–2 lines of a Facebook post appear before the 'See more' button; they are critical to engagement.",
+        // NAMES NO HOOK ARCHETYPE, deliberately. This fragment used to open its
+        // list of suggestions with "a direct question", unconditionally, on
+        // every Facebook post — while the prompt above it had already assigned
+        // one specific hook archetype from the rotation. Two instructions, one
+        // slot, and the generic one won: eleven of twenty consecutive posts
+        // opened with the same rhetorical question, spread across all eight
+        // assigned archetypes. Channel guidance says how strong the opening must
+        // be; the assigned pattern is the only thing that says what KIND it is.
         promptFragment:
-          "Your opening 1–2 lines are critical — they appear before 'See more'. Start with a strong hook: a direct question, a surprising fact, a specific observation, or a clear benefit. Avoid generic, dramatic, or clickbait-style openings that feel artificial. The hook must feel natural and relevant to the source content.",
+          "Your opening 1–2 lines are critical — they appear before 'See more'. Write them in the hook style assigned to this post above, and make them strong, specific, and grounded in the source content. Do not default to a rhetorical question, and do not reuse an opening formula from your previous posts. Avoid generic, dramatic, or clickbait-style openings that feel artificial.",
       },
       {
         severity: "WARNING",
@@ -106,8 +114,11 @@ export const CHANNEL_POLICIES: Record<SocialChannel, ChannelPolicy> = {
         id: "facebook_conversational_tone",
         description:
           "Facebook audiences typically respond better to a conversational, authentic tone.",
+        // "Conversational" is a register, not a device. Spelling that out
+        // because it was the second-largest pull toward opening every post with
+        // a question once `facebook_first_line_hook` stopped recommending one.
         promptFragment:
-          "Write a conversational, direct, and authentic post. Speak like a knowledgeable human, not a marketing template. Use the brand's configured form of address ('ти' or 'вие' in Bulgarian) consistently. Avoid corporate filler, generic AI wording, artificial excitement, and canned phrases.",
+          "Write a conversational, direct, and authentic post. Speak like a knowledgeable human, not a marketing template. Conversational refers to the register — plain, natural phrasing — and does NOT mean the post has to ask the reader a question. Use the brand's configured form of address ('ти' or 'вие' in Bulgarian) consistently. Avoid corporate filler, generic AI wording, artificial excitement, and canned phrases.",
       },
       {
         severity: "WARNING",

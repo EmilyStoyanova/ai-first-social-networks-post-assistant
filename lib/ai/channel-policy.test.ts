@@ -188,6 +188,48 @@ describe("channel-policy — Facebook writing principles", () => {
     assert.match(templateHint.promptFragment, /template|formulaic|coherent/i);
   });
 
+  // The assigned hook archetype is the ONLY thing allowed to name a hook style.
+  // Channel guidance that also recommended "a direct question" competed with it
+  // on every single post, and won — eleven of twenty consecutive posts opened
+  // with the same rhetorical question under eight different assigned archetypes.
+  it("Facebook first-line guidance recommends no hook archetype of its own", () => {
+    const hookHint = CHANNEL_POLICIES.facebook.hints.find(
+      (h) => h.id === "facebook_first_line_hook"
+    );
+    assert.ok(hookHint);
+    assert.doesNotMatch(
+      hookHint.promptFragment,
+      /start with a (?:strong hook: )?(?:a )?direct question|with a direct question/i,
+      "first-line guidance must not independently recommend a question opening"
+    );
+  });
+
+  it("Facebook first-line guidance defers to the assigned hook style", () => {
+    const hookHint = CHANNEL_POLICIES.facebook.hints.find(
+      (h) => h.id === "facebook_first_line_hook"
+    );
+    assert.ok(hookHint);
+    assert.match(hookHint.promptFragment, /hook style assigned/i);
+  });
+
+  it("no Facebook hint pushes every post toward a rhetorical question", () => {
+    for (const hint of CHANNEL_POLICIES.facebook.hints) {
+      assert.doesNotMatch(
+        hint.promptFragment,
+        /\bstart with .{0,40}\bquestion\b|\bopen with .{0,40}\bquestion\b/i,
+        `Facebook hint ${hint.id} must not prescribe a question opening`
+      );
+    }
+  });
+
+  it("conversational tone guidance does not imply asking a question", () => {
+    const toneHint = CHANNEL_POLICIES.facebook.hints.find(
+      (h) => h.id === "facebook_conversational_tone"
+    );
+    assert.ok(toneHint);
+    assert.match(toneHint.promptFragment, /does NOT mean the post has to ask/i);
+  });
+
   it("all Facebook hints have non-empty prompt fragments", () => {
     const policy = CHANNEL_POLICIES.facebook;
     for (const hint of policy.hints) {
