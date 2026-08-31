@@ -417,3 +417,313 @@ describe("validateBulkRequest — the posting-window requirement", () => {
     assert.equal(problem?.code, "NO_POSTING_WINDOWS");
   });
 });
+
+// ─── The period and the schedule have to meet ─────────────────────────────────
+//
+// Having a schedule is not the same as having room in it. Two further ways an
+// even distribution can be unanswerable, both decided entirely by the request
+// and the saved configuration, and both refused here rather than resolved by
+// publishing on a weekday nobody configured or past the end of a window.
+
+describe("validateBulkRequest — the period has to contain the schedule", () => {
+  const loadEnabledSourceIds = async () => new Set(["source-a"]);
+
+  /** Mondays only, one hour wide — one slot per Monday in the period. */
+  const MONDAY_ONLY = [{ day: "MONDAY", start: "09:00", end: "10:00" }];
+  /** One Friday afternoon: five hourly slots per Friday in the period. */
+  const FRIDAY_AFTERNOON = [{ day: "FRIDAY", start: "12:00", end: "17:00" }];
+
+  it("refuses a period holding none of the channel's posting days", async () => {
+    // Tue–Thu asked of a Monday-only channel. It used to publish on all three at
+    // Monday's hour; now the request is refused and the user widens the period.
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({ numberOfPosts: 1, startDate: "2026-08-18", endDate: "2026-08-20" }),
+      NOW,
+      { loadEnabledSourceIds, loadPostingWindows: async () => MONDAY_ONLY }
+    );
+
+    assert.equal(problem?.code, "NO_POSTING_DAYS_IN_PERIOD");
+    // The days are named, because that is what makes the refusal actionable.
+    assert.match(problem.message, /Monday/);
+    assert.match(problem.message, /facebook/);
+  });
+
+  it("refuses more posts than the period has room for", async () => {
+    // One Friday, five hourly slots, six posts. The sixth used to become 17:00.
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({ numberOfPosts: 6, startDate: "2026-08-21", endDate: "2026-08-21" }),
+      NOW,
+      { loadEnabledSourceIds, loadPostingWindows: async () => FRIDAY_AFTERNOON }
+    );
+
+    assert.equal(problem?.code, "INSUFFICIENT_POSTING_SLOTS");
+    assert.match(problem.message, /6 posts were requested/);
+    assert.match(problem.message, /facebook has room for 5/);
+  });
+
+  it("accepts a request that fills the period exactly", async () => {
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({ numberOfPosts: 5, startDate: "2026-08-21", endDate: "2026-08-21" }),
+      NOW,
+      { loadEnabledSourceIds, loadPostingWindows: async () => FRIDAY_AFTERNOON }
+    );
+
+    assert.equal(problem, null);
+  });
+
+  it("plans each channel from its OWN windows", async () => {
+    // Facebook publishes on the Monday in this period; Instagram does not
+    // publish that week at all. Facebook's schedule cannot cover for it, and the
+    // whole request is refused rather than half of it quietly generated.
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({
+        channels: ["facebook", "instagram"],
+        numberOfPosts: 1,
+        startDate: "2026-08-17",
+        endDate: "2026-08-17",
+      }),
+      NOW,
+      {
+        loadEnabledSourceIds,
+        loadPostingWindows: async (_slug, channel) =>
+          channel === "facebook" ? MONDAY_ONLY : FRIDAY_AFTERNOON,
+      }
+    );
+
+    assert.equal(problem?.code, "NO_POSTING_DAYS_IN_PERIOD");
+    assert.match(problem.message, /instagram/);
+    assert.doesNotMatch(problem.message, /facebook/);
+  });
+
+  it("refuses the whole batch when one channel of several is short of room", async () => {
+    // LinkedIn has all week; Instagram has one Friday afternoon. Generating the
+    // LinkedIn versions and dropping the Instagram ones would leave a batch whose
+    // content exists on one network and not the other, found out in the grid.
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({
+        channels: ["linkedin", "instagram"],
+        numberOfPosts: 6,
+        startDate: "2026-08-17",
+        endDate: "2026-08-21",
+      }),
+      NOW,
+      {
+        loadEnabledSourceIds,
+        loadPostingWindows: async (_slug, channel) =>
+          channel === "linkedin"
+            ? ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"].map((day) => ({
+                day,
+                start: "09:00",
+                end: "12:00",
+              }))
+            : FRIDAY_AFTERNOON,
+      }
+    );
+
+    assert.equal(problem?.code, "INSUFFICIENT_POSTING_SLOTS");
+    assert.match(problem.message, /instagram has room for 5/);
+    assert.doesNotMatch(problem.message, /linkedin has room/);
+  });
+
+  it("reports the reasons in the order they are worth fixing", async () => {
+    // No schedule at all cannot be helped by a wider period, so it is said
+    // first; a period that contains no posting day at all is said before one
+    // that merely has too little room in it.
+    const byChannel: Record<string, unknown> = {
+      facebook: null, // no schedule
+      linkedin: MONDAY_ONLY, // has one, but not in a Fri-only period
+      instagram: FRIDAY_AFTERNOON, // has room for 5, not 6
+    };
+    const request = makeRequest({
+      channels: ["facebook", "linkedin", "instagram"],
+      numberOfPosts: 6,
+      startDate: "2026-08-21",
+      endDate: "2026-08-21",
+    });
+    const deps = {
+      loadEnabledSourceIds,
+      loadPostingWindows: async (_slug: string, channel: string) => byChannel[channel],
+    };
+
+    assert.equal(
+      (await validateBulkRequest("acme", request, NOW, deps))?.code,
+      "NO_POSTING_WINDOWS"
+    );
+
+    byChannel.facebook = FRIDAY_AFTERNOON;
+    assert.equal(
+      (await validateBulkRequest("acme", request, NOW, deps))?.code,
+      "NO_POSTING_DAYS_IN_PERIOD"
+    );
+
+    byChannel.linkedin = FRIDAY_AFTERNOON;
+    assert.equal(
+      (await validateBulkRequest("acme", request, NOW, deps))?.code,
+      "INSUFFICIENT_POSTING_SLOTS"
+    );
+  });
+
+  it("applies none of this to a CUSTOM distribution", async () => {
+    // The user named every date and time, including days the channel does not
+    // normally publish on and more posts than its windows would hold. That is
+    // the whole point of the mode, and the windows are never even read.
+    let reads = 0;
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({
+        numberOfPosts: 3,
+        startDate: "2026-08-18",
+        endDate: "2026-08-18",
+        customDistribution: [{ date: "2026-08-18", count: 3, times: ["08:00", "12:00", "21:00"] }],
+      }),
+      NOW,
+      {
+        loadEnabledSourceIds,
+        loadPostingWindows: async () => {
+          reads += 1;
+          return MONDAY_ONLY;
+        },
+      }
+    );
+
+    assert.equal(problem, null);
+    assert.equal(reads, 0);
+  });
+});
+
+// ─── A period that has already begun ──────────────────────────────────────────
+//
+// A bulk period may legitimately start TODAY, and by the time somebody fills the
+// form in, today's window has usually already opened. Every eligible slot becomes
+// a real `Post.scheduledFor`, so the ones behind the clock have to go — otherwise
+// a batch planned at 15:00 is scheduled for 09:00 that morning and is past due
+// before it has been written.
+
+describe("validateBulkRequest — today's window may already be spent", () => {
+  const loadEnabledSourceIds = async () => new Set(["source-a"]);
+
+  /** 2026-08-21, a Friday. 09:00–14:00 Sofia = five slots, 06:00Z…10:00Z. */
+  const FRIDAY = "2026-08-21";
+  const FRIDAY_MORNING = [{ day: "FRIDAY", start: "09:00", end: "14:00" }];
+
+  /** 11:30 Sofia on that Friday — three slots gone, two still ahead. */
+  const MIDWAY = new Date("2026-08-21T08:30:00.000Z");
+  /** 20:00 Sofia on that Friday — the window is over. */
+  const AFTERWARDS = new Date("2026-08-21T17:00:00.000Z");
+
+  const today = (overrides = {}) =>
+    makeRequest({ numberOfPosts: 1, startDate: FRIDAY, endDate: FRIDAY, ...overrides });
+
+  it("counts only the slots still ahead as available", async () => {
+    // Five slots on the day, three of them behind the clock. The count the user
+    // is given has to be the two that remain, not the five the window describes.
+    const problem = await validateBulkRequest("acme", today({ numberOfPosts: 3 }), MIDWAY, {
+      loadEnabledSourceIds,
+      loadPostingWindows: async () => FRIDAY_MORNING,
+    });
+
+    assert.equal(problem?.code, "INSUFFICIENT_POSTING_SLOTS");
+    assert.match(problem.message, /3 posts were requested/);
+    assert.match(problem.message, /facebook has room for 2/);
+  });
+
+  it("accepts a request that fits the slots still ahead", async () => {
+    const problem = await validateBulkRequest("acme", today({ numberOfPosts: 2 }), MIDWAY, {
+      loadEnabledSourceIds,
+      loadPostingWindows: async () => FRIDAY_MORNING,
+    });
+
+    assert.equal(problem, null);
+  });
+
+  it("has its own code once every slot has gone by", async () => {
+    // Not INSUFFICIENT_POSTING_SLOTS with zero: "ask for fewer posts" is wrong
+    // advice when no number of posts fits.
+    const problem = await validateBulkRequest("acme", today(), AFTERWARDS, {
+      loadEnabledSourceIds,
+      loadPostingWindows: async () => FRIDAY_MORNING,
+    });
+
+    assert.equal(problem?.code, "NO_FUTURE_POSTING_SLOTS");
+    assert.match(problem.message, /facebook/);
+    assert.match(problem.message, /already passed/);
+  });
+
+  it("keeps 'the day never occurs' distinct from 'the day is over'", async () => {
+    // Both leave nothing to schedule, and they are fixed differently: one by
+    // widening the period, the other by choosing a later one.
+    const problem = await validateBulkRequest(
+      "acme",
+      makeRequest({ numberOfPosts: 1, startDate: "2026-08-18", endDate: "2026-08-20" }),
+      NOW,
+      { loadEnabledSourceIds, loadPostingWindows: async () => FRIDAY_MORNING }
+    );
+
+    assert.equal(problem?.code, "NO_POSTING_DAYS_IN_PERIOD");
+  });
+
+  it("refuses the whole batch when one channel of several has nothing left", async () => {
+    // Facebook still has its afternoon; Instagram published this morning only.
+    // Generating the Facebook half would leave a batch whose content exists on
+    // one network and not the other.
+    const problem = await validateBulkRequest(
+      "acme",
+      today({ channels: ["facebook", "instagram"] }),
+      MIDWAY,
+      {
+        loadEnabledSourceIds,
+        loadPostingWindows: async (_slug, channel) =>
+          channel === "facebook"
+            ? FRIDAY_MORNING
+            : [{ day: "FRIDAY", start: "07:00", end: "09:00" }],
+      }
+    );
+
+    assert.equal(problem?.code, "NO_FUTURE_POSTING_SLOTS");
+    assert.match(problem.message, /instagram/);
+    assert.doesNotMatch(problem.message, /facebook/);
+  });
+
+  it("leaves a period that has not started alone", async () => {
+    const problem = await validateBulkRequest("acme", today({ numberOfPosts: 5 }), NOW, {
+      loadEnabledSourceIds,
+      loadPostingWindows: async () => FRIDAY_MORNING,
+    });
+
+    assert.equal(problem, null);
+  });
+
+  it("does not apply the rule to a CUSTOM distribution — it has its own", async () => {
+    // Custom mode already refuses a chosen time that has gone by, as
+    // `time_in_past`, with the same strict comparison. Nothing here changes it,
+    // and the windows are still never read.
+    const past = await validateBulkRequest(
+      "acme",
+      today({
+        numberOfPosts: 1,
+        customDistribution: [{ date: FRIDAY, count: 1, times: ["09:00"] }],
+      }),
+      MIDWAY,
+      { loadEnabledSourceIds, loadPostingWindows: async () => FRIDAY_MORNING }
+    );
+    assert.equal(past?.code, "INVALID_DISTRIBUTION");
+
+    // …and a time still ahead is accepted, on a day the channel does not even
+    // publish slots for by then.
+    const ahead = await validateBulkRequest(
+      "acme",
+      today({
+        numberOfPosts: 1,
+        customDistribution: [{ date: FRIDAY, count: 1, times: ["22:00"] }],
+      }),
+      MIDWAY,
+      { loadEnabledSourceIds, loadPostingWindows: async () => FRIDAY_MORNING }
+    );
+    assert.equal(ahead, null);
+  });
+});

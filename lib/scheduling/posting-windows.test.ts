@@ -6,6 +6,8 @@ import * as postingWindows from "./posting-windows";
 import {
   hasPostingWindows,
   parsePostingWindows,
+  postingDaySlots,
+  postingDaysCoverTarget,
   resolveWindowStart,
   utcDayIndex,
   windowStartOn,
@@ -89,6 +91,113 @@ describe("windowStartOn", () => {
     assert.ok(parsed);
     assert.deepEqual(windowStartOn(parsed, 0), { hour: 9, minute: 0 });
     assert.deepEqual(windowStartOn(parsed, 2), { hour: 18, minute: 30 });
+  });
+});
+
+describe("postingDaySlots — the days an automatic post may land on", () => {
+  it("gives each configured day its own start time, Monday first", () => {
+    assert.deepEqual(postingDaySlots(parsePostingWindows(MON_WED) ?? []), [
+      { dayIndex: 0, time: { hour: 9, minute: 0 } },
+      { dayIndex: 2, time: { hour: 18, minute: 30 } },
+    ]);
+  });
+
+  it("returns a day the schedule does not name — never", () => {
+    // The bug this exists for: one Friday window used to authorise a post on
+    // Monday, Tuesday, Wednesday and Saturday too.
+    const friday = parsePostingWindows([{ day: "FRIDAY", start: "12:00", end: "17:00" }]) ?? [];
+    assert.deepEqual(postingDaySlots(friday), [{ dayIndex: 4, time: { hour: 12, minute: 0 } }]);
+  });
+
+  it("collapses several windows on one weekday to that day's first", () => {
+    const twice =
+      parsePostingWindows([
+        { day: "MONDAY", start: "08:00", end: "10:00" },
+        { day: "MONDAY", start: "18:00", end: "20:00" },
+      ]) ?? [];
+    assert.deepEqual(postingDaySlots(twice), [{ dayIndex: 0, time: { hour: 8, minute: 0 } }]);
+  });
+
+  it("orders the days by the week, not by how they were typed", () => {
+    const authored =
+      parsePostingWindows([
+        { day: "FRIDAY", start: "18:00", end: "19:00" },
+        { day: "MONDAY", start: "09:00", end: "10:00" },
+      ]) ?? [];
+    assert.deepEqual(
+      postingDaySlots(authored).map((slot) => slot.dayIndex),
+      [0, 4]
+    );
+  });
+
+  it("has no slots for a schedule that was never configured", () => {
+    assert.deepEqual(postingDaySlots([]), []);
+  });
+});
+
+describe("postingDaysCoverTarget — the configuration rule", () => {
+  const day = (name: string, start: string) => ({ day: name, start, end: "23:00" });
+  const FRIDAY_ONLY = [day("FRIDAY", "12:00")];
+  const FOUR_DAYS = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY"].map((d) => day(d, "09:00"));
+  const FIVE_DAYS = [...FOUR_DAYS, day("FRIDAY", "09:00")];
+
+  it("refuses 5 posts a week on a single posting day", () => {
+    // The reported configuration, verbatim.
+    assert.equal(postingDaysCoverTarget(5, FRIDAY_ONLY), false);
+  });
+
+  it("refuses 5 posts a week on four posting days", () => {
+    // One short is still short — at most one automatic post per calendar day.
+    assert.equal(postingDaysCoverTarget(5, FOUR_DAYS), false);
+  });
+
+  it("accepts 5 posts a week on five posting days", () => {
+    assert.equal(postingDaysCoverTarget(5, FIVE_DAYS), true);
+  });
+
+  it("accepts one post a week on one posting day", () => {
+    assert.equal(postingDaysCoverTarget(1, FRIDAY_ONLY), true);
+  });
+
+  it("counts two windows on the same weekday as one posting day", () => {
+    const mondayTwice = [day("MONDAY", "08:00"), day("MONDAY", "18:00")];
+    assert.equal(postingDaysCoverTarget(2, mondayTwice), false, "one day cannot carry two posts");
+    assert.equal(postingDaysCoverTarget(1, mondayTwice), true);
+  });
+
+  it("accepts seven posts a week only with all seven days configured", () => {
+    const sixDays = [...FIVE_DAYS, day("SATURDAY", "09:00")];
+    assert.equal(postingDaysCoverTarget(7, sixDays), false);
+    assert.equal(postingDaysCoverTarget(7, [...sixDays, day("SUNDAY", "09:00")]), true);
+  });
+
+  it("leaves a channel with no windows alone", () => {
+    // Zero windows is the explicit "takes no part in automatic generation"
+    // state, which every other part of the app already relies on. The rule is
+    // about a schedule too narrow for its target, not about not having one.
+    for (const nothing of [[], null, undefined]) {
+      assert.equal(postingDaysCoverTarget(5, nothing), true, `${JSON.stringify(nothing)}`);
+    }
+  });
+
+  it("leaves a channel with no weekly target alone", () => {
+    assert.equal(postingDaysCoverTarget(0, FRIDAY_ONLY), true);
+  });
+
+  it("ignores the per-channel weekly ceiling it cannot exceed anyway", () => {
+    // postsPerWeek is capped at MAX_POSTS_PER_CHANNEL_PER_WEEK (7) when the week
+    // is filled, so a stored 100 asks for 7 days, not 100.
+    const everyDay = [...FIVE_DAYS, day("SATURDAY", "09:00"), day("SUNDAY", "09:00")];
+    assert.equal(postingDaysCoverTarget(100, everyDay), true);
+  });
+});
+
+describe("the day rule does not leak into the automatic-generation gate", () => {
+  it("still calls a one-day schedule a schedule", () => {
+    // hasPostingWindows gates MANUAL bulk even-distribution as well. A narrow
+    // schedule is a bad automatic configuration, not an absent one, and manual
+    // generation must go on working exactly as before.
+    assert.equal(hasPostingWindows([{ day: "FRIDAY", start: "12:00", end: "17:00" }]), true);
   });
 });
 

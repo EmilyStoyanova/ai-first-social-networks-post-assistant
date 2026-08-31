@@ -10,6 +10,7 @@ import { clampDayCount, customTotal, enumerateDays, syncDayTimes } from "@/lib/p
 import {
   MAX_BULK_POSTS,
   parseTimeOfDay,
+  type BulkPlanProblem,
   type CustomDistributionError,
 } from "@/lib/scheduling/bulk-schedule";
 import { appZoneInstant } from "@/lib/scheduling/app-datetime-local";
@@ -38,15 +39,36 @@ export interface BulkPlanState {
   times: Record<string, string[]>;
 }
 
+/**
+ * What one selected channel would be scheduled to — or why it cannot be.
+ *
+ * An even spread is planned PER CHANNEL, from that channel's own posting
+ * windows, so a multi-channel batch has as many timetables as it has channels
+ * and each can fail for its own reason. Computed by the parent with the SAME
+ * planner the server uses, so the preview and the submitted request can never be
+ * two different answers.
+ */
+export interface ChannelSchedule {
+  /** The channel's own value — a stable React key, and never shown. */
+  channel: string;
+  /** The channel's display name, which is what the preview is headed with. */
+  label: string;
+  /** The instants this channel would publish at. Empty when `problem` is set. */
+  slots: Date[];
+  /** Why this channel cannot be planned, or null when it can. */
+  problem: BulkPlanProblem | null;
+}
+
 interface Props {
   plan: BulkPlanState;
   onChange: (plan: BulkPlanState) => void;
   /**
-   * The slots this plan would schedule, already computed by the parent with the
-   * SAME planner the server uses. Passed in rather than derived here so the
-   * preview and the submitted request can never be two different answers.
+   * CUSTOM mode's timetable: one list, shared by every selected channel, because
+   * there the user named the times for the topic rather than for a channel.
    */
-  slots: Date[];
+  customSlots: Date[];
+  /** EVEN mode's timetables — one per selected channel. */
+  channelSchedules: ChannelSchedule[];
   /** Custom mode only: why the distribution is not usable yet, if it is not. */
   distributionError: CustomDistributionError | null;
   /**
@@ -70,16 +92,6 @@ interface Props {
    * seed from, and the inputs open empty rather than at an invented hour.
    */
   postingWindows: unknown;
-  /**
-   * Selected channels that have no publishing times configured, by label.
-   *
-   * Even distribution is entirely a function of those times, so this list being
-   * non-empty means the batch cannot be planned at all — the parent disables the
-   * Generate button on the same condition, and the API refuses the request with
-   * `NO_POSTING_WINDOWS` if it is made anyway. Custom mode is unaffected: there
-   * the user names every time.
-   */
-  channelsWithoutWindows: string[];
   /** Channel settings, where the missing schedule is configured. */
   channelSettingsHref: string;
   /** Saves the half-filled batch before the CTA above navigates away from it. */
@@ -92,6 +104,28 @@ const FIELD_CLASS =
   "rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60";
 
 const LABEL_CLASS = "text-fg-muted mb-1.5 block text-sm font-medium";
+
+/**
+ * One timetable, as chips in publishing order.
+ *
+ * Extracted because the panel now renders several of them — one per selected
+ * channel in even mode — and a second copy of the markup is how two lists start
+ * looking like two different things.
+ */
+function SlotList({ slots, locale }: { slots: Date[]; locale: string }) {
+  return (
+    <ol className="flex flex-wrap gap-1.5">
+      {slots.map((slot, i) => (
+        <li
+          key={`${slot.getTime()}-${i}`}
+          className="border-border bg-surface text-fg-muted rounded-control border px-2.5 py-1 text-xs"
+        >
+          {formatDateTime(slot, locale)}
+        </li>
+      ))}
+    </ol>
+  );
+}
 
 /**
  * The fields that turn "generate a post" into "generate several".
@@ -108,24 +142,71 @@ const LABEL_CLASS = "text-fg-muted mb-1.5 block text-sm font-medium";
 export function BulkGenerateFields({
   plan,
   onChange,
-  slots,
+  customSlots,
+  channelSchedules,
   distributionError,
   minDate,
   now,
   postingWindows,
-  channelsWithoutWindows,
   channelSettingsHref,
   onLeaveForSettings,
   disabled,
   locale,
 }: Props) {
   const t = useTranslations("posts.generate.bulk");
+  const tDays = useTranslations("channels.days");
 
   /**
-   * Even distribution has no times to work from. Shown INSTEAD of the ordinary
-   * even-mode hint, because that hint describes something this batch cannot do.
+   * The channels an even spread cannot be planned for, with the reason each one
+   * gave. Any of them is enough to make the whole request unanswerable — the
+   * parent disables Generate on the same condition, and the API refuses it for
+   * the same reason if it is made anyway.
    */
-  const evenUnplannable = plan.distribution === "even" && channelsWithoutWindows.length > 0;
+  const unplannable =
+    plan.distribution === "even" ? channelSchedules.filter((s) => s.problem !== null) : [];
+
+  /**
+   * Even distribution cannot be planned as things stand. Shown INSTEAD of the
+   * ordinary even-mode hint, because that hint describes something this batch
+   * cannot do.
+   */
+  const evenUnplannable = unplannable.length > 0;
+
+  /** One line saying why this channel cannot be planned, in the user's language. */
+  function explain({ label, problem }: ChannelSchedule): string {
+    switch (problem?.code) {
+      case "NO_POSTING_WINDOWS":
+        return t("noPostingWindows", { channels: label });
+      case "NO_POSTING_DAYS_IN_PERIOD":
+        return t("noPostingDaysInPeriod", {
+          channel: label,
+          // The weekday names the rest of the app already uses, so this reads
+          // the same as the channel's own settings page and the calendar.
+          days: problem.days.map((day) => tDays(day)).join(", "),
+        });
+      case "NO_FUTURE_POSTING_SLOTS":
+        return t("noFuturePostingSlots", { channel: label });
+      case "INSUFFICIENT_POSTING_SLOTS":
+        return t("insufficientSlots", {
+          channel: label,
+          requested: problem.requested,
+          available: problem.available,
+        });
+      default:
+        return "";
+    }
+  }
+
+  /** True when at least one channel simply has no room, rather than no schedule. */
+  const anyTooFewSlots = unplannable.some((s) => s.problem?.code === "INSUFFICIENT_POSTING_SLOTS");
+
+  /**
+   * True when at least one channel's period is spent rather than merely tight.
+   *
+   * Its own hint, because "ask for fewer posts" is wrong advice here: no number
+   * of posts fits a period whose publishing times have all gone by.
+   */
+  const anySlotsPassed = unplannable.some((s) => s.problem?.code === "NO_FUTURE_POSTING_SLOTS");
 
   const days = enumerateDays(plan.startDate, plan.endDate);
   const assigned = customTotal(plan.counts);
@@ -287,14 +368,25 @@ export function BulkGenerateFields({
         </p>
       )}
 
-      {/* No posting schedule, so an even spread has no hours to spread over —
-          and none is invented. Both ways out are offered: configure the channel,
-          or switch to custom and name the times here. Not a validation error
-          under a field, because nothing on this form is wrong — the channel is
-          simply not set up for this mode yet. */}
+      {/* An even spread is planned entirely out of the channel's own posting
+          windows, so it can fail in three ways — no schedule at all, no
+          configured day inside this period, or not enough room in the days it
+          does have. Every affected channel says which, because the fix differs
+          and is per channel. No time is ever invented to avoid saying so.
+
+          Not a validation error under a field: nothing typed here is wrong — the
+          period and the channel's schedule simply do not meet. Both ways out are
+          offered, and a channel that is merely short of room is also told what
+          would give it more. */}
       {evenUnplannable && (
         <Alert variant="warning" className="mt-3">
-          <p>{t("noPostingWindows", { channels: channelsWithoutWindows.join(", ") })}</p>
+          {unplannable.map((schedule) => (
+            <p key={schedule.channel} className="mt-1.5 first:mt-0">
+              {explain(schedule)}
+            </p>
+          ))}
+          {anySlotsPassed && <p className="mt-1.5">{t("noFuturePostingSlotsHint")}</p>}
+          {anyTooFewSlots && <p className="mt-1.5">{t("insufficientSlotsHint")}</p>}
           <p className="mt-1.5">
             <Link
               href={channelSettingsHref}
@@ -412,27 +504,42 @@ export function BulkGenerateFields({
           {t("previewTitle")}
         </div>
 
-        {slots.length === 0 ? (
+        {/* Custom mode is ONE timetable — the user named the times for the topic,
+            and every selected channel gets them. Even mode is one PER CHANNEL,
+            because each is scheduled into its own posting windows: showing the
+            first channel's and noting underneath that the others may differ was
+            a promise this form could not keep. Channels are headed by name only
+            when there is more than one to tell apart. */}
+        {plan.distribution === "custom" ? (
+          customSlots.length === 0 ? (
+            <p className="text-fg-faint text-xs">{t("previewEmpty")}</p>
+          ) : (
+            <SlotList slots={customSlots} locale={locale} />
+          )
+        ) : channelSchedules.length === 0 ? (
           <p className="text-fg-faint text-xs">{t("previewEmpty")}</p>
         ) : (
-          <>
-            <ol className="flex flex-wrap gap-1.5">
-              {slots.map((slot, i) => (
-                <li
-                  key={`${slot.getTime()}-${i}`}
-                  className="border-border bg-surface text-fg-muted rounded-control border px-2.5 py-1 text-xs"
-                >
-                  {formatDateTime(slot, locale)}
-                </li>
-              ))}
-            </ol>
-            {/* These are the channel's posting windows on the clock the company
-                works to, not the viewer's own and not UTC. Worth saying once,
-                beside the only place the app shows a list of future times. */}
-            <p className="text-fg-faint mt-2 text-xs">
-              {t("timeZoneHint", { zone: APP_TIME_ZONE })}
-            </p>
-          </>
+          <div className="space-y-3">
+            {channelSchedules.map((schedule) => (
+              <div key={schedule.channel}>
+                {channelSchedules.length > 1 && (
+                  <p className="text-fg-muted mb-1.5 text-xs font-medium">{schedule.label}</p>
+                )}
+                {schedule.slots.length === 0 ? (
+                  <p className="text-fg-faint text-xs">{explain(schedule) || t("previewEmpty")}</p>
+                ) : (
+                  <SlotList slots={schedule.slots} locale={locale} />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* These are the channel's posting windows on the clock the company works
+            to, not the viewer's own and not UTC. Said once for the whole panel
+            rather than under each channel's list. */}
+        {(plan.distribution === "custom" ? customSlots.length > 0 : !evenUnplannable) && (
+          <p className="text-fg-faint mt-2 text-xs">{t("timeZoneHint", { zone: APP_TIME_ZONE })}</p>
         )}
       </div>
 

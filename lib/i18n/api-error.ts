@@ -82,6 +82,16 @@ export const API_ERROR_CODES = [
   // …or it asks for an even spread over a channel that has no posting schedule,
   // so there is no time of day to spread the posts across.
   "NO_POSTING_WINDOWS",
+  // …or over a period that contains none of the channel's posting days, or one
+  // whose posting windows hold fewer publishing slots than posts were asked for.
+  "NO_POSTING_DAYS_IN_PERIOD",
+  // …or over a period whose publishing times have all already gone by, which is
+  // the ordinary case for a batch started in the afternoon for "today".
+  "NO_FUTURE_POSTING_SLOTS",
+  "INSUFFICIENT_POSTING_SLOTS",
+  // Channel settings — the channel posts more times a week than it has posting
+  // days, and automatic scheduling places at most one post per calendar day.
+  "INSUFFICIENT_POSTING_DAYS",
   // …and its content mix names a source this company does not have, or does not
   // add up to the number of posts asked for.
   "INVALID_SOURCE_MIX",

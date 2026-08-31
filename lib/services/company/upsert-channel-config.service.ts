@@ -1,10 +1,15 @@
 import { prisma } from "@/lib/db/client";
+import { postingDaysCoverTarget } from "@/lib/scheduling/posting-windows";
 import type { UpsertChannelConfigInput } from "@/lib/validators/channel-config.schema";
 import type { ChannelConfigItem, PostingWindow } from "./list-channel-configs.service";
 
 export type UpsertChannelConfigResult =
   | { success: true; config: ChannelConfigItem }
-  | { success: false; code: "NOT_FOUND" | "FORBIDDEN"; message?: string };
+  | {
+      success: false;
+      code: "NOT_FOUND" | "FORBIDDEN" | "INSUFFICIENT_POSTING_DAYS";
+      message?: string;
+    };
 
 export async function upsertChannelConfig(
   slug: string,
@@ -27,6 +32,18 @@ export async function upsertChannelConfig(
     if (!membership) return { success: false, code: "NOT_FOUND" };
     if (membership.role !== "owner") return { success: false, code: "FORBIDDEN" };
     companyId = membership.companyId;
+  }
+
+  // The posting-day rule, enforced again at the write itself.
+  //
+  // The request schema already refuses this combination, so in practice nothing
+  // reaches here. It is repeated because this function is the ONLY way a
+  // posting window is stored, and the rule it enforces is not a shape check
+  // that a validator owns — it is the invariant the weekly cron depends on: a
+  // channel may not ask for more posts a week than it configured days to put
+  // them on. A future caller that skips the schema still cannot break it.
+  if (!postingDaysCoverTarget(data.postsPerWeek, data.postingWindows ?? [])) {
+    return { success: false, code: "INSUFFICIENT_POSTING_DAYS" };
   }
 
   // Verify the config belongs to this company.

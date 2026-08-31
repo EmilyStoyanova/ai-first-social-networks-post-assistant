@@ -50,6 +50,21 @@ const WEEKDAYS_9AM = [
   { day: "FRIDAY", start: "09:00", end: "17:00" },
 ];
 
+/**
+ * All seven days at 09:00 — what a channel posting more than five times a week
+ * has to be configured with.
+ *
+ * Automatic scheduling places at most one post per calendar day, so a six- or
+ * seven-post week needs six or seven configured days. The tests below that
+ * exercise those cadences are about the SOURCE MIX, not about the day rule, so
+ * they say so with a schedule wide enough to hold what they ask for.
+ */
+const EVERY_DAY_9AM = [
+  ...WEEKDAYS_9AM,
+  { day: "SATURDAY", start: "09:00", end: "17:00" },
+  { day: "SUNDAY", start: "09:00", end: "17:00" },
+];
+
 interface FakeChannel {
   channel: string;
   postsPerWeek: number;
@@ -412,7 +427,7 @@ describe("generateWeeklySchedule — channel target drives the count", () => {
     // other's, and neither is held to the mix's total of 5.
     const harness = mixHarness([
       { channel: "facebook", postsPerWeek: 5 },
-      { channel: "instagram", postsPerWeek: 7 },
+      { channel: "instagram", postsPerWeek: 7, postingWindows: EVERY_DAY_9AM },
     ]);
     await runUntilSettled(harness, 12);
 
@@ -433,7 +448,9 @@ describe("generateWeeklySchedule — channel target drives the count", () => {
 
   it("does not cap a channel at the mix total", async () => {
     // A recipe totalling 5 must not turn a 7-post channel into a 5-post one.
-    const harness = mixHarness([{ channel: "instagram", postsPerWeek: 7 }]);
+    const harness = mixHarness([
+      { channel: "instagram", postsPerWeek: 7, postingWindows: EVERY_DAY_9AM },
+    ]);
     const summary = await runUntilSettled(harness, 12);
 
     assert.equal(harness.posts.length, 7);
@@ -454,7 +471,9 @@ describe("generateWeeklySchedule — channel target drives the count", () => {
   });
 
   it("caps a channel at the per-channel ceiling, mix or no mix", async () => {
-    const harness = mixHarness([{ channel: "facebook", postsPerWeek: 100 }]);
+    const harness = mixHarness([
+      { channel: "facebook", postsPerWeek: 100, postingWindows: EVERY_DAY_9AM },
+    ]);
     await runUntilSettled(harness, 12);
     assert.equal(harness.posts.length, 7, "MAX_POSTS_PER_CHANNEL_PER_WEEK");
   });
@@ -462,7 +481,9 @@ describe("generateWeeklySchedule — channel target drives the count", () => {
   it("resumes a scaled week across runs without redistributing it", async () => {
     // The split is re-derived every run, never stored, so the second run must
     // pick up exactly where the first left off.
-    const harness = mixHarness([{ channel: "instagram", postsPerWeek: 7 }]);
+    const harness = mixHarness([
+      { channel: "instagram", postsPerWeek: 7, postingWindows: EVERY_DAY_9AM },
+    ]);
 
     const first = await generateWeeklySchedule(COMPANY_ID, harness.deps());
     assert.equal(first.postsGenerated, 3, "budget is 3 generations per run");
@@ -750,7 +771,7 @@ describe("generateWeeklySchedule — quota transfer", () => {
         },
       ],
       0,
-      [{ channel: "facebook", postsPerWeek: 6 }]
+      [{ channel: "facebook", postsPerWeek: 6, postingWindows: EVERY_DAY_9AM }]
     );
     await runUntilSettled(harness);
 
@@ -846,7 +867,9 @@ describe("generateWeeklySchedule — backward compatibility", () => {
   });
 
   it("caps the legacy target at the per-channel ceiling", async () => {
-    const harness = legacyHarness([{ channel: "facebook", postsPerWeek: 100 }]);
+    const harness = legacyHarness([
+      { channel: "facebook", postsPerWeek: 100, postingWindows: EVERY_DAY_9AM },
+    ]);
     await runUntilSettled(harness, 10);
     assert.equal(harness.posts.length, 7, "MAX_POSTS_PER_CHANNEL_PER_WEEK");
   });
@@ -1011,24 +1034,128 @@ describe("generateWeeklySchedule — posting-window gate", () => {
     }
   });
 
-  it("keeps a channel's own hour on a weekday it did not configure", async () => {
-    // Monday-only windows on a channel posting 7× a week: the days it never
-    // named still take its usual hour. That is a fallback inside a schedule the
-    // owner authored — not the invented default the gate exists to remove.
-    const harness = new Harness([], 7, [
+  it("publishes only on the weekdays the channel actually configured", async () => {
+    // The reported bug, at its narrowest: postsPerWeek=5 with one Friday window.
+    // The old spread put a post on Mon/Tue/Wed/Fri/Sat and took FRIDAY's 12:00
+    // for every one of them — four days nobody configured, each authorised by a
+    // window belonging to a different day.
+    const harness = new Harness([], 5, [
       {
         channel: "facebook",
-        postsPerWeek: 7,
-        postingWindows: [{ day: "MONDAY", start: "16:45", end: "18:00" }],
+        postsPerWeek: 5,
+        postingWindows: [{ day: "FRIDAY", start: "12:00", end: "17:00" }],
       },
     ]);
     await runUntilSettled(harness, 12);
 
-    assert.equal(harness.posts.length, 7);
-    assert.equal(
-      harness.posts.every((p) => p.scheduledFor?.getUTCHours() === 16),
-      true
+    // 5 = Friday (getUTCDay: Sunday 0 … Saturday 6).
+    for (const post of harness.posts) {
+      assert.ok(post.scheduledFor, "every post carries a slot");
+      assert.equal(post.scheduledFor.getUTCDay(), 5, "only the configured weekday");
+      assert.equal(post.scheduledFor.getUTCHours(), 12);
+    }
+  });
+
+  it("writes at most one post per configured day, so a 1-day channel gets 1", async () => {
+    // The other half: the week cannot hold 5 posts if only one day may carry
+    // one. The target is reduced to what the schedule can honestly take rather
+    // than the surplus being placed on unconfigured days.
+    const harness = new Harness([], 5, [
+      {
+        channel: "facebook",
+        postsPerWeek: 5,
+        postingWindows: [{ day: "FRIDAY", start: "12:00", end: "17:00" }],
+      },
+    ]);
+    const summary = await runUntilSettled(harness, 12);
+
+    assert.equal(harness.posts.length, 1);
+    assert.equal(summary.postsRemaining, 0, "the week owes nothing it cannot place");
+    assert.equal(summary.scheduleStatus, "ready", "and does not hang in generating");
+  });
+
+  it("reports a channel whose posting days cannot carry its weekly target", async () => {
+    // Silently writing 1 post where 5 were asked for would look like a broken
+    // cron. The reduction is named, the way an unscheduled channel is.
+    const harness = new Harness([], 5, [
+      {
+        channel: "facebook",
+        postsPerWeek: 5,
+        postingWindows: [{ day: "FRIDAY", start: "12:00", end: "17:00" }],
+      },
+    ]);
+    const summary = await runUntilSettled(harness, 12);
+
+    assert.deepEqual(summary.cappedChannels, [
+      {
+        channel: "facebook",
+        requested: 5,
+        scheduled: 1,
+        reason: "FEWER_POSTING_DAYS_THAN_TARGET",
+      },
+    ]);
+    assert.deepEqual(summary.failures, [], "a narrow schedule is not a failure");
+  });
+
+  it("counts several windows on one weekday as a single posting day", async () => {
+    // Morning and evening on the same Monday is one day that may carry a post,
+    // not two — the rule is one automatic post per calendar day.
+    const harness = new Harness([], 5, [
+      {
+        channel: "facebook",
+        postsPerWeek: 2,
+        postingWindows: [
+          { day: "MONDAY", start: "08:00", end: "10:00" },
+          { day: "MONDAY", start: "18:00", end: "20:00" },
+        ],
+      },
+    ]);
+    await runUntilSettled(harness, 12);
+
+    assert.equal(harness.posts.length, 1);
+    assert.equal(harness.posts[0].scheduledFor?.getUTCDay(), 1, "Monday");
+    assert.equal(harness.posts[0].scheduledFor?.getUTCHours(), 8, "that day's own window");
+  });
+
+  it("places a fully configured week one post per configured day", async () => {
+    // The regression guard for schedules that were always valid: five posts,
+    // five weekdays, each on its own day at its own hour. Nothing about a
+    // correctly configured channel changes.
+    const harness = new Harness([], 5, [{ channel: "facebook", postsPerWeek: 5 }]);
+    const summary = await runUntilSettled(harness, 12);
+
+    assert.equal(harness.posts.length, 5);
+    const days = harness.posts.map((p) => p.scheduledFor?.getUTCDay()).sort();
+    assert.deepEqual(days, [1, 2, 3, 4, 5], "Monday through Friday, one each");
+    for (const post of harness.posts) {
+      assert.equal(post.scheduledFor?.getUTCHours(), 9, "WEEKDAYS_9AM");
+    }
+    assert.deepEqual(summary.cappedChannels, [], "a schedule that fits is not capped");
+    assert.equal(summary.scheduleStatus, "ready");
+  });
+
+  it("keeps each day's own window when the days have different hours", async () => {
+    // No cross-day borrowing in either direction: Monday's post takes Monday's
+    // hour, Wednesday's takes Wednesday's.
+    const harness = new Harness([], 5, [
+      {
+        channel: "facebook",
+        postsPerWeek: 2,
+        postingWindows: [
+          { day: "MONDAY", start: "07:15", end: "09:00" },
+          { day: "WEDNESDAY", start: "16:45", end: "18:00" },
+        ],
+      },
+    ]);
+    await runUntilSettled(harness, 12);
+
+    const byDay = new Map(
+      harness.posts.map((p) => [p.scheduledFor?.getUTCDay(), p.scheduledFor?.getUTCHours()])
     );
+    assert.deepEqual([...byDay.entries()].sort(), [
+      [1, 7],
+      [3, 16],
+    ]);
   });
 });
 

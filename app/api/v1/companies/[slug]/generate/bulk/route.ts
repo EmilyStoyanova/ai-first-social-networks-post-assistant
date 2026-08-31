@@ -212,10 +212,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
       case "INVALID_DATE_RANGE":
       case "START_DATE_IN_PAST":
       case "INVALID_DISTRIBUTION":
-      // An even spread was asked for over a channel with no posting schedule.
-      // Answerable from the request and the saved configuration alone, so it is
-      // answered here rather than becoming a job that schedules nothing.
+      // An even spread was asked for over a channel with no posting schedule,
+      // over a period holding none of its posting days, or over one with fewer
+      // publishing slots than posts requested. All three are answerable from the
+      // request and the saved configuration alone, so they are answered here
+      // rather than becoming a job that schedules nothing.
       case "NO_POSTING_WINDOWS":
+      case "NO_POSTING_DAYS_IN_PERIOD":
+      case "NO_FUTURE_POSTING_SLOTS":
+      case "INSUFFICIENT_POSTING_SLOTS":
       case "INVALID_SOURCE_MIX":
         return NextResponse.json(
           { error: { code: result.code, message: result.message } },

@@ -33,6 +33,9 @@ const BASE =
   "w-full rounded-control border px-3.5 py-2.5 text-sm outline-none transition-all duration-fast focus:ring-2 focus:ring-offset-0";
 const NORMAL = "border-border-strong bg-surface focus:border-accent focus:ring-accent/20";
 
+/** A week cannot hold more posting days than it has days. */
+const DAYS_IN_WEEK = 7;
+
 function formatWindows(windows: PostingWindow[]): string {
   return windows.map((w) => `${w.day} ${w.start}-${w.end}`).join("\n");
 }
@@ -99,10 +102,28 @@ export function ChannelConfigForm({
 
   const { windows, invalid: invalidWindowLines } = parseWindows(windowsText);
 
+  // Automatic generation publishes at most one post per calendar day, so a
+  // weekly target needs that many DISTINCT posting days. Checked against the
+  // field as it is being typed — the same rule the API enforces
+  // (postingDaysCoverTarget), so the form never offers to save something the
+  // server will refuse.
+  //
+  // Read off the parsed target rather than the raw input, so a half-typed "1"
+  // on the way to "10" does not flash an error about a number nobody has
+  // finished entering.
+  const weeklyTarget = Math.max(0, Math.min(100, parseInt(postsPerWeek, 10) || 0));
+  const configuredDays = new Set(windows.map((w) => w.day)).size;
+  const requiredDays = Math.min(weeklyTarget, DAYS_IN_WEEK);
+  // A channel with no windows at all takes no part in automatic generation —
+  // a supported state, not an error. See postingDaysCoverTarget.
+  const tooFewDays = windows.length > 0 && configuredDays < requiredDays;
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     // Saving here would silently store fewer windows than are on screen.
     if (invalidWindowLines.length > 0) return;
+    // …and saving here would store a week the scheduler cannot place.
+    if (tooFewDays) return;
 
     onSave({
       enabled,
@@ -263,7 +284,7 @@ export function ChannelConfigForm({
           value={windowsText}
           onChange={(e) => setWindowsText(e.target.value)}
           placeholder={"MONDAY 09:00-17:00\nTUESDAY 09:00-17:00"}
-          aria-invalid={invalidWindowLines.length > 0 || undefined}
+          aria-invalid={invalidWindowLines.length > 0 || tooFewDays || undefined}
           className={`${BASE} ${NORMAL} resize-none`}
         />
         {invalidWindowLines.length > 0 && (
@@ -271,10 +292,25 @@ export function ChannelConfigForm({
             {t("postingWindowsInvalid", { lines: invalidWindowLines.join(", ") })}
           </p>
         )}
+        {/* Names the three numbers that matter — asked for, configured, missing
+            — because "add more days" without them leaves the owner counting
+            lines in a textarea. */}
+        {tooFewDays && (
+          <p className="text-status-danger-fg mt-1.5 text-xs">
+            {t("postingWindowsTooFewDays", {
+              posts: weeklyTarget,
+              days: configuredDays,
+              missing: requiredDays - configuredDays,
+            })}
+          </p>
+        )}
         {/* The windows are no longer only a time of day — an empty list now
             means the channel is left out of the weekly cron entirely. Said here
             because this field is the only place that decision is made. */}
         <p className="text-fg-faint mt-1.5 text-xs">{t("postingWindowsAutomationHelp")}</p>
+        {/* The one-post-per-day rule, said once where the schedule is authored
+            — otherwise the only way to learn it is to trip the error above. */}
+        <p className="text-fg-faint mt-1 text-xs">{t("postingWindowsOnePerDayHelp")}</p>
       </div>
 
       {/* Actions */}
@@ -284,7 +320,7 @@ export function ChannelConfigForm({
           variant="primary"
           size="sm"
           loading={saving}
-          disabled={invalidWindowLines.length > 0}
+          disabled={invalidWindowLines.length > 0 || tooFewDays}
         >
           {saving ? tCommon("saving") : t("save")}
         </Button>

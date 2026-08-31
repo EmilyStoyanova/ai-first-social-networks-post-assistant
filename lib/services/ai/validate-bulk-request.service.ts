@@ -45,14 +45,16 @@ import { prisma } from "@/lib/db/client";
 import type { ManualContentSourceRef } from "@/lib/ai/manual-content-source";
 import type { SocialChannel } from "@prisma/client";
 import { COMPANY_CONTENT_SOURCE_ID } from "@/lib/scheduling/content-mix";
-import { hasPostingWindows } from "@/lib/scheduling/posting-windows";
+import type { PostingDay } from "@/lib/scheduling/posting-windows";
 import {
   MAX_BULK_POSTS,
   MAX_BULK_RANGE_DAYS,
   inclusiveDayCount,
   isStartDateInPast,
+  planEvenDistribution,
   validateCustomDistribution,
   type BulkCustomDay,
+  type BulkPlanProblem,
   type CustomDistributionError,
 } from "@/lib/scheduling/bulk-schedule";
 
@@ -89,6 +91,37 @@ export type BulkRequestErrorCode =
    * lib/scheduling/bulk-schedule.ts.
    */
   | "NO_POSTING_WINDOWS"
+  /**
+   * The channel has a posting schedule, but none of its weekdays fall inside the
+   * chosen period — a Monday-only channel asked for a Tuesday–Thursday range.
+   *
+   * Refused rather than resolved. This used to fall back to every day of the
+   * period at the channel's usual hour, which is one weekday's window
+   * authorising publishing on another. The user widens the period, picks a
+   * channel that posts in it, or names the times themselves in custom mode.
+   */
+  | "NO_POSTING_DAYS_IN_PERIOD"
+  /**
+   * The period does contain the channel's posting days, but every publishing
+   * time on them has already gone by.
+   *
+   * A period may legitimately start TODAY, and the window for today has usually
+   * already begun — so this is the ordinary afternoon case, not an exotic one.
+   * The slots behind the clock used to be offered anyway, which meant a batch
+   * planned at 15:00 could be scheduled for 09:00 that morning: past due before
+   * it was written, and refused by the publisher when someone approved it.
+   */
+  | "NO_FUTURE_POSTING_SLOTS"
+  /**
+   * The channel's windows do hold FUTURE publishing slots inside the period, but
+   * fewer than the number of posts requested.
+   *
+   * Refused rather than capped. Manual bulk writes the number of posts it was
+   * asked for: quietly generating six of ten would leave the user counting
+   * drafts to discover it. The surplus used to be stacked an hour at a time
+   * instead, which walked straight out of the configured window.
+   */
+  | "INSUFFICIENT_POSTING_SLOTS"
   | "INVALID_SOURCE_MIX";
 
 export interface BulkRequestProblem {
@@ -293,6 +326,112 @@ export async function loadPostingWindowsFromDb(slug: string, channel: string): P
   return config?.postingWindows ?? null;
 }
 
+/** "MONDAY" → "Monday", for a message that reads like a sentence. */
+function dayName(day: PostingDay): string {
+  return day.charAt(0) + day.slice(1).toLowerCase();
+}
+
+/**
+ * The even-distribution check: every selected channel is planned with the same
+ * `planEvenDistribution` the worker schedules from, and the request is refused if
+ * ANY of them cannot be planned.
+ *
+ * ALL OR NOTHING, deliberately. Each channel plans its own slots from its own
+ * windows, so in a multi-channel batch one channel can be perfectly schedulable
+ * while another has nowhere to put the posts. Generating the topics for the
+ * channels that fit and quietly dropping the rest would leave a batch whose
+ * content exists on some networks and not others, discovered only in the grid;
+ * the whole request is refused instead, while there is still an HTTP response to
+ * refuse it with and a form to fix it in.
+ *
+ * The three reasons are reported in that order — no schedule, no day in the
+ * period, not enough room — because that is the order in which they are worth
+ * fixing, and a channel that has no windows at all cannot be helped by a wider
+ * period. Every affected channel is named: the fix is per channel, and the user
+ * cannot otherwise tell which one to open.
+ */
+async function checkEvenDistribution(
+  slug: string,
+  input: BulkRequestShape,
+  now: Date,
+  deps: ValidateBulkRequestDeps
+): Promise<BulkRequestProblem | null> {
+  const loadPostingWindows = deps.loadPostingWindows ?? loadPostingWindowsFromDb;
+  const failures: Array<{ channel: string; problem: BulkPlanProblem }> = [];
+
+  for (const channel of input.channels) {
+    const result = planEvenDistribution({
+      startDate: input.startDate,
+      endDate: input.endDate,
+      count: input.numberOfPosts,
+      postingWindows: await loadPostingWindows(slug, channel),
+      // The server's own clock, which is the authority — the form gates itself
+      // on the one it opened on, so a batch left on screen long enough for its
+      // first slot to go by is refused here rather than written into the past.
+      now,
+    });
+    if (!result.ok) failures.push({ channel, problem: result.problem });
+  }
+
+  const period = `${input.startDate} and ${input.endDate}`;
+
+  const unscheduled = failures.filter((f) => f.problem.code === "NO_POSTING_WINDOWS");
+  if (unscheduled.length > 0) {
+    return {
+      code: "NO_POSTING_WINDOWS",
+      message:
+        `No publishing times are configured for ${unscheduled.map((f) => f.channel).join(", ")}. ` +
+        "Add a posting schedule in channel settings, or choose the date and time of each post yourself.",
+    };
+  }
+
+  const offPeriod = failures.filter((f) => f.problem.code === "NO_POSTING_DAYS_IN_PERIOD");
+  if (offPeriod.length > 0) {
+    const detail = offPeriod
+      .map((f) => {
+        const days = f.problem.code === "NO_POSTING_DAYS_IN_PERIOD" ? f.problem.days : [];
+        return `${f.channel} publishes on ${days.map(dayName).join(", ")}`;
+      })
+      .join("; ");
+    return {
+      code: "NO_POSTING_DAYS_IN_PERIOD",
+      message:
+        `None of the configured posting days fall between ${period} (${detail}). ` +
+        "Widen the period, or choose the date and time of each post yourself.",
+    };
+  }
+
+  const spent = failures.filter((f) => f.problem.code === "NO_FUTURE_POSTING_SLOTS");
+  if (spent.length > 0) {
+    return {
+      code: "NO_FUTURE_POSTING_SLOTS",
+      message:
+        `Every publishing time between ${period} has already passed for ` +
+        `${spent.map((f) => f.channel).join(", ")}. ` +
+        "Choose a later period, or choose the date and time of each post yourself.",
+    };
+  }
+
+  const tooFew = failures.filter((f) => f.problem.code === "INSUFFICIENT_POSTING_SLOTS");
+  if (tooFew.length > 0) {
+    const detail = tooFew
+      .map((f) => {
+        const available = f.problem.code === "INSUFFICIENT_POSTING_SLOTS" ? f.problem.available : 0;
+        return `${f.channel} has room for ${available}`;
+      })
+      .join("; ");
+    return {
+      code: "INSUFFICIENT_POSTING_SLOTS",
+      message:
+        `${input.numberOfPosts} posts were requested, but the posting windows between ${period} ` +
+        `allow fewer (${detail}). Ask for fewer posts, widen the period, add posting windows, ` +
+        "or choose the date and time of each post yourself.",
+    };
+  }
+
+  return null;
+}
+
 export interface ValidateBulkRequestDeps {
   /** The company's enabled content-source ids — what a submitted mix is checked against. */
   loadEnabledSourceIds?: (slug: string) => Promise<Set<string>>;
@@ -319,28 +458,12 @@ export async function validateBulkRequest(
   if (shapeProblem !== null) return shapeProblem;
 
   // Even distribution only. The channel's posting windows are the ONLY thing
-  // that decides the days and times in that mode, so a channel without any has
-  // nothing to be distributed over — and inventing an hour for it is exactly
-  // what this application no longer does, on the manual path or the automatic
-  // one. Custom mode skips this: the user has named every time already.
+  // that decides the days and times in that mode, so this runs the very planner
+  // the worker will schedule with and refuses whatever it cannot plan. Custom
+  // mode skips it entirely: the user has named every time already.
   if (input.customDistribution === undefined) {
-    const loadPostingWindows = deps.loadPostingWindows ?? loadPostingWindowsFromDb;
-    const unscheduled: string[] = [];
-
-    for (const channel of input.channels) {
-      if (!hasPostingWindows(await loadPostingWindows(slug, channel))) unscheduled.push(channel);
-    }
-
-    if (unscheduled.length > 0) {
-      return {
-        code: "NO_POSTING_WINDOWS",
-        // Names the channels, because in a multi-channel batch the fix is
-        // per channel and the user cannot otherwise tell which one to open.
-        message:
-          `No publishing times are configured for ${unscheduled.join(", ")}. ` +
-          "Add a posting schedule in channel settings, or choose the date and time of each post yourself.",
-      };
-    }
+    const problem = await checkEvenDistribution(slug, input, now, deps);
+    if (problem !== null) return problem;
   }
 
   if (input.sourceMix === undefined) return null;

@@ -112,6 +112,22 @@ export function hasPostingWindows(postingWindows: unknown): boolean {
  * its usual hour rather than at an arbitrary default. That is a fallback WITHIN
  * a schedule the user authored, not a substitute for one.
  *
+ * NOT FOR SCHEDULING — AUTOMATIC OR MANUAL. The fallback answers "what time on
+ * this day", which presumes the day was already decided legitimately. Both
+ * schedulers used to decide days for themselves and then ask this, and the
+ * fallback then made one Friday window authorise posts on other weekdays:
+ *
+ *   • the weekly cron spread its target across all seven days — it now takes its
+ *     days from `postingDaySlots`;
+ *   • manual bulk fell back to every day in the requested period whenever no
+ *     configured weekday occurred in it — it now derives a finite eligible set
+ *     from the windows themselves (`deriveEligibleSlots` in bulk-schedule.ts) and
+ *     refuses the request rather than borrowing a weekday.
+ *
+ * What is left is SEEDING the custom bulk editor's time inputs
+ * (`defaultTimesForDay`), where the user has chosen the day and this only offers
+ * a starting value for a field they can overwrite. A seed is not a schedule.
+ *
  * `dayIndex` is an index into DAY_ORDER, i.e. 0 = Monday.
  */
 export function windowStartOn(windows: readonly PostingWindowEntry[], dayIndex: number): TimeOfDay {
@@ -119,6 +135,79 @@ export function windowStartOn(windows: readonly PostingWindowEntry[], dayIndex: 
   const window = windows.find((w) => w.day === dayName) ?? windows[0];
   const [hour, minute] = window.start.split(":").map(Number);
   return { hour, minute };
+}
+
+/** A weekday this channel publishes on, and the time of day it publishes at. */
+export interface PostingDaySlot {
+  /** Index into DAY_ORDER — 0 = Monday. */
+  dayIndex: number;
+  time: TimeOfDay;
+}
+
+/**
+ * The days an automatic post may actually land on, Monday first.
+ *
+ * One slot per DISTINCT configured weekday, carrying that day's own start time.
+ * This is the answer `windowStartOn` cannot give: it is asked about a day
+ * somebody else chose and has to answer something, whereas this is asked which
+ * days were chosen at all.
+ *
+ * That difference is the whole fix. The weekly cron used to spread its posts
+ * evenly over all seven days and ask `windowStartOn` for each one, so a channel
+ * configured for FRIDAY alone had posts placed on Monday, Tuesday, Wednesday and
+ * Saturday, every one of them stamped with Friday's hour. A window authorises
+ * its OWN weekday and no other; the cron now takes its days from here.
+ *
+ * Several windows on one weekday collapse to that day's first, because
+ * automatic scheduling places at most one post per calendar day. The first in
+ * saved order rather than the earliest by clock: it is the one `windowStartOn`
+ * has always returned for that day, so a schedule that was already valid keeps
+ * the exact times it had.
+ */
+export function postingDaySlots(windows: readonly PostingWindowEntry[]): PostingDaySlot[] {
+  const slots: PostingDaySlot[] = [];
+
+  for (let dayIndex = 0; dayIndex < DAY_ORDER.length; dayIndex++) {
+    const window = windows.find((w) => w.day === DAY_ORDER[dayIndex]);
+    if (!window) continue;
+
+    const [hour, minute] = window.start.split(":").map(Number);
+    slots.push({ dayIndex, time: { hour, minute } });
+  }
+
+  return slots;
+}
+
+/**
+ * Whether a channel's configured days can carry its weekly target.
+ *
+ * THE configuration rule, and the reason a channel can no longer be saved
+ * asking for five posts a week with one posting day. Automatic scheduling
+ * places at most one post per calendar day, so N posts a week need N distinct
+ * days — anything less used to be resolved by publishing on days nobody
+ * configured.
+ *
+ * Two states are deliberately exempt, and neither is a loophole:
+ *
+ *   • NO WINDOWS AT ALL. That is the explicit "this channel takes no part in
+ *     automatic generation" state the whole module is built around: it is gated
+ *     by `hasPostingWindows` long before anything is scheduled, so no post can
+ *     be placed on an unconfigured day by way of it. Refusing it here would also
+ *     make every such channel unsavable until its owner either invented a
+ *     schedule or zeroed its weekly target.
+ *   • NO WEEKLY TARGET. Nothing is asked for, so no days are needed.
+ *
+ * The target is capped at the length of a week before comparing, since a stored
+ * `postsPerWeek` of 100 cannot ask for more than seven days however it is
+ * counted. That bound is the week itself, not a tunable ceiling.
+ */
+export function postingDaysCoverTarget(postsPerWeek: number, postingWindows: unknown): boolean {
+  if (postsPerWeek <= 0) return true;
+
+  const windows = parsePostingWindows(postingWindows);
+  if (windows === null) return true;
+
+  return postingDaySlots(windows).length >= Math.min(postsPerWeek, DAY_ORDER.length);
 }
 
 /**

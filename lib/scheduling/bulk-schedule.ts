@@ -12,25 +12,54 @@
  * puts it. What decides the actual dates is the channel's configured posting
  * windows:
  *
- *   1. every configured window that falls inside the period becomes an ELIGIBLE
- *      SLOT (its day, at its start time),
- *   2. the requested posts are distributed evenly across that eligible list.
+ *   1. every configured window that falls inside the period is opened out into
+ *      candidate slots — one an hour, from its start, while still inside it,
+ *   2. the ones that have already gone by are dropped, leaving the ELIGIBLE
+ *      SLOTS,
+ *   3. the requested posts are distributed evenly across that eligible list.
  *
  * So a channel configured for Tuesdays and Thursdays at 08:30 gets posts on
  * Tuesdays and Thursdays at 08:30 — never on the Sunday the range happens to
- * start on. See `deriveEligibleSlots` for what happens when the configured days
- * never occur in the period, and `planBulkSlots` for the fallback used when
- * there are fewer eligible slots than requested posts.
+ * start on.
+ *
+ * THE ELIGIBLE SET IS FINITE, AND IT IS THE WHOLE ANSWER. Every instant this
+ * mode can schedule comes out of `deriveEligibleSlots`; the planner only chooses
+ * among them. It cannot borrow a time from a weekday the channel does not
+ * publish on, cannot push a post past the end of the window it was planned into,
+ * cannot invent an hour for a channel that has none, and cannot reach back into
+ * a slot that has already gone by. When the request cannot be met from that set,
+ * it is REFUSED — with which of the four reasons applies and the numbers behind
+ * it — rather than met approximately:
+ *
+ *   • `NO_POSTING_WINDOWS` — the channel has no usable schedule at all. Configure
+ *     one, or name the times yourself in custom mode.
+ *   • `NO_POSTING_DAYS_IN_PERIOD` — it has one, but none of its weekdays occur in
+ *     the period asked for (a Monday-only channel asked for Tue–Thu). This used
+ *     to fall back to every day in the period at the channel's usual hour, which
+ *     is precisely one weekday's window authorising another's.
+ *   • `NO_FUTURE_POSTING_SLOTS` — the period does contain its posting days, but
+ *     every slot on them is behind the clock. A period may start TODAY, and the
+ *     window for today has usually already begun; the slots that have gone by
+ *     used to be offered anyway, so a batch planned at 15:00 could be scheduled
+ *     for 09:00 that morning and be past due before it was written.
+ *   • `INSUFFICIENT_POSTING_SLOTS` — some slots remain, but fewer than the number
+ *     of posts requested. This used to stack the surplus an hour at a time,
+ *     walking straight out of the configured window and stopping only at 23:00.
+ *     Asking for ten and silently getting six is not an option either: manual
+ *     bulk writes the number of posts it was asked for, or says why not.
+ *
+ * See `planEvenDistribution`, which is the one entry point that answers all of
+ * this — the form previews with it, the enqueue path validates with it, and the
+ * worker schedules with it.
  *
  * NO INVENTED HOUR, ANYWHERE. Nothing in this module answers "when does this
- * channel publish?" with a time nobody chose. A channel with no usable posting
- * window plans NO eligible slots, and an even distribution over it comes back
- * empty — the caller reports that as `NO_POSTING_WINDOWS`
- * (lib/services/ai/validate-bulk-request.service.ts) so the user is told to
- * configure a schedule or to name the times themselves in custom mode. This is
- * the manual half of the same rule the weekly cron follows by skipping such a
- * channel; the two paths differ in what they DO about it, never in whether a
- * time gets made up.
+ * channel publish?" with a time nobody chose. This is the manual half of the same
+ * rule the weekly cron follows by skipping such a channel; the two paths differ
+ * in what they DO about it, never in whether a time gets made up. They differ in
+ * one more way, deliberately: the cron places at most one post per calendar day,
+ * whereas manual bulk may fill several slots of one day — the user asked for a
+ * specific number of posts over a specific period, and the window they configured
+ * is how much room that day has.
  *
  * `planCustomSlots` is the other mode entirely, and the channel's windows have
  * no say in it: the user holds the calendar AND the clock, naming a time for
@@ -56,8 +85,8 @@
  */
 
 import { DAY_ORDER, parsePostingWindows, utcDayIndex, windowStartOn } from "./posting-windows";
-import type { PostingWindowEntry, TimeOfDay } from "./posting-windows";
-import { appZoneClock, appZoneInstant, appZoneToday } from "./app-datetime-local";
+import type { PostingDay, PostingWindowEntry, TimeOfDay } from "./posting-windows";
+import { appZoneInstant, appZoneToday } from "./app-datetime-local";
 import {
   LAST_SLOT_MINUTES,
   SLOT_MINUTES,
@@ -84,8 +113,22 @@ export const MAX_BULK_POSTS = 10;
  */
 export const MAX_BULK_RANGE_DAYS = 366;
 
-/** Latest hour a same-day overflow post may be pushed to. */
-const LAST_HOUR_OF_DAY = 23;
+/**
+ * How far apart two publishing slots inside one posting window are.
+ *
+ * A window is a RANGE — "Fridays, 12:00 to 17:00" — so it has to be opened out
+ * into the individual instants a post can actually be given. An hour is the
+ * granularity the whole feature already reads in: it is what the old overflow
+ * rule stepped by, it is what a channel's `postsPerWeek` implies about how often
+ * a company wants to appear, and it keeps a five-hour window at five posts rather
+ * than at ten half-hourly ones nobody asked for.
+ *
+ * The end is EXCLUSIVE: 12:00–17:00 offers 12:00, 13:00, 14:00, 15:00 and 16:00.
+ * A post at 17:00 is a post at the moment the window shuts, and the same choice
+ * is what makes two adjacent windows (09:00–12:00 and 12:00–15:00) describe one
+ * unbroken run of slots rather than one that repeats at the seam.
+ */
+export const WINDOW_SLOT_MINUTES = 60;
 
 export interface BulkSlotPlan {
   /** Inclusive, `YYYY-MM-DD`, read as UTC. */
@@ -102,6 +145,20 @@ export interface BulkSlotPlan {
    * scheduled at a time nobody chose.
    */
   postingWindows?: unknown;
+  /**
+   * The clock every candidate slot is measured against — a slot must be strictly
+   * after it to be eligible.
+   *
+   * REQUIRED, and passed in rather than read here, for the reason every other
+   * date rule in this module takes one (`isStartDateInPast`): the module is pure,
+   * and a planner that read the clock itself would give a different answer every
+   * time it ran, including between the preview the user approved and the batch
+   * the worker wrote. Each caller supplies its own and each is right to: the form
+   * uses the clock it opened on so a preview cannot change while being read, and
+   * the enqueue path and the worker use their own — the server is the authority,
+   * exactly as it already is for `START_DATE_IN_PAST` and `time_in_past`.
+   */
+  now: Date;
 }
 
 /**
@@ -180,51 +237,105 @@ export function isStartDateInPast(startDate: string, now: Date): boolean {
   return startDate < appZoneToday(now);
 }
 
-/** A window's start as a time of day. Shape-checked already; range-checked below. */
-function windowStart(window: PostingWindowEntry): TimeOfDay {
-  const [hour, minute] = window.start.split(":").map(Number);
-  return { hour, minute };
+/** Minutes past midnight → the time of day they name. */
+function minutesToTimeOfDay(minutes: number): TimeOfDay {
+  return { hour: Math.floor(minutes / WINDOW_SLOT_MINUTES), minute: minutes % WINDOW_SLOT_MINUTES };
 }
 
 /**
- * The channel's windows, keeping only the ones whose start is a real time of
- * day. Null when nothing usable is left.
+ * Every minute-of-day a post may be published at inside ONE window: its start,
+ * then each hour after it, while still short of its end.
  *
- * `postingWindowsSchema` checks the SHAPE of a stored window, not its range, so
- * a `"25:00"` parses and is not a time. Dropping those here means the rest of
- * the module works from times that exist, and — crucially — that a channel whose
- * only window is unusable gets the SAME answer as one that was never configured:
- * null. Neither is an hour a person can be said to have chosen, so neither may
- * be turned into one.
+ * Empty when the start is not a time a clock can show. `postingWindowsSchema`
+ * checks the SHAPE of a stored window, not its range, so a `"25:00"` parses and
+ * is not a time — and a window with no readable start names no publishing time
+ * at all.
+ *
+ * An unreadable or backwards END yields the start alone rather than nothing. The
+ * settings form has required `start < end` since before this rule existed, so
+ * this only ever meets rows written by something else; the start is still a time
+ * its owner chose, and one slot at it is the narrowest honest reading. What it
+ * must not do is guess an end and hand out slots the owner never authorised.
+ */
+function windowSlotMinutes(window: PostingWindowEntry): number[] {
+  const start = timeToMinutes(window.start);
+  if (start === null) return [];
+
+  const end = timeToMinutes(window.end);
+  if (end === null || end <= start) return [start];
+
+  const minutes: number[] = [];
+  for (let at = start; at < end; at += WINDOW_SLOT_MINUTES) minutes.push(at);
+  return minutes;
+}
+
+/**
+ * The channel's windows, keeping only the ones that name at least one publishing
+ * time. Null when nothing usable is left.
+ *
+ * A channel whose only window is unusable gets the SAME answer as one that was
+ * never configured: null. Neither is an hour a person can be said to have
+ * chosen, so neither may be turned into one.
  */
 function usableWindows(postingWindows: unknown): PostingWindowEntry[] | null {
   const parsed = parsePostingWindows(postingWindows);
   if (parsed === null) return null;
 
-  const usable = parsed.filter((window) => isRealTimeOfDay(windowStart(window)));
+  const usable = parsed.filter((window) => windowSlotMinutes(window).length > 0);
   return usable.length > 0 ? usable : null;
 }
 
 /**
- * The channel's posting times grouped by weekday, indexed by DAY_ORDER position
- * (0 = Monday).
+ * Times grouped by weekday, indexed by DAY_ORDER position (0 = Monday), with
+ * `minutesOf` deciding which times a window contributes.
  *
- * A day may carry several windows (morning and evening, say); each becomes its
- * own eligible slot. Exact repeats are dropped so a duplicated window entry
- * cannot make one time of day look twice as available as it is.
+ * Each day's times come out ascending and DISTINCT. Deduplication is what makes
+ * overlapping windows behave: `09:00–12:00` beside `11:00–14:00` describes one
+ * run of slots from 09:00 to 13:00, not a doubled 11:00 that would look twice as
+ * available as it is and could take two posts at the same instant.
  *
- * Takes windows already filtered by `usableWindows`, so every time it returns is
- * one a clock can show and every empty day genuinely has no window.
+ * Takes windows already filtered by `usableWindows`, so every empty day genuinely
+ * has no window rather than an unreadable one.
  */
-function windowsByWeekday(windows: readonly PostingWindowEntry[]): TimeOfDay[][] {
-  const byDay: TimeOfDay[][] = DAY_ORDER.map(() => []);
+function timesByWeekday(
+  windows: readonly PostingWindowEntry[],
+  minutesOf: (window: PostingWindowEntry) => number[]
+): TimeOfDay[][] {
+  const byDay: number[][] = DAY_ORDER.map(() => []);
   for (const window of windows) {
-    const { hour, minute } = windowStart(window);
-    const times = byDay[DAY_ORDER.indexOf(window.day)];
-    if (!times.some((t) => t.hour === hour && t.minute === minute)) times.push({ hour, minute });
+    const day = byDay[DAY_ORDER.indexOf(window.day)];
+    for (const minutes of minutesOf(window)) if (!day.includes(minutes)) day.push(minutes);
   }
-  for (const times of byDay) times.sort((a, b) => a.hour - b.hour || a.minute - b.minute);
-  return byDay;
+  return byDay.map((day) => day.sort((a, b) => a - b).map(minutesToTimeOfDay));
+}
+
+/** Every instant-of-day this channel may publish at, per weekday. */
+function eligibleTimesByWeekday(windows: readonly PostingWindowEntry[]): TimeOfDay[][] {
+  return timesByWeekday(windows, windowSlotMinutes);
+}
+
+/**
+ * The window START times, per weekday — what the CUSTOM editor's inputs open on.
+ *
+ * Deliberately not the eligible slots above: a seed says "this is the hour you
+ * usually post at", and a five-hour window has one of those, not five. See
+ * `defaultTimesForDay`.
+ */
+function windowStartsByWeekday(windows: readonly PostingWindowEntry[]): TimeOfDay[][] {
+  return timesByWeekday(windows, (window) => {
+    const start = timeToMinutes(window.start);
+    return start === null ? [] : [start];
+  });
+}
+
+/**
+ * The weekdays this channel publishes on, Monday first — what a refusal names
+ * back to the user so they can see why their period holds nothing.
+ */
+export function configuredPostingDays(postingWindows: unknown): PostingDay[] {
+  const windows = usableWindows(postingWindows);
+  if (windows === null) return [];
+  return DAY_ORDER.filter((day) => windows.some((window) => window.day === day));
 }
 
 /**
@@ -246,47 +357,33 @@ function slotInstant(day: Date, time: TimeOfDay): Date | null {
 }
 
 /**
- * Every day in the period at that weekday's start time, falling back WITHIN the
- * channel's own schedule to its first configured window for a day that has none.
- */
-function everyDayInPeriod(
-  start: Date,
-  days: number,
-  windows: readonly PostingWindowEntry[]
-): Date[] {
-  const slots: Date[] = [];
-  for (let offset = 0; offset < days; offset++) {
-    const day = new Date(start.getTime() + offset * DAY_MS);
-    const at = slotInstant(day, windowStartOn(windows, utcDayIndex(day)));
-    if (at !== null) slots.push(at);
-  }
-  return slots;
-}
-
-/**
  * Every instant inside the period at which this channel is configured to
- * publish, earliest first.
+ * publish, earliest first — WITHOUT regard to whether it has already gone by.
  *
- * This is the candidate set the requested posts are drawn from — it is what
- * "prefer the channel's configured posting days and times" actually means. One
- * slot per configured window per matching day.
+ * One slot per hour of each configured window, on each day of the period that
+ * window's weekday falls on.
  *
- * EMPTY WHEN THE CHANNEL HAS NO USABLE WINDOW, and that is the point. There is
- * no time to spread posts over, so none is chosen: the caller reports
- * `NO_POSTING_WINDOWS` and the user either configures a schedule or names the
- * times themselves in custom mode. This used to fall back to a fixed hour, which
- * meant a batch could be scheduled entirely at a time nobody had picked.
+ * STRICTLY THE CONFIGURED WEEKDAYS. A Monday window authorises Mondays. Asked
+ * for a Tuesday–Thursday period, a Monday-only channel yields NOTHING — it does
+ * not keep its usual hour and move it onto days it does not publish on, which is
+ * what this used to do whenever no configured weekday occurred in the period.
  *
- * One fallback remains, and it stays inside a schedule the user authored:
- * windows configured, but none of their weekdays occur in this period (a
- * Monday-only channel asked for a Tue–Thu range) — every day at the first
- * configured window's time, so the channel at least keeps its usual hour.
- * Honouring the days here would mean generating nothing at all, which is a worse
- * answer to "give me 5 posts next week" than posting off-schedule.
+ * STRICTLY INSIDE THE WINDOWS, too: the last slot of a 12:00–17:00 window is
+ * 16:00, and 17:00 is not eligible however many posts are asked for.
  *
- * Also empty when the range itself is unusable.
+ * DISTINCT INSTANTS. The dedupe in `timesByWeekday` works on wall clocks, which
+ * is one instant short of enough: on the spring-forward day the skipped hour has
+ * no instant of its own and `appZoneInstant` resolves it forward, so 03:00 and
+ * 04:00 in Sofia on 2026-03-29 are the same moment. Two posts at one instant is
+ * exactly what a custom distribution refuses as `duplicate_slot`, and the even
+ * planner must not manufacture the situation to begin with.
+ *
+ * Not exported: what callers want is `deriveEligibleSlots`, which is this minus
+ * the past. This exists separately only so `planEvenDistribution` can tell "the
+ * period contains no posting day at all" from "it does, but the day is spent" —
+ * two different problems with two different fixes.
  */
-export function deriveEligibleSlots(plan: BulkSlotPlan): Date[] {
+function configuredSlotsInPeriod(plan: BulkSlotPlan): Date[] {
   const days = inclusiveDayCount(plan.startDate, plan.endDate);
   const start = parseIsoDate(plan.startDate);
   if (days === null || start === null) return [];
@@ -296,21 +393,102 @@ export function deriveEligibleSlots(plan: BulkSlotPlan): Date[] {
 
   // Days ascending, and each day's times already sorted — so this comes out
   // chronological without a second sort.
-  const byDay = windowsByWeekday(windows);
-  const configured: Date[] = [];
+  const byDay = eligibleTimesByWeekday(windows);
+  const slots: Date[] = [];
+  const seen = new Set<number>();
   for (let offset = 0; offset < days; offset++) {
     const day = new Date(start.getTime() + offset * DAY_MS);
     for (const time of byDay[utcDayIndex(day)]) {
       const at = slotInstant(day, time);
-      if (at !== null) configured.push(at);
+      if (at === null || seen.has(at.getTime())) continue;
+      seen.add(at.getTime());
+      slots.push(at);
     }
   }
 
-  return configured.length > 0 ? configured : everyDayInPeriod(start, days, windows);
+  return slots;
 }
 
 /**
- * The scheduled instants for one bulk run, earliest first.
+ * Every instant inside the period at which this channel MAY STILL publish,
+ * earliest first.
+ *
+ * This is the candidate set the requested posts are drawn from, and it is the
+ * ONLY source of publishing instants this mode has: the configured slots of
+ * `configuredSlotsInPeriod`, minus the ones already behind `plan.now`.
+ *
+ * THE PAST IS NOT A SCHEDULE. A bulk period may legitimately start today, and
+ * the channel's window for today has very likely already begun — a five-hour
+ * Friday window asked about at 15:00 has had four of its slots go by. Every slot
+ * here becomes a real `Post.scheduledFor`, so keeping those would write drafts
+ * that are past due the moment they exist: the publisher refuses to fire them
+ * (lib/scheduling/publish-window.ts) and the user is left with a batch nobody
+ * asked to be stranded. The comparison is on INSTANTS and is strict — see
+ * `isStillAhead`.
+ *
+ * EMPTY WHEN THE CHANNEL HAS NO USABLE WINDOW, when no configured weekday occurs
+ * in the period, and when every configured slot in it has gone by.
+ * `planEvenDistribution` tells those three apart; here they are all simply "no
+ * slot", because none of them is a time a post could be given.
+ *
+ * Also empty when the range itself is unusable — refused upstream as
+ * `INVALID_DATE_RANGE`, and a range that names no days holds no slots either
+ * way.
+ */
+export function deriveEligibleSlots(plan: BulkSlotPlan): Date[] {
+  return configuredSlotsInPeriod(plan).filter((slot) => isStillAhead(slot, plan.now));
+}
+
+/**
+ * Whether a slot is far enough ahead to be worth scheduling — STRICTLY after
+ * `now`.
+ *
+ * Strict, so a slot falling on this very instant counts as gone: its publish
+ * time would arrive before the post had been generated, let alone reviewed and
+ * approved. There is no grace period in the other direction either, and
+ * deliberately: a slot that has passed is not made available again by being only
+ * a little bit past, and the honest answer to "there is no room left today" is
+ * to say so rather than to schedule into a few minutes' time.
+ *
+ * Both sides are absolute instants, so the business zone and its DST changes are
+ * already accounted for by the time this is asked — a 16:00 Sofia slot in August
+ * is 13:00Z and is compared as such.
+ */
+function isStillAhead(slot: Date, now: Date): boolean {
+  return slot.getTime() > now.getTime();
+}
+
+/** Why an even distribution cannot be planned, with the numbers behind it. */
+export type BulkPlanProblem =
+  /** No usable posting schedule at all. */
+  | { code: "NO_POSTING_WINDOWS" }
+  /** A schedule exists, but none of its weekdays occur in the chosen period. */
+  | { code: "NO_POSTING_DAYS_IN_PERIOD"; days: PostingDay[] }
+  /**
+   * The period does contain the channel's posting days, but every slot on them
+   * has already gone by.
+   *
+   * Its own code rather than a zero-availability `INSUFFICIENT_POSTING_SLOTS`,
+   * because it is a different sentence to the person reading it: "there is no
+   * room left in this period" is fixed by choosing a later one, whereas "there
+   * is not enough room" is also fixed by asking for fewer posts — advice that
+   * would be simply wrong here, since no number of posts fits.
+   */
+  | { code: "NO_FUTURE_POSTING_SLOTS" }
+  /** The period holds fewer FUTURE publishing slots than posts were asked for. */
+  | { code: "INSUFFICIENT_POSTING_SLOTS"; requested: number; available: number };
+
+export type BulkPlanResult = { ok: true; slots: Date[] } | { ok: false; problem: BulkPlanProblem };
+
+/**
+ * The scheduled instants for one bulk run, earliest first — or why there are
+ * none.
+ *
+ * THE one answer to "when would this batch publish?", shared by all three places
+ * that need it: the form previews with it, the enqueue path refuses a request
+ * with it, and the worker schedules from it. A second implementation anywhere is
+ * how a preview starts lying and how an accepted request starts failing in a
+ * worker log.
  *
  * The posts are spread evenly over the eligible slots by stratified sampling:
  * the eligible list is cut into `count` equal shares and each post takes the
@@ -319,65 +497,56 @@ export function deriveEligibleSlots(plan: BulkSlotPlan): Date[] {
  * spread genuinely lands them there. (Three posts over a fortnight of daily
  * slots come out at roughly days 2, 7 and 12, not 1, 7 and 14.)
  *
- * FALLBACK — more posts requested than there are eligible slots. Every post
- * still maps to a share centre, so several posts share a slot; each one that
- * would land at or before the previous post is pushed to one hour after it.
- * Deterministic, chronological, and it keeps the posts inside the channel's
- * configured rhythm instead of inventing new posting days. Past 23:00 they stop
- * moving and may share a time — reaching that needs a channel whose window is
- * already late in the evening plus a period short enough to pile the whole
- * batch onto it, and nothing is silently lost when it happens.
+ * With at least as many slots as posts, those share centres are strictly
+ * increasing, so the chosen slots are DISTINCT and in order without any
+ * collision rule — the shares are at least one slot wide, so no two centres can
+ * land on the same one. That is why there is no longer an overflow rule to get
+ * wrong: fewer slots than posts is refused rather than resolved.
  *
- * Returns an empty array for a non-positive count, an unusable range, or a
- * channel with no usable posting window. Callers validate first and report a
- * proper error code — `NO_POSTING_WINDOWS` for the last of those — so this only
- * has to be safe, and never has to guess an hour to avoid coming back empty.
+ * A non-positive or non-integer count plans nothing and reports it as the
+ * shortfall it is; `validateBulkRequestShape` refuses it as `INVALID_POST_COUNT`
+ * long before this, so it only has to be safe here.
  */
-export function planBulkSlots(plan: BulkSlotPlan): Date[] {
-  if (plan.count < 1) return [];
+export function planEvenDistribution(plan: BulkSlotPlan): BulkPlanResult {
+  if (usableWindows(plan.postingWindows) === null) {
+    return { ok: false, problem: { code: "NO_POSTING_WINDOWS" } };
+  }
+
+  // Asked before the clock is applied, so "this period never contains a Friday"
+  // stays distinguishable from "the Friday it contains is over".
+  if (configuredSlotsInPeriod(plan).length === 0) {
+    return {
+      ok: false,
+      problem: {
+        code: "NO_POSTING_DAYS_IN_PERIOD",
+        days: configuredPostingDays(plan.postingWindows),
+      },
+    };
+  }
 
   const eligible = deriveEligibleSlots(plan);
-  if (eligible.length === 0) return [];
+  if (eligible.length === 0) {
+    return { ok: false, problem: { code: "NO_FUTURE_POSTING_SLOTS" } };
+  }
+
+  const count = Number.isInteger(plan.count) ? plan.count : 0;
+  if (count > eligible.length || count < 1) {
+    return {
+      ok: false,
+      problem: {
+        code: "INSUFFICIENT_POSTING_SLOTS",
+        requested: plan.count,
+        available: eligible.length,
+      },
+    };
+  }
 
   const slots: Date[] = [];
-  let previous: Date | null = null;
-
-  for (let i = 0; i < plan.count; i++) {
-    const index = Math.min(
-      eligible.length - 1,
-      Math.floor(((i + 0.5) * eligible.length) / plan.count)
-    );
-
-    const when = pushPastPrevious(eligible[index], previous);
-    slots.push(when);
-    previous = when;
+  for (let i = 0; i < count; i++) {
+    slots.push(eligible[Math.floor(((i + 0.5) * eligible.length) / count)]);
   }
 
-  return slots;
-}
-
-/**
- * `candidate`, moved to an hour after `previous` if it would not otherwise be
- * strictly later — the shared rule for "two posts want the same slot".
- *
- * Clamped at 23:00 rather than spilling into the next day: a post must never
- * silently move off the day it was planned for (in a custom distribution, the
- * day the user typed). Reaching the clamp needs a late window plus more posts
- * than the day has room for, and nothing is dropped when it happens.
- *
- * Both the hour and the day here are business-zone, matching the slots being
- * pushed — 23:00 means 23:00 in Sofia, and "the same day" is the Sofia day.
- */
-function pushPastPrevious(candidate: Date, previous: Date | null): Date {
-  if (previous === null || candidate.getTime() > previous.getTime()) {
-    return new Date(candidate.getTime());
-  }
-
-  const clock = appZoneClock(previous);
-  if (clock === null) return new Date(previous.getTime());
-
-  const hour = Math.min(LAST_HOUR_OF_DAY, clock.hour + 1);
-  return appZoneInstant(clock.day, hour, clock.minute) ?? new Date(previous.getTime());
+  return { ok: true, slots };
 }
 
 // ─── Custom distribution ───────────────────────────────────────────────────────
@@ -403,18 +572,6 @@ export function parseTimeOfDay(value: string): TimeOfDay | null {
 /** A time of day → the `HH:mm` a time input shows and the request carries. */
 export function formatTimeOfDay(time: TimeOfDay): string {
   return `${String(time.hour).padStart(2, "0")}:${String(time.minute).padStart(2, "0")}`;
-}
-
-/** Whether a time of day is one a clock can actually show. */
-function isRealTimeOfDay(time: TimeOfDay): boolean {
-  return (
-    Number.isInteger(time.hour) &&
-    Number.isInteger(time.minute) &&
-    time.hour >= 0 &&
-    time.hour <= LAST_HOUR_OF_DAY &&
-    time.minute >= 0 &&
-    time.minute <= 59
-  );
 }
 
 /**
@@ -606,7 +763,7 @@ export function defaultTimesForDay(
   if (windows === null) return [];
 
   const dayIndex = utcDayIndex(day);
-  const configured = windowsByWeekday(windows)[dayIndex];
+  const configured = windowStartsByWeekday(windows)[dayIndex];
   const seeds = configured.length > 0 ? configured : [windowStartOn(windows, dayIndex)];
 
   const times: string[] = [];

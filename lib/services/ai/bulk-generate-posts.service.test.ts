@@ -35,12 +35,16 @@ const START = "2026-08-17";
 const END = "2026-08-30";
 
 /**
- * The harness's default channel schedule: every day at 10:00.
+ * The harness's default channel schedule: every day at 10:00, one hour wide.
  *
  * An even spread is refused outright for a channel with no posting windows, so
  * the tests below that are about ORCHESTRATION — the loop, the budget, the
  * content mix, the failure handling — need a configured channel to be about
  * anything at all. A slot on every day also keeps the planned dates legible.
+ *
+ * One hour wide on purpose: a window is a range that opens out into an hourly
+ * slot each, so a wider one would put two slots on every day and make the dates
+ * these tests read back a statement about the spread rather than about the loop.
  */
 const EVERY_DAY_10 = [
   "MONDAY",
@@ -50,7 +54,7 @@ const EVERY_DAY_10 = [
   "FRIDAY",
   "SATURDAY",
   "SUNDAY",
-].map((day) => ({ day, start: "10:00", end: "12:00" }));
+].map((day) => ({ day, start: "10:00", end: "11:00" }));
 
 /** Everything the bulk service passes to ONE generation, as it received it. */
 interface RecordedCall {
@@ -267,7 +271,7 @@ describe("bulkGeneratePosts — a fully satisfied request", () => {
 
   it("publishes only on the channel's configured posting days and times", async () => {
     const { deps, calls } = makeDeps({
-      postingWindows: [{ day: "MONDAY", start: "07:45", end: "09:00" }],
+      postingWindows: [{ day: "MONDAY", start: "07:45", end: "08:45" }],
     });
 
     await bulkGeneratePosts(SLUG, USER_ID, false, makeInput({ numberOfPosts: 2 }), deps);
@@ -278,6 +282,22 @@ describe("bulkGeneratePosts — a fully satisfied request", () => {
     assert.deepEqual(
       calls().map((c) => slotStamp(c.options.scheduledFor as Date)),
       ["2026-08-17T07:45", "2026-08-24T07:45"]
+    );
+  });
+
+  it("fills a wide window an hour at a time without leaving it", async () => {
+    // The same Monday-only channel, but its window is two hours wide, so each
+    // Monday carries two publishing slots. Four posts fill both Mondays exactly
+    // — and nothing lands at 09:45, which is outside the window.
+    const { deps, calls } = makeDeps({
+      postingWindows: [{ day: "MONDAY", start: "07:45", end: "09:45" }],
+    });
+
+    await bulkGeneratePosts(SLUG, USER_ID, false, makeInput({ numberOfPosts: 4 }), deps);
+
+    assert.deepEqual(
+      calls().map((c) => slotStamp(c.options.scheduledFor as Date)),
+      ["2026-08-17T07:45", "2026-08-17T08:45", "2026-08-24T07:45", "2026-08-24T08:45"]
     );
   });
 });
@@ -560,7 +580,11 @@ describe("bulkGeneratePosts — request validation", () => {
   });
 
   it("accepts a single-day range", async () => {
-    const { deps } = makeDeps();
+    // Two posts on one day, so the channel's window for that day has to hold
+    // two publishing slots — a range check, not a room check.
+    const { deps } = makeDeps({
+      postingWindows: [{ day: "MONDAY", start: "10:00", end: "12:00" }],
+    });
 
     const result = await bulkGeneratePosts(
       SLUG,
@@ -780,6 +804,89 @@ describe("bulkGeneratePosts — a user-authored schedule", () => {
     });
 
     assert.equal(loads, 1);
+  });
+
+  it("schedules only slots that are still ahead of the worker's clock", async () => {
+    // The period is TODAY, and the channel's window opened this morning. The
+    // worker measures against its own clock — the same rule that already refuses
+    // a stale job as START_DATE_IN_PAST, at a finer granularity — so the posts
+    // land in the afternoon rather than being back-dated to 09:00.
+    //
+    // 2026-08-21 is a Friday; 09:00–14:00 Sofia is 06:00Z…10:00Z, and the clock
+    // below reads 11:30 Sofia.
+    const { deps, calls } = makeDeps({
+      postingWindows: [{ day: "FRIDAY", start: "09:00", end: "14:00" }],
+    });
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ numberOfPosts: 2, startDate: "2026-08-21", endDate: "2026-08-21" }),
+      { ...deps, now: () => Date.parse("2026-08-21T08:30:00.000Z") }
+    );
+
+    assert.equal(result.success, true);
+    assert.deepEqual(
+      calls().map((c) => slotStamp(c.options.scheduledFor as Date)),
+      ["2026-08-21T12:00", "2026-08-21T13:00"]
+    );
+  });
+
+  it("refuses rather than back-dating when the day's window is spent", async () => {
+    // Same channel, same day, asked about in the evening. Nothing is generated:
+    // a batch of posts whose publish times have gone by is worse than a refusal,
+    // and the publisher would decline to send them anyway.
+    const { deps, calls } = makeDeps({
+      postingWindows: [{ day: "FRIDAY", start: "09:00", end: "14:00" }],
+    });
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ numberOfPosts: 1, startDate: "2026-08-21", endDate: "2026-08-21" }),
+      { ...deps, now: () => Date.parse("2026-08-21T17:00:00.000Z") }
+    );
+
+    assert.equal(result.success, false);
+    if (result.success) return;
+    assert.equal(result.code, "NO_FUTURE_POSTING_SLOTS");
+    assert.equal(calls().length, 0);
+  });
+
+  it("gives each channel its own timetable, from its own windows", async () => {
+    // The multi-channel promise, end to end: Facebook publishes Monday mornings
+    // and Instagram Thursday evenings, so a topic's two versions go out on
+    // different days at different times. Neither channel's schedule is allowed
+    // to leak into the other's — this is the case the old single-channel preview
+    // could not show, and it was never asserted here either.
+    const { deps, calls } = makeDeps();
+
+    const result = await bulkGeneratePosts(
+      SLUG,
+      USER_ID,
+      false,
+      makeInput({ channels: ["facebook", "instagram"], numberOfPosts: 2 }),
+      {
+        ...deps,
+        loadPostingWindows: async (_slug, channel) =>
+          channel === "facebook"
+            ? [{ day: "MONDAY", start: "09:00", end: "10:00" }]
+            : [{ day: "THURSDAY", start: "18:30", end: "19:30" }],
+      }
+    );
+
+    assert.equal(result.success, true);
+
+    const byChannel = (channel: string) =>
+      calls()
+        .filter((c) => c.channel === channel)
+        .map((c) => slotStamp(c.options.scheduledFor as Date));
+
+    // The two Mondays and the two Thursdays of the period, each at its own hour.
+    assert.deepEqual(byChannel("facebook"), ["2026-08-17T09:00", "2026-08-24T09:00"]);
+    assert.deepEqual(byChannel("instagram"), ["2026-08-20T18:30", "2026-08-27T18:30"]);
   });
 });
 

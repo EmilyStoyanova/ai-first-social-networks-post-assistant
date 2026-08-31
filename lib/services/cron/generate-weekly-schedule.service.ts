@@ -5,7 +5,8 @@ import {
 } from "@/lib/services/ai/build-generation-context.service";
 import {
   parsePostingWindows,
-  windowStartOn,
+  postingDaySlots,
+  type PostingDaySlot,
   type PostingWindowEntry,
 } from "@/lib/scheduling/posting-windows";
 import { generatePostFromContext } from "@/lib/services/ai/generate-draft-post.service";
@@ -64,6 +65,24 @@ export interface WeeklyScheduleSummary {
    * reads to find out that the fix is on the settings page.
    */
   skippedChannels: Array<{ channel: string; reason: "NO_POSTING_WINDOWS" }>;
+  /**
+   * Channels whose weekly target was reduced to the number of days they
+   * configured, because automatic scheduling places at most one post per
+   * calendar day.
+   *
+   * A channel asking for 5 posts with one Friday window gets 1 post, not 5 —
+   * the surplus has nowhere to go that its owner authorised. Reported rather
+   * than absorbed silently, for the same reason `skippedChannels` is: a cron
+   * writing one post where five were configured must not look like a cron that
+   * is failing. The fix is on the settings page, which now refuses to save the
+   * combination in the first place; this covers rows saved before it did.
+   */
+  cappedChannels: Array<{
+    channel: string;
+    requested: number;
+    scheduled: number;
+    reason: "FEWER_POSTING_DAYS_THAN_TARGET";
+  }>;
 }
 
 /** Monday 00:00 UTC of the week after the given date. */
@@ -76,30 +95,23 @@ export function nextWeekStart(from: Date): Date {
 }
 
 /**
- * Picks the scheduled time for the Nth post (0-based) of `target` posts in a
- * week: posts are spread evenly across the 7 days, at the start of the
- * channel's posting window for that day.
+ * The instant one of the channel's configured posting days names in this week.
  *
- * `windows` is non-empty by construction — a channel without one never reaches
- * this function, because it is never given a share of the week in the first
- * place. That is what removes the last place an automatic post could be dated by
- * an hour nobody chose.
+ * The caller picks the SLOT — one of `postingDaySlots`, which exist only for
+ * weekdays the owner explicitly configured — and this turns it into a date.
+ * There is no day arithmetic left here to get wrong.
+ *
+ * It used to spread the target evenly over all seven days and look up a time for
+ * whatever day that produced, which is how a channel configured for Friday alone
+ * ended up with posts on Monday, Tuesday, Wednesday and Saturday, each carrying
+ * Friday's hour. A window authorises its own weekday and no other.
  */
-function slotFor(
-  weekStart: Date,
-  slotIndex: number,
-  target: number,
-  windows: readonly PostingWindowEntry[]
-): Date {
-  const dayIndex = Math.min(6, Math.floor((slotIndex * 7) / Math.max(target, 1)));
-
+function slotFor(weekStart: Date, slot: PostingDaySlot): Date {
   // weekStart is always a Monday, so the slot's DAY_ORDER index is its offset.
-  const { hour, minute } = windowStartOn(windows, dayIndex);
-
-  const slot = new Date(weekStart);
-  slot.setUTCDate(slot.getUTCDate() + dayIndex);
-  slot.setUTCHours(hour, minute, 0, 0);
-  return slot;
+  const at = new Date(weekStart);
+  at.setUTCDate(at.getUTCDate() + slot.dayIndex);
+  at.setUTCHours(slot.time.hour, slot.time.minute, 0, 0);
+  return at;
 }
 
 interface ChannelConfigRow {
@@ -118,9 +130,22 @@ interface ChannelConfigRow {
  * there. Re-parsing per slot would let the two questions — "may this channel be
  * scheduled at all" and "at what time" — be answered from separate reads of the
  * same JSON, which is precisely how a default hour creeps back in.
+ *
+ * `daySlots` and `target` are derived there too, for the same reason: the days
+ * this channel may publish on and how many posts its week can hold are one
+ * decision, taken once, and every post placed below reads it rather than
+ * re-deriving it.
  */
 interface SchedulableChannel extends ChannelConfigRow {
   windows: PostingWindowEntry[];
+  /** One per explicitly configured weekday — the only days a post may land on. */
+  daySlots: PostingDaySlot[];
+  /**
+   * The posts this channel's week can actually hold: its weekly target, capped
+   * at the per-channel ceiling AND at the number of days it configured, since
+   * automatic scheduling places at most one post per calendar day.
+   */
+  target: number;
 }
 
 // ─── Minimal DB interface for testability ─────────────────────────────────────
@@ -276,6 +301,7 @@ export async function generateWeeklySchedule(
   // nothing for the cron to do this week.
   const schedulable: SchedulableChannel[] = [];
   const skippedChannels: WeeklyScheduleSummary["skippedChannels"] = [];
+  const cappedChannels: WeeklyScheduleSummary["cappedChannels"] = [];
 
   for (const config of channelConfigs) {
     const windows = parsePostingWindows(config.postingWindows);
@@ -283,7 +309,27 @@ export async function generateWeeklySchedule(
       skippedChannels.push({ channel: config.channel, reason: "NO_POSTING_WINDOWS" });
       continue;
     }
-    schedulable.push({ ...config, windows });
+
+    // ── The one-post-per-day rule ───────────────────────────────────────────
+    // A week can hold no more posts than the channel has days to put them on.
+    // Capping here, at the same place the target is otherwise decided, is what
+    // keeps the surplus from being placed on days nobody configured — the old
+    // behaviour, where postsPerWeek=5 against a single Friday window produced
+    // posts on four other weekdays at Friday's hour.
+    const daySlots = postingDaySlots(windows);
+    const requested = Math.min(config.postsPerWeek, MAX_POSTS_PER_CHANNEL_PER_WEEK);
+    const target = Math.min(requested, daySlots.length);
+
+    if (target < requested) {
+      cappedChannels.push({
+        channel: config.channel,
+        requested,
+        scheduled: target,
+        reason: "FEWER_POSTING_DAYS_THAN_TARGET",
+      });
+    }
+
+    schedulable.push({ ...config, windows, daySlots, target });
   }
 
   if (schedulable.length === 0) {
@@ -298,6 +344,7 @@ export async function generateWeeklySchedule(
       exhaustedQuotas: [],
       shortfalls: [],
       skippedChannels,
+      cappedChannels,
     };
   }
 
@@ -321,6 +368,7 @@ export async function generateWeeklySchedule(
       exhaustedQuotas: [],
       shortfalls: [],
       skippedChannels,
+      cappedChannels,
     };
   }
 
@@ -361,6 +409,7 @@ export async function generateWeeklySchedule(
     exhaustedQuotas: [],
     shortfalls: [],
     skippedChannels,
+    cappedChannels,
   };
 
   const budget: RunBudget = { remaining: MAX_GENERATIONS_PER_RUN };
@@ -417,7 +466,9 @@ async function fillChannelPooled(
 ): Promise<void> {
   const { companyId, scheduleId, weekStart, config, budget, summary, buildContext, generate } =
     fill;
-  const target = Math.min(config.postsPerWeek, MAX_POSTS_PER_CHANNEL_PER_WEEK);
+  // Decided at the gate: the weekly target already capped at the per-channel
+  // ceiling and at the number of days this channel configured.
+  const target = config.target;
 
   let have = 0;
   for (const count of generatedBySource.values()) have += count;
@@ -426,6 +477,12 @@ async function fillChannelPooled(
     // Soft deadline: stop between posts rather than starting another LLM/image generation
     // past the cron time budget. What's unwritten stays "generating" and resumes next run.
     if (fill.shouldStop()) break;
+
+    // No configured day left to put a post on. Unreachable while `have < target`
+    // — target IS the day count when days are the binding constraint — and kept
+    // as the structural guarantee that a post is never created without one.
+    const daySlot = config.daySlots[have];
+    if (!daySlot) break;
 
     const contextResult = await buildContext(companyId, config.channel);
     if (!contextResult.success) {
@@ -438,7 +495,7 @@ async function fillChannelPooled(
       // (which already falls back to the brand default) is used.
       contentLanguage: config.postingLanguage ?? undefined,
       scheduleId,
-      scheduledFor: slotFor(weekStart, have, target, config.windows),
+      scheduledFor: slotFor(weekStart, daySlot),
       initialStatus: "pending_approval",
       // Descriptive only, for the generation trace: the `scheduleId` above
       // already derives `cron`, and this adds how the article window was ordered.
@@ -510,7 +567,12 @@ async function fillChannelFromMix(
   // result is the channel's target — scaleMixToTotal hits the number exactly —
   // except for an all-zero recipe, which has no proportions to apply and
   // correctly yields an empty week rather than an invented split.
-  const quotas = mixForChannel(mix, config.postsPerWeek);
+  // The channel's target as the gate settled it — its weekly count capped at the
+  // per-channel ceiling and at the days it configured — so the recipe is scaled
+  // to a week that can actually be placed. Handing mixForChannel the raw
+  // postsPerWeek instead would split 5 posts across sources for a channel with
+  // one posting day, and four of them would have nowhere to go.
+  const quotas = mixForChannel(mix, config.target);
   const target = contentMixTotal(quotas);
   const generatedBySource = new Map(existing);
   const exhausted = new Set<string | null>();
@@ -532,6 +594,13 @@ async function fillChannelFromMix(
 
     const due = nextDueQuota({ quotas, generatedBySource, exhausted });
     if (!due) break; // every quota is filled or exhausted
+
+    // The day this post would go on. Absent once every configured day is taken —
+    // which is also where the target ends, so this is the structural guarantee
+    // rather than a second rule: no post is created without a day its owner
+    // explicitly configured.
+    const daySlot = config.daySlots[totalGenerated()];
+    if (!daySlot) break;
 
     const scope: SourceScope =
       due.sourceId === COMPANY_CONTENT_SOURCE_ID
@@ -564,7 +633,7 @@ async function fillChannelFromMix(
       // (which already falls back to the brand default) is used.
       contentLanguage: config.postingLanguage ?? undefined,
       scheduleId,
-      scheduledFor: slotFor(weekStart, totalGenerated(), target, config.windows),
+      scheduledFor: slotFor(weekStart, daySlot),
       initialStatus: "pending_approval",
       contentSourceId: due.sourceId,
       // Descriptive only, for the generation trace — see the pooled path above.

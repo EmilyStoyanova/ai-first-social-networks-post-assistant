@@ -68,7 +68,11 @@ import {
   remainingBudgetMs,
   runInRequestDeadline,
 } from "@/lib/http/request-deadline";
-import { planBulkSlots, planCustomSlots, type BulkCustomDay } from "@/lib/scheduling/bulk-schedule";
+import {
+  planCustomSlots,
+  planEvenDistribution,
+  type BulkCustomDay,
+} from "@/lib/scheduling/bulk-schedule";
 import {
   loadPostingWindowsFromDb,
   validateBulkRequest,
@@ -311,6 +315,13 @@ export type BulkGeneratePostsResult =
   // An even spread was asked for over a channel with no posting schedule, so
   // there is no time of day to spread across and none is invented.
   | { success: false; code: "NO_POSTING_WINDOWS"; message: string }
+  // …or over a period holding none of that channel's posting days, or fewer
+  // publishing slots than the number of posts asked for. Refused rather than
+  // borrowing a weekday or overflowing past the end of a window.
+  | { success: false; code: "NO_POSTING_DAYS_IN_PERIOD"; message: string }
+  // …or over a period whose publishing times have all gone by.
+  | { success: false; code: "NO_FUTURE_POSTING_SLOTS"; message: string }
+  | { success: false; code: "INSUFFICIENT_POSTING_SLOTS"; message: string }
   | { success: false; code: "INVALID_SOURCE_MIX"; message: string }
   | GenerateDraftPostFailure;
 
@@ -627,15 +638,31 @@ export async function bulkGeneratePosts(
     for (const channel of input.channels) slotsByChannel.set(channel, shared);
   } else {
     for (const channel of input.channels) {
-      slotsByChannel.set(
-        channel,
-        planBulkSlots({
-          startDate: input.startDate,
-          endDate: input.endDate,
-          count: input.numberOfPosts,
-          postingWindows: await readPostingWindows(slug, channel),
-        })
-      );
+      const planned = planEvenDistribution({
+        startDate: input.startDate,
+        endDate: input.endDate,
+        count: input.numberOfPosts,
+        postingWindows: await readPostingWindows(slug, channel),
+        // The worker's own clock, and the same one the check above used. A job
+        // that sat in the queue long enough for its slots to go by is refused
+        // rather than written into the past — the same rule that already
+        // refuses a stale batch as START_DATE_IN_PAST, at a finer granularity.
+        now: new Date(now()),
+      });
+
+      // Unreachable in practice: the check above ran this same planner over the
+      // same memoised windows and refused anything it could not plan. Answered
+      // rather than assumed all the same, because the alternative — an empty
+      // slot list — would report a successful batch of zero posts, which is the
+      // one outcome this whole path exists to avoid.
+      if (!planned.ok) {
+        return asRequestFailure({
+          code: planned.problem.code,
+          message: `The requested posts cannot be placed in the chosen period for ${channel}.`,
+        });
+      }
+
+      slotsByChannel.set(channel, planned.slots);
     }
   }
 
