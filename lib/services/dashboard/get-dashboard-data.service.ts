@@ -14,7 +14,6 @@ export interface DashboardActivityItem {
 
 export interface DashboardData {
   companies: CompanyListItem[];
-  totalPending: number;
   totalDrafts: number;
   recentActivity: DashboardActivityItem[];
 }
@@ -25,7 +24,6 @@ export async function getDashboardData(
 ): Promise<DashboardData> {
   const companies = await listCompanies(userId, isGlobalAdmin);
 
-  const totalPending = companies.reduce((sum, c) => sum + c.pendingCount, 0);
   const totalDrafts = companies.reduce((sum, c) => sum + c.draftCount, 0);
 
   const recentActivity: DashboardActivityItem[] = [];
@@ -62,5 +60,5 @@ export async function getDashboardData(
     }
   }
 
-  return { companies, totalPending, totalDrafts, recentActivity };
+  return { companies, totalDrafts, recentActivity };
 }

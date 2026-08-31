@@ -13,7 +13,6 @@ import {
 } from "lucide-react";
 import { RoleBadge } from "@/components/ui/RoleBadge";
 import type { CompanyDetails } from "@/lib/services/company/get-company.service";
-import { countPendingApprovals } from "@/lib/services/company/count-pending-approvals.service";
 import { CompanyWorkspaceNav, type WorkspaceTab } from "./company-workspace-nav";
 
 interface Props {
@@ -33,18 +32,13 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
   const t = await getTranslations("workspace");
   const { slug } = company;
 
-  // Sourced here rather than passed in, so the badge is identical on every
-  // workspace page without eight callers each deciding whether to compute it.
-  // One source, one number — which is what §9.4 asks for now that the filter
-  // chip on Posts shows the same count.
-  const pendingApprovals = await countPendingApprovals(company.id);
-
   // Team is not a tab — it is rare-touch configuration reached through the
   // Settings sub-navigation, which Phase 4b built to hold it. Approvals is not
   // one either: Phase 4c folded the queue into a Posts filter, so approving
-  // happens where the posts already are. Its count badge came with it, because
-  // the pull signal was the tab's real job and Principle 4 still needs
-  // somewhere to put it.
+  // happens where the posts already are. It carries no count badge of its
+  // own any more — `pending_approval` stopped being a generation outcome, so a
+  // badge here would be pulling toward a queue nothing actively feeds (see
+  // lib/posts/post-status-filter.ts).
   //
   // Channels is the seventh, and it is a place rather than a filter: Posts is
   // the whole company's output as a grid, Channels is one network at a time,
@@ -57,8 +51,6 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
       label: t("tabs.posts"),
       href: `/companies/${slug}/posts`,
       icon: FileText,
-      count: pendingApprovals,
-      countLabel: t("pendingApprovalsLabel", { count: pendingApprovals }),
     },
     {
       key: "channels",

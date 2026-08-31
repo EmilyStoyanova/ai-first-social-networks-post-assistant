@@ -6,7 +6,6 @@ export type CompanyListItem = {
   slug: string;
   website: string | null;
   role: "OWNER" | "EDITOR" | null;
-  pendingCount: number;
   draftCount: number;
 };
 
@@ -75,25 +74,16 @@ export async function listCompanies(
 
   const ids = baseItems.map((c) => c.id);
 
-  const [pendingRows, draftRows] = await Promise.all([
-    prisma.post.groupBy({
-      by: ["companyId"],
-      where: { companyId: { in: ids }, status: "pending_approval" as never },
-      _count: { _all: true },
-    }),
-    prisma.post.groupBy({
-      by: ["companyId"],
-      where: { companyId: { in: ids }, status: "draft" as never },
-      _count: { _all: true },
-    }),
-  ]);
+  const draftRows = await prisma.post.groupBy({
+    by: ["companyId"],
+    where: { companyId: { in: ids }, status: "draft" as never },
+    _count: { _all: true },
+  });
 
-  const pendingMap = new Map(pendingRows.map((r) => [r.companyId, r._count._all]));
   const draftMap = new Map(draftRows.map((r) => [r.companyId, r._count._all]));
 
   return baseItems.map((c) => ({
     ...c,
-    pendingCount: pendingMap.get(c.id) ?? 0,
     draftCount: draftMap.get(c.id) ?? 0,
   }));
 }

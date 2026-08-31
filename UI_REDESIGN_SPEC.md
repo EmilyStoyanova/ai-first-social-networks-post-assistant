@@ -1,9 +1,21 @@
 # UI Redesign Specification — AI-First Social Networks Post Assistant
 
-> **Status:** v2.2 · 2026-07-20 · Official UI/UX blueprint for the redesign — reconciled with shipped code
+> **Status:** v2.5 · 2026-08-31 · Official UI/UX blueprint for the redesign — reconciled with shipped code
 > **Audience:** Frontend engineers and designers. This document is the single source of truth for every UX decision. Engineers implementing from this spec should not need to make UX decisions on their own.
-> **Scope:** Reorganization and redesign of the existing functionality only. No feature additions, no business-logic changes, no removals.
+> **Scope:** Reorganization and redesign of the existing functionality only. No feature additions, no business-logic changes, no removals. **v2.4 and v2.5 are the two recorded exceptions** — see below: both follow real workflow/generation-outcome changes, not redesign decisions made for their own sake.
 > **Design direction:** An original design language derived from first principles — see _Design Philosophy_ below. No reference product is imitated; every decision must survive the five questions in that section. Approved visual identity: **Direction A — The Reading Room** (rationale in _Visual Identity_, concrete tokens in §6).
+
+### What changed in v2.5
+
+**The editor hand-off v2.4 said "still exists" is gone too.** v2.4 (below) retired the `pending_approval` PILL on the argument that cron generation stopped producing the status, but noted the editor's own "Submit for approval" action was untouched. It has since been removed as well: an editor now approves a draft directly — `draft` → `approved`, one action, the same step an owner gets from the same button — with no hand-off to an owner in between. What still separates the roles is PUBLISHING, not approving: `approveAndPublishPost` (Buffer) remains owner/admin-only, enforced server-side independent of the UI, and `rejectPost` remains owner-only. `canApprove` (`lib/services/posts/post-approval.service.ts`) now accepts any `draft` directly, not only a hand-scheduled one; `pending_approval` is accepted there too, purely so a row from before this change — or one an editor submitted under the old workflow — still has a way to reach `approved`. No code path creates a new one. The `/api/v1/posts/[id]/submit` route and its service function are deleted outright, not deprecated.
+
+Affected: §4.5, §9.6. (§3.8 already describes a pre-v2.1 "Approvals" tab and a reject-to-draft behaviour that do not match shipped code — a pre-existing inconsistency this change does not touch or compound.)
+
+### What changed in v2.4
+
+**A second reversal on the same filter, for the opposite reason v2.1 acted on.** v2.1 split `pending_approval` out of Drafts because a dedicated Approvals tab was gone and the filter had to answer "what is waiting on me?" on its own. That distinction depended on cron generation actually producing `pending_approval` posts. It stopped: cron-generated posts now land in `draft`, exactly like manual and bulk ones, so nothing NEW ever reaches the pill it was given — a fifth choice sitting at "0" beside a full Drafts count is not two different queues, it is the same one measured twice. v2.4 retires the PILL (`VISIBLE_POST_STATUS_FILTERS` in `lib/posts/post-status-filter.ts`), not the status: a pre-existing `pending_approval` row is untouched, and the dashboard's own "N pending approval" link still deep-links straight past the bar to that queue. (v2.4 also noted the editor's "Submit for approval" hand-off was untouched — that changed in v2.5, above.) See §4.5.
+
+Affected: §4.5 (status filter table + badge note).
 
 ### What changed in v2.2
 
@@ -748,7 +760,7 @@ Standard fields per page: Purpose · Primary action · Secondary actions · Visi
 
 - **Purpose:** Browse and manage the full post lifecycle.
 - **Primary:** **Generate post** (opens side panel, §3.7).
-- **Secondary per row:** contextual by status — Edit / Submit for approval (draft) · Publish now (approved) · Retry (failed) · History, Delete in overflow.
+- **Secondary per row:** contextual by status — Edit / Approve (draft — either role; owner sees the combined Approve & Publish instead when Buffer is connected) · Publish now (approved, owner/admin only) · Retry (failed) · History, Delete in overflow.
 - **Visible per row:** channel chip, status badge, first ~2 lines of content, scheduled time, media thumb, safety flag, rejection notes indicator; **metrics strip on published posts** (§3.9a).
 - **Hidden:** full text, versions, audit (in detail/History modal); image controls and metrics detail behind row expansion.
 - **Layout:** `FilterBar` + list of `PostCard` rows (list, not grid — text is the content) + side `GeneratePanel`.
@@ -759,19 +771,36 @@ Standard fields per page: Purpose · Primary action · Secondary actions · Visi
 
 Order is lifecycle order, left to right, so the bar reads as the workflow it filters.
 
-| Filter               | Statuses                      | Why grouped this way                                                                                                                                                                                                                                                   |
-| -------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **All**              | all seven                     | Default                                                                                                                                                                                                                                                                |
-| **Drafts**           | `draft`                       | Work nobody has been asked to look at yet. `rejected` is excluded: rejection does not reset a post to draft, so burying it here would hide an owner's decision.                                                                                                        |
-| **Pending approval** | `pending_approval`            | The approval queue (§3.8). Split out from Drafts in v2.1 when this filter replaced the Approvals tab — the difference the v2.0 grouping dismissed as "only who is waiting" is precisely what this view exists to answer. The only filter with a count outside the bar. |
-| **Approved**         | `approved`                    | Approval granted, nothing sent yet                                                                                                                                                                                                                                     |
-| **Published**        | `sent_to_buffer`, `published` | "What went out." Once sent, a post has left the system for good. Matches the pair eligible for metrics. `failed` is excluded — publishing was attempted and did not happen.                                                                                            |
+**v2.4 — Pending-approval pill retired.** Cron-generated posts stopped landing
+in `pending_approval` and now land in `draft`, exactly like manual and
+bulk-generated ones. With no NEW post ever reaching it, a fifth pill sitting at
+"0" next to a full Drafts pill read as the same queue twice — the "only who is
+waiting" overlap the v2.0 grouping was criticized for, now true in the other
+direction. Rather than deleting the status (an editor's own "Submit for
+approval" hand-off still needs somewhere to point, and a pre-existing row must
+not disappear), only the PILL is retired: `VISIBLE_POST_STATUS_FILTERS` in
+`lib/posts/post-status-filter.ts` is `POST_STATUS_FILTERS` minus
+`pending_approval`, so the bar renders four choices while every predicate,
+count and URL value keeps working exactly as written — including
+`pendingApprovalsHref`, which still deep-links straight to the (now pill-less)
+queue for the dashboard's own "N pending approval" row. A system-generated
+draft the owner wants to turn down is still Rejectable — `generatedById` is
+what tells it apart from a human's own unfinished draft (see §3.8/§4.5's
+Reject action, and `lib/posts/post-actions.ts`).
+
+| Filter               | Statuses                      | Why grouped this way                                                                                                                                                                                                |
+| -------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **All**              | all seven                     | Default                                                                                                                                                                                                             |
+| **Drafts**           | `draft`                       | Work nobody has been asked to look at yet. `rejected` is excluded: rejection does not reset a post to draft, so burying it here would hide an owner's decision.                                                     |
+| ~~Pending approval~~ | `pending_approval`            | **No longer a pill (v2.4)** — see the note above the table. Still a real status and predicate (an editor's submission, a pre-existing row); reachable only via the dashboard's own link, never by browsing the bar. |
+| **Approved**         | `approved`                    | Approval granted, nothing sent yet                                                                                                                                                                                  |
+| **Published**        | `sent_to_buffer`, `published` | "What went out." Once sent, a post has left the system for good. Matches the pair eligible for metrics. `failed` is excluded — publishing was attempted and did not happen.                                         |
 
 `rejected` and `failed` have no filter of their own and are reachable only under **All** — a documented gap, asserted by a test so it stays deliberate.
 
 The groupings mirror boundaries the services already draw; they are not invented for the UI. `lib/posts/post-status-filter.ts` is the single source and is unit-tested — the design must not introduce a sixth grouping without changing that module.
 
-**The count appears twice, from one predicate.** The Posts tab badge and the Pending-approval chip both read `FILTER_STATUSES.pending_approval`; the badge is server-rendered via `countPendingApprovals`, the chip counts the loaded list. A card action (approve / reject / submit) updates the list locally for instant feedback and calls `router.refresh()` to re-render the badge, so the two cannot drift (§9.4).
+**The count appears twice, from one predicate.** The Posts tab badge and the Pending-approval chip both read `FILTER_STATUSES.pending_approval`; the badge is server-rendered via `countPendingApprovals`, the chip counts the loaded list. A card action (approve / reject / submit) updates the list locally for instant feedback and calls `router.refresh()` to re-render the badge, so the two cannot drift (§9.4). **v2.4:** the bar's own chip for this count is gone along with the pill — the Posts tab badge and the dashboard's own row are now the only surfaces that show it.
 
 - **Loading:** 5 skeleton rows. **Error:** list-level alert + retry; row action errors as toasts.
 - **Responsive:** row actions collapse into overflow menu <768px; generate panel becomes full-screen sheet.
@@ -1351,12 +1380,26 @@ Two entry directions, one library: (a) library-first — Media tab, upload/gener
 
 ### 9.6 Roles inside the workspace
 
-| Capability                                                 | Owner / global admin | Editor                                             |
-| ---------------------------------------------------------- | -------------------- | -------------------------------------------------- |
-| Tabs visible                                               | all                  | all                                                |
-| Approve / reject / edit / generate / media / fetch sources | ✓                    | ✓                                                  |
-| Settings forms                                             | editable             | read-only + "Only owners can change settings" note |
-| Delete company, disconnect Buffer, manage team             | ✓                    | hidden (not disabled)                              |
+**v2.5:** split the old single "Approve / reject / edit / generate / media /
+fetch sources" row below — it bundled capabilities that were never actually
+identical (an editor could edit and generate but never reject, even before
+this version) and now genuinely diverge further: an editor approves a draft
+directly (no "Submit for approval" hand-off any more — that action is gone),
+but still cannot publish it or reject anyone's post. Enforced server-side in
+`approvePost`/`approveAndPublishPost`/`rejectPost`
+(`lib/services/posts/post-approval.service.ts`,
+`lib/services/buffer/publish-post.service.ts`), not merely hidden in the UI.
+
+| Capability                                      | Owner / global admin | Editor                                             |
+| ----------------------------------------------- | -------------------- | -------------------------------------------------- |
+| Tabs visible                                    | all                  | all                                                |
+| Generate / edit a draft                         | ✓                    | ✓                                                  |
+| Approve a draft (→ `approved`, never publishes) | ✓                    | ✓                                                  |
+| Publish / approve-and-publish (→ Buffer)        | ✓                    | hidden (not disabled)                              |
+| Reject                                          | ✓                    | hidden (not disabled)                              |
+| Media / fetch sources                           | ✓                    | ✓                                                  |
+| Settings forms                                  | editable             | read-only + "Only owners can change settings" note |
+| Delete company, disconnect Buffer, manage team  | ✓                    | hidden (not disabled)                              |
 
 Rule: capabilities the user _can never have_ are **hidden**; capabilities _temporarily unavailable_ (Buffer not connected, cap reached) are **disabled with an inline reason**.
 

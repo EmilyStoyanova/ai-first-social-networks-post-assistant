@@ -197,15 +197,7 @@
     "comingSoon": "Очаквайте скоро",
     "stats": {
       "companies": "Компании",
-      "pendingApprovals": "Чакащи одобрение",
       "drafts": "Чернови"
-    },
-    "pendingWork": {
-      "title": "Чакаща работа",
-      "reviewQueue": "Прегледай опашката",
-      "posts": "{count, plural, one {# публикация чака одобрение} other {# публикации чакат одобрение}}",
-      "noPending": "Всичко е наред.",
-      "noPendingDesc": "Няма публикации, чакащи одобрение."
     },
     "recentActivity": {
       "title": "Последна активност",
@@ -251,7 +243,6 @@
     "allRoles": "Всички",
     "owner": "Собственик",
     "editor": "Редактор",
-    "pendingApprovals": "{count, plural, one {# чакаща} other {# чакащи}}",
     "drafts": "{count, plural, one {# чернова} other {# чернови}}",
     "noResults": "Няма компании, съответстващи на търсенето."
   },
@@ -266,7 +257,6 @@
       "activity": "Активност",
       "channels": "Канали"
     },
-    "pendingApprovalsLabel": "{count, plural, one {# публикация чака одобрение} other {# публикации чакат одобрение}}",
     "setupHint": "Започни от тук — попълни идентичността на марката, после свържи Buffer и конфигурирай каналите. AI използва тази информация при генерирането на публикации.",
     "generatePost": "Генерирай публикация"
   },
@@ -308,12 +298,10 @@
     "created": "Създадена",
     "kpis": {
       "postsThisMonth": "Публикации този месец",
-      "pendingApproval": "Чакат одобрение",
       "published": "Публикувани",
       "connectedChannels": "Свързани канали",
       "rssSources": "RSS източници",
       "vsLastMonth": "спрямо миналия месец",
-      "reviewAndApprove": "Прегледай и одобри",
       "ofTotalChannels": "{total, plural, =0 {Няма настроени канали} one {от # настроен} other {от # настроени}}",
       "withNewContent": "{count, plural, =0 {Няма ново съдържание} one {# с ново съдържание} other {# с ново съдържание}}"
     },
@@ -714,8 +702,6 @@
     "generateImage": "Генерирай изображение",
     "generatingImage": "Генериране на изображение…",
     "regenerateImage": "Регенерирай изображение",
-    "submitForApproval": "Изпрати за одобрение",
-    "submitting": "Изпращане…",
     "approveAndPublish": "Одобри и публикувай в Buffer",
     "approve": "Одобри",
     "approving": "Одобряване…",

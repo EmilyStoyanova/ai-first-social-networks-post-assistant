@@ -71,8 +71,11 @@ export type PublishPostResult =
  *   • approved — nothing left to approve, including a post a fully_automated
  *     channel approved at generation. Publish only.
  *
- * `rejected` is absent on purpose: an owner turned that post down, so it must be
- * resubmitted rather than published straight from the card.
+ * `rejected` is absent on purpose: an owner turned that post down, and that
+ * verdict is final — a rejected post has no route back to `approved` at all
+ * (edits are permitted, per lib/services/posts/post-editor.service.ts, but
+ * never change its status). It is not a click away from Buffer; deleting it
+ * is the only next step (lib/services/company/delete-post.service.ts).
  */
 const PUBLISHABLE_STATUSES: ReadonlySet<string> = new Set([
   "draft",
@@ -198,11 +201,14 @@ export interface PublishPostDeps {
  * single primary action.
  *
  * Owner-only, consistent with connecting/disconnecting Buffer: an editor gets
- * FORBIDDEN here and hands work over with submitForApproval instead. The
- * approval workflow itself is untouched — this only spares an owner from
- * performing an approval, on their own post, that they were always going to
- * grant. approvedById/approvedAt and a POST_APPROVED audit entry are recorded
- * exactly as approvePost would have written them.
+ * FORBIDDEN here — enforced independently of anything post-approval.service.ts
+ * decides, since that service now lets an editor approve a draft directly.
+ * Approving and publishing remain two different rights: every role that can
+ * reach `approved` can do so through `approvePost`, but only an owner/admin
+ * can reach `sent_to_buffer` through this action. approvedById/approvedAt and
+ * a POST_APPROVED audit entry are recorded exactly as approvePost would have
+ * written them, for a draft or pending_approval post this call approves on
+ * its way out.
  *
  * Ordering is what keeps a Buffer failure clean: every validation runs, then
  * Buffer is called, and only then is anything written. A post that Buffer

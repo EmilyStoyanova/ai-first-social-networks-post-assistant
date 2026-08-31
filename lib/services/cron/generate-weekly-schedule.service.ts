@@ -496,7 +496,12 @@ async function fillChannelPooled(
       contentLanguage: config.postingLanguage ?? undefined,
       scheduleId,
       scheduledFor: slotFor(weekStart, daySlot),
-      initialStatus: "pending_approval",
+      // Cron-generated posts land in the same `draft` bucket as manual ones —
+      // `pending_approval` no longer exists as a distinct generation outcome.
+      // `generatedById` is left undefined by this call (see `generate` below),
+      // which is what lets autoApprovePosts tell a system draft apart from a
+      // human's own WIP draft on a fully_automated channel.
+      initialStatus: "draft",
       // Descriptive only, for the generation trace: the `scheduleId` above
       // already derives `cron`, and this adds how the article window was ordered.
       trace: { trigger: "cron", priority: contextResult.priority },
@@ -634,7 +639,12 @@ async function fillChannelFromMix(
       contentLanguage: config.postingLanguage ?? undefined,
       scheduleId,
       scheduledFor: slotFor(weekStart, daySlot),
-      initialStatus: "pending_approval",
+      // Cron-generated posts land in the same `draft` bucket as manual ones —
+      // `pending_approval` no longer exists as a distinct generation outcome.
+      // `generatedById` is left undefined by this call (see `generate` below),
+      // which is what lets autoApprovePosts tell a system draft apart from a
+      // human's own WIP draft on a fully_automated channel.
+      initialStatus: "draft",
       contentSourceId: due.sourceId,
       // Descriptive only, for the generation trace — see the pooled path above.
       trace: { trigger: "cron", priority: contextResult.priority },

@@ -245,7 +245,6 @@ function GeneratedPostCardBody({
   const originLabelFor = usePostOriginLabel();
 
   // ── Approval state ────────────────────────────────────────────────────────
-  const [submitting, setSubmitting] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [approving, setApproving] = useState(false);
   const [approvalError, setApprovalError] = useState("");
@@ -385,6 +384,7 @@ function GeneratedPostCardBody({
     bufferConnected,
     manuallyScheduled,
     scheduledFor,
+    generatedById: post.generatedById,
     now: hydrated ? new Date() : undefined,
   });
 
@@ -432,28 +432,11 @@ function GeneratedPostCardBody({
   }
 
   // ── Approval ──────────────────────────────────────────────────────────────
-  async function handleSubmitForApproval() {
-    setSubmitting(true);
-    setApprovalError("");
-    try {
-      const res = await fetch(`/api/v1/posts/${post.id}/submit`, { method: "POST" });
-      if (!res.ok) {
-        const json = (await res.json()) as { error?: { message?: string } };
-        throw new Error(apiError(json.error));
-      }
-      setLocalStatus("PENDING_APPROVAL");
-      onStatusChange?.(post.id, "PENDING_APPROVAL");
-    } catch (err) {
-      setApprovalError(err instanceof Error ? err.message : tCommon("somethingWentWrong"));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   /**
-   * Approve without publishing — the action for a post whose time is still
-   * ahead. Goes through the plain approval route, so the post becomes `approved`
-   * with its `scheduledFor` untouched and the publishing sweep sends it when due.
+   * Approve without publishing. For a post whose time is still ahead, this
+   * leaves `scheduledFor` untouched so the publishing sweep sends it when due.
+   * For an editor, this is the WHOLE approval action — draft straight to
+   * approved, with no hand-off to an owner in between.
    */
   async function handleApproveOnly() {
     setApproving(true);
@@ -926,18 +909,6 @@ function GeneratedPostCardBody({
           </Button>
         )}
 
-        {/* Submit for approval — an editor's hand-off to an owner */}
-        {actions.submitForApproval && (
-          <Button
-            variant="secondary"
-            size="sm"
-            loading={submitting}
-            onClick={handleSubmitForApproval}
-          >
-            {submitting ? t("submitting") : t("submitForApproval")}
-          </Button>
-        )}
-
         {/* The owner's single primary action — approves on the way out when needed */}
         {actions.approveAndPublish && !publishOpen && (
           <Button variant="primary" size="sm" onClick={handleOpenPublish}>
@@ -945,7 +916,9 @@ function GeneratedPostCardBody({
           </Button>
         )}
 
-        {/* Approve alone — its publish time is still ahead, so the sweep sends it */}
+        {/* Approve alone — an editor's whole approval action on a draft, or an
+            owner's action on a post whose publish time is still ahead (the
+            sweep sends it, not this button) */}
         {actions.approveOnly && (
           <Button variant="primary" size="sm" loading={approving} onClick={handleApproveOnly}>
             {approving ? t("approving") : t("approve")}

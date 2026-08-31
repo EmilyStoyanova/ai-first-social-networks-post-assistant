@@ -13,23 +13,30 @@ function actions(overrides: Partial<PostActionsInput> = {}) {
 }
 
 describe("resolvePostActions — editor", () => {
-  it("offers only the hand-off to an owner on a draft", () => {
+  it("offers approval directly on a draft — no hand-off to an owner", () => {
     const a = actions({ role: "editor", status: "DRAFT" });
 
-    assert.equal(a.submitForApproval, true);
-    // An editor holds neither right, so nothing else is on the card.
+    assert.equal(a.approveOnly, true);
+    // An editor can never publish, whatever the status.
     assert.equal(a.approveAndPublish, false);
     assert.equal(a.reject, false);
     assert.equal(a.connectBufferHint, false);
   });
 
-  it("offers nothing once the draft is pending an owner's decision", () => {
+  it("still offers approval on a pre-existing pending_approval row (backward compatibility)", () => {
     const a = actions({ role: "editor", status: "PENDING_APPROVAL" });
 
-    // The ball is in the owner's court — resubmitting would be a no-op.
-    assert.equal(a.submitForApproval, false);
+    assert.equal(a.approveOnly, true);
     assert.equal(a.approveAndPublish, false);
     assert.equal(a.reject, false);
+  });
+
+  it("offers nothing further once approved — there is no publish action for this role", () => {
+    const a = actions({ role: "editor", status: "APPROVED" });
+
+    assert.equal(a.approveOnly, false);
+    assert.equal(a.approveAndPublish, false);
+    assert.equal(a.approvalPending, false);
   });
 
   it("never publishes, even on an approved post with Buffer connected", () => {
@@ -38,14 +45,31 @@ describe("resolvePostActions — editor", () => {
     assert.equal(a.approveAndPublish, false);
     assert.equal(a.connectBufferHint, false);
   });
+
+  it("withholds approval on a hand-scheduled draft whose time has passed", () => {
+    const a = actions({
+      role: "editor",
+      status: "DRAFT",
+      manuallyScheduled: true,
+      scheduledFor: "2026-08-12T09:00:00.000Z",
+      now: new Date("2026-08-12T09:05:00.000Z"),
+    });
+
+    assert.equal(a.scheduleMissed, true);
+    assert.equal(a.approveOnly, false);
+  });
+
+  it("never rejects, even a system-generated draft", () => {
+    const a = actions({ role: "editor", status: "DRAFT", generatedById: null });
+
+    assert.equal(a.reject, false);
+  });
 });
 
 describe("resolvePostActions — owner", () => {
-  it("skips submit-then-approve on a draft and offers the combined action", () => {
+  it("offers the combined approve-and-publish action on a draft", () => {
     const a = actions({ role: "owner", status: "DRAFT" });
 
-    // The whole point: an owner never submits a post to themselves.
-    assert.equal(a.submitForApproval, false);
     assert.equal(a.approveAndPublish, true);
     assert.equal(a.approvalPending, true);
   });
@@ -80,7 +104,7 @@ describe("resolvePostActions — owner", () => {
     const a = actions({ role: "owner", status: "SENT_TO_BUFFER" });
 
     assert.equal(a.approveAndPublish, false);
-    assert.equal(a.submitForApproval, false);
+    assert.equal(a.approveOnly, false);
   });
 
   it("replaces the publish action with a hint when Buffer is not connected", () => {
@@ -88,6 +112,39 @@ describe("resolvePostActions — owner", () => {
 
     assert.equal(a.approveAndPublish, false);
     assert.equal(a.connectBufferHint, true);
+  });
+});
+
+// ─── Rejecting a draft ────────────────────────────────────────────────────────
+// `pending_approval` no longer exists as a generation outcome — cron-generated
+// posts land in `draft` exactly like manual ones. `generatedById` is the only
+// thing left that tells a system draft (no human author) apart from a person's
+// own work in progress, and it decides whether Reject applies to a draft.
+
+describe("resolvePostActions — rejecting a draft", () => {
+  it("lets an owner reject a system-generated draft (no human author)", () => {
+    const a = actions({ role: "owner", status: "DRAFT", generatedById: null });
+
+    assert.equal(a.reject, true);
+  });
+
+  it("does not let an owner reject their own or another human's draft", () => {
+    const a = actions({ role: "owner", status: "DRAFT", generatedById: "user-1" });
+
+    assert.equal(a.reject, false);
+  });
+
+  it("never offers reject to an editor, even on a system-generated draft", () => {
+    const a = actions({ role: "editor", status: "DRAFT", generatedById: null });
+
+    assert.equal(a.reject, false);
+  });
+
+  it("does not extend reject to a non-draft, non-pending status merely for lacking an author", () => {
+    for (const status of ["APPROVED", "REJECTED", "SENT_TO_BUFFER", "PUBLISHED"]) {
+      const a = actions({ role: "owner", status, generatedById: null });
+      assert.equal(a.reject, false, `${status} must not offer reject`);
+    }
   });
 });
 
@@ -187,7 +244,7 @@ describe("resolvePostActions — manually scheduled", () => {
     assert.equal(a.approveOnly, false);
   });
 
-  it("never offers an editor either action", () => {
+  it("offers an editor approval alone on a hand-scheduled post, never publishing", () => {
     const a = actions({
       role: "editor",
       status: "PENDING_APPROVAL",
@@ -195,7 +252,10 @@ describe("resolvePostActions — manually scheduled", () => {
       scheduledFor: NOON,
     });
 
-    assert.equal(a.approveOnly, false);
+    // The time is still ahead (no clock supplied), so approval is on offer —
+    // an editor can approve a hand-scheduled post exactly like an owner can.
+    assert.equal(a.approveOnly, true);
+    // Never publishing is the one thing that never changes for this role.
     assert.equal(a.approveAndPublish, false);
     assert.equal(a.awaitingSchedule, false);
     assert.equal(a.scheduleMissed, false);

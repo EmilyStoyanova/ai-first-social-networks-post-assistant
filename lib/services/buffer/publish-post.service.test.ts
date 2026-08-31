@@ -134,7 +134,7 @@ describe("approveAndPublishPost — access", () => {
     assert.equal(result.success === false && result.code, "NOT_FOUND");
   });
 
-  it("refuses an editor, who hands off with submitForApproval instead", async () => {
+  it("refuses an editor — approving is theirs now, publishing never is", async () => {
     const h = makeDeps(makePost({ status: "pending_approval" }), { role: "editor" });
     const result = await approveAndPublishPost(POST_ID, PROFILE_ID, USER_ID, false, h.deps);
 

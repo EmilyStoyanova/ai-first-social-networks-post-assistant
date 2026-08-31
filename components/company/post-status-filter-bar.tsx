@@ -1,7 +1,7 @@
 "use client";
 
 import { useTranslations } from "next-intl";
-import { POST_STATUS_FILTERS, type PostStatusFilter } from "@/lib/posts/post-status-filter";
+import { VISIBLE_POST_STATUS_FILTERS, type PostStatusFilter } from "@/lib/posts/post-status-filter";
 
 interface Props {
   value: PostStatusFilter;
@@ -31,7 +31,7 @@ export function PostStatusFilterBar({ value, onChange, counts }: Props) {
       aria-label={t("label")}
       className="border-border bg-surface rounded-control flex flex-wrap items-center gap-1 border p-1"
     >
-      {POST_STATUS_FILTERS.map((filter) => {
+      {VISIBLE_POST_STATUS_FILTERS.map((filter) => {
         const isActive = filter === value;
         return (
           <button

@@ -102,17 +102,11 @@ export function CompanyCards({ companies }: Props) {
 
                   {/* Post status chips */}
                   <div className="mb-4 flex flex-wrap gap-1.5">
-                    {company.pendingCount > 0 && (
-                      <span className="text-micro bg-status-warning-bg text-status-warning-fg inline-flex h-[22px] items-center rounded-full px-2.5">
-                        {t("pendingApprovals", { count: company.pendingCount })}
-                      </span>
-                    )}
-                    {company.draftCount > 0 && (
+                    {company.draftCount > 0 ? (
                       <span className="text-micro bg-status-neutral-bg text-status-neutral-fg inline-flex h-[22px] items-center rounded-full px-2.5">
                         {t("drafts", { count: company.draftCount })}
                       </span>
-                    )}
-                    {company.pendingCount === 0 && company.draftCount === 0 && (
+                    ) : (
                       <span className="text-fg-faint text-xs">—</span>
                     )}
                   </div>

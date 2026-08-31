@@ -197,15 +197,7 @@
     "comingSoon": "Coming soon",
     "stats": {
       "companies": "Companies",
-      "pendingApprovals": "Pending Approvals",
       "drafts": "Drafts"
-    },
-    "pendingWork": {
-      "title": "Pending Work",
-      "reviewQueue": "Review queue",
-      "posts": "{count, plural, one {# post pending approval} other {# posts pending approval}}",
-      "noPending": "All clear.",
-      "noPendingDesc": "No posts are waiting for approval."
     },
     "recentActivity": {
       "title": "Recent Activity",
@@ -251,7 +243,6 @@
     "allRoles": "All",
     "owner": "Owner",
     "editor": "Editor",
-    "pendingApprovals": "{count, plural, one {# pending} other {# pending}}",
     "drafts": "{count, plural, one {# draft} other {# drafts}}",
     "noResults": "No companies match your search."
   },
@@ -266,7 +257,6 @@
       "activity": "Activity",
       "channels": "Channels"
     },
-    "pendingApprovalsLabel": "{count, plural, one {# post awaiting approval} other {# posts awaiting approval}}",
     "setupHint": "Start here — fill in your brand identity, then connect Buffer and configure your channels. The AI uses this information when generating posts.",
     "generatePost": "Generate post"
   },
@@ -308,12 +298,10 @@
     "created": "Created",
     "kpis": {
       "postsThisMonth": "Posts this month",
-      "pendingApproval": "Pending approval",
       "published": "Published",
       "connectedChannels": "Connected channels",
       "rssSources": "RSS sources",
       "vsLastMonth": "vs. last month",
-      "reviewAndApprove": "Review and approve",
       "ofTotalChannels": "{total, plural, =0 {No channels configured} one {of # configured} other {of # configured}}",
       "withNewContent": "{count, plural, =0 {No new content} one {# with new content} other {# with new content}}"
     },
@@ -714,8 +702,6 @@
     "generateImage": "Generate Image",
     "generatingImage": "Generating image…",
     "regenerateImage": "Regenerate Image",
-    "submitForApproval": "Submit for Approval",
-    "submitting": "Submitting…",
     "approveAndPublish": "Approve & Publish to Buffer",
     "approve": "Approve",
     "approving": "Approving…",

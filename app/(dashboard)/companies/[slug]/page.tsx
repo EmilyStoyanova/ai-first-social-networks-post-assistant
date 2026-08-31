@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import { getTranslations } from "next-intl/server";
-import { CheckCircle2, Clock, FileText, Radio, Users } from "lucide-react";
+import { CheckCircle2, FileText, Radio, Users } from "lucide-react";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { getBrandGuidelines } from "@/lib/services/company/get-brand-guidelines.service";
@@ -21,7 +21,6 @@ import { OverviewSources, type OverviewSourceRow } from "@/components/company/ov
 import { OverviewActivity } from "@/components/company/overview-activity";
 import { resolveLegacyTabRedirect } from "@/lib/companies/legacy-tab-redirect";
 import { PERFORMANCE_CHANNEL_PARAM } from "@/lib/analytics/performance-channels";
-import { pendingApprovalsHref } from "@/lib/posts/post-status-filter";
 
 interface Props {
   params: Promise<{ slug: string }>;
@@ -135,7 +134,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
           />
 
           {/* KPI row — each tile routes into the work it counts (§9.3). */}
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <OverviewStatCard
               icon={FileText}
               tone="accent"
@@ -144,14 +143,6 @@ export default async function CompanyPage({ params, searchParams }: Props) {
               delta={kpis.postsThisMonthDelta}
               hint={t("kpis.vsLastMonth")}
               href={`/companies/${slug}/posts`}
-            />
-            <OverviewStatCard
-              icon={Clock}
-              tone="warning"
-              label={t("kpis.pendingApproval")}
-              value={kpis.pendingApproval}
-              hint={t("kpis.reviewAndApprove")}
-              href={pendingApprovalsHref(slug)}
             />
             <OverviewStatCard
               icon={CheckCircle2}

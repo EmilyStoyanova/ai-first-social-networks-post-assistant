@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   POST_STATUS_FILTERS,
+  VISIBLE_POST_STATUS_FILTERS,
   DEFAULT_POST_STATUS_FILTER,
   PENDING_APPROVAL_FILTER,
   pendingApprovalsHref,
@@ -68,6 +69,36 @@ describe("resolvePostStatusFilter — default and fallback", () => {
     // ?status=draft&status=published — Next hands this over as an array.
     assert.equal(resolvePostStatusFilter(["draft", "published"]), "draft");
     assert.equal(resolvePostStatusFilter([]), "all");
+  });
+});
+
+// ─── VISIBLE_POST_STATUS_FILTERS ──────────────────────────────────────────────
+// `pending_approval` no longer exists as a generation outcome — cron-generated
+// posts land in `draft` exactly like manual ones — so it is retired as a PILL a
+// person clicks. It is not retired as a filter VALUE: an editor's submission, a
+// pre-existing row, and the dashboard's own link all still need it to work.
+
+describe("VISIBLE_POST_STATUS_FILTERS — the bar's pills", () => {
+  it("excludes pending_approval", () => {
+    // TypeScript already proves this at compile time — the tuple's element
+    // type simply does not include "pending_approval" — so this is a runtime
+    // pin against a mistaken future edit, not new information.
+    assert.ok(!(VISIBLE_POST_STATUS_FILTERS as readonly string[]).includes("pending_approval"));
+  });
+
+  it("keeps every other filter, in the same order", () => {
+    assert.deepEqual(
+      VISIBLE_POST_STATUS_FILTERS,
+      POST_STATUS_FILTERS.filter((f) => f !== "pending_approval")
+    );
+  });
+
+  it("still resolves pending_approval as a valid filter VALUE, even though it has no pill", () => {
+    // The dashboard's own link (pendingApprovalsHref) depends on this: a filter
+    // that stopped being recognized would silently fall back to "all" and lose
+    // the queue it was supposed to jump straight to.
+    assert.equal(resolvePostStatusFilter("pending_approval"), "pending_approval");
+    assert.equal(matchesPostStatusFilter("PENDING_APPROVAL", "pending_approval"), true);
   });
 });
 

@@ -17,10 +17,11 @@
  *     system is queued for delivery.
  *
  *   • **Drafts** — `draft` + `pending_approval`. Both mean "not approved yet",
- *     which is what makes them one bucket here even though the posts grid splits
- *     them: that grid inherited the retired Approvals tab's job and needs the
- *     approval queue as its own filter, while a calendar is being asked "what is
- *     not yet cleared to go out?".
+ *     which is what makes them one bucket here. The posts grid used to keep
+ *     `pending_approval` as its own clickable pill (v2.1, when cron generation
+ *     still produced it); v2.4 retired that pill once cron stopped producing
+ *     the status, which is this calendar's grouping catching up to what a
+ *     calendar was always being asked: "what is not yet cleared to go out?".
  *
  *   • Neither — `rejected` and `failed`. `rejected` is excluded for the reason
  *     the posts grid excludes it: rejection does not reset a post to draft, so

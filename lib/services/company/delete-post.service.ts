@@ -26,12 +26,15 @@ import { deleteImageFromCloudinary } from "@/lib/integrations/cloudinary/delete-
  *
  * `draft` and `rejected`, and nothing else.
  *
- * They are the same case despite looking like two. A post can only be rejected
- * out of `pending_approval` (see post-approval.service), which is upstream of
- * every publishing step — so neither status has ever been handed to Buffer, has
- * a `bufferUpdateId`, or exists anywhere outside this database. Deleting one
- * destroys nothing that happened; it removes something that was proposed and
- * turned down.
+ * They are the same case despite looking like two. A post can be rejected out
+ * of `pending_approval` (an editor's submission, or a pre-existing row) OR out
+ * of `draft` (a system-generated one with no human author — see
+ * post-approval.service's `rejectPost`), but both of those, like `draft`
+ * itself, sit upstream of every publishing step — so a rejected post has never
+ * been handed to Buffer, has no `bufferUpdateId`, and exists nowhere outside
+ * this database, whichever status it was rejected from. Deleting one destroys
+ * nothing that happened; it removes something that was proposed and turned
+ * down.
  *
  * Rejected posts are in fact the ones that most need to go. A draft is usually
  * deleted because the user changed their mind, but a rejection is a verdict —

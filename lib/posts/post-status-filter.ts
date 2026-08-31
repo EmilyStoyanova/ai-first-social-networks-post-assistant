@@ -13,12 +13,24 @@ import type { PostStatusValue } from "./post-actions";
  * the single client-side list, and it is the compile-time check that every
  * status below is real.
  *
- * Phase 4c split the former "draft" bucket into DRAFT and PENDING_APPROVAL.
- * Until then the two shared a filter on the argument that the difference was
- * "only who is waiting", which the badge already showed. That argument held
- * while a dedicated Approvals tab existed to answer "what is waiting on me?".
- * The tab is gone and this filter inherited its job, so the distinction is now
- * the whole point: `pending_approval` is the approval queue.
+ * Phase 4c split the former "draft" bucket into DRAFT and PENDING_APPROVAL,
+ * on the argument that a dedicated Approvals tab was gone and this filter had
+ * inherited its job. That argument stopped holding once `pending_approval`
+ * stopped being a generation outcome (cron-generated posts now land in
+ * `draft`, exactly like manual ones — see generate-weekly-schedule.service.ts)
+ * — with no tab pointing at it and no NEW post ever landing there, a fifth
+ * pill sitting at "0" next to a full Drafts pill read as the same bucket
+ * twice, not two different queues.
+ *
+ * `pending_approval` is NOT gone from the status model: rows created before
+ * this change keep their status untouched, and `approvePost` still accepts
+ * them (see `PENDING_APPROVAL_FILTER` below). What IS gone is the transition
+ * that used to create new ones — the editor's "Submit for approval" hand-off
+ * no longer exists; an editor now approves a draft directly, the same
+ * one-step action an owner has (see post-approval.service.ts and
+ * lib/posts/post-actions.ts). `pending_approval` is only retired as a PILL a
+ * person clicks — `VISIBLE_POST_STATUS_FILTERS` is what the bar actually
+ * renders.
  */
 
 export const POST_STATUS_FILTERS = [
@@ -30,6 +42,19 @@ export const POST_STATUS_FILTERS = [
 ] as const;
 
 export type PostStatusFilter = (typeof POST_STATUS_FILTERS)[number];
+
+/**
+ * The pills `PostStatusFilterBar` actually renders — `POST_STATUS_FILTERS`
+ * minus `pending_approval`. Everything else in this module (URL parsing,
+ * `matchesPostStatusFilter`, counts, `pendingApprovalsHref`) still treats
+ * `pending_approval` as a fully valid filter: an editor's submission, a
+ * pre-existing row, and the dashboard's "N pending approval" link all still
+ * need it to filter correctly. It is simply not a button a person can press —
+ * reachable only by the dashboard's own link, never by browsing the bar.
+ */
+export const VISIBLE_POST_STATUS_FILTERS = POST_STATUS_FILTERS.filter(
+  (f) => f !== "pending_approval"
+);
 
 /** What an absent or unrecognized ?status= falls back to. */
 export const DEFAULT_POST_STATUS_FILTER: PostStatusFilter = "all";
@@ -74,9 +99,13 @@ const FILTER_STATUSES: Record<Exclude<PostStatusFilter, "all">, readonly PostSta
   draft: ["DRAFT"],
 
   /**
-   * The approval queue, and the only filter with a count outside this grid —
-   * the Posts tab badge reads it (§9.1). Both surfaces derive from this one
-   * predicate so a badge can never promise a post the filter then hides.
+   * The approval queue. No longer a pill in the bar (see
+   * VISIBLE_POST_STATUS_FILTERS) — cron generation stopped producing this
+   * status — but still a real predicate: an editor's submission or a
+   * pre-existing row is still `pending_approval`, and the Posts tab badge /
+   * dashboard "N pending approval" link both still read it (§9.1). Both
+   * surfaces derive from this one predicate so a badge can never promise a
+   * post the filter then hides.
    */
   pending_approval: ["PENDING_APPROVAL"],
 };

@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { approvePost, canApprove } from "./post-approval.service";
+import { approvePost, canApprove, rejectPost } from "./post-approval.service";
 import type { ApprovalDb, ApprovalDeps } from "./post-approval.service";
 import { decidePublish } from "@/lib/scheduling/publish-window";
+import type { CreateAuditLogInput } from "@/lib/services/audit/audit-log.service";
 
 // 12:00 Europe/Sofia (UTC+3) — the slot from the bug report, and the moment
 // twelve minutes before it when the owner pressed Approve.
@@ -14,6 +15,8 @@ interface PostRow {
   status: string;
   scheduledFor: Date | null;
   manuallyScheduled: boolean;
+  /** Null for a cron/system post; a user id for a manual or bulk one. */
+  generatedById: string | null;
 }
 
 /** A manual bulk post as bulkGeneratePosts writes it: a draft with a time. */
@@ -23,6 +26,7 @@ function bulkDraft(overrides: Partial<PostRow> = {}): PostRow {
     status: "draft",
     scheduledFor: SOFIA_NOON,
     manuallyScheduled: true,
+    generatedById: "user-1",
     ...overrides,
   };
 }
@@ -44,17 +48,19 @@ function singleDraft(overrides: Partial<PostRow> = {}): PostRow {
     status: "draft",
     scheduledFor: SOFIA_NOON,
     manuallyScheduled: true,
+    generatedById: "user-1",
     ...overrides,
   };
 }
 
-/** A cron post: a time the weekly filler estimated, no batch. */
+/** A cron post: a time the weekly filler estimated, no batch, no human author. */
 function cronPost(overrides: Partial<PostRow> = {}): PostRow {
   return {
     companyId: "co-1",
     status: "pending_approval",
     scheduledFor: SOFIA_NOON,
     manuallyScheduled: false,
+    generatedById: null,
     ...overrides,
   };
 }
@@ -73,10 +79,11 @@ function makeDeps(
   deps: ApprovalDeps;
   updates: () => UpdateData[];
   audits: () => string[];
+  auditEntries: () => CreateAuditLogInput[];
   membershipLookups: () => number;
 } {
   const updates: UpdateData[] = [];
-  const audits: string[] = [];
+  const auditEntries: CreateAuditLogInput[] = [];
   let membershipLookups = 0;
 
   const db: ApprovalDb = {
@@ -100,12 +107,13 @@ function makeDeps(
     deps: {
       db,
       auditLog: async (entry) => {
-        audits.push(entry.action);
+        auditEntries.push(entry);
       },
       now: () => options.now ?? APPROVED_AT,
     },
     updates: () => updates,
-    audits: () => audits,
+    audits: () => auditEntries.map((e) => e.action),
+    auditEntries: () => auditEntries,
     membershipLookups: () => membershipLookups,
   };
 }
@@ -194,15 +202,55 @@ describe("approvePost — a manual bulk draft scheduled for later", () => {
     assert.equal(membershipLookups(), 0);
   });
 
-  it("still refuses an editor", async () => {
+  it("now allows an editor — approving no longer distinguishes the roles", async () => {
     const { deps, updates, audits } = makeDeps(bulkDraft(), { role: "editor" });
 
     const result = await approvePost("p-1", "editor-1", false, deps);
 
-    assert.equal(result.success, false);
-    assert.equal(result.success === false && result.code, "FORBIDDEN");
-    assert.deepEqual(updates(), []);
-    assert.deepEqual(audits(), []);
+    assert.deepEqual(result, { success: true, status: "APPROVED" });
+    assert.equal(updates()[0].status, "approved");
+    assert.equal(updates()[0].approvedById, "editor-1");
+    assert.deepEqual(audits(), ["POST_APPROVED"]);
+  });
+});
+
+// ─── Approval identity: who, and when ─────────────────────────────────────────
+// `approvedById`/`approvedAt` on Post, plus the POST_APPROVED audit entry's
+// `userId`, are the only facts the product needs to answer "who approved this
+// and at what moment" — no new column is needed for it. One test per role
+// pins the write down for each caller who can reach `approvePost`, and the
+// audit entry's `userId` is asserted alongside so a future edit cannot drop
+// one write while keeping the other in sync.
+
+describe("approvePost — approval identity is recorded for every role", () => {
+  it("records the editor's own id and the moment, on the post and in the audit trail", async () => {
+    const { deps, updates, auditEntries } = makeDeps(bulkDraft(), { role: "editor" });
+
+    await approvePost("p-1", "editor-1", false, deps);
+
+    assert.equal(updates()[0].approvedById, "editor-1");
+    assert.deepEqual(updates()[0].approvedAt, APPROVED_AT);
+    assert.equal(auditEntries()[0].userId, "editor-1");
+  });
+
+  it("records the owner's own id and the moment, on the post and in the audit trail", async () => {
+    const { deps, updates, auditEntries } = makeDeps(bulkDraft(), { role: "owner" });
+
+    await approvePost("p-1", "owner-1", false, deps);
+
+    assert.equal(updates()[0].approvedById, "owner-1");
+    assert.deepEqual(updates()[0].approvedAt, APPROVED_AT);
+    assert.equal(auditEntries()[0].userId, "owner-1");
+  });
+
+  it("records a global admin's own id and the moment, with no membership row at all", async () => {
+    const { deps, updates, auditEntries } = makeDeps(bulkDraft(), { role: null });
+
+    await approvePost("p-1", "admin-1", true, deps);
+
+    assert.equal(updates()[0].approvedById, "admin-1");
+    assert.deepEqual(updates()[0].approvedAt, APPROVED_AT);
+    assert.equal(auditEntries()[0].userId, "admin-1");
   });
 });
 
@@ -219,29 +267,48 @@ describe("approvePost — unchanged for other posts", () => {
     assert.deepEqual(audits(), ["POST_APPROVED"]);
   });
 
-  it("refuses a plain draft, which must still be submitted first", async () => {
+  it("lets an editor approve a pre-existing pending_approval row too (backward compatibility)", async () => {
+    // No active workflow creates a NEW pending_approval post any more, but a
+    // row from before this change — or one an editor previously submitted
+    // under the old workflow — must still be approvable by anyone who could
+    // approve a draft, editor included.
+    const { deps, updates, audits } = makeDeps(cronPost(), { role: "editor" });
+
+    const result = await approvePost("p-1", "editor-1", false, deps);
+
+    assert.deepEqual(result, { success: true, status: "APPROVED" });
+    assert.equal(updates()[0].status, "approved");
+    assert.deepEqual(audits(), ["POST_APPROVED"]);
+  });
+
+  it("approves a plain unscheduled draft directly — no submission step exists any more", async () => {
     const { deps, updates, audits } = makeDeps(
       bulkDraft({ scheduledFor: null, manuallyScheduled: false })
     );
 
     const result = await approvePost("p-1", "owner-1", false, deps);
 
-    assert.equal(result.success, false);
-    assert.equal(result.success === false && result.code, "INVALID_TRANSITION");
-    assert.deepEqual(updates(), [], "a refused approval writes nothing");
-    assert.deepEqual(audits(), []);
+    assert.deepEqual(result, { success: true, status: "APPROVED" });
+    assert.equal(updates()[0].status, "approved");
+    assert.deepEqual(audits(), ["POST_APPROVED"]);
   });
 
-  it("refuses a cron draft, schedule or no schedule", async () => {
-    // The guard that keeps this change out of the automated pipeline: a cron
-    // draft is publishable up to 48 hours early, so approving one here would
-    // move its publish time, not just its status.
+  it("approves a cron draft, schedule or no schedule", async () => {
+    // Approving does not touch scheduledFor/manuallyScheduled — only status —
+    // so this does not move the post's publish time, only its status. A cron
+    // draft approved here still reaches the sweep exactly when its own
+    // estimate says to, via the same "automatic" branch decidePublish always
+    // used: this is the normal semi_automated path (a human approves, the
+    // sweep sends it once due), not a bypass of it.
     const { deps, updates } = makeDeps(cronPost({ status: "draft" }));
 
     const result = await approvePost("p-1", "owner-1", false, deps);
 
-    assert.equal(result.success === false && result.code, "INVALID_TRANSITION");
-    assert.deepEqual(updates(), []);
+    assert.deepEqual(result, { success: true, status: "APPROVED" });
+    assert.equal(updates()[0].status, "approved");
+    for (const field of ["scheduledFor", "manuallyScheduled"]) {
+      assert.equal(field in updates()[0], false, `${field} must survive the approval`);
+    }
   });
 
   it("refuses an already approved post rather than re-stamping it", async () => {
@@ -272,11 +339,11 @@ describe("approvePost — unchanged for other posts", () => {
   });
 
   it("names the status it refused, so the card can explain itself", async () => {
-    const { deps } = makeDeps(bulkDraft({ scheduledFor: null, manuallyScheduled: false }));
+    const { deps } = makeDeps(bulkDraft({ status: "rejected" }));
 
     const result = await approvePost("p-1", "owner-1", false, deps);
 
-    assert.match(result.success === false ? (result.message ?? "") : "", /DRAFT/);
+    assert.match(result.success === false ? (result.message ?? "") : "", /REJECTED/);
   });
 
   it("is NOT_FOUND for a missing post", async () => {
@@ -364,19 +431,19 @@ describe("approvePost — a single manually generated post scheduled for later",
     assert.equal(canApprove(single, APPROVED_AT), canApprove(bulk, APPROVED_AT));
   });
 
-  it("leaves an UNSCHEDULED single draft to the immediate publish path", async () => {
-    // No time was chosen, so there is nothing to wait for: approval alone is
-    // refused and the card's approve-and-publish action stays the way out. That
-    // is the pre-existing behaviour for every ordinary draft, unchanged.
+  it("also approves an UNSCHEDULED single draft directly, alongside the combined publish action", async () => {
+    // No time was chosen, so there is nothing to wait for — the card's
+    // approve-and-publish action is still the normal way out for this case.
+    // But approval alone is no longer refused either: any draft is approvable
+    // on its own now, this one included.
     const { deps, updates } = makeDeps(
       singleDraft({ scheduledFor: null, manuallyScheduled: false })
     );
 
     const result = await approvePost("p-1", "owner-1", false, deps);
 
-    assert.equal(result.success, false);
-    assert.equal(result.success === false && result.code, "INVALID_TRANSITION");
-    assert.deepEqual(updates(), []);
+    assert.deepEqual(result, { success: true, status: "APPROVED" });
+    assert.equal(updates()[0].status, "approved");
   });
 });
 
@@ -509,18 +576,16 @@ describe("canApprove", () => {
     }
   });
 
-  it("accepts a draft only when a person chose its time", () => {
-    assert.equal(canApprove({ status: "draft", ...manual }, BEFORE), null);
-    assert.equal(canApprove({ status: "draft", ...automatic }, BEFORE), "INVALID_TRANSITION");
-    assert.equal(canApprove({ status: "draft", ...unscheduled }, BEFORE), "INVALID_TRANSITION");
-  });
-
-  it("rejects a bulk draft with no time — there is nothing to wait for", () => {
-    // Approving it would leave a post that is never due and never publishes.
-    assert.equal(
-      canApprove({ status: "draft", scheduledFor: null, manuallyScheduled: true }, BEFORE),
-      "INVALID_TRANSITION"
-    );
+  it("accepts a draft whatever its schedule — no submission step exists any more", () => {
+    // There used to be a mandatory "Submit for approval" first, and an ordinary
+    // (unscheduled) draft could only reach `pending_approval` through it — a
+    // bare draft with no chosen time was refused here on the reasoning that
+    // approving it would leave a post that never becomes due. That step is
+    // gone: approving IS the direct action now, for a hand-scheduled draft, a
+    // cron estimate, or a plain unscheduled one alike.
+    for (const post of [manual, automatic, unscheduled]) {
+      assert.equal(canApprove({ status: "draft", ...post }, BEFORE), null);
+    }
   });
 
   it("accepts no other status", () => {
@@ -590,5 +655,89 @@ describe("canApprove", () => {
 
     assert.equal(canApprove({ status: "pending_approval", ...automatic }, late), null);
     assert.equal(canApprove({ status: "pending_approval", ...unscheduled }, late), null);
+  });
+});
+
+// ─── rejectPost ───────────────────────────────────────────────────────────────
+//
+// Previously untested directly. Coverage matters more now: `pending_approval`
+// no longer exists as a generation outcome, so a system-generated post lands
+// in `draft` exactly like a manual one, and `generatedById` is the only thing
+// left that tells the two apart. A bug here would either let an owner reject
+// (destroy the audit-tracked way) a person's own unfinished draft, or silently
+// drop the "turn down a bad system post" capability that used to come for
+// free with pending_approval.
+
+describe("rejectPost", () => {
+  it("rejects a post that is pending approval (an editor's submission, or a legacy row)", async () => {
+    const { deps, updates, audits } = makeDeps(cronPost({ status: "pending_approval" }));
+
+    const result = await rejectPost("post-1", "owner-1", false, deps);
+
+    assert.deepEqual(result, { success: true, status: "REJECTED" });
+    assert.equal(updates()[0].status, "rejected");
+    assert.equal(updates()[0].rejectedById, "owner-1");
+    assert.ok(updates()[0].rejectedAt instanceof Date);
+    assert.deepEqual(audits(), ["POST_REJECTED"]);
+  });
+
+  it("rejects a system-generated draft (no human author)", async () => {
+    const { deps, updates } = makeDeps(cronPost({ status: "draft", generatedById: null }));
+
+    const result = await rejectPost("post-1", "owner-1", false, deps);
+
+    assert.deepEqual(result, { success: true, status: "REJECTED" });
+    assert.equal(updates()[0].status, "rejected");
+  });
+
+  it("refuses to reject a human-authored draft, however it was scheduled", async () => {
+    const { deps, updates } = makeDeps(singleDraft({ status: "draft" }));
+
+    const result = await rejectPost("post-1", "owner-1", false, deps);
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "INVALID_TRANSITION");
+    assert.deepEqual(updates(), [], "a human's own draft must never be updated");
+  });
+
+  it("refuses to reject an already-approved post", async () => {
+    const { deps } = makeDeps(cronPost({ status: "approved" }));
+
+    const result = await rejectPost("post-1", "owner-1", false, deps);
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "INVALID_TRANSITION");
+  });
+
+  it("refuses when the acting user is not an owner", async () => {
+    const { deps, updates } = makeDeps(cronPost({ status: "pending_approval" }), {
+      role: "editor",
+    });
+
+    const result = await rejectPost("post-1", "editor-1", false, deps);
+
+    assert.deepEqual(result, { success: false, code: "FORBIDDEN" });
+    assert.deepEqual(updates(), []);
+  });
+
+  it("reports NOT_FOUND for a post that does not exist", async () => {
+    const { deps } = makeDeps(null);
+
+    const result = await rejectPost("missing", "owner-1", false, deps);
+
+    assert.deepEqual(result, { success: false, code: "NOT_FOUND" });
+  });
+
+  it("lets a global admin reject without a membership row", async () => {
+    const { deps, updates, membershipLookups } = makeDeps(
+      cronPost({ status: "pending_approval" }),
+      { role: null }
+    );
+
+    const result = await rejectPost("post-1", "admin-1", true, deps);
+
+    assert.deepEqual(result, { success: true, status: "REJECTED" });
+    assert.equal(updates()[0].status, "rejected");
+    assert.equal(membershipLookups(), 0, "a global admin never needs the membership lookup");
   });
 });

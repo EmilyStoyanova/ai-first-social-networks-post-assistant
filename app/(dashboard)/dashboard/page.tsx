@@ -9,7 +9,6 @@ import {
   isSetupComplete,
 } from "@/lib/services/dashboard/get-setup-statuses.service";
 import { getUserLlmSettings } from "@/lib/services/user/get-user-llm-settings.service";
-import { pendingApprovalsHref } from "@/lib/posts/post-status-filter";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { LlmPreferenceCard } from "@/components/user/llm-preference-card";
 import { Button } from "@/components/ui/Button";
@@ -56,7 +55,7 @@ export default async function DashboardPage() {
   const firstName = user?.name?.split(" ")[0] ?? null;
   const greeting = firstName ? `, ${firstName}` : "";
 
-  const { companies, totalPending, totalDrafts, recentActivity } = await getDashboardData(
+  const { companies, totalDrafts, recentActivity } = await getDashboardData(
     user.id,
     user.isGlobalAdmin
   );
@@ -80,8 +79,6 @@ export default async function DashboardPage() {
       )
   );
 
-  const withPending = companies.filter((c) => c.pendingCount > 0);
-
   return (
     <DashboardLayout
       user={{ name: user?.name, email: user?.email, isGlobalAdmin: user?.isGlobalAdmin }}
@@ -99,10 +96,9 @@ export default async function DashboardPage() {
         </div>
 
         {/* Stats row */}
-        <div className="grid grid-cols-3 gap-3 sm:gap-4">
+        <div className="grid grid-cols-2 gap-3 sm:gap-4">
           {[
             { value: companies.length, label: t("stats.companies") },
-            { value: totalPending, label: t("stats.pendingApprovals") },
             { value: totalDrafts, label: t("stats.drafts") },
           ].map(({ value, label }) => (
             <Card key={label} className="px-3 py-3 sm:px-5 sm:py-4">
@@ -157,85 +153,49 @@ export default async function DashboardPage() {
               </div>
             )}
 
-            <div className="grid gap-6 lg:grid-cols-2">
-              {/* Pending work */}
-              <div>
-                <h2 className="text-title text-fg mb-3">{t("pendingWork.title")}</h2>
-                {withPending.length === 0 ? (
-                  <Card className="px-5 py-8">
-                    <EmptyState
-                      title={t("pendingWork.noPending")}
-                      description={t("pendingWork.noPendingDesc")}
-                    />
-                  </Card>
-                ) : (
-                  <div className="space-y-2">
-                    {withPending.map((c) => (
-                      <Card key={c.id} variant="hover" className="px-5 py-4">
-                        <div className="flex items-center justify-between gap-4">
-                          <div className="min-w-0">
-                            <p className="text-fg truncate text-sm font-medium">{c.name}</p>
-                            <p className="text-fg-faint mt-0.5 text-xs">
-                              {t("pendingWork.posts", { count: c.pendingCount })}
-                            </p>
-                          </div>
-                          <Link
-                            href={pendingApprovalsHref(c.slug)}
-                            className="text-accent hover:text-fg shrink-0 text-xs font-medium transition-colors"
-                          >
-                            {t("pendingWork.reviewQueue")} →
-                          </Link>
+            {/* Recent activity */}
+            <div>
+              <h2 className="text-title text-fg mb-3">{t("recentActivity.title")}</h2>
+              {recentActivity.length === 0 ? (
+                <Card className="px-5 py-8">
+                  <EmptyState
+                    title={t("recentActivity.noActivity")}
+                    description={t("recentActivity.noActivityDesc")}
+                  />
+                </Card>
+              ) : (
+                <Card className="px-5 py-2">
+                  <ul className="divide-border divide-y">
+                    {recentActivity.map((item) => (
+                      <li key={item.id} className="flex items-start gap-3 py-3">
+                        <span
+                          className="bg-status-neutral-dot mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full"
+                          aria-hidden
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-fg text-xs font-medium">
+                            {ACTION_LABELS[item.action] ?? item.action}
+                          </p>
+                          <p className="text-fg-faint mt-0.5 text-xs">
+                            <Link
+                              href={`/companies/${item.companySlug}`}
+                              className="hover:text-accent transition-colors"
+                            >
+                              {item.companyName}
+                            </Link>
+                            {item.user
+                              ? ` · ${item.user.name ?? item.user.email}`
+                              : ` · ${t("recentActivity.system")}`}
+                          </p>
                         </div>
-                      </Card>
+                        <span className="text-fg-faint shrink-0 text-xs">
+                          {relativeTime(item.createdAt)}
+                        </span>
+                      </li>
                     ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Recent activity */}
-              <div>
-                <h2 className="text-title text-fg mb-3">{t("recentActivity.title")}</h2>
-                {recentActivity.length === 0 ? (
-                  <Card className="px-5 py-8">
-                    <EmptyState
-                      title={t("recentActivity.noActivity")}
-                      description={t("recentActivity.noActivityDesc")}
-                    />
-                  </Card>
-                ) : (
-                  <Card className="px-5 py-2">
-                    <ul className="divide-border divide-y">
-                      {recentActivity.map((item) => (
-                        <li key={item.id} className="flex items-start gap-3 py-3">
-                          <span
-                            className="bg-status-neutral-dot mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full"
-                            aria-hidden
-                          />
-                          <div className="min-w-0 flex-1">
-                            <p className="text-fg text-xs font-medium">
-                              {ACTION_LABELS[item.action] ?? item.action}
-                            </p>
-                            <p className="text-fg-faint mt-0.5 text-xs">
-                              <Link
-                                href={`/companies/${item.companySlug}`}
-                                className="hover:text-accent transition-colors"
-                              >
-                                {item.companyName}
-                              </Link>
-                              {item.user
-                                ? ` · ${item.user.name ?? item.user.email}`
-                                : ` · ${t("recentActivity.system")}`}
-                            </p>
-                          </div>
-                          <span className="text-fg-faint shrink-0 text-xs">
-                            {relativeTime(item.createdAt)}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </Card>
-                )}
-              </div>
+                  </ul>
+                </Card>
+              )}
             </div>
           </>
         )}

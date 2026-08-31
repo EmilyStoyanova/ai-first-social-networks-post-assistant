@@ -30,6 +30,14 @@ export interface PostItem {
   /** The image a switch displaced, restorable without regenerating. */
   previousMediaUrl: string | null;
   approvedById: string | null;
+  /**
+   * Who triggered generation — null for a cron/system post, a user id for a
+   * manual or bulk one. The only thing that tells a system draft apart from a
+   * human's own work in progress, now that both share the `draft` status; the
+   * card uses it to decide whether "Reject" applies to a draft (see
+   * lib/posts/post-actions.ts).
+   */
+  generatedById: string | null;
   publishedPostUrl: string | null;
   /** When the post is due to go out. Null for drafts that were never scheduled. */
   scheduledFor: string | null;
@@ -96,6 +104,7 @@ export const POST_ITEM_SELECT = {
   llmProvider: true,
   llmModel: true,
   approvedById: true,
+  generatedById: true,
   publishedPostUrl: true,
   scheduledFor: true,
   publishedAt: true,
@@ -156,6 +165,7 @@ export interface PostItemRow {
   llmProvider: string | null;
   llmModel: string | null;
   approvedById: string | null;
+  generatedById: string | null;
   publishedPostUrl: string | null;
   mediaAsset: { url: string; sourceUrl: string | null } | null;
   previousMediaAsset: { url: string } | null;
@@ -192,6 +202,7 @@ export function toPostItem(r: PostItemRow): PostItem {
     llmProvider: r.llmProvider,
     llmModel: r.llmModel,
     approvedById: r.approvedById,
+    generatedById: r.generatedById,
     publishedPostUrl: r.publishedPostUrl,
     mediaUrl: r.mediaAsset?.url ?? null,
     sourceImageUrl,

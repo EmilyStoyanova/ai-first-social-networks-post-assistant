@@ -54,7 +54,7 @@ app/
     ├── auth/          # Login, register
     ├── admin/         # LLM configs, users, companies (global admin only)
     ├── companies/[slug]/   # Company-scoped resources
-    ├── posts/[id]/    # Post actions: approve, reject, submit, edit, publish, restore
+    ├── posts/[id]/    # Post actions: approve, reject, edit, publish, restore
     ├── buffer/        # OAuth callback
     └── internal/      # Cron, health (API key protected)
 ```

@@ -24,7 +24,6 @@ import type { PostItem } from "./list-posts.service";
 export interface OverviewKpis {
   postsThisMonth: number;
   postsThisMonthDelta: number | null;
-  pendingApproval: number;
   published: number;
   publishedDelta: number | null;
   connectedChannels: number;
@@ -141,7 +140,6 @@ export async function getOverviewData(
   const [
     postsThisMonth,
     postsPrevMonth,
-    pendingApproval,
     publishedThisMonth,
     publishedPrevMonth,
     channels,
@@ -154,7 +152,6 @@ export async function getOverviewData(
     prisma.post.count({
       where: { companyId, createdAt: { gte: prevMonthStart, lt: monthStart } },
     }),
-    prisma.post.count({ where: { companyId, status: "pending_approval" as never } }),
     prisma.post.count({
       where: {
         companyId,
@@ -201,6 +198,7 @@ export async function getOverviewData(
         llmProvider: true,
         llmModel: true,
         approvedById: true,
+        generatedById: true,
         publishedPostUrl: true,
         scheduledFor: true,
         manuallyScheduled: true,
@@ -276,7 +274,6 @@ export async function getOverviewData(
     kpis: {
       postsThisMonth,
       postsThisMonthDelta: delta(postsThisMonth, postsPrevMonth),
-      pendingApproval,
       published: publishedThisMonth,
       publishedDelta: delta(publishedThisMonth, publishedPrevMonth),
       connectedChannels: channels.filter((c) => c.enabled).length,
@@ -296,6 +293,7 @@ export async function getOverviewData(
       llmProvider: r.llmProvider,
       llmModel: r.llmModel,
       approvedById: r.approvedById,
+      generatedById: r.generatedById,
       publishedPostUrl: r.publishedPostUrl,
       mediaUrl: r.mediaAsset?.url ?? null,
       // The overview's upcoming list is a read-only summary — it renders no
