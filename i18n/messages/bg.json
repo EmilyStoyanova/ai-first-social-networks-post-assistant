@@ -363,10 +363,161 @@
           "x": "X",
           "other": "Друго"
         }
+      },
+      "sources": {
+        "title": "RSS източници",
+        "hint": "Именувани RSS емисии за този конкурент — за разлика от социалните профили по-горе, те СЕ обхождат и следят.",
+        "empty": "Все още няма RSS емисии.",
+        "addSource": "Добави RSS емисия",
+        "labelPlaceholder": "Етикет (напр. Блог)",
+        "sync": "Синхронизирай",
+        "syncResult": "Синхронизирано — {created} нови, {updated} обновени.",
+        "disable": "Спри",
+        "enable": "Пусни",
+        "disabled": "Спряна"
       }
     },
     "content": {
-      "comingSoon": "Очаквайте скоро — събирането и анализът на съдържание на конкуренти не са реализирани в тази фаза."
+      "comingSoon": "Очаквайте скоро — събирането и анализът на съдържание на конкуренти не са реализирани в тази фаза.",
+      "observedNote": "Съдържание, забелязано в следените източници на конкуренти — следенето може да е непълно.",
+      "detailTitle": "Забелязано съдържание",
+      "unknownDate": "Неизвестна дата",
+      "viewSource": "Виж източника",
+      "addContent": "Добави съдържание на конкурент",
+      "emptyTitle": "Все още няма забелязано съдържание",
+      "emptyDesc": "Синхронизирай RSS емисия на конкурент или добави съдържание ръчно, за да го видиш тук.",
+      "filters": {
+        "allCompetitors": "Всички конкуренти",
+        "allOrigins": "Всички източници",
+        "originRss": "RSS",
+        "originManual": "Добавено ръчно",
+        "allRelevance": "Всякаква релевантност"
+      },
+      "relevance": {
+        "relevant": "Релевантно",
+        "related": "Свързано",
+        "out_of_scope": "Извън обхвата",
+        "pending": "Все още не е оценено"
+      },
+      "status": {
+        "pending": "Чака анализ",
+        "analyzing": "Анализира се…",
+        "completed": "Анализирано",
+        "failed": "Анализът не бе успешен"
+      },
+      "platform": {
+        "rss": "RSS",
+        "facebook": "Facebook",
+        "instagram": "Instagram",
+        "linkedin": "LinkedIn",
+        "tiktok": "TikTok",
+        "youtube": "YouTube",
+        "x": "X",
+        "website": "Уебсайт",
+        "other": "Друго"
+      },
+      "contentType": {
+        "blog_post": "Публикация в блог",
+        "product_update": "Обновление на продукт",
+        "promotion": "Промоция",
+        "announcement": "Съобщение",
+        "guide": "Ръководство",
+        "video": "Видео",
+        "social_post": "Публикация в социална мрежа",
+        "ad": "Реклама",
+        "other": "Друго"
+      },
+      "hookType": {
+        "question": "Въпрос",
+        "problem": "Проблем",
+        "bold_claim": "Смело твърдение",
+        "statistic": "Статистика",
+        "curiosity": "Любопитство",
+        "story": "История",
+        "direct_offer": "Директна оферта",
+        "announcement": "Съобщение",
+        "none": "Няма",
+        "other": "Друго"
+      },
+      "structurePattern": {
+        "problem_solution": "Проблем → решение",
+        "how_to": "Как се прави",
+        "list": "Списък",
+        "story": "История",
+        "comparison": "Сравнение",
+        "question_answer": "Въпрос и отговор",
+        "announcement": "Съобщение",
+        "offer": "Оферта",
+        "other": "Друго"
+      },
+      "angleCategory": {
+        "problem_solution": "Проблем → решение",
+        "comparison": "Сравнение",
+        "how_to": "Как се прави",
+        "case_study": "Казус",
+        "announcement": "Съобщение",
+        "thought_leadership": "Експертна позиция",
+        "behind_the_scenes": "Зад кулисите",
+        "promotion": "Промоция",
+        "other": "Друго"
+      },
+      "commercialIntent": {
+        "informational": "Информативно",
+        "soft_sell": "Меко продаване",
+        "hard_sell": "Директно продаване",
+        "promotional": "Промоционално"
+      },
+      "ctaType": {
+        "learn_more": "Научи повече",
+        "sign_up": "Регистрация",
+        "buy_now": "Купи сега",
+        "contact_us": "Свържи се с нас",
+        "download": "Изтегли",
+        "comment_engage": "Коментар / ангажимент",
+        "none": "Няма",
+        "other": "Друго"
+      },
+      "fields": {
+        "topic": "Тема",
+        "subtopic": "Подтема",
+        "angle": "Ъгъл",
+        "contentType": "Вид съдържание",
+        "hookType": "Кукичка",
+        "structurePattern": "Структура",
+        "angleCategory": "Категория на ъгъла",
+        "commercialIntent": "Комерсиално намерение",
+        "ctaType": "Вид призив за действие",
+        "targetAudience": "Целева аудитория",
+        "tone": "Тон",
+        "originalLanguage": "Оригинален език",
+        "summary": "Резюме",
+        "keyMessage": "Основно послание",
+        "problemAddressed": "Засегнат проблем",
+        "ctaText": "Текст на призива за действие",
+        "productsServicesMentioned": "Споменати продукти/услуги"
+      },
+      "manualEntry": {
+        "competitor": "Конкурент",
+        "platform": "Платформа",
+        "postType": "Вид",
+        "content": "Съдържание",
+        "contentPlaceholder": "Постави текста на публикацията тук…",
+        "url": "URL на източника (по избор)",
+        "urlHint": "Само за справка — никога не се обхожда автоматично.",
+        "capturedAt": "Дата (по избор)",
+        "capturedAtHint": "Остави празно, ако не знаеш датата — ще се показва „Неизвестна дата“, никога предположена.",
+        "sourceTypes": {
+          "website": "Уебсайт",
+          "other": "Друго"
+        },
+        "postTypes": {
+          "organic": "Органично",
+          "ad": "Реклама"
+        },
+        "errors": {
+          "competitorRequired": "Избери конкурент."
+        }
+      }
     },
     "trends": {
       "comingSoon": "Очаквайте скоро — обобщените тенденции между конкуренти не са реализирани в тази фаза."

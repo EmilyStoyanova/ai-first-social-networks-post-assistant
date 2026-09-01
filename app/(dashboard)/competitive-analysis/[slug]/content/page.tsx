@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
-import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
+import { listCompetitorContent } from "@/lib/services/competitive-analysis/list-competitor-content.service";
+import { listCompetitors } from "@/lib/services/competitive-analysis/list-competitors.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompetitiveAnalysisHeader } from "@/components/competitive-analysis/analysis-header";
-import { Card } from "@/components/ui/Card";
+import { ContentPanel } from "@/components/competitive-analysis/content-panel";
 
 interface Props {
   params: Promise<{ slug: string }>;
@@ -17,9 +18,10 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
 }
 
 /**
- * Placeholder foundation only (§12 of the Part 3A task). The read API
- * (`list-competitor-content.service.ts`), competitor content collection, and
- * structured analysis are all Part 3B — nothing here is faked.
+ * Real implementation (Part 3B §16), replacing the Part 3A placeholder.
+ * "Observed content from monitored competitor sources" — see
+ * `content-panel.tsx`'s own comment on why the wording stays deliberately
+ * non-exhaustive.
  */
 export default async function CompetitiveAnalysisContentPage({ params }: Props) {
   const session = await auth();
@@ -29,7 +31,13 @@ export default async function CompetitiveAnalysisContentPage({ params }: Props) 
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
-  const t = await getTranslations("competitiveAnalysis.content");
+  const [contentResult, competitorsResult] = await Promise.all([
+    listCompetitorContent(slug, session.user.id, session.user.isGlobalAdmin),
+    listCompetitors(slug, session.user.id, session.user.isGlobalAdmin, "active"),
+  ]);
+  if (!contentResult.success || !competitorsResult.success) notFound();
+
+  const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
 
   return (
     <DashboardLayout
@@ -42,9 +50,15 @@ export default async function CompetitiveAnalysisContentPage({ params }: Props) 
     >
       <div className="space-y-6">
         <CompetitiveAnalysisHeader slug={slug} activeTab="content" />
-        <Card className="px-6 py-14 text-center">
-          <p className="text-body text-fg-muted">{t("comingSoon")}</p>
-        </Card>
+        {/* Keyed on `slug` — same cross-company state-leak fix as the
+            Competitors panel (see that page's comment). */}
+        <ContentPanel
+          key={slug}
+          slug={slug}
+          initialItems={contentResult.items}
+          competitors={competitorsResult.competitors.map((c) => ({ id: c.id, name: c.name }))}
+          canManage={canManage}
+        />
       </div>
     </DashboardLayout>
   );

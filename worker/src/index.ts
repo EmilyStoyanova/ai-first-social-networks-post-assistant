@@ -60,6 +60,14 @@ import {
   productPageExtractionHandler,
   PRODUCT_PAGE_EXTRACTION_JOB_TYPE,
 } from "./product-page-extraction-handler";
+import {
+  competitorIntelligenceExtractionHandler,
+  COMPETITOR_INTELLIGENCE_EXTRACTION_JOB_TYPE,
+} from "./competitor-intelligence-extraction-handler";
+import {
+  competitorRelevanceHandler,
+  COMPETITOR_RELEVANCE_JOB_TYPE,
+} from "./competitor-relevance-handler";
 import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
 import { WakeSignal } from "./wake-signal";
 import { createWakeServer } from "./wake-server";
@@ -109,6 +117,11 @@ async function main(): Promise<void> {
     // Turns a scraped product page into the facts its extraction instruction
     // asked for, before any post is written from it.
     .register(PRODUCT_PAGE_EXTRACTION_JOB_TYPE, productPageExtractionHandler)
+    // Competitive Analysis (Part 3B) — fully isolated from every pipeline
+    // above: never shares a job type, a dedupe key, or a queue selection with
+    // normal RSS translation/extraction/classification.
+    .register(COMPETITOR_INTELLIGENCE_EXTRACTION_JOB_TYPE, competitorIntelligenceExtractionHandler)
+    .register(COMPETITOR_RELEVANCE_JOB_TYPE, competitorRelevanceHandler)
     // The two interactive jobs: a person is waiting on each, so they report
     // progress as they go and resume rather than repeat on a retry.
     .register(BULK_GENERATION_JOB_TYPE, bulkGenerationHandlerFor(config))

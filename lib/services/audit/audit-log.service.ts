@@ -44,6 +44,13 @@ export const AUDIT_ACTIONS = {
   /** Permanent delete only — never the archive action. */
   COMPETITOR_DELETED: "COMPETITOR_DELETED",
   RESEARCH_PROFILE_UPDATED: "RESEARCH_PROFILE_UPDATED",
+  // Competitive Analysis (Part 3B).
+  COMPETITOR_SOURCE_ADDED: "COMPETITOR_SOURCE_ADDED",
+  COMPETITOR_SOURCE_UPDATED: "COMPETITOR_SOURCE_UPDATED",
+  /** Permanent delete only — a disable is a COMPETITOR_SOURCE_UPDATED with
+   *  `metadata.enabled: false`, not a separate action. */
+  COMPETITOR_SOURCE_DELETED: "COMPETITOR_SOURCE_DELETED",
+  COMPETITOR_MANUAL_ENTRY_ADDED: "COMPETITOR_MANUAL_ENTRY_ADDED",
 } as const;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────

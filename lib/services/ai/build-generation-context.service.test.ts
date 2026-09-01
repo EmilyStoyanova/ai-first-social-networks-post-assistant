@@ -40,6 +40,9 @@ interface Row {
   enabled: boolean;
   usedInPost: boolean;
   sourceEnabled: boolean;
+  /** NULL for every ordinary company source; set only on a competitor's
+   *  ContentSource row (competitor_rss/competitor_website). */
+  sourceCompetitorId: string | null;
   /**
    * Whether `content` is the article or only the feed's summary.
    *
@@ -65,6 +68,7 @@ function row(id: string, classification: string | null, overrides: Partial<Row> 
     enabled: true,
     usedInPost: false,
     sourceEnabled: true,
+    sourceCompetitorId: null,
     contentComplete: true,
     // Seeded rows get strictly decreasing recency, so "declared first" reads as
     // "newest" and a tier's internal order is the array order.
@@ -99,9 +103,12 @@ function matches(r: Row, where: Record<string, unknown>): boolean {
       case "sourceId":
         if (r.sourceId !== value) return false;
         break;
-      case "source":
-        if (r.sourceEnabled !== (value as { enabled: boolean }).enabled) return false;
+      case "source": {
+        const clause = value as { enabled: boolean; competitorId?: string | null };
+        if (r.sourceEnabled !== clause.enabled) return false;
+        if ("competitorId" in clause && r.sourceCompetitorId !== clause.competitorId) return false;
         break;
+      }
       case "classification":
         // Exact equality, including null — this is the tier predicate.
         if (r.classification !== value) return false;
@@ -335,7 +342,7 @@ describe("candidateWhereFor", () => {
     assert.equal(where.usedInPost, false);
     assert.equal(where.companyId, CO);
     assert.equal(where.enabled, true);
-    assert.deepEqual(where.source, { enabled: true });
+    assert.deepEqual(where.source, { enabled: true, competitorId: null });
   });
 
   it("narrows to one source without loosening anything", async () => {
@@ -358,7 +365,7 @@ describe("candidateWhereFor", () => {
     assert.equal(where.id, "fi-9");
     // Still company- and source-scoped: naming an item is not a bypass.
     assert.equal(where.companyId, CO);
-    assert.deepEqual(where.source, { enabled: true });
+    assert.deepEqual(where.source, { enabled: true, competitorId: null });
   });
 
   it("keeps a disabled source out of every scope", async () => {
@@ -439,5 +446,40 @@ describe("candidate window — summary-only articles are not generatable", () =>
     ];
 
     assert.deepEqual(await windowFor(corpus, POOLED), []);
+  });
+});
+
+// ─── Competitive Analysis isolation (Part 3B §3.8/§4) ─────────────────────────
+
+describe("candidate window — competitor sources are never generation input", () => {
+  it("excludes an item from a competitor ContentSource even though it is otherwise eligible", async () => {
+    const corpus = [
+      row("own", "HIGH"),
+      row("competitor-item", "HIGH", { sourceId: "src-competitor", sourceCompetitorId: "c-1" }),
+    ];
+
+    assert.deepEqual(await windowFor(corpus, POOLED), ["own"]);
+  });
+
+  it("excludes a competitor item from every scope, not only pooled", async () => {
+    const competitorRow = row("competitor-item", "HIGH", {
+      sourceId: "src-competitor",
+      sourceCompetitorId: "c-1",
+    });
+
+    assert.deepEqual(
+      await windowFor([competitorRow], { kind: "source", sourceId: "src-competitor" }),
+      []
+    );
+    assert.deepEqual(
+      await windowFor([competitorRow], { kind: "content_source", sourceId: "src-competitor" }),
+      []
+    );
+    // Even the pinned-sibling window, which drops usedInPost/contentComplete
+    // leniency, must not let a competitor item back in.
+    assert.deepEqual(
+      await windowFor([competitorRow], { kind: "feed_item", feedItemId: "competitor-item" }),
+      []
+    );
   });
 });

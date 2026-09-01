@@ -66,7 +66,12 @@ export async function listContentSources(
   }
 
   const rows = await prisma.contentSource.findMany({
-    where: { companyId },
+    // competitorId: null — a competitor's ContentSource (competitor_rss/
+    // competitor_website, Part 3B) is monitoring input for Competitive
+    // Analysis, not a company content source; it is managed and listed
+    // exclusively through the dedicated competitor-source services (§3.7) and
+    // must never appear in the ordinary Sources UI or its generic listing API.
+    where: { companyId, competitorId: null },
     orderBy: { createdAt: "asc" },
     select: SELECT,
   });

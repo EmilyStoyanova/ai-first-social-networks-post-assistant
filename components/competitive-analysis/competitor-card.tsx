@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { CompetitorForm } from "./competitor-form";
+import { CompetitorSourcesEditor } from "./competitor-sources-editor";
 import type { CompetitorListItem } from "@/lib/services/competitive-analysis/competitor-dto";
 import type { CompetitorInput } from "@/lib/validators/competitor.schema";
 
@@ -171,8 +172,10 @@ export function CompetitorCard({
         </div>
       )}
 
+      <CompetitorSourcesEditor slug={slug} competitorId={competitor.id} canManage={canManage} />
+
       {actionError && (
-        <Alert variant="error" className="mb-3">
+        <Alert variant="error" className="mt-3 mb-3">
           {actionError}
         </Alert>
       )}

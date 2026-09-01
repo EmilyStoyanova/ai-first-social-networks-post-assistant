@@ -8,6 +8,8 @@ import {
   extractArticleParts,
   extractReadableText,
   resolveArticleContent,
+  safeFetch,
+  MAX_SAFE_FETCH_REDIRECTS,
 } from "./article-extractor";
 import type { DnsResolver } from "./article-extractor";
 import { pickSourceImage } from "./article-image";
@@ -27,6 +29,41 @@ function failingResolver(): DnsResolver {
 function mockFetch(status: number, body: string, contentType = "text/html; charset=utf-8") {
   return async () =>
     new Response(body, { status, headers: { "content-type": contentType } }) as Response;
+}
+
+/**
+ * Resolves each hostname independently — needed for redirect tests, where the
+ * initial host and a later redirect target must resolve to DIFFERENT
+ * addresses (one public, one private) for the test to prove anything.
+ */
+function hostAwareResolver(map: Record<string, { address: string; family: 4 | 6 }>): DnsResolver {
+  return async (hostname: string) => {
+    const entry = map[hostname];
+    if (!entry) throw new Error(`no fake DNS entry configured for host "${hostname}"`);
+    return [entry];
+  };
+}
+
+/**
+ * A fetch mock keyed by exact URL, for tests that need a chain of distinct
+ * responses (redirect hop → redirect hop → final response). Records every
+ * URL actually fetched, so a test can assert a later hop was never reached.
+ */
+function chainFetch(
+  steps: Record<string, { status: number; location?: string; body?: string; contentType?: string }>
+) {
+  const calls: string[] = [];
+  const fn: typeof globalThis.fetch = async (input) => {
+    const url = typeof input === "string" ? input : input.toString();
+    calls.push(url);
+    const step = steps[url];
+    if (!step) throw new Error(`chainFetch: no step configured for "${url}"`);
+    const headers: Record<string, string> = {};
+    if (step.location !== undefined) headers.location = step.location;
+    if (step.contentType) headers["content-type"] = step.contentType;
+    return new Response(step.body ?? "", { status: step.status, headers }) as Response;
+  };
+  return { fn, calls };
 }
 
 /** Public IP resolver — passes SSRF checks without real DNS. */
@@ -174,6 +211,232 @@ describe("checkSsrf — blocks private IPv6 addresses returned by DNS", () => {
 describe("checkSsrf — DNS failure handling", () => {
   it("returns false when DNS resolution throws", async () => {
     assert.equal(await checkSsrf(new URL(ARTICLE_URL), failingResolver()), false);
+  });
+});
+
+// ─── safeFetch — redirect-safe fetch (SSRF hardening) ─────────────────────────
+//
+// `safeFetch` is what closes the hole `checkSsrf` alone could not: validating
+// only the URL the CALLER asked for, then letting `fetch(url, {redirect:
+// "follow"})` chase redirects to wherever the server sends it, unvalidated.
+// Every test below drives `safeFetch` directly with `redirect: "manual"`
+// fetch mocks, so each one proves a specific hop was (or was not) requested.
+
+describe("safeFetch — public URL, no redirect", () => {
+  it("1. returns the response for an ordinary public URL", async () => {
+    const { fn } = chainFetch({
+      [ARTICLE_URL]: { status: 200, body: "hello", contentType: "text/html" },
+    });
+    const result = await safeFetch(ARTICLE_URL, { resolve: publicResolver, fetch: fn });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.finalUrl, ARTICLE_URL);
+      assert.equal(await result.response.text(), "hello");
+    }
+  });
+});
+
+describe("safeFetch — initial URL blocked", () => {
+  it("2. rejects a private/localhost initial URL WITHOUT ever calling fetch", async () => {
+    const { fn, calls } = chainFetch({});
+    const result = await safeFetch("http://localhost/admin", {
+      resolve: publicResolver,
+      fetch: fn,
+    });
+    assert.deepEqual(result, { ok: false, reason: "ssrf_blocked" });
+    assert.equal(calls.length, 0, "must never reach the network for a pre-DNS-blocked host");
+  });
+
+  it("rejects when the initial host's own DNS resolves to a private address", async () => {
+    const { fn, calls } = chainFetch({});
+    const result = await safeFetch(ARTICLE_URL, { resolve: resolver("10.0.0.1", 4), fetch: fn });
+    assert.deepEqual(result, { ok: false, reason: "ssrf_blocked" });
+    assert.equal(calls.length, 0);
+  });
+});
+
+describe("safeFetch — redirect targets are independently validated", () => {
+  const START = "https://public-start.example/feed";
+
+  it("3. rejects a redirect to localhost", async () => {
+    const { fn, calls } = chainFetch({
+      [START]: { status: 302, location: "http://localhost/internal" },
+    });
+    const resolve = hostAwareResolver({
+      "public-start.example": { address: "93.184.216.34", family: 4 },
+    });
+    const result = await safeFetch(START, { resolve, fetch: fn });
+    assert.deepEqual(result, { ok: false, reason: "ssrf_blocked" });
+    // Only the first hop was actually requested — localhost is blocked
+    // pre-DNS, before a second fetch call would even be attempted.
+    assert.deepEqual(calls, [START]);
+  });
+
+  it("4. rejects a redirect to a private IPv4 address (via DNS)", async () => {
+    const target = "https://internal-host.example/private";
+    const { fn, calls } = chainFetch({
+      [START]: { status: 302, location: target },
+    });
+    const resolve = hostAwareResolver({
+      "public-start.example": { address: "93.184.216.34", family: 4 },
+      "internal-host.example": { address: "10.0.0.5", family: 4 },
+    });
+    const result = await safeFetch(START, { resolve, fetch: fn });
+    assert.deepEqual(result, { ok: false, reason: "ssrf_blocked" });
+    assert.deepEqual(calls, [START], "the redirect target must never be fetched");
+  });
+
+  it("5. rejects a redirect to a prohibited IPv6 address (link-local)", async () => {
+    const target = "https://internal-host6.example/private";
+    const { fn, calls } = chainFetch({
+      [START]: { status: 302, location: target },
+    });
+    const resolve = hostAwareResolver({
+      "public-start.example": { address: "93.184.216.34", family: 4 },
+      "internal-host6.example": { address: "fe80::1", family: 6 },
+    });
+    const result = await safeFetch(START, { resolve, fetch: fn });
+    assert.deepEqual(result, { ok: false, reason: "ssrf_blocked" });
+    assert.deepEqual(calls, [START]);
+  });
+
+  it("6. allows a redirect to another valid public HTTPS URL", async () => {
+    const target = "https://public-target.example/moved";
+    const { fn, calls } = chainFetch({
+      [START]: { status: 302, location: target },
+      [target]: { status: 200, body: "final content", contentType: "text/html" },
+    });
+    const resolve = hostAwareResolver({
+      "public-start.example": { address: "93.184.216.34", family: 4 },
+      "public-target.example": { address: "93.184.216.35", family: 4 },
+    });
+    const result = await safeFetch(START, { resolve, fetch: fn });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.finalUrl, target);
+      assert.equal(await result.response.text(), "final content");
+    }
+    assert.deepEqual(calls, [START, target]);
+  });
+
+  it("7. allows multiple safe redirects within the limit", async () => {
+    const hop1 = "https://hop1.example/a";
+    const hop2 = "https://hop2.example/b";
+    const final = "https://hop3.example/c";
+    const { fn, calls } = chainFetch({
+      [START]: { status: 302, location: hop1 },
+      [hop1]: { status: 302, location: hop2 },
+      [hop2]: { status: 302, location: final },
+      [final]: { status: 200, body: "ok", contentType: "text/html" },
+    });
+    const resolve = hostAwareResolver({
+      "public-start.example": { address: "93.184.216.34", family: 4 },
+      "hop1.example": { address: "93.184.216.35", family: 4 },
+      "hop2.example": { address: "93.184.216.36", family: 4 },
+      "hop3.example": { address: "93.184.216.37", family: 4 },
+    });
+    const result = await safeFetch(START, { resolve, fetch: fn });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.finalUrl, final);
+    assert.deepEqual(calls, [START, hop1, hop2, final]);
+  });
+
+  it("8. rejects once the redirect chain exceeds the configured limit", async () => {
+    // A chain one hop longer than the (overridden, small) limit allows.
+    const hosts = ["a", "b", "c", "d"].map((label) => `https://hop-${label}.example/x`);
+    const steps: Record<string, { status: number; location?: string; body?: string }> = {
+      [START]: { status: 302, location: hosts[0] },
+      [hosts[0]]: { status: 302, location: hosts[1] },
+      [hosts[1]]: { status: 302, location: hosts[2] },
+      [hosts[2]]: { status: 302, location: hosts[3] },
+      [hosts[3]]: { status: 200, body: "unreachable" },
+    };
+    const { fn } = chainFetch(steps);
+    const resolve = hostAwareResolver({
+      "public-start.example": { address: "93.184.216.34", family: 4 },
+      "hop-a.example": { address: "93.184.216.35", family: 4 },
+      "hop-b.example": { address: "93.184.216.36", family: 4 },
+      "hop-c.example": { address: "93.184.216.37", family: 4 },
+      "hop-d.example": { address: "93.184.216.38", family: 4 },
+    });
+    const result = await safeFetch(START, { resolve, fetch: fn, maxRedirects: 2 });
+    assert.deepEqual(result, { ok: false, reason: "too_many_redirects" });
+  });
+
+  it("uses MAX_SAFE_FETCH_REDIRECTS as the production default", () => {
+    assert.ok(MAX_SAFE_FETCH_REDIRECTS >= 1 && MAX_SAFE_FETCH_REDIRECTS <= 10);
+  });
+
+  it("9. rejects safely when a redirect response has no Location header", async () => {
+    const { fn, calls } = chainFetch({
+      [START]: { status: 302 /* no location */ },
+    });
+    const resolve = hostAwareResolver({
+      "public-start.example": { address: "93.184.216.34", family: 4 },
+    });
+    const result = await safeFetch(START, { resolve, fetch: fn });
+    assert.deepEqual(result, { ok: false, reason: "invalid_redirect" });
+    assert.deepEqual(calls, [START]);
+  });
+
+  it("9b. rejects safely when a redirect Location is a malformed URL (unterminated IPv6 host)", async () => {
+    const { fn } = chainFetch({
+      // Absolute, and malformed regardless of any base URL it might otherwise
+      // be resolved against — an opening "[" with no closing "]" is invalid
+      // host syntax, so `new URL(...)` throws rather than silently producing
+      // a wrong-but-parseable address.
+      [START]: { status: 302, location: "http://[::1" },
+    });
+    const resolve = hostAwareResolver({
+      "public-start.example": { address: "93.184.216.34", family: 4 },
+    });
+    const result = await safeFetch(START, { resolve, fetch: fn });
+    assert.deepEqual(result, { ok: false, reason: "invalid_redirect" });
+  });
+
+  it("10. terminates safely on a redirect loop instead of hanging", async () => {
+    const a = "https://loop-a.example/x";
+    const b = "https://loop-b.example/y";
+    const { fn, calls } = chainFetch({
+      [a]: { status: 302, location: b },
+      [b]: { status: 302, location: a },
+    });
+    const resolve = hostAwareResolver({
+      "loop-a.example": { address: "93.184.216.34", family: 4 },
+      "loop-b.example": { address: "93.184.216.35", family: 4 },
+    });
+    const result = await safeFetch(a, { resolve, fetch: fn });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.reason, "redirect_loop");
+    // Bounded: the loop must not have been walked more than a couple of times.
+    assert.ok(calls.length <= 3, `expected a bounded number of calls, got ${calls.length}`);
+  });
+});
+
+describe("safeFetch — non-redirect statuses pass through untouched", () => {
+  it("returns a 404 as an ok result — the caller decides what to do with it", async () => {
+    const { fn } = chainFetch({ [ARTICLE_URL]: { status: 404, body: "nope" } });
+    const result = await safeFetch(ARTICLE_URL, { resolve: publicResolver, fetch: fn });
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.response.status, 404);
+  });
+});
+
+describe("safeFetch — transport failures", () => {
+  it("reports a transport error without throwing", async () => {
+    const result = await safeFetch(ARTICLE_URL, {
+      resolve: publicResolver,
+      fetch: async () => {
+        throw new Error("socket hang up");
+      },
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, /^fetch_failed: socket hang up$/);
+  });
+
+  it("rejects an unparseable initial URL", async () => {
+    const result = await safeFetch("not-a-url", { resolve: publicResolver });
+    assert.deepEqual(result, { ok: false, reason: "invalid_url" });
   });
 });
 

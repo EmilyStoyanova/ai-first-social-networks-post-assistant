@@ -99,6 +99,13 @@ describe("isClassifiableSourceType", () => {
       assert.equal(isClassifiableSourceType(type), false);
     }
   });
+
+  // Part 3B §4/§25.7 — competitor content never enters the normal
+  // classification queue, whatever else changes about that pipeline.
+  it("rejects both competitor source types", () => {
+    assert.equal(isClassifiableSourceType("competitor_rss"), false);
+    assert.equal(isClassifiableSourceType("competitor_website"), false);
+  });
 });
 
 describe("classificationMode", () => {

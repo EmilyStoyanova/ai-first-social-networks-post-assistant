@@ -38,3 +38,47 @@ export function computeNextProfileVersion(
     !sameStringSet(existing.markets, next.markets);
   return contentChanged ? existing.profileVersion + 1 : existing.profileVersion;
 }
+
+/** True only when a save actually moved `profileVersion` on an EXISTING row —
+ *  never for a first-ever save (there is no prior version to move away from)
+ *  and never for a period-only save. Exists as its own function so
+ *  `shouldRecomputeRelevanceOnSave` can state its two conditions
+ *  (`isFirstSave || versionBumped`) as two independently-named, independently
+ *  testable facts rather than one inlined boolean expression. */
+export function versionWasBumped(
+  existing: { profileVersion: number } | null,
+  nextVersion: number
+): boolean {
+  return existing !== null && nextVersion !== existing.profileVersion;
+}
+
+/**
+ * Whether a Research Profile save should trigger the bounded relevance
+ * recompute drain (`recompute-stale-relevance.service.ts`) — verification
+ * pass §1.
+ *
+ * True on the FIRST-EVER save (`existing === null`), not just on a later
+ * version bump. Before this row is ever persisted, `recomputeStaleRelevanceForCompany`
+ * refuses to run at all (it returns immediately when no profile row exists —
+ * see that service's own guard), so any competitor content already extracted
+ * while unpersisted sits at `relevance: pending, relevanceProfileVersion:
+ * null` with NOTHING ever triggering its first relevance computation unless
+ * something recognizes that the row now exists. Relying on `versionBumped`
+ * alone misses this: on a first save `existing` is null, so `versionBumped`
+ * is unconditionally false by its own definition above — not a coincidence
+ * this function has to work around, but the exact bug this pass found.
+ *
+ * This is also why NO version sentinel (e.g. a non-persisted "version 0" for
+ * unsaved Brand-derived defaults) is needed: relevance is NEVER computed
+ * before this row is persisted (there is no code path that does), so the
+ * first save's `profileVersion` — always 1, per `computeNextProfileVersion`
+ * — is the ONLY version any of that backlog is ever judged against. A
+ * sentinel would be solving a collision that cannot occur under the current
+ * one-row-per-company, recompute-only-after-persistence design.
+ */
+export function shouldRecomputeRelevanceOnSave(
+  existing: { profileVersion: number } | null,
+  versionBumped: boolean
+): boolean {
+  return existing === null || versionBumped;
+}

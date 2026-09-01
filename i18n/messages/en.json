@@ -363,10 +363,161 @@
           "x": "X",
           "other": "Other"
         }
+      },
+      "sources": {
+        "title": "RSS Sources",
+        "hint": "Labeled RSS feeds for this competitor — these ARE ingestible and monitored, unlike Social Profiles above.",
+        "empty": "No RSS feeds yet.",
+        "addSource": "Add RSS feed",
+        "labelPlaceholder": "Label (e.g. Blog)",
+        "sync": "Sync",
+        "syncResult": "Synced — {created} new, {updated} updated.",
+        "disable": "Disable",
+        "enable": "Enable",
+        "disabled": "Disabled"
       }
     },
     "content": {
-      "comingSoon": "Coming soon — competitor content collection and analysis are not implemented in this phase."
+      "comingSoon": "Coming soon — competitor content collection and analysis are not implemented in this phase.",
+      "observedNote": "Observed content from monitored competitor sources — monitoring may be incomplete.",
+      "detailTitle": "Observed content",
+      "unknownDate": "Unknown date",
+      "viewSource": "View source",
+      "addContent": "Add competitor content",
+      "emptyTitle": "No content observed yet",
+      "emptyDesc": "Sync a competitor's RSS feed or add content manually to start seeing it here.",
+      "filters": {
+        "allCompetitors": "All competitors",
+        "allOrigins": "All sources",
+        "originRss": "RSS",
+        "originManual": "Manually added",
+        "allRelevance": "All relevance"
+      },
+      "relevance": {
+        "relevant": "Relevant",
+        "related": "Related",
+        "out_of_scope": "Out of scope",
+        "pending": "Not yet scored"
+      },
+      "status": {
+        "pending": "Queued for analysis",
+        "analyzing": "Analyzing…",
+        "completed": "Analyzed",
+        "failed": "Analysis failed"
+      },
+      "platform": {
+        "rss": "RSS",
+        "facebook": "Facebook",
+        "instagram": "Instagram",
+        "linkedin": "LinkedIn",
+        "tiktok": "TikTok",
+        "youtube": "YouTube",
+        "x": "X",
+        "website": "Website",
+        "other": "Other"
+      },
+      "contentType": {
+        "blog_post": "Blog post",
+        "product_update": "Product update",
+        "promotion": "Promotion",
+        "announcement": "Announcement",
+        "guide": "Guide",
+        "video": "Video",
+        "social_post": "Social post",
+        "ad": "Ad",
+        "other": "Other"
+      },
+      "hookType": {
+        "question": "Question",
+        "problem": "Problem",
+        "bold_claim": "Bold claim",
+        "statistic": "Statistic",
+        "curiosity": "Curiosity",
+        "story": "Story",
+        "direct_offer": "Direct offer",
+        "announcement": "Announcement",
+        "none": "None",
+        "other": "Other"
+      },
+      "structurePattern": {
+        "problem_solution": "Problem → solution",
+        "how_to": "How-to",
+        "list": "List",
+        "story": "Story",
+        "comparison": "Comparison",
+        "question_answer": "Question & answer",
+        "announcement": "Announcement",
+        "offer": "Offer",
+        "other": "Other"
+      },
+      "angleCategory": {
+        "problem_solution": "Problem → solution",
+        "comparison": "Comparison",
+        "how_to": "How-to",
+        "case_study": "Case study",
+        "announcement": "Announcement",
+        "thought_leadership": "Thought leadership",
+        "behind_the_scenes": "Behind the scenes",
+        "promotion": "Promotion",
+        "other": "Other"
+      },
+      "commercialIntent": {
+        "informational": "Informational",
+        "soft_sell": "Soft sell",
+        "hard_sell": "Hard sell",
+        "promotional": "Promotional"
+      },
+      "ctaType": {
+        "learn_more": "Learn more",
+        "sign_up": "Sign up",
+        "buy_now": "Buy now",
+        "contact_us": "Contact us",
+        "download": "Download",
+        "comment_engage": "Comment / engage",
+        "none": "None",
+        "other": "Other"
+      },
+      "fields": {
+        "topic": "Topic",
+        "subtopic": "Subtopic",
+        "angle": "Angle",
+        "contentType": "Content type",
+        "hookType": "Hook",
+        "structurePattern": "Structure",
+        "angleCategory": "Angle category",
+        "commercialIntent": "Commercial intent",
+        "ctaType": "CTA type",
+        "targetAudience": "Target audience",
+        "tone": "Tone",
+        "originalLanguage": "Original language",
+        "summary": "Summary",
+        "keyMessage": "Key message",
+        "problemAddressed": "Problem addressed",
+        "ctaText": "CTA text",
+        "productsServicesMentioned": "Products/services mentioned"
+      },
+      "manualEntry": {
+        "competitor": "Competitor",
+        "platform": "Platform",
+        "postType": "Type",
+        "content": "Content",
+        "contentPlaceholder": "Paste the post's text here…",
+        "url": "Source URL (optional)",
+        "urlHint": "Reference only — never fetched automatically.",
+        "capturedAt": "Date (optional)",
+        "capturedAtHint": "Leave blank if you don't know it — it will show as \"Unknown date\", never guessed.",
+        "sourceTypes": {
+          "website": "Website",
+          "other": "Other"
+        },
+        "postTypes": {
+          "organic": "Organic",
+          "ad": "Ad"
+        },
+        "errors": {
+          "competitorRequired": "Select a competitor."
+        }
+      }
     },
     "trends": {
       "comingSoon": "Coming soon — aggregate and cross-competitor trends are not implemented in this phase."

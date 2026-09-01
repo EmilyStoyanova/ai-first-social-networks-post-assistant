@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { parseFeedXml } from "./parser";
+import { parseFeed, parseFeedXml, FeedFetchBlockedError } from "./parser";
+import type { DnsResolver } from "./article-extractor";
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -344,5 +345,119 @@ describe("parseFeedXml — item images", () => {
 
   it("reports null for an item with no image at all", () => {
     assert.equal(parseFeedXml(rssWith(`<description>Text only.</description>`))[0].imageUrl, null);
+  });
+});
+
+// ─── parseFeed — network fetch is now redirect-safe (verification pass) ──────
+//
+// Before this pass, `parseFeed` performed a bare `fetch(url, {cache:
+// "no-store"})` with NO SSRF check of its own — not on the initial URL, and
+// not on any redirect it followed. This applies to BOTH the normal RSS
+// pipeline (`ingest-content-source.service.ts`, which calls `parseFeed`
+// directly) and competitor RSS ingestion — the fix lives here, once, in the
+// shared low-level fetch, so both paths inherit it identically.
+
+function feedResolver(map: Record<string, { address: string; family: 4 | 6 }>): DnsResolver {
+  return async (hostname: string) => {
+    const entry = map[hostname];
+    if (!entry) throw new Error(`no fake DNS entry configured for host "${hostname}"`);
+    return [entry];
+  };
+}
+
+const MINIMAL_FEED_XML = `<?xml version="1.0"?><rss><channel>
+  <item><title>Hi</title><link>https://example.com/a</link></item>
+</channel></rss>`;
+
+describe("parseFeed — SSRF/redirect safety", () => {
+  const FEED_URL = "https://public-feed.example/rss.xml";
+
+  it("fetches and parses a feed from a safe public URL", async () => {
+    const fetchFn: typeof globalThis.fetch = async () =>
+      new Response(MINIMAL_FEED_XML, { status: 200 }) as Response;
+    const items = await parseFeed(FEED_URL, {
+      resolve: feedResolver({ "public-feed.example": { address: "93.184.216.34", family: 4 } }),
+      fetch: fetchFn,
+    });
+    assert.equal(items.length, 1);
+    assert.equal(items[0].url, "https://example.com/a");
+  });
+
+  it("rejects a feed URL that resolves to a private address, WITHOUT fetching it", async () => {
+    let called = false;
+    const fetchFn: typeof globalThis.fetch = async () => {
+      called = true;
+      return new Response(MINIMAL_FEED_XML, { status: 200 }) as Response;
+    };
+    await assert.rejects(
+      () =>
+        parseFeed(FEED_URL, {
+          resolve: feedResolver({ "public-feed.example": { address: "10.0.0.1", family: 4 } }),
+          fetch: fetchFn,
+        }),
+      FeedFetchBlockedError
+    );
+    assert.equal(called, false, "must never reach the network for an SSRF-blocked feed URL");
+  });
+
+  it("rejects a feed URL that redirects to an internal/private address", async () => {
+    const target = "https://internal-feed-host.example/hidden.xml";
+    const calls: string[] = [];
+    const fetchFn: typeof globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      calls.push(url);
+      if (url === FEED_URL) {
+        return new Response(null, { status: 302, headers: { location: target } }) as Response;
+      }
+      // The redirect target must never actually be requested.
+      return new Response(MINIMAL_FEED_XML, { status: 200 }) as Response;
+    };
+    await assert.rejects(
+      () =>
+        parseFeed(FEED_URL, {
+          resolve: feedResolver({
+            "public-feed.example": { address: "93.184.216.34", family: 4 },
+            "internal-feed-host.example": { address: "127.0.0.1", family: 4 },
+          }),
+          fetch: fetchFn,
+        }),
+      FeedFetchBlockedError
+    );
+    assert.deepEqual(calls, [FEED_URL], "the redirect target must never be fetched");
+  });
+
+  it("follows a redirect to another safe public URL and parses the final feed", async () => {
+    const target = "https://public-feed-2.example/rss2.xml";
+    const fetchFn: typeof globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url === FEED_URL) {
+        return new Response(null, { status: 301, headers: { location: target } }) as Response;
+      }
+      if (url === target) {
+        return new Response(MINIMAL_FEED_XML, { status: 200 }) as Response;
+      }
+      throw new Error(`unexpected fetch to ${url}`);
+    };
+    const items = await parseFeed(FEED_URL, {
+      resolve: feedResolver({
+        "public-feed.example": { address: "93.184.216.34", family: 4 },
+        "public-feed-2.example": { address: "93.184.216.35", family: 4 },
+      }),
+      fetch: fetchFn,
+    });
+    assert.equal(items.length, 1);
+  });
+
+  it("throws an ordinary error (not FeedFetchBlockedError) for a non-SSRF HTTP failure", async () => {
+    const fetchFn: typeof globalThis.fetch = async () =>
+      new Response("Not Found", { status: 404, statusText: "Not Found" }) as Response;
+    await assert.rejects(
+      () =>
+        parseFeed(FEED_URL, {
+          resolve: feedResolver({ "public-feed.example": { address: "93.184.216.34", family: 4 } }),
+          fetch: fetchFn,
+        }),
+      (err: unknown) => err instanceof Error && !(err instanceof FeedFetchBlockedError)
+    );
   });
 });

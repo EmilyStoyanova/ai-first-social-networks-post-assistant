@@ -204,3 +204,37 @@ describe("content-source schema — other types are unchanged", () => {
     );
   });
 });
+
+describe("content-source schema — competitor types are never accepted here (Part 3B §2/§25.2)", () => {
+  // The generic Content Source API is a company-content surface; competitor
+  // sources are created exclusively through the dedicated Competitive
+  // Analysis routes/services (§3.7), which validate against
+  // competitor-source.schema.ts instead. `type` is a Zod discriminated union
+  // over exactly four literals, so a competitor payload fails validation
+  // structurally — this pins that guarantee down as a test, not just a
+  // consequence of the union happening not to list it.
+  for (const type of ["competitor_rss", "competitor_website"]) {
+    it(`rejects type "${type}"`, () => {
+      const result = contentSourceSchema.safeParse({
+        type,
+        name: "Competitor feed",
+        config: { url: "https://competitor.example.com/feed.xml" },
+      });
+      assert.equal(result.success, false);
+    });
+  }
+
+  it("rejects a competitorId on an otherwise-valid RSS payload (the field does not exist on this schema)", () => {
+    const result = contentSourceSchema.safeParse({
+      type: "rss",
+      name: "Econ Daily",
+      competitorId: "c-1",
+      config: { url: "https://news.example.com/feed.xml" },
+    });
+    // Zod strips unknown keys by default rather than rejecting them, so the
+    // meaningful assertion is that the parsed value never carries the field —
+    // nothing downstream can read a `competitorId` off a generic-API payload.
+    assert.ok(result.success);
+    assert.ok(!("competitorId" in result.data));
+  });
+});

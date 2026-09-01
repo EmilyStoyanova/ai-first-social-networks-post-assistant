@@ -1,7 +1,13 @@
 import { prisma } from "@/lib/db/client";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
+import { enqueueJob } from "@/lib/services/queue/enqueue-job.service";
+import { COMPETITOR_RELEVANCE_JOB_TYPE, competitorRelevanceDedupeKey } from "@/lib/queue/job-types";
 import { resolveCompetitiveAnalysisContext } from "./resolve-competitor-context";
-import { computeNextProfileVersion } from "./research-profile-versioning";
+import {
+  computeNextProfileVersion,
+  shouldRecomputeRelevanceOnSave,
+  versionWasBumped,
+} from "./research-profile-versioning";
 import type { UpdateResearchProfileInput } from "@/lib/validators/research-profile.schema";
 import type { ResearchProfileDTO } from "./get-research-profile-or-defaults.service";
 
@@ -17,8 +23,11 @@ export type UpdateResearchProfileResult =
  *
  * `profileVersion` starts at 1 and increments ONLY when `researchTopics` or
  * `markets` actually changed (order-independent) — never for an
- * `analysisPeriodDays`-only save. This is versioning only: Part 3B's
- * relevance-recompute sweep (keyed off this number) is not implemented here.
+ * `analysisPeriodDays`-only save (§12). When a save DOES bump the version,
+ * this best-effort enqueues the bounded relevance-recompute drain
+ * (`recompute-stale-relevance.service.ts`) for this company — it re-evaluates
+ * already-extracted content against the new profile; it never re-runs
+ * extraction, and a period-only save never reaches this enqueue at all.
  */
 export async function updateResearchProfile(
   slug: string,
@@ -37,7 +46,13 @@ export async function updateResearchProfile(
   });
 
   const nextVersion = computeNextProfileVersion(existing, data);
-  const versionBumped = existing !== null && nextVersion !== existing.profileVersion;
+  const versionBumped = versionWasBumped(existing, nextVersion);
+  // Verification pass (§1) — see `shouldRecomputeRelevanceOnSave`'s own
+  // comment for why the first-ever save needs its own trigger condition, not
+  // just `versionBumped`, and why no version sentinel is needed to make that
+  // safe.
+  const isFirstSave = existing === null;
+  const shouldRecomputeRelevance = shouldRecomputeRelevanceOnSave(existing, versionBumped);
 
   const row = await prisma.competitorResearchProfile.upsert({
     where: { companyId },
@@ -67,8 +82,31 @@ export async function updateResearchProfile(
     userId,
     action: AUDIT_ACTIONS.RESEARCH_PROFILE_UPDATED,
     entityType: "competitor_research_profile",
-    metadata: { profileVersion: row.profileVersion, versionBumped },
+    metadata: { profileVersion: row.profileVersion, versionBumped, isFirstSave },
   });
+
+  // Relevance recompute — on the first-ever save, or whenever a later save
+  // actually moves the version (§12); never for a period-only save on an
+  // existing row (that leaves both `isFirstSave` and `versionBumped` false).
+  // Never re-runs extraction; see recompute-stale-relevance.service.ts.
+  // Best-effort: a failed enqueue must not fail the Save, and stale rows
+  // simply wait for the next Save or a future manual trigger.
+  if (shouldRecomputeRelevance) {
+    try {
+      await enqueueJob({
+        type: COMPETITOR_RELEVANCE_JOB_TYPE,
+        // companyId travels in the PAYLOAD, not only the job row's companyId
+        // column — JobRecord (what a handler actually receives) exposes
+        // payload but not the row's other columns; see worker/src/job-store.ts.
+        payload: { companyId },
+        dedupeKey: competitorRelevanceDedupeKey(companyId),
+        companyId,
+        createdBy: userId,
+      });
+    } catch (err) {
+      console.error("[research-profile] relevance recompute enqueue failed (ignored):", err);
+    }
+  }
 
   return {
     success: true,

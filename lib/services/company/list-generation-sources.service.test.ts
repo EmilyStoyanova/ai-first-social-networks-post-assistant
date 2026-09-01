@@ -337,6 +337,30 @@ describe("listGenerationSourcesCore", () => {
     assert.deepEqual(queried, [undefined], "only the non-RSS window is queried");
   });
 
+  it("scopes the source query to competitorId: null (Part 3B §3.8/§4 isolation)", async () => {
+    // A real Prisma call with `competitorId: null` excludes every competitor
+    // ContentSource row (competitor_rss/competitor_website) by construction —
+    // this pins the query shape so that guard cannot be silently dropped in a
+    // future edit. The fake DB below asserts the exact where clause rather
+    // than reproducing Prisma's filtering.
+    let observedWhere: unknown;
+    const db: GenerationSourcesDb = {
+      company: { findUnique: async () => ({ id: "co-1" }) },
+      companyMember: { findFirst: async () => ({ companyId: "co-1" }) },
+      contentSource: {
+        findMany: async ({ where }) => {
+          observedWhere = where;
+          return [];
+        },
+      },
+      feedItem: { findMany: async () => [] },
+    };
+
+    await listGenerationSourcesCore("acme", "u-1", false, db);
+
+    assert.deepEqual(observedWhere, { companyId: "co-1", enabled: true, competitorId: null });
+  });
+
   it("returns NOT_FOUND when a non-member requests the list", async () => {
     const db: GenerationSourcesDb = {
       company: { findUnique: async () => null },

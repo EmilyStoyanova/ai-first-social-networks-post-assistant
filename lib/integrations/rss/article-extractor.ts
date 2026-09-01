@@ -83,6 +83,157 @@ export async function checkSsrf(url: URL, resolve: DnsResolver = lookup): Promis
   return true;
 }
 
+// ─── Redirect-safe fetch ──────────────────────────────────────────────────────
+
+/**
+ * Standard redirect status codes that carry a `Location` header to follow.
+ * Anything else in the 3xx range (e.g. 304 Not Modified) is treated as a
+ * terminal response, not a hop — this project never sends conditional
+ * request headers, so a 304 would only occur ahead of an intermediary that
+ * behaves unexpectedly, and it has no `Location` to follow anyway.
+ */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Hard cap on redirect hops for one `safeFetch` call — generous enough for a
+ * normal CDN/tracking-link chain, small enough to bound the work a malicious
+ * or misconfigured target can force.
+ */
+export const MAX_SAFE_FETCH_REDIRECTS = 5;
+
+export interface SafeFetchOptions {
+  /** Injectable DNS resolver — tests avoid real lookups. */
+  resolve?: DnsResolver;
+  /** Injectable fetch — tests avoid real network requests. */
+  fetch?: typeof globalThis.fetch;
+  /** Extra request headers, applied identically to every hop. */
+  headers?: Record<string, string>;
+  /** Total time budget across the WHOLE redirect chain, not per hop — a
+   *  target cannot reset the clock by adding another redirect. Defaults to
+   *  `FETCH_TIMEOUT_MS`. */
+  timeoutMs?: number;
+  /** Overridable for tests only; production callers use the default. */
+  maxRedirects?: number;
+  /** Forwarded verbatim to every hop's fetch call — e.g. Next.js's
+   *  `"no-store"` to bypass its Data Cache for a source that must always be
+   *  read fresh. Omitted entirely (not even as `undefined`) when unset, since
+   *  some fetch implementations reject an explicit `cache: undefined`. */
+  cache?: RequestCache;
+}
+
+export type SafeFetchResult =
+  { ok: true; response: Response; finalUrl: string } | { ok: false; reason: string };
+
+/**
+ * Fetches `rawUrl` with EVERY hop — the initial URL and every redirect target
+ * it issues — independently validated by `checkSsrf` before it is requested.
+ *
+ * This exists because `fetch(url, { redirect: "follow" })` (what this module
+ * used exclusively before this function) only lets the CALLER see and
+ * validate the URL it originally asked for. The actual TCP connections made
+ * while following redirects happen entirely inside the fetch implementation,
+ * unvalidated — so a target could pass `checkSsrf` on its own public URL and
+ * then 302 the real request to `http://169.254.169.254/...` or
+ * `http://localhost:6379/`, and Node would follow it transparently. Fetching
+ * with `redirect: "manual"` and walking the chain here closes that gap: no
+ * hop is ever requested before its own URL clears the same SSRF policy the
+ * first one did.
+ *
+ * Never throws — every failure (SSRF block on any hop, a missing/malformed
+ * `Location`, too many redirects, a redirect loop, a transport error, a
+ * timeout) comes back as `{ ok: false, reason }`. `reason` is a short
+ * machine-readable tag, occasionally suffixed with `: <message>` for
+ * transport failures — the same convention `ExtractedArticle.error` already
+ * uses, so callers can pass it straight through.
+ *
+ * Known limitation, not solved by this function or by `checkSsrf`: DNS
+ * rebinding. `checkSsrf` resolves and validates each hop's hostname once,
+ * before the request; the underlying fetch implementation then resolves it
+ * again (independently) to actually connect. A hostname whose DNS answer
+ * changes between those two resolutions — pointing at a public address for
+ * the check and a private one for the connection — is not caught. This is a
+ * pre-existing limitation of `checkSsrf`'s check-then-connect shape, not
+ * something the manual redirect loop introduces or could fix without
+ * controlling the socket connection itself.
+ */
+export async function safeFetch(
+  rawUrl: string,
+  options: SafeFetchOptions = {}
+): Promise<SafeFetchResult> {
+  const fetchFn = options.fetch ?? fetch;
+  const maxRedirects = options.maxRedirects ?? MAX_SAFE_FETCH_REDIRECTS;
+  const timeoutMs = options.timeoutMs ?? FETCH_TIMEOUT_MS;
+
+  let currentUrl: URL;
+  try {
+    currentUrl = new URL(rawUrl);
+  } catch {
+    return { ok: false, reason: "invalid_url" };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // Every URL visited this call, initial included — catches a redirect loop
+  // (A → B → A) without waiting for it to exhaust the hop budget.
+  const visited = new Set<string>();
+
+  try {
+    for (let hop = 0; ; hop++) {
+      if (!(await checkSsrf(currentUrl, options.resolve))) {
+        return { ok: false, reason: "ssrf_blocked" };
+      }
+
+      const normalized = currentUrl.toString();
+      if (visited.has(normalized)) return { ok: false, reason: "redirect_loop" };
+      visited.add(normalized);
+
+      let res: Response;
+      try {
+        res = await fetchFn(normalized, {
+          signal: controller.signal,
+          headers: options.headers,
+          redirect: "manual",
+          ...(options.cache ? { cache: options.cache } : {}),
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const reason = controller.signal.aborted ? `timeout_${timeoutMs}ms` : "fetch_failed";
+        return { ok: false, reason: `${reason}: ${message}` };
+      }
+
+      if (!REDIRECT_STATUSES.has(res.status)) {
+        return { ok: true, response: res, finalUrl: normalized };
+      }
+
+      // A redirect response's body is never used — release it before looping,
+      // rather than leaving it open for every hop of a long chain.
+      if (res.body) {
+        try {
+          await res.body.cancel();
+        } catch {
+          /* best-effort */
+        }
+      }
+
+      if (hop >= maxRedirects) return { ok: false, reason: "too_many_redirects" };
+
+      const location = res.headers.get("location");
+      if (!location) return { ok: false, reason: "invalid_redirect" };
+
+      try {
+        // Resolved against the CURRENT hop, not the original URL — a redirect
+        // chain routinely changes host, and a relative Location is relative
+        // to where it was issued from.
+        currentUrl = new URL(location, currentUrl);
+      } catch {
+        return { ok: false, reason: "invalid_redirect" };
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ─── HTML → text + image ──────────────────────────────────────────────────────
 
 /** Everything one parse of an article page yields. Each part stands alone: a
@@ -208,51 +359,39 @@ export async function extractArticle(
 ): Promise<ExtractedArticle> {
   if (!rawUrl) return emptyArticle("no_url");
 
-  let url: URL;
-  try {
-    url = new URL(rawUrl);
-  } catch {
-    return emptyArticle("invalid_url");
-  }
+  const result = await safeFetch(rawUrl, {
+    resolve: options?.resolve,
+    fetch: options?.fetch,
+    timeoutMs: FETCH_TIMEOUT_MS,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; RSS content reader)",
+      Accept: "text/html,application/xhtml+xml",
+    },
+  });
 
-  const fetchFn = options?.fetch ?? fetch;
-
-  if (!(await checkSsrf(url, options?.resolve))) return emptyArticle("ssrf_blocked");
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-  let html: string;
-  try {
-    const res = await fetchFn(rawUrl, {
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; RSS content reader)",
-        Accept: "text/html,application/xhtml+xml",
-      },
-      redirect: "follow",
-    });
-    clearTimeout(timer);
-    if (!res.ok) {
-      console.warn("[article-extraction] fetch rejected", { url: rawUrl, status: res.status });
-      return emptyArticle(`http_${res.status}`);
+  if (!result.ok) {
+    // ssrf_blocked/invalid_url are expected, routine outcomes (a bad or
+    // policy-refused link) — everything else (a redirect gone wrong, a
+    // transport failure, a timeout) is worth a log line, same as before.
+    if (result.reason !== "ssrf_blocked" && result.reason !== "invalid_url") {
+      console.error("[article-extraction] fetch failed", { url: rawUrl, reason: result.reason });
     }
-    const contentType = res.headers.get("content-type") ?? "";
-    if (!contentType.includes("text/html")) return emptyArticle(`non_html: ${contentType}`);
-    html = await res.text();
-  } catch (err) {
-    clearTimeout(timer);
-    // Distinguishes an abort (the timeout fired) from a transport error. Both
-    // used to be the same silent null.
-    const message = err instanceof Error ? err.message : String(err);
-    const reason = controller.signal.aborted ? `timeout_${FETCH_TIMEOUT_MS}ms` : `fetch_failed`;
-    console.error("[article-extraction] fetch failed", { url: rawUrl, reason, error: message });
-    return emptyArticle(`${reason}: ${message}`);
+    return emptyArticle(result.reason);
   }
 
-  // Resolved against the FETCHED url, not the requested one, so a feed link that
-  // redirects to the publisher's domain still yields absolute image addresses.
-  return extractArticleParts(html, rawUrl);
+  const res = result.response;
+  if (!res.ok) {
+    console.warn("[article-extraction] fetch rejected", { url: rawUrl, status: res.status });
+    return emptyArticle(`http_${res.status}`);
+  }
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("text/html")) return emptyArticle(`non_html: ${contentType}`);
+  const html = await res.text();
+
+  // Resolved against the FINAL fetched url (after any redirects), not the
+  // requested one, so a feed link that redirects to the publisher's domain
+  // still yields absolute image addresses.
+  return extractArticleParts(html, result.finalUrl);
 }
 
 /**

@@ -203,3 +203,47 @@ export const TOPIC_GENERATION_MAX_ATTEMPTS = 2;
  * where it is useful.
  */
 export const BULK_GENERATION_MAX_ATTEMPTS = 3;
+
+/**
+ * Competitive Intelligence extraction drain (Part 3B, §7/§13): turns a
+ * competitor FeedItem (RSS) or CompetitorManualEntry into structured intrinsic
+ * content intelligence — topic, angle, hook, structure, etc. Never Research
+ * Profile-aware; see `lib/ai/competitor-intelligence-extraction.ts`.
+ *
+ * A global sweep across every company with pending origins, mirroring
+ * `RSS_CLASSIFICATION_JOB_TYPE`'s shape (fan-out drain + self-continuation) —
+ * NOT the normal article classification job, which this must never share a
+ * queue with (§13/§25.16 — Part 3C SocialItem execution is still absent, and
+ * this pipeline is fully isolated from the normal one).
+ */
+export const COMPETITOR_INTELLIGENCE_EXTRACTION_JOB_TYPE = "competitor-intelligence-extraction";
+
+/**
+ * Stable dedupe key for the extraction drain. Same guarantee as the sweeps
+ * above: the partial unique index `jobs_dedupe_active_key` rejects a second
+ * enqueue while one drain is queued or running, so a competitor RSS ingest and
+ * a manual entry save finishing together collapse into one run.
+ */
+export const COMPETITOR_INTELLIGENCE_EXTRACTION_DEDUPE_KEY =
+  "cron:competitor-intelligence-extraction";
+
+/**
+ * Relevance recompute (Part 3B, §11/§12): re-evaluates the ALREADY-EXTRACTED
+ * intrinsic fields of one company's `CompetitorIntelligence` rows against its
+ * CURRENT Research Profile, without re-running extraction. Triggered when a
+ * Research Profile save bumps `profileVersion` (`update-research-profile.service.ts`).
+ *
+ * Scoped to ONE company (unlike the extraction drain, which sweeps every
+ * company): a Research Profile save is a single company's event, and there is
+ * nothing to gain from making every company's relevance wait on a single
+ * global drain — see `bulkGenerationDedupeKey`'s reasoning for the same
+ * per-company-not-per-request shape.
+ */
+export const COMPETITOR_RELEVANCE_JOB_TYPE = "competitor-relevance";
+
+/** One in-flight relevance recompute per company at a time — a second Research
+ *  Profile save while one is still running collapses into it rather than
+ *  racing it over the same rows. */
+export function competitorRelevanceDedupeKey(companyId: string): string {
+  return `competitor-relevance:${companyId}`;
+}

@@ -4,6 +4,8 @@ import {
   computeNextProfileVersion,
   defaultResearchTopicsFromBrand,
   sameStringSet,
+  shouldRecomputeRelevanceOnSave,
+  versionWasBumped,
 } from "./research-profile-versioning";
 
 describe("defaultResearchTopicsFromBrand", () => {
@@ -70,5 +72,99 @@ describe("computeNextProfileVersion", () => {
     const existing = { researchTopics: ["a", "b"], markets: [], profileVersion: 5 };
     const next = { researchTopics: ["b", "a"], markets: [] };
     assert.equal(computeNextProfileVersion(existing, next), 5);
+  });
+});
+
+describe("versionWasBumped", () => {
+  it("is false on the first-ever save — there is no prior version to move away from", () => {
+    assert.equal(versionWasBumped(null, 1), false);
+  });
+
+  it("is true when an existing row's version actually moved", () => {
+    assert.equal(versionWasBumped({ profileVersion: 3 }, 4), true);
+  });
+
+  it("is false when the version is unchanged (period-only save)", () => {
+    assert.equal(versionWasBumped({ profileVersion: 3 }, 3), false);
+  });
+});
+
+// ─── Verification-pass §1: the unsaved-default lifecycle ─────────────────
+// Reproduces the exact sequence the pass asked to trace:
+//   A. no CompetitorResearchProfile row exists; effective (unpersisted)
+//      Brand-derived defaults are used, and content is extracted/relevance
+//      would be judged against them if anything ever computed it — nothing
+//      does (recomputeStaleRelevanceForCompany refuses to run without a
+//      persisted row).
+//   B. the user's FIRST Save changes topics away from those defaults; the
+//      newly-persisted row starts at profileVersion = 1.
+// The concern was: could content judged against the unsaved defaults ALSO
+// carry relevanceProfileVersion = 1, colliding with the first persisted
+// save's version 1 and breaking stale detection? See
+// `shouldRecomputeRelevanceOnSave`'s own comment for why the answer is no —
+// nothing is ever computed before persistence, so there is only ever one
+// "version 1" per company, and no sentinel is needed.
+describe("shouldRecomputeRelevanceOnSave — the unsaved-default lifecycle (verification pass §1)", () => {
+  it("A → B: the FIRST-EVER save (existing === null) must trigger a recompute", () => {
+    // This is the exact bug the pass found: relying on versionBumped alone
+    // (which is unconditionally false when existing is null) would silently
+    // skip the recompute here, leaving any content extracted before this
+    // save sat at relevance: pending forever.
+    const existing = null;
+    const versionBumped = versionWasBumped(
+      existing,
+      computeNextProfileVersion(existing, {
+        researchTopics: ["boilers", "air conditioning"],
+        markets: [],
+      })
+    );
+    assert.equal(versionBumped, false); // confirms the trap this function avoids
+    assert.equal(shouldRecomputeRelevanceOnSave(existing, versionBumped), true);
+  });
+
+  it("first save always persists at profileVersion 1, regardless of the topics chosen", () => {
+    const version = computeNextProfileVersion(null, {
+      researchTopics: ["boilers", "air conditioning"],
+      markets: [],
+    });
+    assert.equal(version, 1);
+  });
+
+  it("a later save that changes topics/markets triggers a recompute via versionBumped", () => {
+    const existing = {
+      researchTopics: ["boilers", "air conditioning"],
+      markets: [],
+      profileVersion: 1,
+    };
+    const next = { researchTopics: ["boilers", "faucets"], markets: [] };
+    const nextVersion = computeNextProfileVersion(existing, next);
+    const versionBumped = versionWasBumped(existing, nextVersion);
+    assert.equal(nextVersion, 2);
+    assert.equal(versionBumped, true);
+    assert.equal(shouldRecomputeRelevanceOnSave(existing, versionBumped), true);
+  });
+
+  it("a period-only save on an existing row triggers NO recompute", () => {
+    const existing = { researchTopics: ["boilers"], markets: [], profileVersion: 2 };
+    // analysisPeriodDays is not part of computeNextProfileVersion's input —
+    // topics/markets are unchanged, so the version does not move.
+    const nextVersion = computeNextProfileVersion(existing, {
+      researchTopics: ["boilers"],
+      markets: [],
+    });
+    const versionBumped = versionWasBumped(existing, nextVersion);
+    assert.equal(nextVersion, 2);
+    assert.equal(versionBumped, false);
+    assert.equal(shouldRecomputeRelevanceOnSave(existing, versionBumped), false);
+  });
+
+  it("a second, later save that changes NOTHING further (no-op re-save) triggers no recompute either", () => {
+    const existing = { researchTopics: ["boilers", "faucets"], markets: [], profileVersion: 2 };
+    const nextVersion = computeNextProfileVersion(existing, {
+      researchTopics: ["boilers", "faucets"],
+      markets: [],
+    });
+    const versionBumped = versionWasBumped(existing, nextVersion);
+    assert.equal(shouldRecomputeRelevanceOnSave(existing, versionBumped), false);
   });
 });

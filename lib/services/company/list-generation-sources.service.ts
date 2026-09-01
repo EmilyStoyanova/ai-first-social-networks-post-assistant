@@ -59,7 +59,7 @@ export interface GenerationSourcesDb {
   };
   contentSource: {
     findMany: (args: {
-      where: { companyId: string; enabled: true };
+      where: { companyId: string; enabled: true; competitorId: null };
       orderBy: { createdAt: "asc" };
       select: { id: true; name: true; type: true };
     }) => Promise<Array<{ id: string; name: string; type: ContentSourceType }>>;
@@ -128,8 +128,12 @@ export async function listGenerationSourcesCore(
 
   // A disabled source is switched off, not dry — it is left out entirely rather
   // than shown greyed out, which would imply content is all that is missing.
+  //
+  // competitorId: null — a competitor's ContentSource (Part 3B) is monitoring
+  // input for Competitive Analysis, never a generation source; it must not
+  // appear in the manual "Content source" picker (§3.8/§4).
   const rows = await db.contentSource.findMany({
-    where: { companyId, enabled: true },
+    where: { companyId, enabled: true, competitorId: null },
     orderBy: { createdAt: "asc" },
     select: { id: true, name: true, type: true },
   });

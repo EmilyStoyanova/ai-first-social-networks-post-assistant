@@ -312,7 +312,13 @@ export function candidateWhereFor(companyId: string, scope: SourceScope): Record
     // topic's first channel claimed it — and the sibling channels of that same
     // topic must still be able to see it.
     ...(directContentSource || pinnedFeedItemId ? {} : { usedInPost: false }),
-    source: { enabled: true },
+    // competitorId: null — a competitor's ContentSource (competitor_rss /
+    // competitor_website, Part 3B §3.0/§3.8) is monitoring input, never
+    // generation input. Every ordinary company source has a NULL competitorId,
+    // so this is a no-op for every pre-existing row and excludes competitor
+    // items by construction rather than by a downstream filter that a future
+    // scope could forget to apply.
+    source: { enabled: true, competitorId: null },
     // One named item, and nothing else, for a sibling channel version. Note this
     // narrows the window; it does not exempt it. A pinned item still has to be a
     // tier the fetch queries, so a REJECTED article cannot re-enter generation

@@ -1,4 +1,5 @@
 import { resolveImageUrl } from "./article-image";
+import { safeFetch, type DnsResolver } from "./article-extractor";
 
 export interface ParsedFeedItem {
   title: string | null;
@@ -242,8 +243,43 @@ export function parseFeedXml(xml: string): ParsedFeedItem[] {
   });
 }
 
-export async function parseFeed(url: string): Promise<ParsedFeedItem[]> {
-  const res = await fetch(url, { cache: "no-store" });
+export interface ParseFeedOptions {
+  /** Injectable DNS resolver — tests avoid real lookups. */
+  resolve?: DnsResolver;
+  /** Injectable fetch — tests avoid real network requests. */
+  fetch?: typeof globalThis.fetch;
+}
+
+/**
+ * Thrown when the feed URL — or a redirect target it issues — fails the
+ * SSRF/redirect safety gate (`safeFetch`), or when the redirect chain itself
+ * is malformed, too long, or looping. A feed URL is user-configurable (both
+ * an owner's normal RSS source and a competitor's), so it gets the same
+ * per-hop validation `extractArticle` already applies to article links —
+ * previously this function performed a bare `fetch` with automatic redirect
+ * following and no SSRF check of its own at all.
+ */
+export class FeedFetchBlockedError extends Error {
+  constructor(url: string, reason: string) {
+    super(`Refused to fetch feed URL "${url}": ${reason}`);
+    this.name = "FeedFetchBlockedError";
+  }
+}
+
+export async function parseFeed(
+  url: string,
+  options?: ParseFeedOptions
+): Promise<ParsedFeedItem[]> {
+  const result = await safeFetch(url, {
+    resolve: options?.resolve,
+    fetch: options?.fetch,
+    // Bypasses Next.js's fetch Data Cache — a feed must always be read fresh,
+    // exactly as the bare `fetch` this replaces already requested.
+    cache: "no-store",
+  });
+  if (!result.ok) throw new FeedFetchBlockedError(url, result.reason);
+
+  const res = result.response;
   if (!res.ok) throw new Error(`Feed fetch failed: ${res.status} ${res.statusText}`);
   const xml = await res.text();
   return parseFeedXml(xml);
