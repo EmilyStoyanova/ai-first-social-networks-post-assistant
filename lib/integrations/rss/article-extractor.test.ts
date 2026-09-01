@@ -9,7 +9,9 @@ import {
   extractReadableText,
   resolveArticleContent,
   safeFetch,
+  contentQualityRank,
   MAX_SAFE_FETCH_REDIRECTS,
+  MIN_ANALYZABLE_CONTENT_LENGTH,
 } from "./article-extractor";
 import type { DnsResolver } from "./article-extractor";
 import { pickSourceImage } from "./article-image";
@@ -883,5 +885,140 @@ describe("resolveArticleContent", () => {
       contentImageUrl: null,
     };
     assert.equal(resolveArticleContent(failed, "   \n  ").content, null);
+  });
+});
+
+// ─── resolveArticleContent — the full fallback hierarchy (2026-09 fix) ───────
+//
+// The real incident this closes: an article page that could not be read
+// (Medium 403s unauthenticated readers) on a feed that ships the full body
+// ONLY in <content:encoded> and no <description> at all. Before this, that
+// combination resolved to "no content anywhere" — and downstream, every such
+// competitor item was skipped `missing_content` forever, with the article
+// text sitting untouched in the feed payload.
+
+describe("resolveArticleContent — fallback hierarchy", () => {
+  const FAILED_READ = {
+    text: null,
+    method: null,
+    error: "http_403",
+    metaImageUrl: null,
+    contentImageUrl: null,
+  };
+
+  const FULL = "The complete article body the feed itself shipped, long enough to analyze. ".repeat(
+    4
+  );
+  const SUMMARY = "One teaser sentence the feed shipped in its description element.";
+
+  it("1. a successful article-page read wins over everything the feed shipped", () => {
+    const extracted = extractArticleParts(ARTICLE_HTML, ARTICLE_URL);
+    const resolved = resolveArticleContent(extracted, SUMMARY, FULL);
+
+    assert.equal(resolved.content, extracted.text);
+    assert.equal(resolved.method, "readability");
+    assert.equal(resolved.complete, true);
+    assert.equal(resolved.error, null);
+  });
+
+  it("2. article read fails but the feed shipped a full body → rss_full_content", () => {
+    const resolved = resolveArticleContent(FAILED_READ, SUMMARY, FULL);
+
+    assert.equal(resolved.content, FULL.trim());
+    assert.equal(resolved.method, "rss_full_content");
+    assert.equal(resolved.complete, false, "a feed body is still not a verified article read");
+    assert.equal(resolved.error, "http_403", "the real cause must survive into the row");
+  });
+
+  it("2b. the REAL incident shape: page 403 + full body + NO summary at all", () => {
+    const resolved = resolveArticleContent(FAILED_READ, null, FULL);
+
+    assert.equal(resolved.method, "rss_full_content");
+    assert.ok(resolved.content && resolved.content.length > 100);
+    assert.notEqual(resolved.content, null, "this is exactly the case that used to store null");
+  });
+
+  it("3. article read fails and there is no full body → the summary", () => {
+    const resolved = resolveArticleContent(FAILED_READ, SUMMARY, null);
+
+    assert.equal(resolved.content, SUMMARY);
+    assert.equal(resolved.method, "rss_summary");
+    assert.equal(resolved.complete, false);
+  });
+
+  it("4. nothing usable anywhere → no content, and it stays that way", () => {
+    const resolved = resolveArticleContent(FAILED_READ, null, null);
+
+    assert.equal(resolved.content, null);
+    assert.equal(resolved.method, null);
+    assert.equal(resolved.chars, 0);
+    assert.equal(resolved.complete, false);
+  });
+
+  it("prefers the full body over the summary when the feed carries BOTH", () => {
+    const resolved = resolveArticleContent(FAILED_READ, SUMMARY, FULL);
+    assert.equal(resolved.method, "rss_full_content");
+    assert.notEqual(resolved.content, SUMMARY, "the blurb must not beat the article");
+  });
+
+  it("falls past a too-thin full body to a substantial summary", () => {
+    // A feed whose <content:encoded> is just "Read more..." — real text, but
+    // not analyzable; the longer description is genuinely the better answer.
+    const resolved = resolveArticleContent(FAILED_READ, SUMMARY, "Read more...");
+    assert.equal(resolved.method, "rss_summary");
+    assert.equal(resolved.content, SUMMARY);
+  });
+
+  it("still STORES a too-thin fallback when it is all there is, labelled honestly", () => {
+    // Never discarded outright — a titled row with a blurb beats an empty one
+    // for a human browsing the list; the analysis gate is what refuses it.
+    const resolved = resolveArticleContent(FAILED_READ, "Read more", null);
+
+    assert.equal(resolved.content, "Read more");
+    assert.equal(resolved.method, "rss_summary");
+    assert.equal(resolved.complete, false);
+    assert.ok(
+      resolved.chars < MIN_ANALYZABLE_CONTENT_LENGTH,
+      "and it is measurably below the analyzable bar, for the gate to act on"
+    );
+  });
+
+  it("treats a whitespace-only full body as no full body", () => {
+    const resolved = resolveArticleContent(FAILED_READ, SUMMARY, "   \n  ");
+    assert.equal(resolved.method, "rss_summary");
+  });
+
+  it("stays backward-compatible when called with the old two-argument shape", () => {
+    // Every pre-existing caller passed (extracted, summary) only.
+    const resolved = resolveArticleContent(FAILED_READ, SUMMARY);
+    assert.equal(resolved.content, SUMMARY);
+    assert.equal(resolved.method, "rss_summary");
+  });
+});
+
+describe("contentQualityRank — a re-ingest must never downgrade what is stored", () => {
+  it("ranks a real article read above every feed fallback", () => {
+    assert.ok(
+      contentQualityRank("readability", true) > contentQualityRank("rss_full_content", false)
+    );
+    assert.ok(contentQualityRank("json_ld", true) > contentQualityRank("rss_full_content", false));
+    assert.ok(contentQualityRank("dom", true) > contentQualityRank("rss_summary", false));
+  });
+
+  it("ranks the feed's full body above its summary", () => {
+    assert.ok(
+      contentQualityRank("rss_full_content", false) > contentQualityRank("rss_summary", false)
+    );
+  });
+
+  it("ranks any content above none", () => {
+    assert.ok(contentQualityRank("rss_summary", false) > contentQualityRank(null, false));
+  });
+
+  it("gives every complete read the same top rank regardless of which reader won", () => {
+    const ranks = (["readability", "json_ld", "dom"] as const).map((m) =>
+      contentQualityRank(m, true)
+    );
+    assert.equal(new Set(ranks).size, 1);
   });
 });

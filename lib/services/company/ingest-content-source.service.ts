@@ -419,7 +419,18 @@ export async function runSourceIngestion(
       // Was `extracted.text ?? item.summary` — the line that let a feed blurb be
       // stored as if it were the article. The fallback still happens; it is now
       // labelled, and the label is what generation refuses to write from.
-      const article = resolveArticleContent(extracted, item.summary);
+      //
+      // `item.fullContent` (2026-09 content-acquisition fix, found while
+      // investigating a Competitive Analysis incident — see
+      // `ingest-competitor-source.service.ts`'s module comment) is passed
+      // through here too: the underlying bug (`<content:encoded>` silently
+      // failing to parse — see `parser.ts`'s `extractContentEncoded` doc
+      // comment) is in the shared, low-level parser and loses real article
+      // text for a normal company source exactly the same way it did for a
+      // competitor one. This one-line reuse of the already-tested fallback
+      // hierarchy fixes that shared bug without touching anything else about
+      // how normal RSS ingestion behaves.
+      const article = resolveArticleContent(extracted, item.summary, item.fullContent);
       const content = article.content;
       if (!article.complete) {
         console.warn("[rss-ingestion] no article body — storing feed summary only", {

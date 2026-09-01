@@ -461,3 +461,146 @@ describe("parseFeed — SSRF/redirect safety", () => {
     );
   });
 });
+
+// ─── <content:encoded> — the 2026-09 content-acquisition fix ────────────────
+//
+// The real production incident: a competitor RSS source
+// (`medium.com/feed/...`) whose items ship the FULL article inside
+// `<content:encoded>` and carry no `<description>`/`<summary>` at all. The
+// generic `extractText(item, "content")` fallback opened on
+// `<content:encoded>` (the colon is absorbed by its `[^>]*`) but then looked
+// for a `</content>` that never comes, so it silently returned null — and
+// every such item was stored with `content: null`, indistinguishable from a
+// feed that genuinely shipped nothing.
+
+describe("parseFeedXml — <content:encoded> full article body", () => {
+  it("reads the full body from <content:encoded> when there is NO description", () => {
+    // The exact real-world shape: content:encoded only, no description/summary.
+    const body = "Real article prose that the publisher shipped in the feed. ".repeat(6);
+    const xml = rssFeed(`
+      <item>
+        <title>Medium-style article</title>
+        <link>https://medium.com/x/article-abc123</link>
+        <content:encoded><![CDATA[<p>${body}</p>]]></content:encoded>
+      </item>`);
+    const items = parseFeedXml(xml);
+
+    assert.equal(items.length, 1);
+    assert.equal(items[0].summary, null, "there genuinely is no description in this feed");
+    assert.ok(items[0].fullContent, "the article body must NOT be lost");
+    assert.ok(
+      items[0].fullContent!.includes("Real article prose"),
+      "the actual prose must survive extraction"
+    );
+  });
+
+  it("strips the embedded HTML rather than storing raw markup", () => {
+    const xml = rssFeed(`
+      <item>
+        <title>Formatted</title>
+        <link>https://example.com/formatted</link>
+        <content:encoded><![CDATA[<h2>Heading</h2><p>First paragraph.</p><p>Second paragraph.</p>]]></content:encoded>
+      </item>`);
+    const full = parseFeedXml(xml)[0].fullContent!;
+
+    assert.ok(!full.includes("<p>"), "no markup may survive into the stored text");
+    assert.ok(!full.includes("<h2>"));
+    assert.ok(full.includes("Heading"));
+    assert.ok(full.includes("First paragraph."));
+    assert.ok(full.includes("Second paragraph."));
+    assert.ok(
+      !/First paragraph\.Second/.test(full),
+      "adjacent blocks must not glue together when their tags are removed"
+    );
+  });
+
+  it("drops <script>/<style> content entirely, not just their tags", () => {
+    const xml = rssFeed(`
+      <item>
+        <title>With junk</title>
+        <link>https://example.com/junk</link>
+        <content:encoded><![CDATA[<script>var tracking = "leak-me";</script><style>.x{color:red}</style><p>The actual article body text goes here and is long enough to matter.</p>]]></content:encoded>
+      </item>`);
+    const full = parseFeedXml(xml)[0].fullContent!;
+
+    assert.ok(!full.includes("leak-me"), "script contents must not become article text");
+    assert.ok(!full.includes("color:red"), "style contents must not become article text");
+    assert.ok(full.includes("The actual article body text"));
+  });
+
+  it("returns null when the item has no <content:encoded> at all", () => {
+    const xml = rssFeed(`
+      <item>
+        <title>Summary only</title>
+        <link>https://example.com/summary-only</link>
+        <description>Just a teaser.</description>
+      </item>`);
+    const item = parseFeedXml(xml)[0];
+
+    assert.equal(item.fullContent, null);
+    assert.equal(item.summary, "Just a teaser.", "the summary path is untouched by this change");
+  });
+
+  it("keeps summary and fullContent SEPARATE when the feed ships both", () => {
+    // A publisher giving the reader a blurb AND the article: each belongs in
+    // its own field, so `resolveArticleContent` can prefer the better one.
+    const body = "The complete article body, far longer than the teaser sentence. ".repeat(5);
+    const xml = rssFeed(`
+      <item>
+        <title>Both</title>
+        <link>https://example.com/both</link>
+        <description><![CDATA[A one-line teaser.]]></description>
+        <content:encoded><![CDATA[<p>${body}</p>]]></content:encoded>
+      </item>`);
+    const item = parseFeedXml(xml)[0];
+
+    assert.equal(item.summary, "A one-line teaser.");
+    assert.ok(item.fullContent!.includes("The complete article body"));
+    assert.ok(
+      item.fullContent!.length > item.summary!.length,
+      "the two fields must not have collapsed into the same value"
+    );
+  });
+
+  it("decodes HTML entities in the extracted body", () => {
+    const xml = rssFeed(`
+      <item>
+        <title>Entities</title>
+        <link>https://example.com/entities</link>
+        <content:encoded><![CDATA[<p>Ben &amp; Jerry&#8217;s launched something &hellip; new today, and the story runs on.</p>]]></content:encoded>
+      </item>`);
+    const full = parseFeedXml(xml)[0].fullContent!;
+
+    assert.ok(full.includes("Ben & Jerry’s"));
+    assert.ok(full.includes("…"));
+  });
+
+  it("handles <content:encoded> without CDATA wrapping", () => {
+    const xml = rssFeed(`
+      <item>
+        <title>No CDATA</title>
+        <link>https://example.com/no-cdata</link>
+        <content:encoded>&lt;p&gt;Plain escaped markup carrying the real article body text.&lt;/p&gt;</content:encoded>
+      </item>`);
+    const full = parseFeedXml(xml)[0].fullContent;
+
+    assert.ok(full, "an un-CDATA'd content:encoded must still yield text");
+    assert.ok(full!.includes("Plain escaped markup carrying the real article body text."));
+  });
+
+  it("does not confuse <content:encoded> with a plain <content> element", () => {
+    // Atom's own <content> is a different element and keeps using the existing
+    // summary chain — this fix must not hijack it.
+    const xml = `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <title>Atom entry</title>
+        <link href="https://example.com/atom-entry" rel="alternate"/>
+        <content>Atom content body.</content>
+      </entry>
+    </feed>`;
+    const item = parseFeedXml(xml)[0];
+
+    assert.equal(item.fullContent, null, "a bare <content> is not <content:encoded>");
+    assert.equal(item.summary, "Atom content body.", "it still reaches the summary chain");
+  });
+});

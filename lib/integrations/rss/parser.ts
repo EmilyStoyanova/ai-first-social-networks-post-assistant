@@ -5,6 +5,17 @@ export interface ParsedFeedItem {
   title: string | null;
   url: string | null;
   summary: string | null;
+  /**
+   * The full article body when the feed embeds one directly — RSS's
+   * `<content:encoded>` (the RDF/Dublin Core "content" module WordPress and
+   * most blogging platforms use), HTML-stripped to plain text. Distinct from
+   * `summary`, which is the feed's short teaser/`<description>` — a publisher
+   * that ships both is giving the reader a blurb AND the article, and only
+   * the latter belongs in this field. Null when the feed carries no such
+   * element. See `extractContentEncoded` below for why this needs its own
+   * extractor rather than reusing `extractText`.
+   */
+  fullContent: string | null;
   publishedAt: Date | null;
   /**
    * An image the FEED itself supplies — `<media:content>`, `<media:thumbnail>`
@@ -102,6 +113,60 @@ function extractText(xml: string, tag: string): string | null {
   const text =
     sections.length > 0 ? sections.join("").trim() : inner.replace(/<[^>]+>/g, "").trim();
 
+  return text ? decodeEntities(text) : null;
+}
+
+/**
+ * Removes markup, collapsing runs of whitespace into single spaces. Tags are
+ * replaced with a space rather than deleted outright, so adjacent block
+ * elements (`<p>A</p><p>B</p>`) don't glue into `AB` once their tags are gone.
+ *
+ * Only used for `<content:encoded>` (below) — the rest of this module's
+ * `extractText` deliberately preserves markup inside CDATA for its callers to
+ * strip themselves (see that function's doc comment). `content:encoded` is
+ * different: it is promoted to a first-class content-fallback candidate
+ * (`resolveArticleContent`'s "rss_full_content" tier), so it is normalized to
+ * plain text at the point of extraction rather than leaving raw HTML for a
+ * downstream AI prompt to choke on.
+ */
+function stripHtmlTags(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/ *\n[ \n]*/g, "\n")
+    .trim();
+}
+
+/**
+ * The item's `<content:encoded>` body, plain-text.
+ *
+ * This is deliberately NOT handled by the generic `extractText(xml, "content")`
+ * call already in this file's fallback chain: that function's regex closes on
+ * a literal `</${tag}>`, so `<content[^>]*>` happily opens on
+ * `<content:encoded>` (the colon is absorbed by `[^>]*`) but then never finds
+ * its match, because the real closing tag is `</content:encoded>`, not
+ * `</content>`. The result was silent data loss — a feed that ships the full
+ * article ONLY inside `<content:encoded>` (no `<description>`/`<summary>`, a
+ * common WordPress/Medium shape) parsed to `summary: null`, indistinguishable
+ * from a feed that genuinely supplied nothing at all. Confirmed against a real
+ * production feed during the 2026-09 "extracted: 0 / missing_content" incident
+ * investigation: `https://medium.com/feed/...` ships 16KB+ of real article
+ * text per item in `<content:encoded>` and NOTHING in `<description>`/
+ * `<summary>`, which is why every item from it hit `resolveArticleContent`'s
+ * hard "no content anywhere" case even though the article body was sitting
+ * right there in the feed payload.
+ */
+function extractContentEncoded(xml: string): string | null {
+  const element = xml.match(/<content:encoded[^>]*>([\s\S]*?)<\/content:encoded>/i);
+  if (!element) return null;
+  const inner = element[1];
+
+  const sections = [...inner.matchAll(/<!\[CDATA\[([\s\S]*?)\]\]>/g)].map((m) => m[1]);
+  const raw = sections.length > 0 ? sections.join("") : inner;
+
+  const text = stripHtmlTags(raw);
   return text ? decodeEntities(text) : null;
 }
 
@@ -238,6 +303,7 @@ export function parseFeedXml(xml: string): ParsedFeedItem[] {
         extractText(item, "description") ??
         extractText(item, "summary") ??
         extractText(item, "content"),
+      fullContent: extractContentEncoded(item),
       publishedAt: parseDate(pubRaw),
     };
   });

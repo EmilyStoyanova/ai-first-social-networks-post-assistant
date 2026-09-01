@@ -21,6 +21,29 @@
  *     `FeedItem` via `upsert` (never a bare `create`) — see the verification
  *     pass note below.
  *
+ * ── 2026-09 content-acquisition fix ─────────────────────────────────────────
+ * A follow-up incident to the livelock fix above: with the livelock gone, the
+ * worker terminated correctly but reported `extracted: 0` — every real row
+ * was skipped `missing_content`. Root cause, confirmed against the real feed
+ * (`medium.com/feed/...`): the article page 403'd (Medium blocks
+ * unauthenticated reads) AND the feed shipped its full article body ONLY in
+ * `<content:encoded>`, which `parser.ts`'s summary chain silently failed to
+ * read (see `extractContentEncoded`'s doc comment) — so `resolveArticleContent`
+ * had no fallback left and stored `content: null`. Two changes fix this:
+ *   1. `resolveArticleContent` now also receives `item.fullContent`
+ *      (`<content:encoded>`) and prefers it over the bare summary — see that
+ *      function's doc comment for the full hierarchy.
+ *   2. This function no longer unconditionally overwrites a `FeedItem`'s
+ *      `content`/provenance on re-ingest. `contentQualityRank` compares what
+ *      this run resolved against what is already stored, and a later run
+ *      that can only produce a WORSE tier (e.g. the site started blocking
+ *      reads) no longer erases a better answer already on file.
+ *   3. When content genuinely changes for a `failed` or `completed`
+ *      `CompetitorIntelligence` row (most relevantly: a `missing_content`
+ *      failure that exhausted its attempts, now that content is available),
+ *      the row is reopened — `status: "pending"`, attempt budget reset — so
+ *      it becomes eligible for analysis again without any manual DB edit.
+ *
  * ── SSRF/fetch safety ────────────────────────────────────────────────────
  * Both `parseFeed` (`lib/integrations/rss/parser.ts`) and `extractArticle`
  * (`lib/integrations/rss/article-extractor.ts`) now route every fetch —
@@ -46,7 +69,9 @@ import {
   extractArticle,
   resolveArticleContent,
   checkSsrf,
+  contentQualityRank,
 } from "@/lib/integrations/rss/article-extractor";
+import type { ExtractionMethod } from "@/lib/integrations/rss/article-strategies";
 import { pickSourceImage } from "@/lib/integrations/rss/article-image";
 import { resolveCompetitiveAnalysisContext } from "./resolve-competitor-context";
 
@@ -69,6 +94,42 @@ export class CompetitorFeedSsrfBlockedError extends Error {
     super(`Refused to fetch feed URL "${url}" — blocked by SSRF protection.`);
     this.name = "CompetitorFeedSsrfBlockedError";
   }
+}
+
+/**
+ * Whether a re-ingest should overwrite a `FeedItem`'s stored `content` and
+ * provenance columns — 2026-09 content-acquisition fix (see this file's
+ * module comment). Pure and exported so "a better article never gets
+ * overwritten by a weaker summary" is directly testable without a database:
+ * `>=` rather than `>` is deliberate — a same-tier re-read (the article
+ * changed but is still, say, `rss_summary`) is a legitimate update, only a
+ * genuine DOWNGRADE is refused.
+ */
+export function shouldOverwriteFeedItemContent(
+  existing: { contentExtraction: ExtractionMethod | null; contentComplete: boolean | null },
+  incoming: { method: ExtractionMethod | null; complete: boolean }
+): boolean {
+  return (
+    contentQualityRank(incoming.method, incoming.complete) >=
+    contentQualityRank(existing.contentExtraction, existing.contentComplete ?? false)
+  );
+}
+
+/**
+ * Whether a `CompetitorIntelligence` row's content genuinely changed this
+ * ingest — the signal that reopens a `failed`/`completed` row for analysis
+ * (2026-09 content-acquisition fix, see this file's module comment). Pure and
+ * exported for the same reason as `shouldOverwriteFeedItemContent`: this is
+ * the exact rule that lets a `missing_content` failure recover once real
+ * content shows up, without resetting a row whose content didn't actually
+ * move (a no-op re-ingest of a still-blocked page, or an already-completed
+ * row re-read identically).
+ */
+export function feedItemContentChanged(
+  existingContent: string | null,
+  incomingContent: string | null
+): boolean {
+  return incomingContent !== null && incomingContent !== existingContent;
 }
 
 /**
@@ -105,9 +166,15 @@ export async function runCompetitorSourceIngestion(
 
   const existingRows = await prisma.feedItem.findMany({
     where: { sourceId: source.id },
-    select: { id: true, url: true },
+    select: {
+      id: true,
+      url: true,
+      content: true,
+      contentExtraction: true,
+      contentComplete: true,
+    },
   });
-  const existingByUrl = new Map(existingRows.map((r) => [r.url, r.id]));
+  const existingByUrl = new Map(existingRows.map((r) => [r.url, r]));
 
   let created = 0;
   let updated = 0;
@@ -121,7 +188,7 @@ export async function runCompetitorSourceIngestion(
     // same guard the normal RSS pipeline already relies on — see the module
     // comment.
     const extracted = await extractArticle(item.url);
-    const article = resolveArticleContent(extracted, item.summary);
+    const article = resolveArticleContent(extracted, item.summary, item.fullContent);
     const sourceImageUrl = pickSourceImage({
       metaImageUrl: extracted.metaImageUrl,
       feedImageUrl: item.imageUrl,
@@ -136,19 +203,47 @@ export async function runCompetitorSourceIngestion(
       contentExtractedAt: new Date(),
     };
 
-    const existingId = existingByUrl.get(item.url);
-    if (existingId) {
+    const existing = existingByUrl.get(item.url);
+    if (existing) {
+      // Never let a re-ingest downgrade what is already on file, and reopen a
+      // settled CompetitorIntelligence row when content genuinely changed —
+      // 2026-09 fix, see the module comment and each function's doc comment.
+      const shouldOverwriteContent = shouldOverwriteFeedItemContent(
+        {
+          contentExtraction: existing.contentExtraction as ExtractionMethod | null,
+          contentComplete: existing.contentComplete,
+        },
+        { method: article.method, complete: article.complete }
+      );
+      const contentChanged = feedItemContentChanged(existing.content, article.content);
+
       await prisma.feedItem.update({
-        where: { id: existingId },
+        where: { id: existing.id },
         data: {
           title: item.title,
-          content: article.content,
           publishedAt: item.publishedAt,
           ...(sourceImageUrl ? { sourceImageUrl } : {}),
-          ...provenance,
+          ...(shouldOverwriteContent ? { content: article.content, ...provenance } : {}),
         },
       });
       updated++;
+
+      if (contentChanged) {
+        // Guarded to `failed`/`completed` only — a `pending` row is already
+        // eligible, and an `analyzing` row is mid-flight under another run's
+        // lease and must not be stomped here.
+        await prisma.competitorIntelligence.updateMany({
+          where: { feedItemId: existing.id, status: { in: ["failed", "completed"] } },
+          data: {
+            status: "pending",
+            attemptCount: 0,
+            analysisError: null,
+            analysisHash: null,
+            analyzedAt: null,
+            leaseExpiresAt: null,
+          },
+        });
+      }
     } else {
       const row = await prisma.feedItem.create({
         data: {
@@ -165,7 +260,13 @@ export async function runCompetitorSourceIngestion(
         },
         select: { id: true },
       });
-      existingByUrl.set(item.url, row.id);
+      existingByUrl.set(item.url, {
+        id: row.id,
+        url: item.url,
+        content: article.content,
+        contentExtraction: article.method,
+        contentComplete: article.complete,
+      });
       created++;
 
       // Idempotent open of the extraction drain's claimable unit — an

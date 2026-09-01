@@ -25,8 +25,18 @@
  * afterwards, over results already in hand.
  */
 
-/** How the stored `content` of a feed item was obtained. */
-export type ExtractionMethod = "readability" | "json_ld" | "dom" | "rss_summary";
+/**
+ * How the stored `content` of a feed item was obtained.
+ *
+ * `"readability" | "json_ld" | "dom"` are all a genuine article PAGE read —
+ * `resolveArticleContent` marks these `complete: true`. `"rss_full_content"`
+ * and `"rss_summary"` are both feed-payload fallbacks used when the page
+ * itself could not be read (blocked, paywalled, non-HTML, ...) — see
+ * `resolveArticleContent`'s doc comment for the full fallback hierarchy and
+ * why the two are kept distinct rather than folded into one "fallback" tag.
+ */
+export type ExtractionMethod =
+  "readability" | "json_ld" | "dom" | "rss_full_content" | "rss_summary";
 
 /**
  * Text shorter than this is not an article — it is a paywall stub, a consent

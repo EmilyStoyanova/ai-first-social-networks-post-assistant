@@ -181,7 +181,17 @@ async function defaultCountRemaining(): Promise<RemainingCounts> {
  *  so a future run's outcome for it can differ. `claimed` (another run owns
  *  it right now) and `max_attempts` (nothing was written; the row shouldn't
  *  normally even reach here — defensive branch only) never move anything. */
-const PROGRESS_SKIP_REASONS = new Set(["archived", "missing_origin", "missing_content"]);
+const PROGRESS_SKIP_REASONS = new Set([
+  "archived",
+  "missing_origin",
+  "missing_content",
+  // 2026-09 content-acquisition fix — a below-threshold RSS fallback also
+  // writes `status: "failed"` and consumes attempt budget via the same
+  // lease-guarded path as `missing_content`, so it is just as much genuine
+  // progress; see extract-competitor-intelligence.service.ts's module
+  // comment.
+  "content_too_short",
+]);
 
 export async function runCompetitorIntelligenceExtraction(
   deps: RunCompetitorIntelligenceExtractionDeps = {}

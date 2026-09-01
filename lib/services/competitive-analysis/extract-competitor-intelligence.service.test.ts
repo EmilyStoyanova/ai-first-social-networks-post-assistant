@@ -79,7 +79,14 @@ function item(overrides: Partial<ExtractableIntelligenceItem> = {}): Extractable
     competitorId: "c-1",
     status: "pending",
     attemptCount: 0,
-    feedItem: { title: "T", content: "Some article body about insulation." },
+    // 2026-09 content-acquisition fix: kept comfortably above
+    // MIN_ANALYZABLE_CONTENT_LENGTH so this default fixture exercises the
+    // ordinary extraction path, not the new content_too_short gate — see the
+    // dedicated "content_too_short" describe block below for that.
+    feedItem: {
+      title: "T",
+      content: "Some article body about home insulation and energy savings.",
+    },
     manualEntry: null,
     ...overrides,
   };
@@ -254,7 +261,13 @@ describe("extractCompetitorIntelligence — content resolution", () => {
       row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
     });
     await extractCompetitorIntelligence(
-      item({ feedItem: { title: "T", content: "Body" }, manualEntry: null }),
+      item({
+        feedItem: {
+          title: "T",
+          content: "A feedItem body long enough to clear the analyzable-content bar.",
+        },
+        manualEntry: null,
+      }),
       { db, resolveProvider: okProvider }
     );
     assert.equal(row.status, "completed");
@@ -370,5 +383,125 @@ describe("extractCompetitorIntelligence — no provider", () => {
     });
     assert.deepEqual(outcome, { status: "no_provider" });
     assert.equal(row.status, "pending");
+  });
+});
+
+// ─── 2026-09 content-acquisition fix — the too-thin content gate ─────────────
+//
+// With `<content:encoded>` now parsed (see parser.ts) a feed fallback can be
+// real text but still useless — "Read more...", a bare repeated title. That is
+// not worth a model call, and it must NOT be silently treated as a full
+// analyzable article. See this service's module comment.
+
+describe("extractCompetitorIntelligence — content_too_short", () => {
+  it("refuses a below-threshold RSS fallback WITHOUT calling the model", async () => {
+    const { db, row } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    let generateCalled = false;
+    const outcome = await extractCompetitorIntelligence(
+      item({ feedItem: { title: "T", content: "Read more..." } }),
+      {
+        db,
+        resolveProvider: async () => ({
+          ok: true as const,
+          instance: {
+            generate: async () => {
+              generateCalled = true;
+              return { text: VALID_REPLY };
+            },
+          },
+          provider: "test",
+          model: "test-model",
+        }),
+      }
+    );
+
+    assert.deepEqual(outcome, { status: "skipped", reason: "content_too_short" });
+    assert.equal(generateCalled, false, "a blurb must never cost a model call");
+    assert.equal(row.status, "failed");
+  });
+
+  it("consumes attempt budget, so a permanently-thin row ages out instead of looping", async () => {
+    // The livelock lesson applied to the new branch: this is a terminal
+    // outcome and must advance state exactly like every other one.
+    const { db, row } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    const thin = item({ feedItem: { title: "T", content: "Read more..." } });
+
+    for (let i = 1; i <= 3; i++) {
+      const outcome = await extractCompetitorIntelligence(
+        { ...thin, status: row.status, attemptCount: row.attemptCount },
+        { db, resolveProvider: okProvider }
+      );
+      assert.deepEqual(outcome, { status: "skipped", reason: "content_too_short" });
+      assert.equal(row.attemptCount, i, `attempt ${i} must advance the count`);
+    }
+
+    const fourth = await extractCompetitorIntelligence(
+      { ...thin, status: row.status, attemptCount: row.attemptCount },
+      { db, resolveProvider: okProvider }
+    );
+    assert.deepEqual(fourth, { status: "skipped", reason: "max_attempts" });
+  });
+
+  it("records WHY it was refused, with the measured length", async () => {
+    const { db, row } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    await extractCompetitorIntelligence(item({ feedItem: { title: "T", content: "Too short." } }), {
+      db,
+      resolveProvider: okProvider,
+    });
+    assert.match(
+      String((row as unknown as { analysisError: string }).analysisError),
+      /too short/i,
+      "the reason must be distinguishable from a plain missing-content failure"
+    );
+  });
+
+  it("still ACCEPTS a substantial RSS fallback — the fix must not over-reject", async () => {
+    // This is the whole point of the acquisition fix: a real
+    // <content:encoded> body reaches the model.
+    const { db, row } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    const outcome = await extractCompetitorIntelligence(
+      item({
+        feedItem: {
+          title: "T",
+          content: "The full article body the publisher shipped in content:encoded. ".repeat(4),
+        },
+      }),
+      { db, resolveProvider: okProvider }
+    );
+    assert.deepEqual(outcome, { status: "extracted" });
+    assert.equal(row.status, "completed");
+  });
+
+  it("never applies the threshold to a MANUAL entry — owner-typed text is deliberate", async () => {
+    // A short pasted ad headline is genuine competitive signal, not feed
+    // noise, and the owner explicitly chose to add it.
+    const { db, row } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    const outcome = await extractCompetitorIntelligence(
+      item({ feedItem: null, manualEntry: { content: "Half price this week." } }),
+      { db, resolveProvider: okProvider }
+    );
+    assert.deepEqual(outcome, { status: "extracted" });
+    assert.equal(row.status, "completed");
+  });
+
+  it("an empty body is still missing_content, not content_too_short", async () => {
+    const { db } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    const outcome = await extractCompetitorIntelligence(
+      item({ feedItem: { title: "T", content: null } }),
+      { db, resolveProvider: okProvider }
+    );
+    assert.deepEqual(outcome, { status: "skipped", reason: "missing_content" });
   });
 });

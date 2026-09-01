@@ -50,6 +50,20 @@
  * The drain (`run-competitor-intelligence-extraction.service.ts`) also gained
  * an independent, root-cause-agnostic no-progress guard so an analogous bug
  * anywhere in this pipeline can no longer hot-loop the worker.
+ *
+ * ── 2026-09 content-acquisition fix (follow-up) ─────────────────────────────
+ * With the livelock fixed, the worker terminated correctly but reported
+ * `extracted: 0` — every real row was skipped `missing_content`. Root cause
+ * was NOT in this file: it was `parser.ts` silently failing to read
+ * `<content:encoded>` (see that file's `extractContentEncoded` doc comment)
+ * on feeds — like the real affected one, `medium.com/feed/...` — that ship
+ * the full article there and nowhere else, combined with the article page
+ * itself being unreadable (blocked/paywalled). Fixed upstream, in
+ * `ingest-competitor-source.service.ts` and `article-extractor.ts`'s
+ * `resolveArticleContent`. This file gained one related, narrower change: the
+ * missing-content gate below now also treats a non-empty but below-threshold
+ * RSS fallback (`MIN_ANALYZABLE_CONTENT_LENGTH`) as un-analyzable —
+ * previously ANY non-empty string, however thin, was sent to the model.
  */
 
 import { prisma } from "@/lib/db/client";
@@ -74,12 +88,19 @@ import {
   buildSupportedProvider,
   ProviderNotAvailableError,
 } from "@/lib/ai/llm/supported-providers";
+import { MIN_ANALYZABLE_CONTENT_LENGTH } from "@/lib/integrations/rss/article-extractor";
 
 export type ExtractCompetitorIntelligenceOutcome =
   | { status: "extracted" }
   | {
       status: "skipped";
-      reason: "archived" | "missing_origin" | "missing_content" | "max_attempts" | "claimed";
+      reason:
+        | "archived"
+        | "missing_origin"
+        | "missing_content"
+        | "content_too_short"
+        | "max_attempts"
+        | "claimed";
     }
   | { status: "no_provider" }
   | { status: "failed"; error: string };
@@ -230,23 +251,39 @@ export async function extractCompetitorIntelligence(
     return { status: "skipped", reason: "archived" };
   }
 
-  // Missing/empty content — checked AFTER the claim (2026-09 livelock fix,
-  // see module comment). This is a genuine terminal outcome for THIS
-  // attempt and must consume attempt budget exactly like a thrown model
+  // Missing/empty/too-thin content — checked AFTER the claim (2026-09
+  // livelock fix, see module comment). This is a genuine terminal outcome for
+  // THIS attempt and must consume attempt budget exactly like a thrown model
   // error does, via the same lease-guarded write — otherwise the row stays
   // permanently selectable (`status: "failed"`, `attemptCount` never
   // advancing) and hot-loops the drain forever. `missing_origin` (should be
   // unreachable given the DB's XOR CHECK constraint and the cascade deletes
   // on `feedItemId`/`manualEntryId` — defended anyway) is distinguished from
-  // `missing_content` (the real-world case: a loaded origin whose body is
-  // simply empty, e.g. article extraction produced nothing usable).
-  if (!content || content.body.trim() === "") {
-    const reason = !item.feedItem && !item.manualEntry ? "missing_origin" : "missing_content";
+  // `missing_content` (empty body) and `content_too_short` (2026-09
+  // content-acquisition fix — see `ingest-competitor-source.service.ts`'s
+  // module comment: a non-empty but below-threshold RSS fallback, e.g. a
+  // one-line "Read more..." blurb, is real text but not worth an AI call).
+  // The threshold applies only to `feedItem` origin — a manual entry is
+  // owner-typed, deliberate content (a short ad headline is genuine signal,
+  // not feed noise) and is never held to the same bar.
+  const trimmedBody = content?.body.trim() ?? "";
+  const isTooThin =
+    !!item.feedItem && trimmedBody.length > 0 && trimmedBody.length < MIN_ANALYZABLE_CONTENT_LENGTH;
+  if (!content || trimmedBody === "" || isTooThin) {
+    const reason =
+      !item.feedItem && !item.manualEntry
+        ? "missing_origin"
+        : isTooThin
+          ? "content_too_short"
+          : "missing_content";
+    const analysisError = isTooThin
+      ? `Content too short to analyze (${trimmedBody.length} chars, minimum ${MIN_ANALYZABLE_CONTENT_LENGTH}).`
+      : "No readable content to analyze.";
     const written = await db.competitorIntelligence.updateMany({
       where: { id: item.id, status: "analyzing", leaseExpiresAt },
       data: {
         status: "failed",
-        analysisError: "No readable content to analyze.",
+        analysisError,
         analyzedAt: now(),
         leaseExpiresAt: null,
       },

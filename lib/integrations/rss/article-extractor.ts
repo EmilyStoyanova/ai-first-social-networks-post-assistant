@@ -435,17 +435,61 @@ export interface ResolvedArticleContent {
 }
 
 /**
- * Combines a fetch attempt with the feed's own summary into what gets stored.
+ * Below this length, a fallback string (an RSS summary, or even
+ * `<content:encoded>` on a feed that ships a one-liner there too) is stored
+ * for display purposes but is not treated as analyzable — see
+ * `resolveArticleContent`'s doc comment and, downstream, the
+ * Competitive-Intelligence extraction gate that reads this same constant.
+ * Deliberately much lower than `MIN_ARTICLE_LENGTH` (300, in
+ * `article-strategies.ts`): that constant decides whether a PAGE READ counts
+ * as a genuine article; this one only filters out a blank/placeholder blurb
+ * ("Read more...", a bare title repeated) before it is worth an AI call, not
+ * "is this as good as a real article" — it deliberately is not.
+ */
+export const MIN_ANALYZABLE_CONTENT_LENGTH = 40;
+
+/**
+ * Ranks how good a stored `FeedItem.content` is, from a re-ingest's point of
+ * view: a genuine article page read outranks the feed's own full body, which
+ * outranks its short summary, which outranks nothing at all. Used so a later
+ * ingest — the site started blocking reads, or a feed briefly stopped
+ * shipping `<content:encoded>` — can never silently REPLACE a better answer
+ * already on file with a worse one; see the "do not overwrite a better full
+ * article with a weaker summary" rule this exists to serve. Exported so
+ * callers can compare an existing row's provenance against a freshly resolved
+ * one without duplicating the ranking.
+ */
+export function contentQualityRank(method: ExtractionMethod | null, complete: boolean): number {
+  if (complete) return 3;
+  if (method === "rss_full_content") return 2;
+  if (method === "rss_summary") return 1;
+  return 0;
+}
+
+/**
+ * Combines a fetch attempt with what the feed itself shipped into what gets
+ * stored — preferring, in order: (1) a genuine article-page read, (2) the
+ * feed's own full body (`<content:encoded>`, when the feed carries one), (3)
+ * the feed's short summary/description. Never fabricates content: a tier is
+ * used only when it actually has text, and the tier below is tried when the
+ * one above is absent OR too thin to be worth analyzing
+ * (`MIN_ANALYZABLE_CONTENT_LENGTH`) — though even a too-thin fallback is still
+ * STORED (a titled row beats an empty one for a human browsing the feed
+ * list), just correctly labelled `complete: false` with its real (weak)
+ * method, so a downstream analysis gate can refuse to spend a model call on
+ * it while the UI can still show something.
  *
- * The summary is still the last resort — dropping it would mean losing items
- * whose publisher blocks every reader, and a title plus a blurb is genuinely
- * better than an empty row for a human browsing the feed list. What changes is
- * that it is now LABELLED, so the article/blurb distinction survives into the
- * database instead of being erased at the moment it is made.
+ * `fullContent` (2026-09 fix — see `parser.ts`'s `extractContentEncoded` doc
+ * comment) is what closes the gap a real production incident exposed: a feed
+ * that ships the complete article ONLY inside `<content:encoded>`, with no
+ * `<description>`/`<summary>` at all, used to resolve to "no content
+ * anywhere" the instant the page itself couldn't be read — even though the
+ * article text was sitting in the feed payload the whole time.
  */
 export function resolveArticleContent(
   extracted: ExtractedArticle,
-  summary: string | null
+  summary: string | null,
+  fullContent: string | null = null
 ): ResolvedArticleContent {
   if (extracted.text) {
     return {
@@ -457,11 +501,23 @@ export function resolveArticleContent(
     };
   }
 
-  const fallback = summary?.trim() || null;
+  const candidates: Array<{ text: string; method: "rss_full_content" | "rss_summary" }> = [];
+  const full = fullContent?.trim();
+  if (full) candidates.push({ text: full, method: "rss_full_content" });
+  const brief = summary?.trim();
+  if (brief) candidates.push({ text: brief, method: "rss_summary" });
+
+  // Prefer the first candidate that clears the analyzable threshold; if none
+  // does, fall back to the best (first, i.e. highest-tier) candidate anyway —
+  // still stored, still honestly labelled, just left for the analysis gate to
+  // refuse.
+  const chosen =
+    candidates.find((c) => c.text.length >= MIN_ANALYZABLE_CONTENT_LENGTH) ?? candidates[0] ?? null;
+
   return {
-    content: fallback,
-    method: fallback ? "rss_summary" : null,
-    chars: fallback?.length ?? 0,
+    content: chosen?.text ?? null,
+    method: chosen?.method ?? null,
+    chars: chosen?.text.length ?? 0,
     complete: false,
     error: extracted.error ?? "no_article_text",
   };
