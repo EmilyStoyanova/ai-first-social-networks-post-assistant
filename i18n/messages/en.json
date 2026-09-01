@@ -275,8 +275,9 @@
     "noCompaniesTitle": "No companies yet",
     "noCompaniesDesc": "Create a company to start generating posts.",
     "createCompany": "Create a company",
-    "placeholderDescription": "Generation for {company} is moving here.",
-    "comingSoon": "Coming soon — single, topic, and bulk generation for this company will live here."
+    "description": "Generate posts for {company} — single, topic, or bulk.",
+    "resultTitle": "Posts created",
+    "viewPosts": "View posts"
   },
   "competitiveAnalysis": {
     "title": "Competitive Analysis",
@@ -717,7 +718,8 @@
       "noPendingDesc": "Posts submitted for approval show up here. Nothing needs your decision right now."
     },
     "noPostsTitle": "No AI-generated posts yet",
-    "noPostsDesc": "Choose a channel above and click Generate Draft to create your first post.",
+    "noPostsDesc": "Head to Content Creation to generate your first post.",
+    "goToContentCreation": "Create content",
     "imageAlt": "AI-generated image",
     "imagePrompt": "Image Prompt",
     "notes": "Notes",

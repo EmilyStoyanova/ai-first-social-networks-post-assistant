@@ -9,13 +9,8 @@ import {
   getPostMetricsForPosts,
   type PostMetricsView,
 } from "@/lib/services/analytics/get-post-metrics.service";
-import { hasEnabledFeedItems } from "@/lib/services/company/list-feed-items.service";
-import { listGenerationSources } from "@/lib/services/company/list-generation-sources.service";
-import { getContentMix } from "@/lib/services/company/get-content-mix.service";
-import { listChannelConfigs } from "@/lib/services/company/list-channel-configs.service";
 import { listPosts } from "@/lib/services/company/list-posts.service";
 import { resolvePostStatusFilter } from "@/lib/posts/post-status-filter";
-import { resolveGenerationChannels } from "@/lib/posts/generation-channels";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompanyWorkspaceHeader } from "@/components/company/company-workspace-header";
 import { GeneratedPostsSection } from "@/components/company/generated-posts-section";
@@ -43,23 +38,9 @@ export default async function CompanyPostsPage({ params, searchParams }: Props) 
   const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
   const canDelete = canManage;
 
-  const [
-    postsData,
-    bufferConnection,
-    rssFeedItemsAvailable,
-    generationSources,
-    channelConfigs,
-    contentMixResult,
-  ] = await Promise.all([
+  const [postsData, bufferConnection] = await Promise.all([
     listPosts(slug, session.user.id, session.user.isGlobalAdmin),
     getBufferConnection(company.id),
-    hasEnabledFeedItems(company.id),
-    listGenerationSources(slug, session.user.id, session.user.isGlobalAdmin),
-    listChannelConfigs(slug, session.user.id, session.user.isGlobalAdmin),
-    // The saved distribution, read here so a batch's mix panel is already
-    // pre-filled on first paint. Editors may read it; only owners may change the
-    // stored one, which happens in settings and not on this page.
-    getContentMix(slug, session.user.id, session.user.isGlobalAdmin),
   ]);
 
   const analyticsStatus = await getAnalyticsKeyStatus(
@@ -79,17 +60,6 @@ export default async function CompanyPostsPage({ params, searchParams }: Props) 
   );
 
   const initialPosts = postsData?.success ? postsData.posts : [];
-  // An empty list simply leaves the dropdown with its two non-RSS choices.
-  const generationSourceOptions = generationSources?.success ? generationSources.sources : [];
-  // Only channels backed by an enabled Buffer profile can be generated for. An
-  // empty list is a real state — the form says so and disables generation rather
-  // than offering four channels the company never connected.
-  const availableChannels = resolveGenerationChannels(
-    channelConfigs?.success ? channelConfigs.configs : []
-  );
-  // Unreadable is treated as "no default to offer": the batch panel then invites
-  // one to be set up, and generation behaves exactly as it did before it existed.
-  const contentMix = contentMixResult.success ? contentMixResult.mix : null;
 
   return (
     <DashboardLayout
@@ -116,13 +86,6 @@ export default async function CompanyPostsPage({ params, searchParams }: Props) 
             canDelete={canDelete}
             role={canManage ? "owner" : "editor"}
             bufferConnected={bufferConnection.connected}
-            hasRssFeedItems={rssFeedItemsAvailable}
-            contentSources={generationSourceOptions}
-            availableChannels={availableChannels}
-            contentMix={contentMix}
-            // Narrowed here for the same reason the channels settings page does
-            // it: the column is a free String in Prisma but only ever "en"/"bg".
-            companyDefaultLang={company.defaultLang === "bg" ? "bg" : "en"}
             isGlobalAdmin={session.user.isGlobalAdmin}
           />
         </div>
