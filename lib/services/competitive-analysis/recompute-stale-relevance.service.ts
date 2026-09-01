@@ -33,6 +33,53 @@
  *     archived while an earlier row in the same batch was still being
  *     processed would not be caught for a later row. `recomputeRelevanceForRow`
  *     now re-checks fresh, per row, immediately before its model call.
+ *
+ * ── 2026-09 relevance-retry fix (relevance-UI follow-up) ─────────────────
+ * Found while implementing automatic post-extraction enqueue (see
+ * `run-competitor-intelligence-extraction.service.ts`'s module comment for
+ * that half of the fix): this drain had NO bounded-retry guard and NO
+ * no-progress continuation guard — `competitor-relevance-handler.ts` used to
+ * self-enqueue a continuation whenever `summary.remaining > 0`, full stop,
+ * with no dedupe key on the continuation (deliberately, per that file's own
+ * comment). A row whose relevance call fails EVERY time (a malformed
+ * research-profile input the model can never satisfy, a provider that is
+ * misconfigured but still resolves) wrote nothing at all on failure, so
+ * `staleWhere` reselected the exact same row every run forever — the
+ * relevance-drain analogue of the extraction livelock this session already
+ * fixed once, for the identical structural reason (a terminal outcome that
+ * never consumes attempt budget).
+ *
+ * Fixed with the same shape as that earlier fix, adapted to relevance's
+ * version-scoped semantics (there is no lease/claim step here — concurrency
+ * is already guarded by the optimistic `relevanceProfileVersion` check on
+ * every write):
+ *
+ *   • `relevanceAttemptCount` (new column) bounds retries. `priorAttempts`
+ *     below trusts it as the CURRENT streak whenever `relevanceProfileVersion`
+ *     is `null` (never evaluated — the ordinary case for a freshly extracted
+ *     row failing its first calls) OR already equals `version`; it resets
+ *     to 0 only when `relevanceProfileVersion` holds a REAL, different prior
+ *     version — a genuine profile change earning a fresh budget instead of
+ *     being blocked forever by an older version's exhausted attempts. Note
+ *     the asymmetry with `null`: a failure deliberately never stamps
+ *     `relevanceProfileVersion` (the row must stay retryable), so treating
+ *     `null` as "different version, reset" would make failures never
+ *     accumulate at all — see `priorAttempts`'s own comment below for the
+ *     exact incident this caused during this fix's own verification.
+ *   • On a real model failure, the row is now written (attempt count bumped,
+ *     `relevanceReason` set to the error) — genuine progress, since a future
+ *     run's `priorAttempts` check will see it and eventually stop retrying.
+ *   • At `MAX_RELEVANCE_ATTEMPTS`, the row is settled WITHOUT a model call:
+ *     `relevance` stays `pending` (truthful — it was never actually scored),
+ *     but `relevanceProfileVersion` is stamped to the current version (so it
+ *     leaves `staleWhere` and stops being reselected) and `relevanceReason`
+ *     explains why — never "permanently pending with no explanation" (§11 of
+ *     the governing instruction).
+ *   • `RecomputeStaleRelevanceSummary` gained `progressed`, true only when at
+ *     least one row's persistent state actually moved this run — mirroring
+ *     `CompetitorIntelligenceExtractionSummary.progressed` exactly.
+ *     `competitor-relevance-handler.ts`'s continuation now requires it, just
+ *     like the extraction handler's continuation does.
  */
 
 import { prisma } from "@/lib/db/client";
@@ -48,6 +95,7 @@ import {
   RELEVANCE_ATTEMPT_TIMEOUT_MS,
   RELEVANCE_BATCH_SIZE,
   RELEVANCE_JSON_SCHEMA,
+  MAX_RELEVANCE_ATTEMPTS,
   type RelevanceOutcome,
   type RelevanceProfile,
   type RelevanceSubject,
@@ -68,6 +116,12 @@ export type RecomputeStaleRelevanceSummary = {
   failed: number;
   skipped: number;
   remaining: number;
+  /** True iff at least one processed row's persistent state actually moved
+   *  this run (a genuine verdict written, a failed attempt recorded, or a
+   *  row settled at `max_attempts`) — see the module comment's 2026-09
+   *  relevance-retry fix. Drives the handler's no-progress continuation
+   *  guard, mirroring `CompetitorIntelligenceExtractionSummary.progressed`. */
+  progressed: boolean;
 };
 
 /** What the drain must have already loaded for one row — mirrors
@@ -77,6 +131,10 @@ export interface RelevanceRow {
   id: string;
   competitorId: string;
   relevanceProfileVersion: number | null;
+  /** Attempts accumulated so far — meaningful only when `relevanceProfileVersion`
+   *  equals the version this row is now being evaluated against; see
+   *  `priorAttempts` below. */
+  relevanceAttemptCount: number;
   topic: string | null;
   subtopic: string | null;
   summary: string | null;
@@ -112,7 +170,7 @@ export interface RecomputeRelevanceRowDeps {
 
 export type RecomputeRelevanceRowOutcome =
   | { status: "updated" }
-  | { status: "skipped"; reason: "archived" | "claimed" | "invalid" }
+  | { status: "skipped"; reason: "archived" | "claimed" | "invalid" | "max_attempts" }
   | { status: "no_provider" }
   | { status: "failed" };
 
@@ -193,6 +251,46 @@ export async function recomputeRelevanceForRow(
     return { status: "skipped", reason: "archived" };
   }
 
+  // 2026-09 relevance-retry fix — `relevanceProfileVersion` only ever
+  // changes on a genuine EVALUATION (success, the deterministic
+  // out-of-scope path, or a max-attempts settle); a failed attempt
+  // deliberately leaves it untouched so the row stays retryable. That means
+  // a row that has NEVER been evaluated sits at `relevanceProfileVersion:
+  // null` for its entire failing streak — comparing that to `version`
+  // directly would incorrectly read as "a different version" on every
+  // single call and reset `priorAttempts` to 0 forever, so accumulated
+  // failures would NEVER reach `MAX_RELEVANCE_ATTEMPTS` and the row would
+  // retry infinitely — reproducing the exact hot loop this fix exists to
+  // close, for the single most common real case (a freshly extracted row
+  // whose first-ever relevance call keeps failing). `null` is therefore
+  // treated as "still the current streak," not "a different version" — only
+  // a REAL prior version number that differs from `version` resets the
+  // budget (a genuine profile change earning a fresh chance).
+  const priorAttempts =
+    row.relevanceProfileVersion === null || row.relevanceProfileVersion === version
+      ? row.relevanceAttemptCount
+      : 0;
+
+  if (priorAttempts >= MAX_RELEVANCE_ATTEMPTS) {
+    // Settle WITHOUT a model call: `relevance` stays whatever it already was
+    // (truthful — this row was never actually scored against `version`), but
+    // stamping `relevanceProfileVersion` here is what makes it leave
+    // `staleWhere` and stop being reselected forever. `relevanceReason`
+    // explains why, so the UI never has to show a bare, unexplained
+    // "pending" for a row that in fact exhausted its retries (§11).
+    const written = await db.competitorIntelligence.updateMany({
+      where: { id: row.id, relevanceProfileVersion: row.relevanceProfileVersion },
+      data: {
+        relevanceReason: `Relevance evaluation failed after ${MAX_RELEVANCE_ATTEMPTS} attempts against this Research Profile version.`,
+        relevanceProfileVersion: version,
+        relevanceAttemptCount: 0,
+      },
+    });
+    return written.count > 0
+      ? { status: "skipped", reason: "max_attempts" }
+      : { status: "skipped", reason: "claimed" };
+  }
+
   // No research interests configured at all — settle to out_of_scope with NO
   // model call, mirroring classification's `mode === "none"` branch (§11:
   // relevance must still resolve deterministically for an empty profile, not
@@ -205,6 +303,8 @@ export async function recomputeRelevanceForRow(
         relevanceReason: "No research topics or markets are configured.",
         matchedResearchTopics: [],
         relevanceProfileVersion: version,
+        relevanceAttemptCount: 0,
+        relevanceEvaluatedAt: new Date(),
       },
     });
     return written.count > 0 ? { status: "updated" } : { status: "skipped", reason: "claimed" };
@@ -263,10 +363,29 @@ export async function recomputeRelevanceForRow(
         relevanceReason: outcome.reason,
         matchedResearchTopics: outcome.matchedResearchTopics,
         relevanceProfileVersion: version,
+        relevanceAttemptCount: 0,
+        relevanceEvaluatedAt: new Date(),
       },
     });
     return written.count > 0 ? { status: "updated" } : { status: "skipped", reason: "claimed" };
-  } catch {
+  } catch (err) {
+    // 2026-09 relevance-retry fix — a failure used to write nothing at all,
+    // which is exactly what let a permanently-failing row hot-loop the
+    // drain's self-continuation (see module comment). Now it consumes
+    // attempt budget via the same version-scoped `priorAttempts` counter,
+    // and records the error so the row is never silently "still pending"
+    // with no explanation. `relevanceProfileVersion` is deliberately left
+    // UNCHANGED — a failed attempt has not actually evaluated the row
+    // against `version`, so it must remain retryable (still matches
+    // `staleWhere`) up to `MAX_RELEVANCE_ATTEMPTS`.
+    const message = err instanceof Error ? err.message : "Relevance evaluation failed.";
+    await db.competitorIntelligence.updateMany({
+      where: { id: row.id, relevanceProfileVersion: row.relevanceProfileVersion },
+      data: {
+        relevanceReason: message,
+        relevanceAttemptCount: priorAttempts + 1,
+      },
+    });
     return { status: "failed" };
   }
 }
@@ -300,6 +419,7 @@ async function defaultFindStaleRows(
       id: true,
       competitorId: true,
       relevanceProfileVersion: true,
+      relevanceAttemptCount: true,
       topic: true,
       subtopic: true,
       summary: true,
@@ -363,7 +483,15 @@ export async function recomputeStaleRelevanceForCompany(
   // practice: this is only ever enqueued right after a Save, which is the
   // profile's only writer — see update-research-profile.service.ts.)
   if (!profileRow) {
-    return { companyId, processed: 0, updated: 0, failed: 0, skipped: 0, remaining: 0 };
+    return {
+      companyId,
+      processed: 0,
+      updated: 0,
+      failed: 0,
+      skipped: 0,
+      remaining: 0,
+      progressed: false,
+    };
   }
 
   const profile: RelevanceProfile = {
@@ -377,6 +505,7 @@ export async function recomputeStaleRelevanceForCompany(
   let updated = 0;
   let failed = 0;
   let skipped = 0;
+  let progressed = false;
 
   for (const row of rows) {
     const outcome = await recomputeRelevanceForRow(row, profile, version, {
@@ -384,15 +513,29 @@ export async function recomputeStaleRelevanceForCompany(
       resolveProvider: deps.resolveProvider,
       attemptTimeoutMs: deps.attemptTimeoutMs,
     });
-    if (outcome.status === "updated") updated++;
-    else if (outcome.status === "failed") failed++;
-    else if (outcome.status === "no_provider") {
+    if (outcome.status === "updated") {
+      updated++;
+      progressed = true;
+    } else if (outcome.status === "failed") {
+      // 2026-09 relevance-retry fix — a failure now WRITES (attempt count +
+      // reason; see `recomputeRelevanceForRow`'s catch block), so it is
+      // genuine progress, exactly like extraction's equivalent branch.
+      failed++;
+      progressed = true;
+    } else if (outcome.status === "no_provider") {
       // Nothing else in this run can succeed either — stop rather than
       // burning the rest of the batch on calls that will all report the same
       // thing. The un-attempted remainder is still counted below via a fresh
       // `remaining` read, so nothing here is lost, only deferred.
       break;
-    } else skipped++;
+    } else {
+      skipped++;
+      // `max_attempts` settled the row (stamped the version, wrote a reason)
+      // — real progress, the row-level analogue of extraction's
+      // `PROGRESS_SKIP_REASONS`. `archived`/`claimed` never write anything
+      // and must not count.
+      if (outcome.reason === "max_attempts") progressed = true;
+    }
   }
 
   // §2 fix — re-read the CURRENT profile version, not the `version` this
@@ -403,5 +546,5 @@ export async function recomputeStaleRelevanceForCompany(
   const currentVersion = (await currentProfileVersion(companyId)) ?? version;
   const remaining = await countRemaining(companyId, currentVersion);
 
-  return { companyId, processed: rows.length, updated, failed, skipped, remaining };
+  return { companyId, processed: rows.length, updated, failed, skipped, remaining, progressed };
 }

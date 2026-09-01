@@ -29,6 +29,7 @@ function summary(
     failed: 1,
     skipped: 1,
     remaining: 0,
+    progressed: true,
     ...overrides,
   };
 }
@@ -99,6 +100,20 @@ describe("competitorRelevanceHandler — self-continuation", () => {
   it("does NOT enqueue when nothing remains", async () => {
     const spy = enqueueSpy();
     const handler = createCompetitorRelevanceHandler(async () => summary({ remaining: 0 }), spy.fn);
+    await handler({ job: job(), logger: silentLogger });
+    assert.deepEqual(spy.calls, []);
+  });
+
+  // 2026-09 relevance-retry fix — the exact hot-loop this guard closes: rows
+  // remain (every one is a permanently-failing row that keeps NOT resolving)
+  // but this run made zero progress. Before this fix the handler enqueued a
+  // continuation on `remaining > 0` alone, which would have looped forever.
+  it("does NOT enqueue when rows remain but the run made zero progress — the hot-loop guard", async () => {
+    const spy = enqueueSpy();
+    const handler = createCompetitorRelevanceHandler(
+      async () => summary({ remaining: 5, progressed: false }),
+      spy.fn
+    );
     await handler({ job: job(), logger: silentLogger });
     assert.deepEqual(spy.calls, []);
   });

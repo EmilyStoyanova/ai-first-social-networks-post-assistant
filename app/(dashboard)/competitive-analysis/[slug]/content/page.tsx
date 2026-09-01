@@ -4,6 +4,7 @@ import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { listCompetitorContent } from "@/lib/services/competitive-analysis/list-competitor-content.service";
 import { listCompetitors } from "@/lib/services/competitive-analysis/list-competitors.service";
+import { getResearchProfileOrDefaults } from "@/lib/services/competitive-analysis/get-research-profile-or-defaults.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
 import { CompetitiveAnalysisHeader } from "@/components/competitive-analysis/analysis-header";
 import { ContentPanel } from "@/components/competitive-analysis/content-panel";
@@ -31,11 +32,16 @@ export default async function CompetitiveAnalysisContentPage({ params }: Props) 
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
-  const [contentResult, competitorsResult] = await Promise.all([
+  const [contentResult, competitorsResult, profileResult] = await Promise.all([
     listCompetitorContent(slug, session.user.id, session.user.isGlobalAdmin),
     listCompetitors(slug, session.user.id, session.user.isGlobalAdmin, "active"),
+    // 2026-09 relevance-UI fix — `persisted` (not the lazily-computed default)
+    // is what distinguishes "genuinely awaiting evaluation" from "no Research
+    // Profile has ever been saved, so nothing can ever evaluate these rows".
+    // See `relevance-display-state.ts`.
+    getResearchProfileOrDefaults(slug, session.user.id, session.user.isGlobalAdmin),
   ]);
-  if (!contentResult.success || !competitorsResult.success) notFound();
+  if (!contentResult.success || !competitorsResult.success || !profileResult.success) notFound();
 
   const canManage = company.role === "OWNER" || session.user.isGlobalAdmin;
 
@@ -58,6 +64,7 @@ export default async function CompetitiveAnalysisContentPage({ params }: Props) 
           initialItems={contentResult.items}
           competitors={competitorsResult.competitors.map((c) => ({ id: c.id, name: c.name }))}
           canManage={canManage}
+          profileConfigured={profileResult.profile.persisted}
         />
       </div>
     </DashboardLayout>

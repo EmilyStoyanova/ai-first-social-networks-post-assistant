@@ -14,6 +14,10 @@ import { ManualEntryForm } from "./manual-entry-form";
 import { ContentItemDetail } from "./content-item-detail";
 import type { CompetitorContentItem } from "@/lib/services/competitive-analysis/competitor-content-dto";
 import type { ManualEntryItem } from "@/lib/services/competitive-analysis/create-manual-entry.service";
+import {
+  relevanceDisplayState,
+  type RelevanceDisplayState,
+} from "@/lib/services/competitive-analysis/relevance-display-state";
 
 const FIELD =
   "text-body rounded-control border-border-strong bg-surface text-fg h-9 border px-3 outline-none transition-all duration-fast focus:border-accent focus:ring-2 focus:ring-accent/20 focus:ring-offset-0";
@@ -21,17 +25,25 @@ const FIELD =
 type RelevanceFilter = "" | "relevant" | "related" | "out_of_scope" | "pending";
 type OriginFilter = "" | "feed_item" | "manual_entry";
 
+/** Badge colour per TRUTHFUL display state (2026-09 relevance-UI fix) — keyed
+ *  on `RelevanceDisplayState`, not the raw `relevance` column, so "failed"
+ *  and "profile not configured" are visually distinct from a genuine
+ *  "pending" instead of all three collapsing into one grey chip. */
 export function relevanceBadgeVariant(
-  relevance: string
-): "success" | "warning" | "neutral" | "readonly" {
-  switch (relevance) {
+  state: RelevanceDisplayState
+): "success" | "warning" | "neutral" | "readonly" | "danger" {
+  switch (state) {
     case "relevant":
       return "success";
     case "related":
       return "warning";
     case "out_of_scope":
       return "neutral";
+    case "failed":
+      return "danger";
     default:
+      // pending / profile_not_configured — both genuinely unresolved, and
+      // neither is an error state.
       return "readonly";
   }
 }
@@ -41,6 +53,10 @@ interface Props {
   initialItems: CompetitorContentItem[];
   competitors: Array<{ id: string; name: string }>;
   canManage: boolean;
+  /** The company's Research Profile `persisted` flag — see
+   *  `relevance-display-state.ts` for why a lazily-computed default must not
+   *  be treated as configured. */
+  profileConfigured: boolean;
 }
 
 /**
@@ -49,7 +65,13 @@ interface Props {
  * sources" — truthful wording (§16): monitoring may be incomplete, so this is
  * never framed as an exhaustive "all competitor posts" view.
  */
-export function ContentPanel({ slug, initialItems, competitors, canManage }: Props) {
+export function ContentPanel({
+  slug,
+  initialItems,
+  competitors,
+  canManage,
+  profileConfigured,
+}: Props) {
   const t = useTranslations("competitiveAnalysis.content");
   const tCommon = useTranslations("common");
   const apiError = useApiErrorMessage();
@@ -142,10 +164,15 @@ export function ContentPanel({ slug, initialItems, competitors, canManage }: Pro
           className={`${FIELD} w-40`}
         >
           <option value="">{t("filters.allRelevance")}</option>
-          <option value="relevant">{t("relevance.relevant")}</option>
-          <option value="related">{t("relevance.related")}</option>
-          <option value="out_of_scope">{t("relevance.out_of_scope")}</option>
-          <option value="pending">{t("relevance.pending")}</option>
+          <option value="relevant">{t("relevanceState.relevant")}</option>
+          <option value="related">{t("relevanceState.related")}</option>
+          <option value="out_of_scope">{t("relevanceState.out_of_scope")}</option>
+          {/* Filters on the PERSISTED `relevance` column, so this one option
+              covers every unresolved row — genuinely pending, failed after
+              exhausted retries, and (when no Research Profile is saved) all
+              of them. The card badge still distinguishes those three; see
+              `relevance-display-state.ts`. */}
+          <option value="pending">{t("filters.relevanceUnresolved")}</option>
         </select>
 
         {canManage && competitors.length > 0 && (
@@ -172,57 +199,69 @@ export function ContentPanel({ slug, initialItems, competitors, canManage }: Pro
         />
       ) : (
         <div className="space-y-2">
-          {items.map((item) => (
-            <div
-              key={item.id}
-              role="button"
-              tabIndex={0}
-              onClick={() => setDetailId(item.id)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  setDetailId(item.id);
-                }
-              }}
-              className="focus-ring rounded-card cursor-pointer"
-            >
-              <Card variant="hover" className="px-4 py-3">
-                <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-                  <Badge variant={relevanceBadgeVariant(item.relevance)}>
-                    {t(`relevance.${item.relevance}`)}
-                  </Badge>
-                  <Badge variant="neutral">{item.competitorName}</Badge>
-                  <Badge variant="readonly">{t(`platform.${item.platform}`)}</Badge>
-                  {item.status !== "completed" && (
-                    <Badge variant="warning">{t(`status.${item.status}`)}</Badge>
-                  )}
-                  <span className="text-fg-faint ml-auto text-xs">
-                    {item.dateKnown ? item.date?.slice(0, 10) : t("unknownDate")}
-                  </span>
-                </div>
-
-                {item.title && <p className="text-fg mb-1 text-sm font-medium">{item.title}</p>}
-                {item.excerpt && (
-                  <p className="text-fg-muted mb-2 line-clamp-2 text-xs">{item.excerpt}</p>
-                )}
-
-                <div className="flex flex-wrap gap-1.5 text-xs">
-                  {item.topic && <Badge variant="accent">{item.topic}</Badge>}
-                  {item.contentType && (
-                    <Badge variant="readonly">{t(`contentType.${item.contentType}`)}</Badge>
-                  )}
-                  {item.hookType && item.hookType !== "none" && (
-                    <Badge variant="readonly">{t(`hookType.${item.hookType}`)}</Badge>
-                  )}
-                  {item.structurePattern && (
-                    <Badge variant="readonly">
-                      {t(`structurePattern.${item.structurePattern}`)}
+          {items.map((item) => {
+            const state = relevanceDisplayState(item, profileConfigured);
+            // The strongest matched topic — first is strongest by the model's
+            // own ordering (see competitor-relevance.ts's prompt). Shown only
+            // for a genuinely relevant/related row, and only one, to keep the
+            // card compact.
+            const topMatchedTopic =
+              (state === "relevant" || state === "related") && item.matchedResearchTopics.length > 0
+                ? item.matchedResearchTopics[0]
+                : null;
+            return (
+              <div
+                key={item.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => setDetailId(item.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setDetailId(item.id);
+                  }
+                }}
+                className="focus-ring rounded-card cursor-pointer"
+              >
+                <Card variant="hover" className="px-4 py-3">
+                  <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
+                    <Badge variant={relevanceBadgeVariant(state)}>
+                      {t(`relevanceState.${state}`)}
                     </Badge>
+                    {topMatchedTopic && <Badge variant="accent">{topMatchedTopic}</Badge>}
+                    <Badge variant="neutral">{item.competitorName}</Badge>
+                    <Badge variant="readonly">{t(`platform.${item.platform}`)}</Badge>
+                    {item.status !== "completed" && (
+                      <Badge variant="warning">{t(`status.${item.status}`)}</Badge>
+                    )}
+                    <span className="text-fg-faint ml-auto text-xs">
+                      {item.dateKnown ? item.date?.slice(0, 10) : t("unknownDate")}
+                    </span>
+                  </div>
+
+                  {item.title && <p className="text-fg mb-1 text-sm font-medium">{item.title}</p>}
+                  {item.excerpt && (
+                    <p className="text-fg-muted mb-2 line-clamp-2 text-xs">{item.excerpt}</p>
                   )}
-                </div>
-              </Card>
-            </div>
-          ))}
+
+                  <div className="flex flex-wrap gap-1.5 text-xs">
+                    {item.topic && <Badge variant="accent">{item.topic}</Badge>}
+                    {item.contentType && (
+                      <Badge variant="readonly">{t(`contentType.${item.contentType}`)}</Badge>
+                    )}
+                    {item.hookType && item.hookType !== "none" && (
+                      <Badge variant="readonly">{t(`hookType.${item.hookType}`)}</Badge>
+                    )}
+                    {item.structurePattern && (
+                      <Badge variant="readonly">
+                        {t(`structurePattern.${item.structurePattern}`)}
+                      </Badge>
+                    )}
+                  </div>
+                </Card>
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -242,6 +281,7 @@ export function ContentPanel({ slug, initialItems, competitors, canManage }: Pro
           slug={slug}
           intelligenceId={detailId}
           onClose={() => setDetailId(null)}
+          profileConfigured={profileConfigured}
         />
       )}
     </div>

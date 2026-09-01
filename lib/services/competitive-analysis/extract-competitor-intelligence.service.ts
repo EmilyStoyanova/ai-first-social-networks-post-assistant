@@ -111,6 +111,11 @@ export type ExtractCompetitorIntelligenceOutcome =
  *  is exactly the bug this refactor closes (§5). */
 export interface ExtractableIntelligenceItem {
   id: string;
+  /** Not read by this function (it only ever acts on `competitorId`) —
+   *  carried purely so the drain (`run-competitor-intelligence-extraction.
+   *  service.ts`) can tell which company to enqueue relevance for after a
+   *  successful extraction, without a second query. */
+  companyId: string;
   competitorId: string;
   status: string;
   attemptCount: number;

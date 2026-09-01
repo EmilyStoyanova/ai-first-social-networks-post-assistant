@@ -391,13 +391,32 @@
         "allOrigins": "Всички източници",
         "originRss": "RSS",
         "originManual": "Добавено ръчно",
-        "allRelevance": "Всякаква релевантност"
+        "allRelevance": "Всякаква релевантност",
+        "relevanceUnresolved": "Още не е оценено"
       },
       "relevance": {
         "relevant": "Релевантно",
         "related": "Свързано",
         "out_of_scope": "Извън обхвата",
         "pending": "Все още не е оценено"
+      },
+      "relevanceState": {
+        "relevant": "Релевантно",
+        "related": "Свързано",
+        "out_of_scope": "Не е релевантно",
+        "pending": "Предстои оценка",
+        "failed": "Оценката не успя",
+        "profile_not_configured": "Няма зададен изследователски профил"
+      },
+      "relevanceSection": {
+        "title": "Релевантност",
+        "matchedTopics": "Съвпадащи наблюдавани теми",
+        "reason": "Защо",
+        "profileVersion": "Версия на профила: v{version}",
+        "evaluatedAt": "Оценено: {date}",
+        "profileNotConfigured": "Запази изследователски профил, за да започне оценка доколко съдържанието на конкурентите е близко до темите и пазарите, които следиш.",
+        "pendingExplain": "Изчаква оценка спрямо текущия ти изследователски профил.",
+        "failedExplain": "Оценката не успя след няколко опита. Ще бъде повторена автоматично при следваща промяна в профила."
       },
       "status": {
         "pending": "Чака анализ",

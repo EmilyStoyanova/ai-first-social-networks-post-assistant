@@ -13,15 +13,23 @@ import {
 } from "./extract-competitor-intelligence.service";
 import { MAX_EXTRACTION_ATTEMPTS } from "@/lib/ai/competitor-intelligence-extraction";
 
-function item(id: string): ExtractableIntelligenceItem {
+function item(id: string, companyId = "co-1"): ExtractableIntelligenceItem {
   return {
     id,
+    companyId,
     competitorId: "c-1",
     status: "pending",
     attemptCount: 0,
     feedItem: { title: "T", content: "Body" },
     manualEntry: null,
   };
+}
+
+/** A no-op relevance-enqueue stub — every test that doesn't specifically
+ *  exercise the 2026-09 relevance auto-enqueue fix passes this so the run
+ *  never touches the real queue/DB. */
+async function noopEnqueueRelevance() {
+  return { enqueued: false, deduplicated: false, jobId: null };
 }
 
 const noRemaining: RemainingCounts = { ready: 0, deferred: 0 };
@@ -34,6 +42,7 @@ describe("runCompetitorIntelligenceExtraction", () => {
       countRemaining: async () => noRemaining,
       extract: async (it) =>
         it.id === "b" ? { status: "failed", error: "boom" } : { status: "extracted" },
+      enqueueRelevance: noopEnqueueRelevance,
     });
     assert.equal(summary.processed, 3);
     assert.equal(summary.extracted, 2);
@@ -69,6 +78,7 @@ describe("runCompetitorIntelligenceExtraction", () => {
       findCandidates: async () => [item("a")],
       countRemaining: async () => ({ ready: 41, deferred: 1 }),
       extract: async () => ({ status: "extracted" }),
+      enqueueRelevance: noopEnqueueRelevance,
     });
     assert.equal(summary.remainingReady, 41);
     assert.equal(summary.remainingDeferred, 1);
@@ -101,6 +111,85 @@ describe("runCompetitorIntelligenceExtraction", () => {
   });
 });
 
+// ─── 2026-09 relevance auto-enqueue fix ────────────────────────────────────
+// See run-competitor-intelligence-extraction.service.ts's module comment for
+// the incident: extraction succeeded end-to-end, but nothing ever asked the
+// relevance drain to run again after a Research Profile's first save, so
+// every genuinely extracted row stayed "not evaluated yet" forever.
+
+describe("runCompetitorIntelligenceExtraction — relevance auto-enqueue (2026-09 fix)", () => {
+  it("enqueues relevance for a company with a genuinely extracted item", async () => {
+    const enqueued: string[] = [];
+    const summary = await runCompetitorIntelligenceExtraction({
+      findCandidates: async () => [item("a", "co-1")],
+      countRemaining: async () => noRemaining,
+      extract: async () => ({ status: "extracted" }),
+      enqueueRelevance: async (companyId) => {
+        enqueued.push(companyId);
+        return { enqueued: true, deduplicated: false, jobId: "rel-1" };
+      },
+    });
+    assert.deepEqual(enqueued, ["co-1"]);
+    assert.deepEqual(summary.relevanceEnqueuedFor, ["co-1"]);
+  });
+
+  it("enqueues once per distinct company, even when several items from the same company extracted", async () => {
+    const enqueued: string[] = [];
+    await runCompetitorIntelligenceExtraction({
+      findCandidates: async () => [item("a", "co-1"), item("b", "co-1"), item("c", "co-1")],
+      countRemaining: async () => noRemaining,
+      extract: async () => ({ status: "extracted" }),
+      enqueueRelevance: async (companyId) => {
+        enqueued.push(companyId);
+        return { enqueued: true, deduplicated: false, jobId: "rel-1" };
+      },
+    });
+    assert.deepEqual(enqueued, ["co-1"]);
+  });
+
+  it("enqueues separately for each distinct company in a mixed batch", async () => {
+    const enqueued: string[] = [];
+    await runCompetitorIntelligenceExtraction({
+      findCandidates: async () => [item("a", "co-1"), item("b", "co-2")],
+      countRemaining: async () => noRemaining,
+      extract: async () => ({ status: "extracted" }),
+      enqueueRelevance: async (companyId) => {
+        enqueued.push(companyId);
+        return { enqueued: true, deduplicated: false, jobId: "rel-1" };
+      },
+    });
+    assert.deepEqual(enqueued.sort(), ["co-1", "co-2"]);
+  });
+
+  it("does NOT enqueue for a company whose items only failed/skipped — never extracted", async () => {
+    const enqueued: string[] = [];
+    await runCompetitorIntelligenceExtraction({
+      findCandidates: async () => [item("a", "co-1")],
+      countRemaining: async () => noRemaining,
+      extract: async () => ({ status: "skipped", reason: "missing_content" }),
+      enqueueRelevance: async (companyId) => {
+        enqueued.push(companyId);
+        return { enqueued: true, deduplicated: false, jobId: "rel-1" };
+      },
+    });
+    assert.deepEqual(enqueued, []);
+  });
+
+  it("is best-effort — a failed enqueue does not fail the run or affect its summary", async () => {
+    const summary = await runCompetitorIntelligenceExtraction({
+      findCandidates: async () => [item("a", "co-1")],
+      countRemaining: async () => noRemaining,
+      extract: async () => ({ status: "extracted" }),
+      enqueueRelevance: async () => {
+        throw new Error("queue unavailable");
+      },
+    });
+    assert.equal(summary.extracted, 1);
+    // Swallowed — not reflected as a failure anywhere in the summary.
+    assert.deepEqual(summary.relevanceEnqueuedFor, []);
+  });
+});
+
 // ─── 2026-09 production livelock fix — progress tracking ──────────────────
 // See run-competitor-intelligence-extraction.service.ts's module comment for
 // the incident. `progressed` is the drain-level half of the no-progress
@@ -113,6 +202,7 @@ describe("runCompetitorIntelligenceExtraction — progressed", () => {
       findCandidates: async () => [item("a")],
       countRemaining: async () => noRemaining,
       extract: async () => ({ status: "extracted" }),
+      enqueueRelevance: noopEnqueueRelevance,
     });
     assert.equal(summary.progressed, true);
   });
@@ -394,6 +484,7 @@ describe("2026-09 production livelock — real row shape, end to end", () => {
 
     const extractableItem: ExtractableIntelligenceItem = {
       id: row.id,
+      companyId: "co-1",
       competitorId: "c-1",
       status: row.status,
       attemptCount: row.attemptCount,
@@ -476,6 +567,7 @@ describe("2026-09 production livelock — real row shape, end to end", () => {
     const db = makeLiveFakeDb(row);
     const item: ExtractableIntelligenceItem = {
       id: row.id,
+      companyId: "co-1",
       competitorId: "c-1",
       status: row.status,
       attemptCount: row.attemptCount,

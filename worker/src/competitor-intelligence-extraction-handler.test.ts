@@ -25,6 +25,7 @@ function summary(
     remainingReady: 0,
     remainingDeferred: 0,
     durationMs: 100,
+    relevanceEnqueuedFor: [],
     ...overrides,
   };
 }

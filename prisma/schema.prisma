@@ -1720,6 +1720,22 @@ model CompetitorIntelligence {
   relevanceReason         String?             @map("relevance_reason")
   matchedResearchTopics   String[]            @map("matched_research_topics")
   relevanceProfileVersion Int?                @map("relevance_profile_version")
+  // 2026-09 relevance-retry fix — bounded-retry counter for the relevance
+  // step, mirroring `attemptCount` below but scoped to whichever profile
+  // `version` is currently being evaluated against (reset to 0 the moment a
+  // row is picked up under a DIFFERENT version than its last attempt — see
+  // `recomputeRelevanceForRow`'s `priorAttempts` comment). Without this, a
+  // permanently-failing row (bad provider config, a model that never returns
+  // valid JSON) would never age out of `staleWhere` and would hot-loop the
+  // relevance drain's self-continuation exactly like the extraction livelock
+  // this same session already fixed once.
+  relevanceAttemptCount Int       @default(0) @map("relevance_attempt_count")
+  // Set only on a genuine evaluation (a verdict was produced, including the
+  // deterministic "no research interests configured" verdict) — never on a
+  // failed attempt or an exhausted-retries write, so it always answers
+  // "when did this row last actually get scored," truthfully, for the UI's
+  // "Evaluated: <date>" field (Part 3B relevance-UI fix, §9).
+  relevanceEvaluatedAt  DateTime? @map("relevance_evaluated_at")
 
   // ── Extraction pipeline status (Part 3B) ──────────────────────────────────
   status         String    @default("pending")

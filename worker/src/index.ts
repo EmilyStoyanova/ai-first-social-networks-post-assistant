@@ -5,7 +5,9 @@
  *   1. loads + validates config from the environment,
  *   2. registers itself in the `workers` table (status: starting),
  *   3. opens the wake listener, if a secret is configured,
- *   4. recovers any stale-leased jobs, then starts the polling loop (idle),
+ *   4. recovers any stale-leased jobs AND sweeps for stale competitor-relevance
+ *      rows that have nothing left to trigger them, then starts the polling
+ *      loop (idle),
  *   5. claims + dispatches jobs through the orchestrator (Phase 2),
  *   6. goes dormant when the queue stays empty — connection closed, nothing sent
  *      to the database — until a wake signal or the fallback interval,
@@ -68,6 +70,7 @@ import {
   competitorRelevanceHandler,
   COMPETITOR_RELEVANCE_JOB_TYPE,
 } from "./competitor-relevance-handler";
+import { enqueueStaleRelevanceRecovery } from "@/lib/services/competitive-analysis/enqueue-stale-relevance-recovery.service";
 import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
 import { WakeSignal } from "./wake-signal";
 import { createWakeServer } from "./wake-server";
@@ -139,6 +142,25 @@ async function main(): Promise<void> {
 
   // Recover anything a previous crashed worker left leased, then poll.
   await orchestrator.reapOnce();
+
+  // Second recovery pass, same spirit as the reap above and the same
+  // once-per-process placement: work that EXISTS but has nothing left to
+  // trigger it. A `CompetitorIntelligence` row that finished extracting
+  // before the post-extraction relevance enqueue existed — or one whose
+  // best-effort enqueue was ever lost — is stale forever otherwise, because
+  // only a Research Profile save or a FRESH extraction can create a relevance
+  // job. Orchestrator-only: all the logic lives in the service; this is the
+  // adapter. Best-effort by construction — a worker must start regardless.
+  try {
+    const recovery = await enqueueStaleRelevanceRecovery();
+    // Logged unconditionally: "0 companies needed recovery" is the answer an
+    // operator is looking for when the Content page still shows unevaluated
+    // items, and a silent no-op cannot distinguish that from a sweep that
+    // never ran.
+    logger.info("stale relevance recovery sweep", recovery);
+  } catch (err) {
+    logger.error("stale relevance recovery sweep failed (ignored)", { error: String(err) });
+  }
 
   // The latch between the wake listener and the poll loop. Always constructed —
   // it costs nothing and keeps the runner's wiring identical whether or not a

@@ -76,6 +76,7 @@ function makeFakeDb(overrides: {
 function item(overrides: Partial<ExtractableIntelligenceItem> = {}): ExtractableIntelligenceItem {
   return {
     id: "ci-1",
+    companyId: "co-1",
     competitorId: "c-1",
     status: "pending",
     attemptCount: 0,

@@ -33,6 +33,12 @@ export const MAX_STORED_MATCHED_RESEARCH_TOPICS = 10;
  *  `recompute-stale-relevance.service.ts`'s "no unbounded synchronous loop"
  *  requirement (§12/§27 of the governing instruction). */
 export const RELEVANCE_BATCH_SIZE = 25;
+/** 2026-09 relevance-retry fix — mirrors `MAX_EXTRACTION_ATTEMPTS`'s role for
+ *  extraction. Bounds how many times `recomputeRelevanceForRow` will retry a
+ *  row against the SAME profile version before settling it (pending +
+ *  explanatory reason) so the drain stops reselecting it — see
+ *  `recompute-stale-relevance.service.ts`'s module comment. */
+export const MAX_RELEVANCE_ATTEMPTS = 3;
 
 /** What relevance is judged FROM — the already-extracted intrinsic fields.
  *  Deliberately a narrow read-only view, not the whole CompetitorIntelligence

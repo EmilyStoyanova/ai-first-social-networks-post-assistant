@@ -35,6 +35,13 @@ export interface CompetitorContentItem {
   structurePattern: string | null;
   angleCategory: string | null;
   relevance: string;
+  /** Present on a row that FAILED to settle a genuine verdict (an exhausted
+   *  retry streak — see `recompute-stale-relevance.service.ts`'s 2026-09
+   *  relevance-retry fix) while `relevance` is still `pending`. The list
+   *  needs this (not just the detail view) to render a truthful "Relevance
+   *  failed" state instead of a bare, unexplained "Not evaluated yet" —
+   *  see `relevance-display-state.ts`. */
+  relevanceReason: string | null;
   matchedResearchTopics: string[];
   /** pending | analyzing | completed | failed — the EXTRACTION pipeline's
    *  status, never relevance's (relevance has no status column of its own —
@@ -56,7 +63,16 @@ export interface CompetitorContentDetail extends CompetitorContentItem {
   ctaType: string | null;
   productsServicesMentioned: string[];
   originalLanguage: string | null;
-  relevanceReason: string | null;
+  /** Null until a genuine relevance verdict has been reached (see
+   *  `CompetitorIntelligence.relevanceProfileVersion`'s own schema comment) —
+   *  the Research Profile version this row's CURRENT `relevance` was scored
+   *  against. Never set by a failed attempt or an exhausted-retries settle. */
+  relevanceProfileVersion: number | null;
+  /** Null until a genuine relevance verdict has been reached — never set on
+   *  a failed attempt (see `recompute-stale-relevance.service.ts`'s 2026-09
+   *  relevance-retry fix). Truthfully answers "when was this last actually
+   *  scored," not "when was this last touched." */
+  relevanceEvaluatedAt: string | null;
   /** The full observed text (RSS article body or the pasted manual content) —
    *  never truncated, unlike the list DTO's `excerpt`. */
   content: string | null;
@@ -99,6 +115,8 @@ export const COMPETITOR_CONTENT_SELECT = {
   relevance: true,
   relevanceReason: true,
   matchedResearchTopics: true,
+  relevanceProfileVersion: true,
+  relevanceEvaluatedAt: true,
   competitor: { select: { name: true } },
   feedItem: { select: { title: true, content: true, url: true, publishedAt: true } },
   manualEntry: {
@@ -131,6 +149,8 @@ export interface CompetitorContentRow {
   relevance: string;
   relevanceReason: string | null;
   matchedResearchTopics: string[];
+  relevanceProfileVersion: number | null;
+  relevanceEvaluatedAt: Date | null;
   competitor: { name: string };
   feedItem: {
     title: string | null;
@@ -163,6 +183,7 @@ export function toCompetitorContentItem(row: CompetitorContentRow): CompetitorCo
     structurePattern: row.structurePattern,
     angleCategory: row.angleCategory,
     relevance: row.relevance,
+    relevanceReason: row.relevanceReason,
     matchedResearchTopics: row.matchedResearchTopics,
     status: row.status,
     analysisError: row.analysisError,
@@ -212,7 +233,8 @@ export function toCompetitorContentDetail(row: CompetitorContentRow): Competitor
     ctaType: row.ctaType,
     productsServicesMentioned: row.productsServicesMentioned,
     originalLanguage: row.originalLanguage,
-    relevanceReason: row.relevanceReason,
+    relevanceProfileVersion: row.relevanceProfileVersion,
+    relevanceEvaluatedAt: row.relevanceEvaluatedAt?.toISOString() ?? null,
     content: fullContent,
   };
 }

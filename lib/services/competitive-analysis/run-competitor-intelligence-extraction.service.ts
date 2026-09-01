@@ -41,6 +41,46 @@
  * progressed`. A batch that makes zero progress — regardless of why — stops
  * hot-looping and lets the normal cron/job-wake cadence pick the drain back
  * up instead.
+ *
+ * ── 2026-09 relevance auto-enqueue fix ─────────────────────────────────────
+ * Real-world verification found extraction working end to end
+ * (`extracted: 10, failed: 0`) but every item stuck at `relevance: pending`
+ * indefinitely. Traced to the ONLY place that ever enqueued the relevance
+ * drain: `update-research-profile.service.ts`, on a Research Profile Save.
+ * A company whose profile was saved BEFORE its content finished extracting
+ * (the ordinary case — the profile is usually configured once, up front,
+ * while ingestion/extraction keep running for as long as the source stays
+ * live) gets exactly one relevance run, right after that save, which
+ * correctly finds nothing stale yet (nothing has been extracted). Every row
+ * extracted AFTER that point is written `relevance: pending,
+ * relevanceProfileVersion: null` — genuinely stale against the current
+ * profile version — but nothing ever asks the drain to run again, since
+ * extraction success was never a trigger. Confirmed against the real
+ * affected company: a persisted profile at version 1, and 10 `completed`
+ * rows sitting at `relevance: pending, relevanceProfileVersion: null`, with
+ * no `competitor-relevance` job in the retained history to have processed
+ * them.
+ *
+ * Fixed here, not in the worker handler — this is business logic ("a
+ * successful extraction should eventually cause relevance evaluation"), and
+ * this drain already knows exactly which companies had a row genuinely
+ * transition to `completed` this run, which the handler (operating on one
+ * pre-aggregated, cross-company summary) does not. Mirrors
+ * `update-research-profile.service.ts`'s own enqueue: best-effort, reuses
+ * the SAME `competitorRelevanceDedupeKey` so an enqueue here collapses with
+ * one already queued/active for that company (from a concurrent Save, or
+ * from this same drain's own earlier batch) rather than creating a second
+ * job. One job PER COMPANY per run — not one per article — since the
+ * relevance drain is itself already a bounded, self-continuing, per-company
+ * sweep (§ Relevance job handler); enqueueing per-item would only produce
+ * redundant dedupe collisions, never additional throughput.
+ *
+ * This performs no continuation logic of its own and touches neither
+ * `progressed` nor `remainingReady`/`remainingDeferred` — it cannot
+ * interact with the no-progress guard above, so it introduces no new
+ * hot-loop risk to THIS drain. (The relevance drain's own historical
+ * hot-loop gap — no bounded retry — was found and fixed separately; see
+ * `recompute-stale-relevance.service.ts`'s module comment.)
  */
 
 import { randomUUID } from "node:crypto";
@@ -54,6 +94,8 @@ import {
   EXTRACTION_BATCH_SIZE,
   MAX_EXTRACTION_ATTEMPTS,
 } from "@/lib/ai/competitor-intelligence-extraction";
+import { enqueueJob, type EnqueueJobResult } from "@/lib/services/queue/enqueue-job.service";
+import { COMPETITOR_RELEVANCE_JOB_TYPE, competitorRelevanceDedupeKey } from "@/lib/queue/job-types";
 
 // A `type`, not `interface` — see the identical note on
 // `RecomputeStaleRelevanceSummary`; this shape is returned directly as a
@@ -84,6 +126,11 @@ export type CompetitorIntelligenceExtractionSummary = {
    *  immediately processable; not a reason to self-enqueue a continuation. */
   remainingDeferred: number;
   durationMs: number;
+  /** Companies for which at least one row transitioned to `completed` this
+   *  run, and for which the relevance drain was therefore (best-effort)
+   *  enqueued — see the module comment's 2026-09 fix. Present for
+   *  observability/tests; the enqueue itself never blocks or fails this run. */
+  relevanceEnqueuedFor: string[];
 };
 
 /**
@@ -137,6 +184,7 @@ export function deferredWhere(now: Date = new Date()): Record<string, unknown> {
 
 const CANDIDATE_SELECT = {
   id: true,
+  companyId: true,
   competitorId: true,
   status: true,
   attemptCount: true,
@@ -165,6 +213,20 @@ export interface RunCompetitorIntelligenceExtractionDeps {
     item: ExtractableIntelligenceItem,
     deps?: ExtractCompetitorIntelligenceDeps
   ) => ReturnType<typeof extractCompetitorIntelligence>;
+  /** Best-effort trigger for one company's relevance drain — defaults to the
+   *  real queue. Injectable so this file's own decision (WHICH companies to
+   *  notify, and only on genuine `extracted` outcomes) is testable without a
+   *  live queue, matching this drain's existing DI conventions. */
+  enqueueRelevance?: (companyId: string) => Promise<EnqueueJobResult>;
+}
+
+async function defaultEnqueueRelevance(companyId: string): Promise<EnqueueJobResult> {
+  return enqueueJob({
+    type: COMPETITOR_RELEVANCE_JOB_TYPE,
+    payload: { companyId },
+    dedupeKey: competitorRelevanceDedupeKey(companyId),
+    companyId,
+  });
 }
 
 async function defaultCountRemaining(): Promise<RemainingCounts> {
@@ -199,6 +261,7 @@ export async function runCompetitorIntelligenceExtraction(
   const findCandidates = deps.findCandidates ?? defaultFindCandidates;
   const countRemaining = deps.countRemaining ?? defaultCountRemaining;
   const extract = deps.extract ?? extractCompetitorIntelligence;
+  const enqueueRelevance = deps.enqueueRelevance ?? defaultEnqueueRelevance;
 
   const runId = randomUUID();
   const startedAt = Date.now();
@@ -210,12 +273,18 @@ export async function runCompetitorIntelligenceExtraction(
   let skipped = 0;
   let progressed = false;
   const skippedByReason: Record<string, number> = {};
+  // 2026-09 relevance auto-enqueue fix — every company with at least one row
+  // that genuinely reached `completed` this run. A Set, not a list: a batch
+  // routinely mixes several items from the same company, and this must
+  // enqueue at most once per company per run regardless.
+  const extractedCompanyIds = new Set<string>();
 
   for (const item of claimable) {
     const outcome = await extract(item);
     if (outcome.status === "extracted") {
       extracted++;
       progressed = true;
+      extractedCompanyIds.add(item.companyId);
     } else if (outcome.status === "failed") {
       failed++;
       progressed = true;
@@ -228,6 +297,24 @@ export async function runCompetitorIntelligenceExtraction(
       const reason = outcome.status === "no_provider" ? "no_provider" : outcome.reason;
       skippedByReason[reason] = (skippedByReason[reason] ?? 0) + 1;
       if (PROGRESS_SKIP_REASONS.has(reason)) progressed = true;
+    }
+  }
+
+  // Best-effort, exactly like `update-research-profile.service.ts`'s own
+  // enqueue: a failed enqueue must not fail this run — the extraction work
+  // is already committed either way, and a missed relevance trigger here
+  // simply waits for the next Save or the next extraction run to try again.
+  const relevanceEnqueuedFor: string[] = [];
+  for (const companyId of extractedCompanyIds) {
+    try {
+      await enqueueRelevance(companyId);
+      relevanceEnqueuedFor.push(companyId);
+    } catch (err) {
+      console.error(
+        "[competitor-intelligence-extraction] relevance enqueue failed (ignored):",
+        companyId,
+        err
+      );
     }
   }
 
@@ -244,5 +331,6 @@ export async function runCompetitorIntelligenceExtraction(
     remainingReady: remaining.ready,
     remainingDeferred: remaining.deferred,
     durationMs: Date.now() - startedAt,
+    relevanceEnqueuedFor,
   };
 }

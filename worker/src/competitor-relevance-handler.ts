@@ -14,10 +14,18 @@
  * — `enqueueContinuation` reported `deduplicated: true` and no row was ever
  * inserted, so a company with more stale rows than one batch could process
  * would silently stop after exactly one batch. Fixed by dropping the key here
- * — the FIRST enqueue (`update-research-profile.service.ts`, on a Save) still
- * carries the key, so two independent Saves in quick succession still
- * collapse into one drain; only the self-continuation, which runs from
- * INSIDE the still-active parent, omits it.
+ * — the FIRST enqueue (`update-research-profile.service.ts`, on a Save, or
+ * `run-competitor-intelligence-extraction.service.ts`, after a successful
+ * extraction) still carries the key, so several independent triggers in
+ * quick succession still collapse into one drain; only the self-continuation,
+ * which runs from INSIDE the still-active parent, omits it.
+ *
+ * ── 2026-09 relevance-retry fix ──────────────────────────────────────────
+ * The continuation used to fire on `summary.remaining > 0` alone, with no
+ * progress guard — see `recompute-stale-relevance.service.ts`'s module
+ * comment for the hot-loop this allowed for a permanently-failing row. Now
+ * requires `summary.progressed` too, exactly mirroring
+ * `competitor-intelligence-extraction-handler.ts`'s own guard.
  */
 
 import type { JobHandler } from "./handler-registry";
@@ -85,7 +93,7 @@ export function createCompetitorRelevanceHandler(
 
     logger.info("competitor relevance recompute completed", { jobId: job.id, ...summary });
 
-    if (summary.remaining > 0) {
+    if (summary.remaining > 0 && summary.progressed) {
       try {
         const enqueue = await enqueueContinuation(companyId);
         logger.info("competitor relevance recompute continuation enqueued", {
@@ -103,6 +111,12 @@ export function createCompetitorRelevanceHandler(
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    } else if (summary.remaining > 0) {
+      logger.info("competitor relevance recompute continuation withheld — no progress", {
+        jobId: job.id,
+        companyId,
+        remaining: summary.remaining,
+      });
     }
 
     return summary;
