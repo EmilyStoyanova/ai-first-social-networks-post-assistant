@@ -195,6 +195,26 @@ describe("extractCompetitorIntelligence — archived (§5/§14, fresh re-check)"
     await extractCompetitorIntelligence(item(), { db, resolveProvider: okProvider });
     assert.notEqual(row.status, "failed");
   });
+
+  // 2026-09 livelock fix, second bug found in the same pass: the archived
+  // release used to leave the claim's attemptCount increment in place,
+  // contradicting this describe block's own name. Regression coverage for
+  // that specific scar, starting from a non-zero attemptCount so a bug that
+  // merely resets to 0 (instead of restoring the PRE-claim value) would still
+  // be caught.
+  it("restores attemptCount to its PRE-claim value on an archived release, not just off of 'failed'", async () => {
+    const { db, row } = makeFakeDb({
+      row: { id: "ci-1", status: "failed", leaseExpiresAt: null, attemptCount: 1 },
+      competitorArchivedAt: new Date(),
+    });
+    const outcome = await extractCompetitorIntelligence(
+      item({ status: "failed", attemptCount: 1 }),
+      { db, resolveProvider: okProvider }
+    );
+    assert.deepEqual(outcome, { status: "skipped", reason: "archived" });
+    assert.equal(row.attemptCount, 1, "attemptCount must be restored to its pre-claim value (1)");
+    assert.equal(row.status, "pending");
+  });
 });
 
 describe("extractCompetitorIntelligence — persistence only while the claim is owned", () => {
@@ -251,18 +271,91 @@ describe("extractCompetitorIntelligence — content resolution", () => {
     assert.equal(row.status, "completed");
   });
 
-  it("fails with no_content when both origins are empty, without ever calling the model", async () => {
+  // 2026-09 livelock fix (see the module comment): this used to run BEFORE
+  // the atomic claim and write `status: "failed"` unconditionally, never
+  // touching `attemptCount` — the row stayed selectable forever, which is
+  // exactly the production incident this regression guards against. It now
+  // runs AFTER the claim, so it consumes attempt budget like every other
+  // terminal outcome. Provider resolution therefore now DOES happen (it sits
+  // before the claim), but the model is still never actually called — the
+  // check below bails before the generate() loop, which `stubProvider`'s
+  // `generate` would throw if reached.
+  it("fails with missing_content when the loaded origin's body is empty, consuming an attempt without calling the model", async () => {
     const { db, row } = makeFakeDb({
       row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
     });
-    let called = false;
+    let generateCalled = false;
     const outcome = await extractCompetitorIntelligence(
       item({ feedItem: { title: null, content: "" }, manualEntry: null }),
-      { db, resolveProvider: async () => (called = true) as never }
+      {
+        db,
+        resolveProvider: async () => ({
+          ok: true,
+          instance: {
+            generate: async () => {
+              generateCalled = true;
+              return { text: VALID_REPLY };
+            },
+          },
+          provider: "test",
+          model: "test-model",
+        }),
+      }
     );
-    assert.deepEqual(outcome, { status: "skipped", reason: "no_content" });
-    assert.equal(called, false);
+    assert.deepEqual(outcome, { status: "skipped", reason: "missing_content" });
+    assert.equal(generateCalled, false, "the model must never be called for empty content");
     assert.equal(row.status, "failed");
+    assert.equal(row.attemptCount, 1, "attemptCount must advance so this row eventually ages out");
+  });
+
+  it("fails with missing_origin (distinct from missing_content) when neither feedItem nor manualEntry loaded", async () => {
+    const { db, row } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    const outcome = await extractCompetitorIntelligence(
+      item({ feedItem: null, manualEntry: null }),
+      { db, resolveProvider: okProvider }
+    );
+    assert.deepEqual(outcome, { status: "skipped", reason: "missing_origin" });
+    assert.equal(row.status, "failed");
+    assert.equal(row.attemptCount, 1);
+  });
+
+  it("a missing-content row eventually ages out of eligibility after MAX_EXTRACTION_ATTEMPTS repeats", async () => {
+    const { db, row } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    let outcome;
+    for (let i = 0; i < 3; i++) {
+      outcome = await extractCompetitorIntelligence(
+        item({
+          status: row.status,
+          attemptCount: row.attemptCount,
+          feedItem: { title: null, content: "" },
+          manualEntry: null,
+        }),
+        { db, resolveProvider: okProvider }
+      );
+    }
+    assert.deepEqual(outcome, { status: "skipped", reason: "missing_content" });
+    assert.equal(row.attemptCount, 3);
+    // A 4th attempt is refused up front — matches selectableWhere's cap, no
+    // DB write, no infinite growth.
+    const finalOutcome = await extractCompetitorIntelligence(
+      item({
+        status: row.status,
+        attemptCount: row.attemptCount,
+        feedItem: { title: null, content: "" },
+        manualEntry: null,
+      }),
+      { db, resolveProvider: okProvider }
+    );
+    assert.deepEqual(finalOutcome, { status: "skipped", reason: "max_attempts" });
+    assert.equal(
+      row.attemptCount,
+      3,
+      "max_attempts must not itself increment attemptCount further"
+    );
   });
 });
 

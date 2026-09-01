@@ -20,7 +20,10 @@ function summary(
     extracted: 4,
     failed: 1,
     skipped: 0,
-    remaining: 0,
+    skippedByReason: {},
+    progressed: true,
+    remainingReady: 0,
+    remainingDeferred: 0,
     durationMs: 100,
     ...overrides,
   };
@@ -68,10 +71,10 @@ describe("competitorIntelligenceExtractionHandler", () => {
 });
 
 describe("competitorIntelligenceExtractionHandler — self-continuation", () => {
-  it("enqueues a continuation when rows remain", async () => {
+  it("enqueues a continuation when ready rows remain AND the run made progress", async () => {
     const spy = enqueueSpy();
     const handler = createCompetitorIntelligenceExtractionHandler(
-      async () => summary({ remaining: 12 }),
+      async () => summary({ remainingReady: 12, progressed: true }),
       spy.fn
     );
     await handler({ job: job(), logger: silentLogger });
@@ -81,7 +84,41 @@ describe("competitorIntelligenceExtractionHandler — self-continuation", () => 
   it("does NOT enqueue when nothing remains", async () => {
     const spy = enqueueSpy();
     const handler = createCompetitorIntelligenceExtractionHandler(
-      async () => summary({ remaining: 0 }),
+      async () => summary({ remainingReady: 0, remainingDeferred: 0, progressed: true }),
+      spy.fn
+    );
+    await handler({ job: job(), logger: silentLogger });
+    assert.equal(spy.calls(), 0);
+  });
+
+  // 2026-09 production livelock fix — see this handler's module comment.
+  // This is the exact real-world shape that hot-looped: ready rows remain,
+  // but the run made zero progress (every row was a no-op skip), so
+  // enqueuing again immediately would just reproduce the same result forever.
+  it("does NOT enqueue when ready rows remain but the run made ZERO progress", async () => {
+    const spy = enqueueSpy();
+    const handler = createCompetitorIntelligenceExtractionHandler(
+      async () =>
+        summary({
+          processed: 10,
+          extracted: 0,
+          failed: 0,
+          skipped: 10,
+          skippedByReason: { claimed: 10 },
+          progressed: false,
+          remainingReady: 10,
+          remainingDeferred: 0,
+        }),
+      spy.fn
+    );
+    await handler({ job: job(), logger: silentLogger });
+    assert.equal(spy.calls(), 0);
+  });
+
+  it("does NOT enqueue when the only remaining rows are deferred behind an active lease elsewhere", async () => {
+    const spy = enqueueSpy();
+    const handler = createCompetitorIntelligenceExtractionHandler(
+      async () => summary({ remainingReady: 0, remainingDeferred: 7, progressed: true }),
       spy.fn
     );
     await handler({ job: job(), logger: silentLogger });
@@ -93,10 +130,10 @@ describe("competitorIntelligenceExtractionHandler — self-continuation", () => 
       throw new Error("enqueue exploded");
     };
     const handler = createCompetitorIntelligenceExtractionHandler(
-      async () => summary({ remaining: 3 }),
+      async () => summary({ remainingReady: 3, progressed: true }),
       failingEnqueue
     );
     const result = await handler({ job: job(), logger: silentLogger });
-    assert.deepEqual(result, summary({ remaining: 3 }));
+    assert.deepEqual(result, summary({ remainingReady: 3, progressed: true }));
   });
 });
