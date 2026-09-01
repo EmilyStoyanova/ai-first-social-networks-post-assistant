@@ -36,6 +36,13 @@ enum ContentSourceType {
   prompt
   product_page
   calendar_event
+  // Competitive Analysis (Part 3A schema foundation — §3.0/§3.3 of the approved
+  // plan). No ingestion, discovery, or CRUD is wired up in Part 3A; these exist
+  // so the schema already carries the shape Part 3B's competitor-source
+  // services will write into. A row of either type always has a non-null
+  // ContentSource.competitorId (see that field's comment).
+  competitor_rss
+  competitor_website
 }
 
 enum MediaSource {
@@ -166,29 +173,148 @@ enum WorkerStatus {
   stopped
 }
 
+// ─── Competitive Analysis (Part 3A) ────────────────────────────────────────────
+// Schema foundation only — see CompetitorIntelligence below and the models that
+// follow the Model section for what each enum is for. No ingestion, extraction,
+// relevance scoring, trends, or generation integration exists yet (Part 3B+),
+// and social collection specifically is Part 3C — see CompetitorSocialProfile/
+// CompetitorSocialItem below.
+
+// Named `Social`, not `Link` — this is the platform a `CompetitorSocialProfile`
+// (§ below) is on, and that model is not a permanent hyperlink: it is the row
+// a future collector attaches sync state to. Also used by `CompetitorSocialItem`
+// so a collected item and the profile it came from agree on one vocabulary.
+enum CompetitorSocialPlatform {
+  facebook
+  instagram
+  linkedin
+  tiktok
+  youtube
+  x
+  other
+}
+
+// How a `CompetitorSocialProfile` participates in collection. `reference_only`
+// is every profile's Part 3A default (and stays the permanent state for a
+// platform Part 3C never gets a supported connector for); `automatic` and
+// `manual_only` are Part 3C/Part 3B destinations, not behaviors implemented
+// yet — see CompetitorSocialProfile's comment.
+enum CompetitorCollectionMode {
+  reference_only
+  automatic
+  manual_only
+}
+
+// pending = never analyzed (or analyzed before relevance existed). This is the
+// SOLE owner of relevance, alongside relevanceReason/matchedResearchTopics/
+// relevanceProfileVersion on CompetitorIntelligence — never written by
+// extraction. See that model's comment.
+enum CompetitorRelevance {
+  pending
+  relevant
+  related
+  out_of_scope
+}
+
+enum CompetitorContentType {
+  blog_post
+  product_update
+  promotion
+  announcement
+  guide
+  video
+  social_post
+  ad
+  other
+}
+
+enum CompetitorCommercialIntent {
+  informational
+  soft_sell
+  hard_sell
+  promotional
+}
+
+enum CompetitorCtaType {
+  learn_more
+  sign_up
+  buy_now
+  contact_us
+  download
+  comment_engage
+  none
+  other
+}
+
+enum CompetitorAngleCategory {
+  problem_solution
+  comparison
+  how_to
+  case_study
+  announcement
+  thought_leadership
+  behind_the_scenes
+  promotion
+  other
+}
+
+// The opening move of a piece of content — deliberately a small, stable V1
+// taxonomy (not an exhaustive copywriting glossary), matching the size of the
+// other normalized dimensions above. `none` is a real verdict (the content
+// simply states its point with no hook device); `other` is the escape hatch
+// for a genuine pattern this list doesn't yet name.
+enum CompetitorHookType {
+  question
+  problem
+  bold_claim
+  statistic
+  curiosity
+  story
+  direct_offer
+  announcement
+  none
+  other
+}
+
+// The overall shape the content is organized in — a separate dimension from
+// angle_category (angle is the STRATEGY — comparison, how-to, thought
+// leadership; structure is the SHAPE that strategy is written in, e.g. an
+// announcement can be structured as a plain announcement or as a list).
+enum CompetitorStructurePattern {
+  problem_solution
+  how_to
+  list
+  story
+  comparison
+  question_answer
+  announcement
+  offer
+  other
+}
+
 // ─── Models ───────────────────────────────────────────────────────────────────
 
 model User {
-  id            String   @id @default(uuid())
-  email         String   @unique
-  passwordHash  String   @map("password_hash")
-  name          String?
-  isGlobalAdmin Boolean  @default(false) @map("is_global_admin")
-  preferredLang String   @default("en") @map("preferred_language")
+  id                   String   @id @default(uuid())
+  email                String   @unique
+  passwordHash         String   @map("password_hash")
+  name                 String?
+  isGlobalAdmin        Boolean  @default(false) @map("is_global_admin")
+  preferredLang        String   @default("en") @map("preferred_language")
   // Per-user preferred LLM config. Nullable = "use system default". The relation
   // is SetNull so deleting a config never orphans the FK — the user simply falls
   // back to the admin default at generation time.
-  preferredLlmConfigId String? @map("preferred_llm_config_id")
-  emailVerified Boolean  @default(false) @map("email_verified")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  preferredLlmConfigId String?  @map("preferred_llm_config_id")
+  emailVerified        Boolean  @default(false) @map("email_verified")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
 
   companies               CompanyMember[]
-  createdCompanies        Company[]       @relation("CompanyCreator")
+  createdCompanies        Company[]                @relation("CompanyCreator")
   uploadedAssets          MediaAsset[]
-  approvedPosts           Post[]          @relation("PostApprover")
-  rejectedPosts           Post[]          @relation("PostRejecter")
-  generatedPosts          Post[]          @relation("PostGenerator")
+  approvedPosts           Post[]                   @relation("PostApprover")
+  rejectedPosts           Post[]                   @relation("PostRejecter")
+  generatedPosts          Post[]                   @relation("PostGenerator")
   postVersions            PostVersion[]
   auditLogs               AuditLog[]
   generationRuns          GenerationRun[]
@@ -200,22 +326,22 @@ model User {
 }
 
 model Company {
-  id                   String         @id @default(uuid())
-  name                 String
-  slug                 String         @unique
-  website              String?
-  automationMode       AutomationMode @default(semi_automated) @map("automation_mode")
-  defaultLang          String         @default("en") @map("default_language")
+  id                         String         @id @default(uuid())
+  name                       String
+  slug                       String         @unique
+  website                    String?
+  automationMode             AutomationMode @default(semi_automated) @map("automation_mode")
+  defaultLang                String         @default("en") @map("default_language")
   // Content mix (v2-8) — weekly quota for posts written from the company's own
   // mission/brand knowledge, with no RSS article behind them. NULL means "no
   // quota configured"; together with a NULL on every ContentSource.postsPerWeek
   // it means this company has no content mix and keeps the pre-v2-8 pooling
   // behaviour. NULL and 0 are NOT the same: 0 means "no mission posts".
-  companyContentPostsPerWeek Int?     @map("company_content_posts_per_week")
-  createdBy            String         @map("created_by")
-  lastCronProcessedAt  DateTime?      @map("last_cron_processed_at")
-  createdAt            DateTime       @default(now()) @map("created_at")
-  updatedAt            DateTime       @updatedAt @map("updated_at")
+  companyContentPostsPerWeek Int?           @map("company_content_posts_per_week")
+  createdBy                  String         @map("created_by")
+  lastCronProcessedAt        DateTime?      @map("last_cron_processed_at")
+  createdAt                  DateTime       @default(now()) @map("created_at")
+  updatedAt                  DateTime       @updatedAt @map("updated_at")
 
   creator          User              @relation("CompanyCreator", fields: [createdBy], references: [id])
   members          CompanyMember[]
@@ -228,6 +354,13 @@ model Company {
   posts            Post[]
   auditLogs        AuditLog[]
   generationRuns   GenerationRun[]
+
+  // ── Competitive Analysis (Part 3A) ──────────────────────────────────────
+  competitors               Competitor[]
+  competitorResearchProfile CompetitorResearchProfile?
+  competitorManualEntries   CompetitorManualEntry[]
+  competitorSocialItems     CompetitorSocialItem[]
+  competitorIntelligence    CompetitorIntelligence[]
 
   @@map("companies")
 }
@@ -311,11 +444,11 @@ model ChannelConfig {
 }
 
 model BufferConnection {
-  id              String    @id @default(uuid())
-  companyId       String    @unique @map("company_id")
-  bufferUserId    String    @map("buffer_user_id")
-  accessTokenEnc  String    @map("access_token_enc")
-  refreshTokenEnc String?   @map("refresh_token_enc")
+  id                String    @id @default(uuid())
+  companyId         String    @unique @map("company_id")
+  bufferUserId      String    @map("buffer_user_id")
+  accessTokenEnc    String    @map("access_token_enc")
+  refreshTokenEnc   String?   @map("refresh_token_enc")
   tokenExpiresAt    DateTime? @map("token_expires_at")
   lastProfileSyncAt DateTime? @map("last_profile_sync_at")
 
@@ -335,8 +468,8 @@ model BufferConnection {
   // silently stopped working (Personal API Keys are revocable and never expire).
   analyticsKeyLastValidAt DateTime? @map("analytics_key_last_valid_at")
 
-  createdAt         DateTime  @default(now()) @map("created_at")
-  updatedAt         DateTime  @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
 
@@ -363,16 +496,16 @@ model LlmConfig {
 }
 
 model ContentSource {
-  id            String            @id @default(uuid())
-  companyId     String            @map("company_id")
-  type          ContentSourceType
-  name          String
-  config        Json
-  enabled       Boolean           @default(true)
-  lastFetchedAt DateTime?         @map("last_fetched_at")
+  id             String            @id @default(uuid())
+  companyId      String            @map("company_id")
+  type           ContentSourceType
+  name           String
+  config         Json
+  enabled        Boolean           @default(true)
+  lastFetchedAt  DateTime?         @map("last_fetched_at")
   // Content mix (v2-8) — how many of each channel's weekly posts must come from
   // this source. NULL = no quota assigned; see Company.companyContentPostsPerWeek.
-  postsPerWeek   Int?             @map("posts_per_week")
+  postsPerWeek   Int?              @map("posts_per_week")
   // LEGACY — retained for backwards compatibility, read by nothing.
   //
   // This once chose what happened when a source ran out of articles mid-week.
@@ -381,13 +514,26 @@ model ContentSource {
   // transferExhaustedQuotas). Whatever a row holds here is ignored, no code path
   // writes it, and it is absent from every type, DTO, and query. Kept only so
   // dropping it can be a deliberate migration rather than a side effect.
-  fallbackPolicy String           @default("skip") @map("fallback_policy")
-  createdAt     DateTime          @default(now()) @map("created_at")
+  fallbackPolicy String            @default("skip") @map("fallback_policy")
+  createdAt      DateTime          @default(now()) @map("created_at")
 
-  company   Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  feedItems FeedItem[]
-  posts     Post[]
+  // Competitive Analysis (Part 3A schema foundation). NULL for every ordinary
+  // company source; non-NULL only for `competitor_rss`/`competitor_website`
+  // rows, which belong to one competitor rather than being generation input.
+  // No service in Part 3A writes this column — see the ContentSourceType
+  // comment. Existing content-source services (create/update/list) reject
+  // these two types starting Part 3B, per the approved plan's API-isolation
+  // note (§3.7); Part 3A adds no such rejection yet since nothing can create
+  // one through the generic API in the first place (the type isn't offered by
+  // the form/validator).
+  competitorId String? @map("competitor_id")
 
+  company    Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  competitor Competitor? @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  feedItems  FeedItem[]
+  posts      Post[]
+
+  @@index([competitorId])
   @@map("content_sources")
 }
 
@@ -444,21 +590,21 @@ model FeedItem {
   // `title` and `content` above always hold the ORIGINAL article text and are
   // never overwritten by translation; generation falls back to them unless
   // translationStatus is 'completed'.
-  translatedTitle          String?   @map("translated_title")
-  translatedContent        String?   @map("translated_content")
+  translatedTitle           String?   @map("translated_title")
+  translatedContent         String?   @map("translated_content")
   /// ISO 639-1, e.g. "bg".
-  translationLanguage      String?   @map("translation_language")
+  translationLanguage       String?   @map("translation_language")
   /// pending | translating | completed | failed | skipped
-  translationStatus        String?   @map("translation_status")
+  translationStatus         String?   @map("translation_status")
   /// sha256(title + content + targetLang) — unchanged content skips re-translation.
-  translationHash          String?   @map("translation_hash")
-  translationError         String?   @map("translation_error")
-  translatedAt             DateTime? @map("translated_at")
-  translationProvider      String?   @map("translation_provider")
-  translationModel         String?   @map("translation_model")
-  translationAttemptCount  Int       @default(0) @map("translation_attempt_count")
-  translationLastAttemptAt DateTime? @map("translation_last_attempt_at")
-  translationNextRetryAt   DateTime? @map("translation_next_retry_at")
+  translationHash           String?   @map("translation_hash")
+  translationError          String?   @map("translation_error")
+  translatedAt              DateTime? @map("translated_at")
+  translationProvider       String?   @map("translation_provider")
+  translationModel          String?   @map("translation_model")
+  translationAttemptCount   Int       @default(0) @map("translation_attempt_count")
+  translationLastAttemptAt  DateTime? @map("translation_last_attempt_at")
+  translationNextRetryAt    DateTime? @map("translation_next_retry_at")
   /// Set while a run holds an atomic claim (status = 'translating'). An expired
   /// lease means the worker died mid-translation and the item is reclaimable.
   translationLeaseExpiresAt DateTime? @map("translation_lease_expires_at")
@@ -470,7 +616,7 @@ model FeedItem {
   /// article never leaks stale progress into an unrelated future retranslation.
   /// See maxBatchesFittingBudget (feed-item-translation.ts) and the resumable
   /// batch loop in madlad-translation.provider.ts.
-  translationProgress Json? @map("translation_progress")
+  translationProgress       Json?     @map("translation_progress")
 
   // Product-page extraction. Written only for `product_page` sources whose config
   // carries `extractionInstructions` — the owner's own description of what a post
@@ -545,7 +691,7 @@ model FeedItem {
   /// state (completed or failed) — see lib/ai/classification-chunk-analysis.ts.
   classificationChunkProgress   Json?     @map("classification_chunk_progress")
 
-  source ContentSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  source         ContentSource   @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   // A feed item backs at most one post PER CHANNEL — one topic, written once for
   // each social channel it was generated for. Enforced at the DB level by the
   // composite unique index on Post(primaryFeedItemId, channel).
@@ -553,11 +699,17 @@ model FeedItem {
   // `usedInPost` still means "this article has been consumed as a topic" and is
   // claimed exactly once, by the first channel; the siblings are pinned to the
   // article the topic already claimed and never claim it again.
-  posts  Post[]
+  posts          Post[]
   /// Translation / classification / extraction traces for THIS article. A post
   /// written from it references the run rather than copying the article text
   /// again — see GenerationStep.linkedRunId.
   generationRuns GenerationRun[]
+
+  /// Competitive Analysis (Part 3A schema foundation) — set only for a FeedItem
+  /// ingested from a `competitor_rss`/`competitor_website` ContentSource, once
+  /// Part 3B's analysis pipeline runs. Always NULL in Part 3A: nothing creates
+  /// competitor FeedItem rows yet.
+  competitorIntelligence CompetitorIntelligence?
 
   @@unique([sourceId, url])
   @@index([sourceId])
@@ -599,11 +751,11 @@ model MediaAsset {
   /// whether the card offers "Use source image" or "Use AI image".
   sourceUrl String? @map("source_url")
 
-  company  Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  uploader User    @relation(fields: [uploadedBy], references: [id])
-  posts    Post[]  @relation("PostMedia")
+  company          Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  uploader         User    @relation(fields: [uploadedBy], references: [id])
+  posts            Post[]  @relation("PostMedia")
   /// Posts holding this asset in reserve after a switch — see Post.previousMediaAssetId.
-  previousForPosts Post[] @relation("PostPreviousMedia")
+  previousForPosts Post[]  @relation("PostPreviousMedia")
 
   @@index([companyId])
   /// Backs the import dedupe lookup (companyId + sourceUrl).
@@ -627,9 +779,9 @@ model WeeklySchedule {
 }
 
 model Post {
-  id               String        @id @default(uuid())
-  companyId        String        @map("company_id")
-  scheduleId       String?       @map("schedule_id")
+  id                   String             @id @default(uuid())
+  companyId            String             @map("company_id")
+  scheduleId           String?            @map("schedule_id")
   // The single source article this post was generated from.
   //
   // Uniqueness is on (primaryFeedItemId, channel), not on the column alone: one
@@ -642,7 +794,7 @@ model Post {
   // See the @@unique at the bottom of this model. NULL is unconstrained either
   // way (Postgres treats NULLs as distinct in a unique index), so mission and
   // evergreen posts are unaffected.
-  primaryFeedItemId String?      @map("primary_feed_item_id")
+  primaryFeedItemId    String?            @map("primary_feed_item_id")
   // The content TOPIC this post is one channel's version of. One id shared by
   // every channel version written from the same topic in the same request.
   //
@@ -655,13 +807,13 @@ model Post {
   // NULL = an ungrouped post: everything generated before this column existed,
   // and every cron post. Those render exactly as they always have — the card
   // falls back to a single-channel badge.
-  contentGroupId    String?      @map("content_group_id")
+  contentGroupId       String?            @map("content_group_id")
   // The content-mix quota this post was drawn against (v2-8). NULL = company
   // content (mission/brand post, no RSS). This cannot be derived from
   // primaryFeedItemId: evergreen (prompt/calendar) posts and mission posts BOTH
   // leave that null, so without this column the scheduler could not tell which
   // quota a generated post consumed.
-  contentSourceId  String?       @map("content_source_id")
+  contentSourceId      String?            @map("content_source_id")
   // ── Origin snapshot ────────────────────────────────────────────────────────
   // What this post was ACTUALLY written from, copied in at generation time and
   // never updated afterwards. The relations above cannot answer this durably:
@@ -675,14 +827,14 @@ model Post {
   // reached by the migration's backfill. Those fall back to the live relations
   // (see lib/posts/post-origin.ts) and are the only posts whose displayed origin
   // can still change.
-  originType        PostOriginType? @map("origin_type")
+  originType           PostOriginType?    @map("origin_type")
   // All four are NULL for a brand_setup post — there is no source to describe.
   // `originSourceType` is what the badge reads to say "RSS · TechPowerUp" rather
   // than guessing the kind of source from its name.
-  originSourceType  ContentSourceType? @map("origin_source_type")
-  originSourceName  String?       @map("origin_source_name")
-  originSourceTitle String?       @map("origin_source_title")
-  originSourceUrl   String?       @map("origin_source_url")
+  originSourceType     ContentSourceType? @map("origin_source_type")
+  originSourceName     String?            @map("origin_source_name")
+  originSourceTitle    String?            @map("origin_source_title")
+  originSourceUrl      String?            @map("origin_source_url")
   // The manual BULK generation that produced this post — one id shared by every
   // post of one "generate N posts between these dates" request. NULL for a
   // single manual generation and for every cron/scheduled post.
@@ -694,7 +846,7 @@ model Post {
   //
   // Purely an association. It used to double as the publisher's discriminator —
   // see `manuallyScheduled`, which now holds that fact on its own.
-  generationBatchId String?       @map("generation_batch_id")
+  generationBatchId    String?            @map("generation_batch_id")
   // Whether a PERSON named this post's publish time, as opposed to the weekly
   // filler estimating one for it. THE publisher's discriminator: false means
   // `scheduledFor` is an estimate and the post may go out early (up to the cron
@@ -708,12 +860,12 @@ model Post {
   // chose this". A single post can now be scheduled at generation and from its
   // own card, neither of which is a batch — so the fact is stored directly
   // instead of inferred from an association that no longer implies it.
-  manuallyScheduled Boolean       @default(false) @map("manually_scheduled")
-  channel          SocialChannel
-  content          String
-  language         String        @default("en")
-  hashtags         String[]
-  mediaAssetId     String?       @map("media_asset_id")
+  manuallyScheduled    Boolean            @default(false) @map("manually_scheduled")
+  channel              SocialChannel
+  content              String
+  language             String             @default("en")
+  hashtags             String[]
+  mediaAssetId         String?            @map("media_asset_id")
   // The image DISPLACED by the last switch between the AI image and the source
   // article's image, kept so the user can go back without regenerating. Purely a
   // second pointer: switching re-points these two columns and never deletes a
@@ -723,56 +875,58 @@ model Post {
   // pointing at an older asset, which is invisible: the card offers "Use AI
   // image" only while the CURRENT asset is the imported one, and any switch
   // rewrites the column first.
-  previousMediaAssetId String?   @map("previous_media_asset_id")
-  status           PostStatus    @default(draft)
-  bufferUpdateId   String?       @map("buffer_update_id")
-  publishedPostUrl String?       @map("published_post_url")
-  scheduledFor     DateTime?     @map("scheduled_for")
-  publishedAt      DateTime?     @map("published_at")
-  safetyFlagged    Boolean       @default(false) @map("safety_flagged")
-  safetyFlagReason String?       @map("safety_flag_reason")
-  retryCount       Int           @default(0) @map("retry_count")
-  lastError        String?       @map("last_error")
-  generatedById    String?       @map("generated_by")
-  imagePrompt      String?       @map("image_prompt")
-  notes            String?
+  previousMediaAssetId String?            @map("previous_media_asset_id")
+  status               PostStatus         @default(draft)
+  bufferUpdateId       String?            @map("buffer_update_id")
+  publishedPostUrl     String?            @map("published_post_url")
+  scheduledFor         DateTime?          @map("scheduled_for")
+  publishedAt          DateTime?          @map("published_at")
+  safetyFlagged        Boolean            @default(false) @map("safety_flagged")
+  safetyFlagReason     String?            @map("safety_flag_reason")
+  retryCount           Int                @default(0) @map("retry_count")
+  lastError            String?            @map("last_error")
+  generatedById        String?            @map("generated_by")
+  imagePrompt          String?            @map("image_prompt")
+  notes                String?
   // The single central claim/takeaway of the post (Phase 1.1). Nullable — legacy
   // posts predating this column stay null; also mirrored in promptSnapshot.coreMessage.
-  coreMessage      String?       @map("core_message")
-  promptSnapshot   Json?         @map("prompt_snapshot")
-  llmProvider      String?       @map("llm_provider")
-  llmModel         String?       @map("llm_model")
-  approvedById     String?       @map("approved_by")
-  approvedAt       DateTime?     @map("approved_at")
-  rejectedById     String?       @map("rejected_by")
-  rejectedAt       DateTime?     @map("rejected_at")
-  rejectionNotes   String?       @map("rejection_notes")
-  createdAt        DateTime      @default(now()) @map("created_at")
-  updatedAt        DateTime      @updatedAt @map("updated_at")
+  coreMessage          String?            @map("core_message")
+  promptSnapshot       Json?              @map("prompt_snapshot")
+  llmProvider          String?            @map("llm_provider")
+  llmModel             String?            @map("llm_model")
+  approvedById         String?            @map("approved_by")
+  approvedAt           DateTime?          @map("approved_at")
+  rejectedById         String?            @map("rejected_by")
+  rejectedAt           DateTime?          @map("rejected_at")
+  rejectionNotes       String?            @map("rejection_notes")
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
 
-  company         Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  schedule        WeeklySchedule? @relation(fields: [scheduleId], references: [id])
-  primaryFeedItem FeedItem?      @relation(fields: [primaryFeedItemId], references: [id])
+  company            Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  schedule           WeeklySchedule?      @relation(fields: [scheduleId], references: [id])
+  primaryFeedItem    FeedItem?            @relation(fields: [primaryFeedItemId], references: [id])
   // SetNull, not Cascade: deleting a source must never delete posts already
   // written from it. The post then reads as company content for quota counting,
   // which only affects the current week — a deleted source has no quota anyway.
-  contentSource   ContentSource? @relation(fields: [contentSourceId], references: [id], onDelete: SetNull)
-  mediaAsset  MediaAsset?     @relation("PostMedia", fields: [mediaAssetId], references: [id])
+  contentSource      ContentSource?       @relation(fields: [contentSourceId], references: [id], onDelete: SetNull)
+  mediaAsset         MediaAsset?          @relation("PostMedia", fields: [mediaAssetId], references: [id])
   // Named only because a second Post→MediaAsset relation now exists; the FK and
   // column are unchanged.
-  previousMediaAsset MediaAsset? @relation("PostPreviousMedia", fields: [previousMediaAssetId], references: [id])
-  generatedBy User?           @relation("PostGenerator", fields: [generatedById], references: [id])
-  approvedBy  User?           @relation("PostApprover", fields: [approvedById], references: [id])
-  rejectedBy  User?           @relation("PostRejecter", fields: [rejectedById], references: [id])
-  versions    PostVersion[]
-  semantics   PostSemantics?
-  metrics         PostMetric?
-  metricSnapshots PostMetricSnapshot[]
+  previousMediaAsset MediaAsset?          @relation("PostPreviousMedia", fields: [previousMediaAssetId], references: [id])
+  generatedBy        User?                @relation("PostGenerator", fields: [generatedById], references: [id])
+  approvedBy         User?                @relation("PostApprover", fields: [approvedById], references: [id])
+  rejectedBy         User?                @relation("PostRejecter", fields: [rejectedById], references: [id])
+  versions           PostVersion[]
+  semantics          PostSemantics?
+  metrics            PostMetric?
+  metricSnapshots    PostMetricSnapshot[]
   /// Every AI operation that produced (or acted on) this post, newest last. A
   /// post normally has exactly one, but the model is a list because regeneration
   /// and later image work are separate runs.
-  generationRuns  GenerationRun[]
+  generationRuns     GenerationRun[]
 
+  // One post per (article, channel). See the note on primaryFeedItemId.
+  @@unique([primaryFeedItemId, channel])
   @@index([companyId, status])
   @@index([scheduledFor])
   @@index([retryCount, status])
@@ -785,8 +939,6 @@ model Post {
   // Backs the grouped posts list — "which channel versions belong together" —
   // which is always asked within one company. NULL for every ungrouped post.
   @@index([companyId, contentGroupId])
-  // One post per (article, channel). See the note on primaryFeedItemId.
-  @@unique([primaryFeedItemId, channel])
   @@map("posts")
 }
 
@@ -818,17 +970,17 @@ model PostMetric {
   channelService String? @map("channel_service")
 
   // Cross-network metrics.
-  reactions Int?
-  comments  Int?
-  shares    Int?
+  reactions   Int?
+  comments    Int?
+  shares      Int?
   // Facebook only, in observed data.
   impressions Int?
   clicks      Int?
   // Instagram only, in observed data.
-  reach     Int?
-  views     Int?
-  saves     Int?
-  follows   Int?
+  reach       Int?
+  views       Int?
+  saves       Int?
+  follows     Int?
 
   // Buffer's NATIVE engagement rate as a percentage — never derived by us.
   // Present on both Facebook and Instagram, but computed on different
@@ -893,11 +1045,11 @@ model PostMetricSnapshot {
 
   post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
 
-  @@index([postId, snapshotAt(sort: Desc)])
-  @@index([companyId, snapshotAt])
   // One snapshot per post per sync. Makes the daily cron idempotent: a re-run on
   // the same day updates rather than inflating history with duplicate rows.
   @@unique([postId, snapshotAt])
+  @@index([postId, snapshotAt(sort: Desc)])
+  @@index([companyId, snapshotAt])
   @@map("post_metric_snapshots")
 }
 
@@ -935,20 +1087,20 @@ model PostSemantics {
   // after the post is created, independent of whether embedding succeeded, so
   // even skipped-gate generations leave a calibration record. All nullable —
   // legacy rows and rows written only by the embed path leave them null.
-  gateTopSimilarity Float?                       @map("gate_top_similarity")
-  gateMatchedPostId String?                      @map("gate_matched_post_id")
-  gateDecision      String?                      @map("gate_decision")
-  gateAttempts      Int?                         @map("gate_attempts")
-  gateSkipped       Boolean?                     @map("gate_skipped")
-  gateEvaluatedAt   DateTime?                    @map("gate_evaluated_at")
+  gateTopSimilarity Float?    @map("gate_top_similarity")
+  gateMatchedPostId String?   @map("gate_matched_post_id")
+  gateDecision      String?   @map("gate_decision")
+  gateAttempts      Int?      @map("gate_attempts")
+  gateSkipped       Boolean?  @map("gate_skipped")
+  gateEvaluatedAt   DateTime? @map("gate_evaluated_at")
 
   // Denormalized immutable routing keys for the future recency-window gate.
-  companyId         String                       @map("company_id")
-  channel           SocialChannel
-  postCreatedAt     DateTime                     @map("post_created_at")
+  companyId     String        @map("company_id")
+  channel       SocialChannel
+  postCreatedAt DateTime      @map("post_created_at")
 
-  createdAt         DateTime                     @default(now()) @map("created_at")
-  updatedAt         DateTime                     @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
 
@@ -1076,12 +1228,12 @@ model GenerationRun {
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  company  Company?  @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  post     Post?     @relation(fields: [postId], references: [id], onDelete: Cascade)
-  feedItem FeedItem? @relation(fields: [feedItemId], references: [id], onDelete: Cascade)
+  company  Company?         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  post     Post?            @relation(fields: [postId], references: [id], onDelete: Cascade)
+  feedItem FeedItem?        @relation(fields: [feedItemId], references: [id], onDelete: Cascade)
   /// SetNull, not Cascade: deleting a user must never delete the history of what
   /// their generations did.
-  user     User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user     User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
   steps    GenerationStep[]
 
   /// The trace viewer's own lookup: everything this post's generation did.
@@ -1188,7 +1340,7 @@ model Job {
   dedupeKey String? @map("dedupe_key")
 
   // Higher runs first; manual/interactive work outranks cron fan-out.
-  priority Int @default(0)
+  priority Int      @default(0)
   // Scheduling/backoff gate: a job is claimable only once runAt <= now().
   runAt    DateTime @default(now()) @map("run_at")
 
@@ -1271,4 +1423,322 @@ model EmailVerificationToken {
 
   @@index([userId])
   @@map("email_verification_tokens")
+}
+
+// ─── Competitive Analysis (Part 3A) ────────────────────────────────────────────
+// Foundation only — see the approved plan (§3.1). No ingestion, extraction,
+// relevance scoring, aggregate trends, or generation integration exists yet.
+
+// A company's research interests for competitor monitoring. At most one row
+// per company (lazy — see get-research-profile-or-defaults.service.ts, which
+// returns a computed, UNPERSISTED default from BrandGuidelines when this row
+// does not exist; opening the module never creates one). Once an owner Saves,
+// this row is INDEPENDENT of BrandGuidelines — later Brand changes are never
+// synced in, in either direction.
+model CompetitorResearchProfile {
+  id                 String   @id @default(uuid())
+  companyId          String   @unique @map("company_id")
+  researchTopics     String[] @map("research_topics")
+  markets            String[]
+  // Validated to {30, 90, 180} at the service layer — Prisma has no CHECK for
+  // an int enum, and Part 3A's UI/service only ever writes one of the three.
+  analysisPeriodDays Int      @default(90) @map("analysis_period_days")
+  // Bumped only when researchTopics/markets actually change (see
+  // update-research-profile.service.ts) — NOT for an analysisPeriodDays-only
+  // save. Drives Part 3B's relevance-recompute sweep via
+  // CompetitorIntelligence.relevanceProfileVersion; no recompute exists yet.
+  profileVersion     Int      @default(1) @map("profile_version")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("competitor_research_profiles")
+}
+
+model Competitor {
+  id         String    @id @default(uuid())
+  companyId  String    @map("company_id")
+  name       String
+  country    String?
+  website    String?
+  notes      String?
+  // NULL = active (the default/listed state); non-NULL = archived. Archiving
+  // stops nothing in Part 3A (no ingestion exists to stop) — it only removes
+  // the competitor from the default listing while keeping every row intact.
+  // See archive-competitor.service.ts / restore-competitor.service.ts.
+  archivedAt DateTime? @map("archived_at")
+  createdBy  String    @map("created_by")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  company        Company                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  socialProfiles CompetitorSocialProfile[]
+  contentSources ContentSource[]
+  manualEntries  CompetitorManualEntry[]
+  socialItems    CompetitorSocialItem[]
+  intelligence   CompetitorIntelligence[]
+
+  @@index([companyId])
+  @@map("competitors")
+}
+
+// A competitor's social profile — Facebook/Instagram/LinkedIn/TikTok/YouTube/X/
+// other. NOT a permanent reference-only hyperlink: social network analysis is a
+// core product requirement, so this row is what a future collector (Part 3C)
+// attaches sync state to, keyed by platform + externalProfileId. A competitor
+// may hold several profiles on the same platform (e.g. two regional Facebook
+// pages), which is why this is a child table rather than a JSON blob on
+// Competitor.
+//
+// Every profile defaults to `collectionMode: reference_only` and
+// `collectionEnabled: false` in Part 3A — nothing here is fetched yet, and
+// nothing in this codebase contains a code path that could (§3.0/§7 of the
+// Part 3A task). A platform Part 3C never builds a supported connector for
+// simply stays `reference_only` permanently; that is a per-platform outcome,
+// not a property of this model.
+model CompetitorSocialProfile {
+  id           String                   @id @default(uuid())
+  competitorId String                   @map("competitor_id")
+  platform     CompetitorSocialPlatform
+  url          String
+  label        String?
+  createdAt    DateTime                 @default(now()) @map("created_at")
+
+  // ── Collection configuration/state (Part 3C foundation — unused in 3A) ────
+  // `collectionMode` and `collectionEnabled` answer two DIFFERENT questions —
+  // Part 3C must not conflate them:
+  //   - `collectionMode` says how this profile is ALLOWED to be handled:
+  //     `reference_only` (never collected — a permanent per-platform outcome
+  //     when Part 3C builds no connector for that platform, or a deliberate
+  //     per-profile choice), `automatic` (eligible for scheduled sync), or
+  //     `manual_only` (a person may re-import content for it, but a collector
+  //     must never run against it on its own).
+  //   - `collectionEnabled` says whether AUTOMATIC collection is CURRENTLY
+  //     active for a profile whose mode already permits it — it is a run/pause
+  //     toggle on top of `automatic` mode, not an independent permission. An
+  //     `automatic` profile can be `collectionEnabled: false` (paused, without
+  //     losing the mode choice) and still never run.
+  // Binding invariant for the future collector (Part 3C, not enforced by any
+  // code in Part 3A): a profile whose `collectionMode` is `reference_only` or
+  // `manual_only` must NEVER be picked up by automatic collector execution,
+  // even if `collectionEnabled` is somehow `true` on it (malformed state,
+  // stale write, manual DB edit). `collectionEnabled` only ever matters when
+  // `collectionMode == automatic`; it must never be read as its own
+  // authorization to run.
+  collectionEnabled Boolean                  @default(false) @map("collection_enabled")
+  collectionMode    CompetitorCollectionMode @default(reference_only) @map("collection_mode")
+  // The platform's own id for this profile/page (e.g. a Facebook Page ID), set
+  // once a connector resolves it. NULL until then — never guessed from `url`.
+  externalProfileId String?                  @map("external_profile_id")
+  lastCollectedAt   DateTime?                @map("last_collected_at")
+  // pending | syncing | ok | error | unsupported — plain string, not an enum,
+  // matching this repo's established pipeline-status convention (see
+  // FeedItem.translationStatus/classificationStatus): new sync states must not
+  // need a migration to appear. `unsupported` is the permanent state for a
+  // platform with no available connector.
+  collectionStatus  String?                  @map("collection_status")
+  collectionError   String?                  @map("collection_error")
+
+  competitor  Competitor             @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  socialItems CompetitorSocialItem[]
+
+  @@index([competitorId])
+  @@map("competitor_social_profiles")
+}
+
+// A pasted-in piece of competitor content (social post or ad) a person added by
+// hand. Schema foundation only — Part 3A creates no rows here; the manual-entry
+// form/service is Part 3B. Stays a DISTINCT origin from `CompetitorSocialItem`
+// (automatically collected — see below) even after Part 3C ships: "a person
+// pasted this" and "a connector synced this" are different provenance facts,
+// not two ways of writing the same row.
+model CompetitorManualEntry {
+  id           String    @id @default(uuid())
+  competitorId String    @map("competitor_id")
+  // Denormalized for scoped querying — ALWAYS derived server-side from the
+  // resolved competitor's own companyId when a future service creates a row
+  // here. Never accepted from client input; see the schema-integrity note on
+  // CompetitorIntelligence.companyId below, which is the identical rule.
+  companyId    String    @map("company_id")
+  // facebook | instagram | linkedin | tiktok | youtube | x | website | other
+  sourceType   String    @map("source_type")
+  // organic | ad
+  postType     String    @map("post_type")
+  // Reference metadata only — NEVER fetched, same hard rule as
+  // CompetitorSocialProfile in Part 3A.
+  url          String?
+  content      String
+  // The publication-period basis for this entry, when the person supplied it.
+  // Left NULL rather than backfilled from createdAt when they don't know it —
+  // a NULL here means "unknown date", excluded from every time-bucketed
+  // aggregate (Part 3B's job, not Part 3A's).
+  capturedAt   DateTime? @map("captured_at")
+  createdBy    String    @map("created_by")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  competitor   Competitor              @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  company      Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  intelligence CompetitorIntelligence?
+
+  @@index([competitorId])
+  @@index([companyId])
+  @@map("competitor_manual_entries")
+}
+
+// One piece of content AUTOMATICALLY collected from a `CompetitorSocialProfile`
+// — Part 3C's sync destination. Schema foundation only: Part 3A implements no
+// creation/sync service for this model, and nothing writes a row here yet.
+// Kept structurally distinct from `CompetitorManualEntry` (see that model's
+// comment) so a row's origin — pasted by a person vs. synced by a connector —
+// is never ambiguous.
+model CompetitorSocialItem {
+  id              String                   @id @default(uuid())
+  // ── Ownership/provenance — binding invariant for Part 3C, not enforced by
+  // any code in Part 3A ──────────────────────────────────────────────────
+  // `companyId`, `competitorId`, `platform`, and `socialProfileId` MUST
+  // ALWAYS be derived server-side from the CALLER-RESOLVED
+  // `CompetitorSocialProfile` row (looked up by id and verified to belong to
+  // the company/competitor making the request) — never accepted as-is from a
+  // collector or client payload. A future sync/import request must supply at
+  // most `socialProfileId` as the thing being synced; the service resolves
+  // that profile first, and everything else on this row (which competitor,
+  // which company, which platform) is read OFF that resolved profile, the
+  // same way every other denormalized companyId in this schema is derived
+  // from its resolved parent (see CompetitorIntelligence.companyId below).
+  // A collector payload MAY supply `externalItemId`, `content`, `url`,
+  // `publishedAt`, and `metadata` — never ownership or platform context.
+  companyId       String                   @map("company_id")
+  competitorId    String                   @map("competitor_id")
+  socialProfileId String                   @map("social_profile_id")
+  // Denormalized off the profile so a query never has to join it just to know
+  // which platform an item came from — also collector-untrusted; see above.
+  platform        CompetitorSocialPlatform
+  // The platform's own id for this specific post — the dedup key (with
+  // socialProfileId, below) that stops a repeated sync from inserting the same
+  // item twice. Nullable because not every future collection method may
+  // surface a stable id; when it is null, dedup for that row is not
+  // guaranteed by the unique index and becomes the sync job's own problem.
+  externalItemId  String?                  @map("external_item_id")
+  content         String?
+  url             String?
+  // When the platform reports it; NULL when unknown, same convention as
+  // FeedItem.publishedAt.
+  publishedAt     DateTime?                @map("published_at")
+  // The raw payload a future collector received, kept for provenance/debugging
+  // — same role as PostMetric.raw.
+  metadata        Json?
+  // First-collected timestamp. No updatedAt: Part 3A does not define whether a
+  // future sync overwrites or versions a changed item, so that column is left
+  // for Part 3C to add deliberately rather than guessed at now.
+  createdAt       DateTime                 @default(now()) @map("created_at")
+
+  company       Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  competitor    Competitor              @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  socialProfile CompetitorSocialProfile @relation(fields: [socialProfileId], references: [id], onDelete: Cascade)
+  intelligence  CompetitorIntelligence?
+
+  // Dedup key: repeated syncs of the same external item update-or-skip against
+  // this index rather than inserting a duplicate. NULLs are distinct in a
+  // Postgres unique index, so this only constrains rows where the platform's
+  // id is actually known — exactly the "when externalItemId exists" scoping
+  // the approved correction asked for.
+  @@unique([socialProfileId, externalItemId])
+  @@index([companyId, competitorId])
+  @@index([socialProfileId])
+  @@map("competitor_social_items")
+}
+
+// Structured intelligence extracted from ONE piece of competitor content —
+// exactly one of a competitor FeedItem (RSS/website), a CompetitorManualEntry
+// (pasted by hand), or a CompetitorSocialItem (collected automatically — Part
+// 3C), never more than one (enforced by a DB CHECK constraint written by hand
+// in this model's migration — Prisma cannot express "exactly one of three
+// nullable columns"; see that migration's SQL).
+//
+// Schema foundation only: Part 3A's analysis pipeline does not run, so no row
+// exists here yet. The column ownership split below is nonetheless the
+// APPROVED final shape, per the plan's §3.6, because it decides which columns
+// a later extraction call may write and which a later relevance step may
+// write — getting the split right now avoids a migration later:
+//
+//   - Intrinsic extraction fields (topic ... originalLanguage below) describe
+//     the CONTENT ITSELF and never depend on this company's research
+//     interests, and apply identically whether the content came from an
+//     article, a pasted entry, or a synced social item. Extraction produces
+//     these once, hash-gated, ever.
+//   - relevance / relevanceReason / matchedResearchTopics /
+//     relevanceProfileVersion are relevance-step fields — they depend on the
+//     CURRENT CompetitorResearchProfile, not on the content alone. Keeping
+//     them out of extraction's output is what lets a Research Profile change
+//     recompute JUST these four without re-running the expensive extraction
+//     call. matchedResearchTopics belongs here, NOT beside `topic`.
+model CompetitorIntelligence {
+  id            String  @id @default(uuid())
+  // Denormalized — ALWAYS derived server-side from the resolved competitor's
+  // own companyId, never accepted from client input. This is what lets every
+  // list/aggregate query filter on companyId alone without a join, and it must
+  // never be trustable as caller-supplied data (cross-company isolation).
+  companyId     String  @map("company_id")
+  competitorId  String  @map("competitor_id")
+  feedItemId    String? @unique @map("feed_item_id")
+  manualEntryId String? @unique @map("manual_entry_id")
+  socialItemId  String? @unique @map("social_item_id")
+
+  // ── Intrinsic extraction fields (owned by extraction, Part 3B) ───────────
+  topic            String?
+  subtopic         String?
+  summary          String?
+  angle            String?
+  targetAudience   String? @map("target_audience")
+  problemAddressed String? @map("problem_addressed")
+  keyMessage       String? @map("key_message")
+  tone             String?
+  // Verbatim/descriptive CTA phrasing — display only, distinct from the
+  // normalized ctaType below.
+  ctaText          String? @map("cta_text")
+
+  contentType      CompetitorContentType?      @map("content_type")
+  commercialIntent CompetitorCommercialIntent? @map("commercial_intent")
+  ctaType          CompetitorCtaType?          @map("cta_type")
+  angleCategory    CompetitorAngleCategory?    @map("angle_category")
+  // The opening device and the overall shape — separate dimensions, see each
+  // enum's own comment. Needed for social-network analysis specifically
+  // (hook/structure patterns are how Trends will compare competitors' social
+  // content), so both are intrinsic-extraction fields alongside angle/contentType.
+  hookType         CompetitorHookType?         @map("hook_type")
+  structurePattern CompetitorStructurePattern? @map("structure_pattern")
+
+  // Products AND services — not products alone; a competitor's social content
+  // routinely mentions an offering with no physical product behind it.
+  productsServicesMentioned String[] @map("products_services_mentioned")
+  originalLanguage          String?  @map("original_language")
+
+  // ── Relevance fields (owned by the relevance step, Part 3B — see the model
+  // comment above; never written by extraction) ────────────────────────────
+  relevance               CompetitorRelevance @default(pending)
+  relevanceReason         String?             @map("relevance_reason")
+  matchedResearchTopics   String[]            @map("matched_research_topics")
+  relevanceProfileVersion Int?                @map("relevance_profile_version")
+
+  // ── Extraction pipeline status (Part 3B) ──────────────────────────────────
+  status         String    @default("pending")
+  analysisHash   String?   @map("analysis_hash")
+  analysisError  String?   @map("analysis_error")
+  analyzedAt     DateTime? @map("analyzed_at")
+  attemptCount   Int       @default(0) @map("attempt_count")
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  company     Company                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  competitor  Competitor             @relation(fields: [competitorId], references: [id], onDelete: Cascade)
+  feedItem    FeedItem?              @relation(fields: [feedItemId], references: [id], onDelete: Cascade)
+  manualEntry CompetitorManualEntry? @relation(fields: [manualEntryId], references: [id], onDelete: Cascade)
+  socialItem  CompetitorSocialItem?  @relation(fields: [socialItemId], references: [id], onDelete: Cascade)
+
+  @@index([companyId, competitorId])
+  @@index([companyId, relevance])
+  @@map("competitor_intelligence")
 }

@@ -36,6 +36,14 @@ export const AUDIT_ACTIONS = {
   // v2-7 analytics. The key itself is never logged — only its last 4 characters.
   ANALYTICS_KEY_SET: "ANALYTICS_KEY_SET",
   ANALYTICS_KEY_REMOVED: "ANALYTICS_KEY_REMOVED",
+  // Competitive Analysis (Part 3A).
+  COMPETITOR_ADDED: "COMPETITOR_ADDED",
+  COMPETITOR_UPDATED: "COMPETITOR_UPDATED",
+  COMPETITOR_ARCHIVED: "COMPETITOR_ARCHIVED",
+  COMPETITOR_RESTORED: "COMPETITOR_RESTORED",
+  /** Permanent delete only — never the archive action. */
+  COMPETITOR_DELETED: "COMPETITOR_DELETED",
+  RESEARCH_PROFILE_UPDATED: "RESEARCH_PROFILE_UPDATED",
 } as const;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────

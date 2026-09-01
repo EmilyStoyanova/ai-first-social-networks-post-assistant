@@ -14,6 +14,7 @@
  * it never used.
  */
 
+import type { ContentSourceType } from "@prisma/client";
 import { hasPublicUrl, publicUrlOf } from "@/lib/ai/source-types";
 
 /** Mirrors Prisma's ContentSourceType. Duplicated so client components that
@@ -56,10 +57,22 @@ export interface PrimaryFeedItemRow {
  * arrived one migration after the others, and a post whose article was already
  * gone by then could not have its type recovered. The name and URL still stand,
  * so such a post renders its name alone.
+ *
+ * Typed as Prisma's `ContentSourceType`, not the narrower `OriginSourceType`,
+ * on purpose: this is the RAW column, and that enum now also carries the
+ * Competitive Analysis `competitor_rss`/`competitor_website` variants (see
+ * schema.prisma) — using the full enum here is what keeps this type equally
+ * valid as the shape of both a read (a Prisma row) and a write
+ * (`Post.originSourceType` in a `create`/`update` call). `toOriginSourceType()`
+ * below is what narrows a read to the display-safe subset, degrading anything
+ * it doesn't recognise to null; a post can never actually be generated from a
+ * competitor source (§3.8's isolation guarantee), so that degrade path is
+ * unreachable in practice, but the type must still accept whatever the column
+ * can legally hold.
  */
 export interface PostOriginSnapshot {
   originType: "brand_setup" | "content_source" | null;
-  originSourceType: OriginSourceType | null;
+  originSourceType: ContentSourceType | null;
   originSourceName: string | null;
   originSourceTitle: string | null;
   originSourceUrl: string | null;

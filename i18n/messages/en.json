@@ -285,7 +285,92 @@
     "noCompaniesDesc": "Create a company to start tracking competitors.",
     "createCompany": "Create a company",
     "placeholderDescription": "Competitor tracking for {company} is coming here.",
-    "comingSoon": "Coming soon — competitors, content, and trends for this company will live here."
+    "comingSoon": "Coming soon — competitors, content, and trends for this company will live here.",
+    "tabs": {
+      "overview": "Overview",
+      "competitors": "Competitors",
+      "content": "Content",
+      "trends": "Trends"
+    },
+    "overview": {
+      "activeCompetitors": "Active competitors"
+    },
+    "researchProfile": {
+      "title": "Research Profile",
+      "usingDefaults": "Using topics from Brand Guidelines. Save to make this profile independent.",
+      "savedSuccess": "Research Profile saved.",
+      "topics": "Research topics",
+      "topicsHint": "— what you want to track competitors talking about",
+      "topicsPlaceholder": "Add a topic…",
+      "markets": "Markets",
+      "marketsHint": "— optional, the regions or markets you care about",
+      "marketsPlaceholder": "Add a market…",
+      "emptyTopics": "No topics yet.",
+      "emptyMarkets": "No markets yet.",
+      "period": "Analysis period",
+      "periodHelp": "How far back Content and Trends look by default.",
+      "periodDays": "{days} days",
+      "add": "Add",
+      "remove": "Remove \"{topic}\"",
+      "errors": {
+        "empty": "Cannot be empty.",
+        "tooLong": "Too long.",
+        "limitReached": "You can add up to {max}.",
+        "duplicate": "Already added."
+      }
+    },
+    "competitors": {
+      "newCompetitor": "New competitor",
+      "addCompetitor": "Add competitor",
+      "filterActive": "Active ({count})",
+      "filterArchived": "Archived ({count})",
+      "noCompetitorsTitle": "No competitors yet",
+      "noCompetitorsDesc": "Add a competitor to start tracking them.",
+      "noCompetitorsDescReadOnly": "No competitors have been added yet.",
+      "noArchivedTitle": "No archived competitors",
+      "noArchivedDesc": "Archived competitors will appear here.",
+      "archived": "Archived",
+      "archive": "Archive",
+      "restore": "Restore",
+      "deletePermanently": "Delete permanently",
+      "deleteConfirmTitle": "Delete competitor permanently?",
+      "deleteConfirmBody": "This permanently deletes \"{name}\" and everything collected for it — social profiles, sources, and history. This cannot be undone. Type the competitor’s name to confirm.",
+      "fields": {
+        "name": "Name",
+        "namePlaceholder": "Competitor name",
+        "country": "Country",
+        "countryPlaceholder": "e.g. Bulgaria",
+        "website": "Website",
+        "notes": "Notes",
+        "notesPlaceholder": "Anything worth remembering about this competitor…"
+      },
+      "errors": {
+        "nameRequired": "Name is required."
+      },
+      "socialProfiles": {
+        "title": "Social profiles",
+        "hint": "Automatic collection isn't available yet — for now, profiles are added for reference.",
+        "empty": "No social profiles yet.",
+        "labelPlaceholder": "Label (optional)",
+        "addProfile": "Add profile",
+        "remove": "Remove profile",
+        "platforms": {
+          "facebook": "Facebook",
+          "instagram": "Instagram",
+          "linkedin": "LinkedIn",
+          "tiktok": "TikTok",
+          "youtube": "YouTube",
+          "x": "X",
+          "other": "Other"
+        }
+      }
+    },
+    "content": {
+      "comingSoon": "Coming soon — competitor content collection and analysis are not implemented in this phase."
+    },
+    "trends": {
+      "comingSoon": "Coming soon — aggregate and cross-competitor trends are not implemented in this phase."
+    }
   },
   "companyPage": {
     "sections": {

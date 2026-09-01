@@ -1,9 +1,6 @@
+import type { ContentSourceType } from "@prisma/client";
 import { prisma } from "@/lib/db/client";
-import {
-  resolvePostOrigin,
-  type OriginSourceType,
-  type PostOriginView,
-} from "@/lib/posts/post-origin";
+import { resolvePostOrigin, type PostOriginView } from "@/lib/posts/post-origin";
 
 export interface PostItem {
   id: string;
@@ -170,7 +167,8 @@ export interface PostItemRow {
   mediaAsset: { url: string; sourceUrl: string | null } | null;
   previousMediaAsset: { url: string } | null;
   originType: "brand_setup" | "content_source" | null;
-  originSourceType: OriginSourceType | null;
+  // Raw column type — see PostOriginSnapshot's comment in lib/posts/post-origin.ts.
+  originSourceType: ContentSourceType | null;
   originSourceName: string | null;
   originSourceTitle: string | null;
   originSourceUrl: string | null;

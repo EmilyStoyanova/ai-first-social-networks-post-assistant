@@ -1,11 +1,12 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
-import { getTranslations } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
+import { getResearchProfileOrDefaults } from "@/lib/services/competitive-analysis/get-research-profile-or-defaults.service";
+import { listCompetitors } from "@/lib/services/competitive-analysis/list-competitors.service";
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout";
-import { PageHeader } from "@/components/ui/PageHeader";
-import { Card } from "@/components/ui/Card";
+import { CompetitiveAnalysisHeader } from "@/components/competitive-analysis/analysis-header";
+import { OverviewPanel } from "@/components/competitive-analysis/overview-panel";
 
 interface Props {
   params: Promise<{ slug: string }>;
@@ -18,10 +19,11 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
 
 /**
  * The Competitive Analysis module for one company (its own route root).
- * Placeholder for Part 1 only — the Overview/Competitors/Content/Trends
- * sub-tabs, the data model, and every service are Part 3's job.
+ * Overview — the module's default tab. Part 3A: Research Profile (read
+ * without write — see get-research-profile-or-defaults.service.ts) and the
+ * active competitor count. No aggregate/trend data yet (Part 3B).
  */
-export default async function CompetitiveAnalysisPage({ params }: Props) {
+export default async function CompetitiveAnalysisOverviewPage({ params }: Props) {
   const session = await auth();
   if (!session) redirect("/login");
 
@@ -29,7 +31,15 @@ export default async function CompetitiveAnalysisPage({ params }: Props) {
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
-  const t = await getTranslations("competitiveAnalysis");
+  const [profileResult, competitorsResult] = await Promise.all([
+    getResearchProfileOrDefaults(slug, session.user.id, session.user.isGlobalAdmin),
+    listCompetitors(slug, session.user.id, session.user.isGlobalAdmin, "active"),
+  ]);
+
+  // Both were already resolved once via getCompany above — a NOT_FOUND here
+  // would mean access was revoked mid-request, same edge case every other
+  // page's secondary fetch has.
+  if (!profileResult.success || !competitorsResult.success) notFound();
 
   return (
     <DashboardLayout
@@ -41,13 +51,13 @@ export default async function CompetitiveAnalysisPage({ params }: Props) {
       activeCompany={{ slug: company.slug, name: company.name }}
     >
       <div className="space-y-6">
-        <PageHeader
-          title={t("title")}
-          description={t("placeholderDescription", { company: company.name })}
+        <CompetitiveAnalysisHeader slug={slug} activeTab="overview" />
+        <OverviewPanel
+          slug={slug}
+          profile={profileResult.profile}
+          isOwner={profileResult.isOwner}
+          activeCompetitorCount={competitorsResult.competitors.length}
         />
-        <Card className="px-6 py-14 text-center">
-          <p className="text-body text-fg-muted">{t("comingSoon")}</p>
-        </Card>
       </div>
     </DashboardLayout>
   );
