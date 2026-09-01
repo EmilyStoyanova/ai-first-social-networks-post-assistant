@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useTranslations } from "next-intl";
-import { Plus, RefreshCw, Trash2, ExternalLink } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, RefreshCw, Trash2, ExternalLink } from "lucide-react";
 import { useApiErrorMessage } from "@/lib/i18n/api-error";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
@@ -150,11 +150,26 @@ export function CompetitorSourcesEditor({ slug, competitorId, canManage }: Props
 
   return (
     <div className="border-border mt-3 border-t pt-3">
+      {/*
+       * This toggle is the ONLY way to reach RSS source management for a
+       * competitor — it must read as a clickable control at a glance, not as
+       * a plain label, or the (already-implemented) empty-state message and
+       * "Add RSS source" action inside never get discovered (Part 3B UX fix:
+       * a competitor with zero sources looked like it had no RSS management
+       * at all, even though `open && sources.length === 0` already rendered
+       * both correctly once expanded).
+       */}
       <button
         type="button"
         onClick={() => void toggleOpen()}
-        className="text-fg-muted hover:text-fg duration-fast text-sm font-medium transition-colors"
+        aria-expanded={open}
+        className="text-fg-muted hover:text-fg hover:bg-surface-subtle duration-fast -mx-2 flex items-center gap-1.5 rounded-md px-2 py-1 text-sm font-medium transition-colors"
       >
+        {open ? (
+          <ChevronDown size={14} aria-hidden="true" />
+        ) : (
+          <ChevronRight size={14} aria-hidden="true" />
+        )}
         {t("title")} {sources ? `(${sources.length})` : ""}
       </button>
 
