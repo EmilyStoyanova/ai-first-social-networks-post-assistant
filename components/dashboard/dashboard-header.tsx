@@ -7,8 +7,8 @@ import { Menu, X } from "lucide-react";
 import { Navigation } from "./navigation";
 import { NavigationItem } from "./navigation-item";
 import { CompanySelector, type ActiveCompanySummary } from "./company-selector";
-import { LogoutButton } from "./logout-button";
-import { LanguageSwitcher } from "@/components/ui/LanguageSwitcher";
+import { UserMenu } from "./user-menu";
+import { COMPANIES_HREF, COMPANY_MANAGEMENT_HREF } from "@/lib/navigation/nav-active";
 import { Logo } from "@/components/ui/Logo";
 import type { BreadcrumbItem } from "./dashboard-layout";
 
@@ -27,9 +27,11 @@ interface Props {
 }
 
 /**
- * The one global horizontal bar (§ Part 1) — logo, the task-oriented nav
- * (Navigation), and the right-hand cluster (company selector, language, user,
- * logout). Replaces the old Sidebar + thin breadcrumb header pair.
+ * The one global horizontal bar (§ Part 1) — logo, the nav, and a right-hand
+ * cluster that is now just two controls: the company selector and the account
+ * menu. The user's name, the EN/BG switcher and the Logout button used to sit
+ * there as three separate permanent items; they all live inside `UserMenu`
+ * now, which is the same three controls behind one 32px avatar.
  */
 export function DashboardHeader({
   user,
@@ -39,7 +41,6 @@ export function DashboardHeader({
   breadcrumb,
 }: Props) {
   const t = useTranslations();
-  const displayName = user.name ?? user.email ?? t("header.userFallback");
   const isGlobalAdmin = user.isGlobalAdmin ?? false;
 
   return (
@@ -103,14 +104,12 @@ export function DashboardHeader({
           )}
         </div>
 
-        {/* Right cluster */}
-        <div className="flex shrink-0 items-center gap-3">
+        {/* Right cluster — two controls, both compact. */}
+        <div className="flex shrink-0 items-center gap-2">
           <div className="hidden sm:block">
             <CompanySelector activeCompany={activeCompany} />
           </div>
-          <LanguageSwitcher />
-          <span className="text-fg-muted hidden text-sm md:block">{displayName}</span>
-          <LogoutButton />
+          <UserMenu name={user.name} email={user.email} />
         </div>
       </div>
 
@@ -126,8 +125,13 @@ export function DashboardHeader({
               variant="vertical"
             />
             <NavigationItem
-              href="/create"
-              label={t("navigation.contentCreation")}
+              href={COMPANIES_HREF}
+              label={t("navigation.companies")}
+              variant="vertical"
+            />
+            <NavigationItem
+              href={COMPANY_MANAGEMENT_HREF}
+              label={t("navigation.companyManagement")}
               variant="vertical"
             />
             <NavigationItem

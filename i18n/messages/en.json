@@ -168,7 +168,7 @@
   "navigation": {
     "dashboard": "Dashboard",
     "companies": "Companies",
-    "contentCreation": "Content Creation",
+    "companyManagement": "Company Management",
     "competitiveAnalysis": "Competitive Analysis",
     "posts": "Posts",
     "mediaGallery": "Media Gallery",
@@ -185,6 +185,11 @@
     "signOut": "Sign out of your account",
     "breadcrumb": "Breadcrumb",
     "userFallback": "User",
+    "accountMenu": {
+      "open": "Account menu for {name}",
+      "label": "Account",
+      "language": "Language"
+    },
     "companySelector": {
       "label": "Company",
       "noCompany": "No company selected",
@@ -270,14 +275,10 @@
     "setupHint": "Start here — fill in your brand identity, then connect Buffer and configure your channels. The AI uses this information when generating posts.",
     "createContent": "Create content"
   },
-  "contentCreation": {
-    "title": "Content Creation",
+  "companyManagement": {
     "noCompaniesTitle": "No companies yet",
-    "noCompaniesDesc": "Create a company to start generating posts.",
-    "createCompany": "Create a company",
-    "description": "Generate posts for {company} — single, topic, or bulk.",
-    "resultTitle": "Posts created",
-    "viewPosts": "View posts"
+    "noCompaniesDesc": "Create a company to start managing it.",
+    "createCompany": "Create a company"
   },
   "competitiveAnalysis": {
     "title": "Competitive Analysis",
@@ -973,8 +974,7 @@
       "noPendingDesc": "Posts submitted for approval show up here. Nothing needs your decision right now."
     },
     "noPostsTitle": "No AI-generated posts yet",
-    "noPostsDesc": "Head to Content Creation to generate your first post.",
-    "goToContentCreation": "Create content",
+    "noPostsDesc": "Use the form above to generate your first post.",
     "imageAlt": "AI-generated image",
     "imagePrompt": "Image Prompt",
     "notes": "Notes",

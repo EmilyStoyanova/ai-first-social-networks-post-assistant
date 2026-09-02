@@ -3,6 +3,7 @@
 import type { ElementType } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { isNavItemActive } from "@/lib/navigation/nav-active";
 
 interface Props {
   href: string;
@@ -21,7 +22,10 @@ export function NavigationItem({
   variant = "vertical",
 }: Props) {
   const pathname = usePathname();
-  const isActive = !disabled && (pathname === href || pathname.startsWith(`${href}/`));
+  // The rule itself lives in a pure module — Company Management redirects into
+  // `/companies/{slug}`, so "which item owns this pathname" is not a plain
+  // prefix match. See `lib/navigation/nav-active.ts`.
+  const isActive = !disabled && isNavItemActive(pathname, href);
 
   const base =
     variant === "horizontal"

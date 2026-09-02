@@ -16,6 +16,14 @@ const SLUG_ROOTS = ["create", "competitive-analysis", "companies"] as const;
  * persisted preference, no navigation.
  */
 export function companySwitchHref(pathname: string, newSlug: string): string | null {
+  // `/companies/new` is the only path under a slug root whose second segment is
+  // not a company slug — it is the create-company form. Swapping it would both
+  // navigate somewhere unrelated and silently discard a half-filled form, so it
+  // is treated like Dashboard: update the preference, stay put. Kept in step
+  // with `nav-active.ts`, which excludes the same path from the company
+  // workspace for the same reason.
+  if (pathname === "/companies/new" || pathname.startsWith("/companies/new/")) return null;
+
   for (const root of SLUG_ROOTS) {
     const prefix = `/${root}/`;
     if (!pathname.startsWith(prefix)) continue;

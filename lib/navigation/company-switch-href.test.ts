@@ -44,4 +44,10 @@ describe("companySwitchHref", () => {
   it("returns null for the bare companies list page", () => {
     assert.equal(companySwitchHref("/companies", "travelnest"), null);
   });
+
+  it("returns null for the create-company form — 'new' is not a slug to swap", () => {
+    // Swapping would navigate to /companies/travelnest and silently discard a
+    // half-filled form. The preference is still updated; the page stays.
+    assert.equal(companySwitchHref("/companies/new", "travelnest"), null);
+  });
 });

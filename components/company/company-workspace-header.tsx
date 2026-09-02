@@ -142,12 +142,11 @@ export async function CompanyWorkspaceHeader({ company, activeTab }: Props) {
         </div>
 
         {/* The workspace's one primary action, in the header's action slot so
-            it never floats over content (§9.3). Generation now lives in the
-            global Content Creation module, so this is a cross-link into it —
-            not duplicate navigation — rather than a route inside this
-            workspace. */}
+            it never floats over content (§9.3). Generation lives on the Posts
+            tab, where the generated posts themselves are — so this points at
+            the tab rather than at a separate module. */}
         <Link
-          href={`/create/${slug}`}
+          href={`/companies/${slug}/posts`}
           className="bg-accent rounded-control duration-fast focus-visible:outline-accent inline-flex shrink-0 items-center gap-2 px-4 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2"
         >
           <Sparkles className="h-4 w-4" aria-hidden="true" />

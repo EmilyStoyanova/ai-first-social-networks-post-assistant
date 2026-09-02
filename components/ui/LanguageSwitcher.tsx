@@ -1,25 +1,25 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useLocale } from "next-intl";
+import { LOCALES, useLocaleSwitch } from "@/lib/i18n/use-locale-switch";
 
+/**
+ * The compact inline EN/BG toggle. Since the header's account menu took over
+ * language switching for the dashboard, this remains in use on the auth pages
+ * (`app/(auth)/layout.tsx`), which have no account menu to put it in.
+ *
+ * The cookie write and reload live in `useLocaleSwitch` so this and the account
+ * menu share one mechanism rather than two copies of it.
+ */
 export function LanguageSwitcher() {
-  const locale = useLocale();
-  const [pendingLocale, setPendingLocale] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (pendingLocale === null) return;
-    document.cookie = `NEXT_LOCALE=${pendingLocale}; path=/; max-age=31536000; SameSite=Lax`;
-    window.location.reload();
-  }, [pendingLocale]);
+  const { locale, switchLocale } = useLocaleSwitch();
 
   return (
     <div className="flex gap-1">
-      {(["en", "bg"] as const).map((l) => (
+      {LOCALES.map((l) => (
         <button
           key={l}
           type="button"
-          onClick={() => setPendingLocale(l)}
+          onClick={() => switchLocale(l)}
           className={[
             "text-micro rounded-control focus-ring duration-fast px-2 py-0.5 transition-colors",
             l === locale

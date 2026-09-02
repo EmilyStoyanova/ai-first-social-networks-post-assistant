@@ -5,7 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { CheckSquare2, FileText } from "lucide-react";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { Button } from "@/components/ui/Button";
+import { GeneratePostForm } from "./generate-post-form";
 import { GeneratedPostCard } from "./generated-post-card";
 import { PostStatusFilterBar } from "./post-status-filter-bar";
 import {
@@ -22,6 +22,9 @@ import { groupPostsByTopic } from "@/lib/posts/post-groups";
 import { applyPostEdit } from "@/lib/posts/apply-post-edit";
 import { usePostsLiveRefresh } from "@/lib/posts/use-posts-live-refresh";
 import type { PostItem } from "@/lib/services/company/list-posts.service";
+import type { GenerationSourceOption } from "@/lib/services/company/list-generation-sources.service";
+import type { GenerationChannelOption } from "@/lib/posts/generation-channels";
+import type { ContentMixDTO } from "@/lib/services/company/get-content-mix.service";
 import type { PostRole } from "@/lib/posts/post-actions";
 import {
   disabledMetrics,
@@ -34,6 +37,14 @@ interface Props {
   canDelete: boolean;
   role: PostRole;
   bufferConnected: boolean;
+  hasRssFeedItems: boolean;
+  contentSources: GenerationSourceOption[];
+  /** Channels backed by an enabled Buffer profile — empty disables generation. */
+  availableChannels: GenerationChannelOption[];
+  /** Company.defaultLang, used to name the resolved "Default" language option. */
+  companyDefaultLang: "en" | "bg";
+  /** The saved content mix, pre-filling a multi-post batch's distribution. */
+  contentMix: ContentMixDTO | null;
   /** Engagement metrics by post id (v2-7). Loaded server-side for the whole tab. */
   postMetrics: Record<string, PostMetricsView>;
   /** Owners see the "add a key" nudge on the disabled state. */
@@ -50,6 +61,11 @@ export function GeneratedPostsSection({
   canDelete,
   role,
   bufferConnected,
+  hasRssFeedItems,
+  contentSources,
+  availableChannels,
+  companyDefaultLang,
+  contentMix,
   postMetrics,
   canManageAnalyticsKey,
   initialStatusFilter,
@@ -100,6 +116,48 @@ export function GeneratedPostsSection({
   if (urlFilter !== lastUrlFilter) {
     setLastUrlFilter(urlFilter);
     setStatusFilter(urlFilter);
+  }
+
+  /**
+   * A topic finished. Prepended as a block, in the order the channels were
+   * written, so the grouping below folds them into one card immediately —
+   * before the router refresh that would eventually deliver them anyway.
+   *
+   * Posts the list already holds are dropped rather than prepended again. The
+   * caller cannot know what is here: a queued topic run is followed by a poll
+   * whose "already added" set lives inside one effect, so a run picked back up
+   * after a reload re-reports every channel it has committed — all of which the
+   * server had already rendered into this list. That handed the grid a second
+   * copy of each post, which the card read as a second version of the same
+   * network ("Facebook, Facebook, Instagram, Instagram") and the filter bar
+   * counted twice. The list is a set of records keyed by id, so it enforces that
+   * here rather than asking every caller to.
+   */
+  function handleGenerated(generated: PostItem[]) {
+    setPosts((prev) => {
+      const known = new Set(prev.map((p) => p.id));
+      const fresh = generated.filter((p) => {
+        if (known.has(p.id)) return false;
+        // Added as we go, so a repeat WITHIN one batch is caught too.
+        known.add(p.id);
+        return true;
+      });
+      // Same array back when there is nothing new, so a poll that reports only
+      // familiar posts does not repaint the grid.
+      return fresh.length > 0 ? [...fresh, ...prev] : prev;
+    });
+  }
+
+  /**
+   * A bulk run finished. It reports post ids rather than whole posts, so the
+   * grid is reloaded from the server instead of patched — one refresh against
+   * up to ten follow-up fetches, and it repaints the tab counts too.
+   *
+   * The refresh reaches the grid via the `initialPosts` sync above; on its own it
+   * only re-renders the server component.
+   */
+  function handleBulkGenerated() {
+    router.refresh();
   }
 
   function handleDelete(id: string) {
@@ -186,6 +244,17 @@ export function GeneratedPostsSection({
 
   return (
     <div className="space-y-4">
+      <GeneratePostForm
+        slug={slug}
+        onGenerated={handleGenerated}
+        onBulkGenerated={handleBulkGenerated}
+        hasRssFeedItems={hasRssFeedItems}
+        contentSources={contentSources}
+        availableChannels={availableChannels}
+        companyDefaultLang={companyDefaultLang}
+        contentMix={contentMix}
+      />
+
       {/* Hidden when there is nothing to filter — a toolbar over an empty grid
           is four ways to see the same nothing. */}
       {posts.length > 0 && (
@@ -196,8 +265,10 @@ export function GeneratedPostsSection({
         <EmptyState
           icon={<FileText className="h-5 w-5" />}
           title={t("noPostsTitle")}
+          // No call-to-action button: the generation form is rendered directly
+          // above this empty state, so a link pointing elsewhere would send the
+          // user away from the very control they need.
           description={t("noPostsDesc")}
-          action={<Button href={`/create/${slug}`}>{t("goToContentCreation")}</Button>}
         />
       ) : emptyState === "no-matches" ? (
         /* An empty approval queue is good news, not a failed search — it is the

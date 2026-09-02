@@ -9,18 +9,30 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Button } from "@/components/ui/Button";
 
 export const metadata: Metadata = {
-  title: "Content Creation – AI-First Post Assistant",
+  title: "Company Management – AI-First Post Assistant",
 };
 
 /**
- * Global landing for the Content Creation module. Never shows a
- * company-picker when an active company is already known — it redirects
- * straight to `/create/[slug]`. `resolveActiveCompany`'s own fallback already
- * tries "first accessible company" before giving up, so reaching the empty
- * state below means the user truly has no company yet, not that a choice is
- * needed.
+ * Company Management entry point — a RESOLVER SHIM, not a page.
+ *
+ * The nav item has to carry a static href (`Navigation` is a client component
+ * with no session or cookie access), but the company it should open is only
+ * knowable on the server. This route closes that gap: it resolves the active
+ * company and redirects into that company's existing management workspace at
+ * `/companies/{slug}`.
+ *
+ * Deliberately NOT a company picker, and deliberately not a second copy of the
+ * workspace. The header's `CompanySelector` is the one company-selection UI in
+ * the app, and `/companies/{slug}/...` is the one company-management surface —
+ * duplicating either here would put the same state in two places, which is
+ * exactly what the previous `/create` → `/create/{slug}` hop did (a company in
+ * the route AND in the selector's cookie, able to disagree).
+ *
+ * The empty state below is not a picker either: `resolveActiveCompany` already
+ * falls back to "first accessible company" before giving up, so reaching it
+ * means the user genuinely has no company yet.
  */
-export default async function ContentCreationLandingPage() {
+export default async function CompanyManagementEntryPage() {
   const session = await auth();
   if (!session) redirect("/login");
 
@@ -31,9 +43,12 @@ export default async function ContentCreationLandingPage() {
     isGlobalAdmin: session.user.isGlobalAdmin,
   });
 
-  if (activeCompany) redirect(`/create/${activeCompany.slug}`);
+  // `resolveActiveCompany` re-validates the slug through `getCompany`, so a
+  // stale or foreign cookie can never redirect a user into a company they are
+  // not a member of — it falls back instead.
+  if (activeCompany) redirect(`/companies/${activeCompany.slug}`);
 
-  const t = await getTranslations("contentCreation");
+  const t = await getTranslations("companyManagement");
 
   return (
     <DashboardLayout
