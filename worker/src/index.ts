@@ -5,9 +5,11 @@
  *   1. loads + validates config from the environment,
  *   2. registers itself in the `workers` table (status: starting),
  *   3. opens the wake listener, if a secret is configured,
- *   4. recovers any stale-leased jobs AND sweeps for stale competitor-relevance
- *      rows that have nothing left to trigger them, then starts the polling
- *      loop (idle),
+ *   4. recovers any stale-leased jobs, then runs two once-per-process
+ *      Competitive-Analysis recovery sweeps — completed intelligence whose
+ *      analysis was produced under superseded extractor semantics, and stale
+ *      relevance rows that have nothing left to trigger them — then starts the
+ *      polling loop (idle),
  *   5. claims + dispatches jobs through the orchestrator (Phase 2),
  *   6. goes dormant when the queue stays empty — connection closed, nothing sent
  *      to the database — until a wake signal or the fallback interval,
@@ -71,6 +73,7 @@ import {
   COMPETITOR_RELEVANCE_JOB_TYPE,
 } from "./competitor-relevance-handler";
 import { enqueueStaleRelevanceRecovery } from "@/lib/services/competitive-analysis/enqueue-stale-relevance-recovery.service";
+import { reopenStaleAnalysis } from "@/lib/services/competitive-analysis/reopen-stale-analysis.service";
 import { createPrismaWorkerStore, createPrismaJobStore } from "./prisma-adapters";
 import { WakeSignal } from "./wake-signal";
 import { createWakeServer } from "./wake-server";
@@ -143,7 +146,32 @@ async function main(): Promise<void> {
   // Recover anything a previous crashed worker left leased, then poll.
   await orchestrator.reapOnce();
 
-  // Second recovery pass, same spirit as the reap above and the same
+  // Second recovery pass — work that is FINISHED but finished under
+  // superseded semantics. A `CompetitorIntelligence` row analyzed before the
+  // extractor learned to write in the company's own language holds English
+  // free-form analysis and, being `completed`, is terminal: no drain, cron or
+  // ingest can ever revisit it. This sweep recomputes each completed row's
+  // extraction hash from its own stored content and re-opens only the rows
+  // that genuinely disagree, then asks for ONE bounded extraction drain.
+  //
+  // Placed BEFORE the relevance sweep below deliberately: a row re-opened here
+  // leaves `completed`, and relevance's `staleWhere` requires `completed`, so
+  // this ordering keeps the relevance sweep from enqueuing a run for rows that
+  // are about to be re-extracted anyway (they get relevance afterwards through
+  // the drain's own post-extraction enqueue). Orchestrator-only: all the logic
+  // lives in the service. Best-effort — a worker must start regardless.
+  try {
+    const recovery = await reopenStaleAnalysis();
+    // Logged unconditionally, same reasoning as the relevance sweep: "0 rows
+    // were stale" is exactly the answer an operator wants when the Content
+    // page still shows English analysis, and silence cannot distinguish that
+    // from a sweep that never ran.
+    logger.info("stale analysis recovery sweep", recovery);
+  } catch (err) {
+    logger.error("stale analysis recovery sweep failed (ignored)", { error: String(err) });
+  }
+
+  // Third recovery pass, same spirit as the reap above and the same
   // once-per-process placement: work that EXISTS but has nothing left to
   // trigger it. A `CompetitorIntelligence` row that finished extracting
   // before the post-extraction relevance enqueue existed — or one whose

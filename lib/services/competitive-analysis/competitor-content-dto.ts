@@ -5,6 +5,12 @@
  * consumer (the list read, the detail read) maps through this.
  */
 
+import {
+  extractionRetryRemains,
+  resolveAnalysisError,
+  type ResolvedAnalysisError,
+} from "./analysis-error";
+
 export type CompetitorContentOrigin = "feed_item" | "manual_entry";
 
 export interface CompetitorContentItem {
@@ -47,7 +53,15 @@ export interface CompetitorContentItem {
    *  status, never relevance's (relevance has no status column of its own —
    *  see CompetitorIntelligence's schema comment). */
   status: string;
-  analysisError: string | null;
+  /** CLASSIFIED, never raw (2026-09-02 analysis-error UX cleanup). The column
+   *  holds two very different things — two deterministic conditions this
+   *  pipeline writes on purpose, and arbitrary provider/internal failure text
+   *  — and only the first kind is user-facing copy. Resolving here rather than
+   *  in the component means the raw message never crosses the API boundary at
+   *  all, so it cannot leak into the normal Content UI even by accident. The
+   *  detail stays in the column and in the worker's logs, where a diagnostic
+   *  belongs. See `analysis-error.ts`. */
+  analysisError: ResolvedAnalysisError | null;
 }
 
 export interface CompetitorContentDetail extends CompetitorContentItem {
@@ -95,6 +109,9 @@ export const COMPETITOR_CONTENT_SELECT = {
   competitorId: true,
   status: true,
   analysisError: true,
+  // Read only to decide whether the generic failure message may promise an
+  // automatic retry — never surfaced as a number. See `extractionRetryRemains`.
+  attemptCount: true,
   topic: true,
   subtopic: true,
   summary: true,
@@ -117,7 +134,10 @@ export const COMPETITOR_CONTENT_SELECT = {
   matchedResearchTopics: true,
   relevanceProfileVersion: true,
   relevanceEvaluatedAt: true,
-  competitor: { select: { name: true } },
+  // `archivedAt` rides the relation select that already runs — an archived
+  // competitor's rows are excluded by the drain, so they will not be retried
+  // either, and the list DOES still show them.
+  competitor: { select: { name: true, archivedAt: true } },
   feedItem: { select: { title: true, content: true, url: true, publishedAt: true } },
   manualEntry: {
     select: { content: true, url: true, capturedAt: true, sourceType: true, postType: true },
@@ -129,6 +149,7 @@ export interface CompetitorContentRow {
   competitorId: string;
   status: string;
   analysisError: string | null;
+  attemptCount: number;
   topic: string | null;
   subtopic: string | null;
   summary: string | null;
@@ -151,7 +172,7 @@ export interface CompetitorContentRow {
   matchedResearchTopics: string[];
   relevanceProfileVersion: number | null;
   relevanceEvaluatedAt: Date | null;
-  competitor: { name: string };
+  competitor: { name: string; archivedAt: Date | null };
   feedItem: {
     title: string | null;
     content: string | null;
@@ -186,7 +207,13 @@ export function toCompetitorContentItem(row: CompetitorContentRow): CompetitorCo
     relevanceReason: row.relevanceReason,
     matchedResearchTopics: row.matchedResearchTopics,
     status: row.status,
-    analysisError: row.analysisError,
+    analysisError: resolveAnalysisError(
+      row.analysisError,
+      extractionRetryRemains({
+        attemptCount: row.attemptCount,
+        competitorArchived: row.competitor.archivedAt !== null,
+      })
+    ),
   };
 
   if (row.feedItem) {

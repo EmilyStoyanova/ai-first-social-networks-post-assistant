@@ -309,6 +309,12 @@
       "period": "Analysis period",
       "periodHelp": "How far back Content and Trends look by default.",
       "periodDays": "{days} days",
+      "analysisLanguage": "Analysis language",
+      "analysisLanguageHelp": "The language AI-generated analysis (topics, summaries, tone, relevance) is written in — independent of Brand's Default language. Changing it re-analyzes existing content.",
+      "analysisLanguageOptions": {
+        "en": "English",
+        "bg": "Bulgarian"
+      },
       "add": "Add",
       "remove": "Remove \"{topic}\"",
       "errors": {
@@ -415,13 +421,24 @@
         "evaluatedAt": "Evaluated: {date}",
         "profileNotConfigured": "Save a Research Profile to start evaluating how relevant competitor content is to the topics and markets you monitor.",
         "pendingExplain": "Waiting to be evaluated against your current Research Profile.",
-        "failedExplain": "Relevance could not be evaluated after several attempts. It will be retried automatically the next time your Research Profile changes."
+        "failedExplain": "Relevance could not be evaluated after several attempts. It will be retried automatically the next time your Research Profile changes.",
+        "reasonCode": {
+          "no_research_interests": "Your Research Profile has no topics or markets yet, so nothing could be matched.",
+          "attempts_exhausted": "Relevance could not be evaluated after several attempts."
+        }
       },
       "status": {
         "pending": "Queued for analysis",
         "analyzing": "Analyzing…",
         "completed": "Analyzed",
         "failed": "Analysis failed"
+      },
+      "analysisError": {
+        "no_readable_content": "No readable content to analyze.",
+        "content_too_short": "This content is too short to analyze.",
+        "content_too_short_detail": "This content is too short to analyze ({chars} characters, minimum {minimum}).",
+        "unknown": "Analysis failed. It will be retried automatically.",
+        "unknownTerminal": "Analysis failed."
       },
       "platform": {
         "rss": "RSS",

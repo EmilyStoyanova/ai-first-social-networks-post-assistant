@@ -5,6 +5,7 @@ import {
   defaultResearchTopicsFromBrand,
   sameStringSet,
   shouldRecomputeRelevanceOnSave,
+  shouldReopenStaleAnalysisOnSave,
   versionWasBumped,
 } from "./research-profile-versioning";
 
@@ -166,5 +167,45 @@ describe("shouldRecomputeRelevanceOnSave — the unsaved-default lifecycle (veri
     });
     const versionBumped = versionWasBumped(existing, nextVersion);
     assert.equal(shouldRecomputeRelevanceOnSave(existing, versionBumped), false);
+  });
+});
+
+// ─── 2026-09-02 ownership-boundary fix ─────────────────────────────────────
+describe("computeNextProfileVersion — analysisLanguage never participates", () => {
+  it("does not accept analysisLanguage as an input at all — a language-only save has nothing that could bump the version", () => {
+    // There is no `analysisLanguage` field in either parameter's type — this
+    // is enforced by construction, not by a runtime branch. Passing the exact
+    // same topics/markets (the only two fields this function ever looks at)
+    // must leave the version exactly where it was, regardless of what else
+    // changed on the save.
+    const existing = { researchTopics: ["a", "b"], markets: ["BG"], profileVersion: 4 };
+    const next = { researchTopics: ["a", "b"], markets: ["BG"] };
+    assert.equal(computeNextProfileVersion(existing, next), 4);
+  });
+});
+
+describe("shouldReopenStaleAnalysisOnSave", () => {
+  it("(new Research Profile) the FIRST-EVER save must trigger recovery — extraction may have already run under the safe default", () => {
+    // A company can have `completed` CompetitorIntelligence rows before ever
+    // saving a Research Profile — extraction does not require one. The very
+    // first save may set analysisLanguage to something those rows were never
+    // analyzed under.
+    assert.equal(shouldReopenStaleAnalysisOnSave(null, false), true);
+  });
+
+  it("a later save that changes analysisLanguage triggers recovery", () => {
+    const existing = { analysisLanguage: "en" };
+    assert.equal(shouldReopenStaleAnalysisOnSave(existing, true), true);
+  });
+
+  it("a later save that keeps analysisLanguage unchanged triggers NO recovery", () => {
+    const existing = { analysisLanguage: "bg" };
+    assert.equal(shouldReopenStaleAnalysisOnSave(existing, false), false);
+  });
+
+  it("a topics/markets/period-only save (analysisLanguage unchanged) triggers no recovery — mirrors shouldRecomputeRelevanceOnSave's own topics/markets-only case, for the orthogonal field", () => {
+    const existing = { analysisLanguage: "bg" };
+    const languageChanged = false; // the caller computes this independently of topics/markets
+    assert.equal(shouldReopenStaleAnalysisOnSave(existing, languageChanged), false);
   });
 });

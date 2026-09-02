@@ -21,6 +21,8 @@
  * trying to learn?". No shared type or decision function with that module.
  */
 
+import { analysisLanguageEnglishName, type AnalysisLanguage } from "@/lib/i18n/analysis-language";
+
 export const COMPETITOR_RELEVANCE_VERDICTS = ["relevant", "related", "out_of_scope"] as const;
 export type CompetitorRelevanceVerdict = (typeof COMPETITOR_RELEVANCE_VERDICTS)[number];
 
@@ -260,7 +262,14 @@ export function parseRelevanceResponse(
 
 // ─── Prompts ───────────────────────────────────────────────────────────────
 
-export function buildRelevanceSystemPrompt(): string {
+/**
+ * `language` (2026-09-02 mixed-language fix) governs the `reason` sentence
+ * ONLY — the one free-form field this step produces. The verdict labels and
+ * `matchedResearchTopics` are canonical values and are explicitly excluded
+ * below; see `lib/i18n/analysis-language.ts`.
+ */
+export function buildRelevanceSystemPrompt(language: AnalysisLanguage): string {
+  const languageName = analysisLanguageEnglishName(language);
   return [
     "You judge whether a piece of ALREADY-ANALYZED competitor content is relevant to a company's research interests.",
     "",
@@ -278,6 +287,17 @@ export function buildRelevanceSystemPrompt(): string {
     '2. Every entry in "matchedResearchTopics" must be copied VERBATIM from the research topics list given below — never translated, rephrased, or invented. Leave it empty for "out_of_scope".',
     '3. A "relevant" or "related" verdict must cite at least one research topic it rests on.',
     '4. Markets inform your judgement (e.g. content clearly about a market the company tracks counts toward relevance) but are never themselves listed in "matchedResearchTopics" — that field is for RESEARCH TOPICS only.',
+    // 2026-09-02 mixed-language fix — `reason` is displayed to the user, so it
+    // follows the company's analysis language; the other two fields are
+    // canonical values and must not move with it. Rule 2 above already forbids
+    // translating a research topic; this restates the boundary from the
+    // language side so the two instructions cannot be read as conflicting.
+    `5. Write "reason" in ${languageName}, whatever language the content or the research topics are written in. This applies ONLY to "reason": "relevance" is always one of the three English labels above, and every entry in "matchedResearchTopics" is still copied verbatim from the list, never translated into ${languageName}.`,
+    ...(language === "bg"
+      ? [
+          '6. Write "reason" as a native Bulgarian speaker would — short and direct, not a literal translation of an English sentence. Keep technical terms, product names and company names in their original form.',
+        ]
+      : []),
     "",
     "Reply with a single JSON object and nothing else:",
     "",

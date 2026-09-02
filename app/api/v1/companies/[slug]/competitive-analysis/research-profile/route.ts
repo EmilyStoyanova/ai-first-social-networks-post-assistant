@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getLocale } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { getResearchProfileOrDefaults } from "@/lib/services/competitive-analysis/get-research-profile-or-defaults.service";
 import { updateResearchProfile } from "@/lib/services/competitive-analysis/update-research-profile.service";
@@ -13,10 +14,16 @@ export async function GET(_req: Request, { params }: { params: Promise<{ slug: s
     );
 
   const { slug } = await params;
+  // The current application locale (NEXT_LOCALE) seeds an UNPERSISTED
+  // profile's `analysisLanguage` default (2026-09-02 ownership-boundary fix)
+  // — deliberately not Company.defaultLang. Has no effect once a profile is
+  // saved. See get-research-profile-or-defaults.service.ts.
+  const appLocale = await getLocale();
   const result = await getResearchProfileOrDefaults(
     slug,
     session.user.id,
-    session.user.isGlobalAdmin
+    session.user.isGlobalAdmin,
+    appLocale
   );
 
   if (!result.success) {

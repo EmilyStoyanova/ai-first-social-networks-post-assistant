@@ -49,7 +49,7 @@ describe("computeExtractionHash", () => {
   it("is deterministic for identical input", () => {
     const a: ExtractableContent = { title: "T", body: "Body text." };
     const b: ExtractableContent = { title: "T", body: "Body text." };
-    assert.equal(computeExtractionHash(a), computeExtractionHash(b));
+    assert.equal(computeExtractionHash(a, "en"), computeExtractionHash(b, "en"));
   });
 
   it("changes when the body changes, even beyond the excerpt cap", () => {
@@ -60,13 +60,13 @@ describe("computeExtractionHash", () => {
     // prefix), but the hash must still change — it fingerprints the FULL
     // input, not merely what was sent, per the module's own contract.
     assert.equal(extractionExcerpt(a), extractionExcerpt(b));
-    assert.notEqual(computeExtractionHash(a), computeExtractionHash(b));
+    assert.notEqual(computeExtractionHash(a, "en"), computeExtractionHash(b, "en"));
   });
 
   it("changes when the title changes", () => {
     const a: ExtractableContent = { title: "One title", body: "Body text." };
     const b: ExtractableContent = { title: "Another title", body: "Body text." };
-    assert.notEqual(computeExtractionHash(a), computeExtractionHash(b));
+    assert.notEqual(computeExtractionHash(a, "en"), computeExtractionHash(b, "en"));
   });
 });
 

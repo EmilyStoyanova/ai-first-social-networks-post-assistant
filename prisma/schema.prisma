@@ -1445,9 +1445,21 @@ model CompetitorResearchProfile {
   analysisPeriodDays Int      @default(90) @map("analysis_period_days")
   // Bumped only when researchTopics/markets actually change (see
   // update-research-profile.service.ts) — NOT for an analysisPeriodDays-only
-  // save. Drives Part 3B's relevance-recompute sweep via
-  // CompetitorIntelligence.relevanceProfileVersion; no recompute exists yet.
+  // save, and NOT for an analysisLanguage-only save (see below). Drives the
+  // relevance-recompute sweep via CompetitorIntelligence.relevanceProfileVersion.
   profileVersion     Int      @default(1) @map("profile_version")
+  // The language AI-generated free-form analysis (topic/summary/tone/relevance
+  // reason) is written in — 2026-09-02 ownership-boundary fix. Owned HERE, by
+  // Competitive Analysis, deliberately NOT Company.defaultLang (Content
+  // Creation's own, independent anchor) — a company must be able to use this
+  // module without ever configuring Brand. Validated to `en`/`bg` at the
+  // service layer via lib/i18n/analysis-language.ts's `resolveAnalysisLanguage`,
+  // exactly like `Company.defaultLang` — a plain String column, no DB enum.
+  // Deliberately does NOT bump `profileVersion`: a language change should
+  // re-render existing analysis (via the analysisHash mechanism — see
+  // reopen-stale-analysis.service.ts), not re-judge whether content is
+  // semantically relevant, which is what `profileVersion` alone governs.
+  analysisLanguage   String   @default("en") @map("analysis_language")
   createdAt          DateTime @default(now()) @map("created_at")
   updatedAt          DateTime @updatedAt @map("updated_at")
 

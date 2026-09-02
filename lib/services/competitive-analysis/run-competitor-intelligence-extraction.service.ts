@@ -96,6 +96,7 @@ import {
 } from "@/lib/ai/competitor-intelligence-extraction";
 import { enqueueJob, type EnqueueJobResult } from "@/lib/services/queue/enqueue-job.service";
 import { COMPETITOR_RELEVANCE_JOB_TYPE, competitorRelevanceDedupeKey } from "@/lib/queue/job-types";
+import { resolveAnalysisLanguage } from "@/lib/i18n/analysis-language";
 
 // A `type`, not `interface` — see the identical note on
 // `RecomputeStaleRelevanceSummary`; this shape is returned directly as a
@@ -188,17 +189,32 @@ const CANDIDATE_SELECT = {
   competitorId: true,
   status: true,
   attemptCount: true,
+  // 2026-09-02 mixed-language fix, re-anchored 2026-09-02 ownership-boundary
+  // fix — the analysis language now comes from the company's OWN
+  // CompetitorResearchProfile, never Company.defaultLang, on the query that
+  // already runs. A relation `select`, not a second round trip per item. A
+  // `null` relation (no saved Research Profile yet — extraction does not
+  // require one) is expected and handled by `resolveAnalysisLanguage` below.
+  company: { select: { competitorResearchProfile: { select: { analysisLanguage: true } } } },
   feedItem: { select: { title: true, content: true } },
   manualEntry: { select: { content: true } },
 } as const;
 
 async function defaultFindCandidates(limit: number): Promise<ExtractableIntelligenceItem[]> {
-  return prisma.competitorIntelligence.findMany({
+  const rows = await prisma.competitorIntelligence.findMany({
     where: selectableWhere(),
     orderBy: { createdAt: "asc" },
     take: limit,
     select: CANDIDATE_SELECT,
   });
+  // `CompetitorResearchProfile.analysisLanguage` is a plain String column
+  // (and may not exist at all for this company), so it is normalized here
+  // rather than cast — `extractCompetitorIntelligence` receives an already
+  // valid `AnalysisLanguage` and never has to second-guess it.
+  return rows.map(({ company, ...row }) => ({
+    ...row,
+    analysisLanguage: resolveAnalysisLanguage(company.competitorResearchProfile?.analysisLanguage),
+  }));
 }
 
 export interface RemainingCounts {

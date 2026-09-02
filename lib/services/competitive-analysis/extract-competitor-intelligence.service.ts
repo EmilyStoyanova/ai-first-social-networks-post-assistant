@@ -3,9 +3,12 @@
  * `CompetitorIntelligence` row (lease-guarded, exactly like
  * `classify-feed-item.service.ts`'s claim), calls the extraction model once
  * with one repair attempt, and persists ONLY the intrinsic fields — never
- * `relevance`/`relevanceReason`/`matchedResearchTopics`/`relevanceProfileVersion`,
- * which belong exclusively to `recompute-stale-relevance.service.ts` (§8's hard
- * separation).
+ * `relevance`/`relevanceReason`/`matchedResearchTopics`, which belong
+ * exclusively to `recompute-stale-relevance.service.ts` (§8's hard separation).
+ * The one narrow exception, added 2026-09-02: a successful write also resets
+ * `relevanceProfileVersion` to `null` — a staleness MARKER, not a verdict; see
+ * that write's own inline comment for why this belongs here rather than
+ * silently rotting a re-extracted row's relevance text in the old language.
  *
  * ── Verification-pass refactor (DB injectability, §7) ───────────────────────
  * This function used to load its own row via `prisma.competitorIntelligence.
@@ -89,6 +92,9 @@ import {
   ProviderNotAvailableError,
 } from "@/lib/ai/llm/supported-providers";
 import { MIN_ANALYZABLE_CONTENT_LENGTH } from "@/lib/integrations/rss/article-extractor";
+import type { AnalysisLanguage } from "@/lib/i18n/analysis-language";
+import { extractableContentOf } from "./analysis-staleness";
+import { analysisErrorCodeValue } from "./analysis-error";
 
 export type ExtractCompetitorIntelligenceOutcome =
   | { status: "extracted" }
@@ -119,6 +125,15 @@ export interface ExtractableIntelligenceItem {
   competitorId: string;
   status: string;
   attemptCount: number;
+  /** Competitive Analysis's own analysis language (2026-09-02 mixed-language
+   *  fix; re-anchored 2026-09-02 ownership-boundary fix to
+   *  `CompetitorResearchProfile.analysisLanguage`, never `Company.defaultLang`),
+   *  already normalized by the caller. Required, not optional: the bug this
+   *  closes was free-form analysis silently coming back in English, so "forgot
+   *  to pass it" must be a type error rather than a quiet fallback. Read on the
+   *  drain's existing candidate query via the `company.competitorResearchProfile`
+   *  relation — no extra round trip per item. */
+  analysisLanguage: AnalysisLanguage;
   feedItem: { title: string | null; content: string | null } | null;
   manualEntry: { content: string } | null;
 }
@@ -199,11 +214,11 @@ export async function extractCompetitorIntelligence(
   const resolveProvider = deps.resolveProvider ?? defaultResolveProvider;
   const attemptTimeoutMs = deps.attemptTimeoutMs ?? EXTRACTION_ATTEMPT_TIMEOUT_MS;
 
-  const content: ExtractableContent | null = item.feedItem
-    ? { title: item.feedItem.title, body: item.feedItem.content ?? "" }
-    : item.manualEntry
-      ? { title: null, body: item.manualEntry.content }
-      : null;
+  // Shared with the stale-analysis recovery sweep, deliberately — see
+  // `analysis-staleness.ts`'s module comment. If this derivation and the
+  // sweep's ever diverged, every re-analyzed row would look stale again on the
+  // next worker start and be re-analyzed forever.
+  const content: ExtractableContent | null = extractableContentOf(item);
 
   if (item.attemptCount >= MAX_EXTRACTION_ATTEMPTS) {
     return { status: "skipped", reason: "max_attempts" };
@@ -281,9 +296,19 @@ export async function extractCompetitorIntelligence(
         : isTooThin
           ? "content_too_short"
           : "missing_content";
+    // Canonical codes, not English prose (2026-09-02 analysis-error UX
+    // cleanup). These two conditions are decided deterministically HERE, so
+    // they are the only `analysisError` values with a finite vocabulary and
+    // the only ones that can be localized without a model call. Everything in
+    // the catch below stays raw provider text, which `resolveAnalysisError`
+    // classifies as `unknown` and the UI never renders. See
+    // `analysis-error.ts`.
     const analysisError = isTooThin
-      ? `Content too short to analyze (${trimmedBody.length} chars, minimum ${MIN_ANALYZABLE_CONTENT_LENGTH}).`
-      : "No readable content to analyze.";
+      ? analysisErrorCodeValue("content_too_short", {
+          chars: trimmedBody.length,
+          minimum: MIN_ANALYZABLE_CONTENT_LENGTH,
+        })
+      : analysisErrorCodeValue("no_readable_content");
     const written = await db.competitorIntelligence.updateMany({
       where: { id: item.id, status: "analyzing", leaseExpiresAt },
       data: {
@@ -297,8 +322,8 @@ export async function extractCompetitorIntelligence(
     return { status: "skipped", reason };
   }
 
-  const hash = computeExtractionHash(content);
-  const systemPrompt = buildExtractionSystemPrompt();
+  const hash = computeExtractionHash(content, item.analysisLanguage);
+  const systemPrompt = buildExtractionSystemPrompt(item.analysisLanguage);
   let userPrompt = buildExtractionUserPrompt(content);
 
   try {
@@ -357,6 +382,23 @@ export async function extractCompetitorIntelligence(
         analysisError: null,
         analyzedAt: now(),
         leaseExpiresAt: null,
+        // 2026-09-02 ownership-boundary fix — every successful extraction
+        // invalidates whatever relevance verdict this row previously carried,
+        // WITHOUT touching `relevance`/`relevanceReason`/`matchedResearchTopics`
+        // themselves (still exclusively `competitor-relevance.ts`'s to write —
+        // §8's hard separation is unbroken: this is a staleness marker, not a
+        // verdict). A no-op on a first-time extraction (already null). On a
+        // RE-extraction — caused by a Research Profile analysisLanguage change,
+        // a changed EXTRACTION_SEMANTIC_VERSION, or the source content itself
+        // changing — this is what makes the row reachable again by
+        // `recompute-stale-relevance.service.ts`'s `staleWhere`, which only
+        // matches `relevanceProfileVersion !== <current profileVersion>` (or
+        // null). Without this, a row already evaluated once would keep its OLD
+        // `relevanceReason` text forever: `profileVersion` itself never moves
+        // for a language-only change (see `CompetitorResearchProfile.
+        // analysisLanguage`'s schema comment), so nothing else would ever mark
+        // it stale again after re-extraction finishes.
+        relevanceProfileVersion: null,
       },
     });
     if (written.count === 0) return { status: "skipped", reason: "claimed" };

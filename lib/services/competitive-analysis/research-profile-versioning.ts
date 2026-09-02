@@ -82,3 +82,38 @@ export function shouldRecomputeRelevanceOnSave(
 ): boolean {
   return existing === null || versionBumped;
 }
+
+/**
+ * Whether a Research Profile save should trigger the bounded stale-analysis
+ * recovery sweep FOR THIS ONE COMPANY (`reopenStaleAnalysisForCompany` in
+ * `reopen-stale-analysis.service.ts`) — the 2026-09-02 ownership-boundary fix.
+ *
+ * Deliberately a SEPARATE trigger from `shouldRecomputeRelevanceOnSave`, and
+ * for a different reason: `analysisLanguage` changing does NOT move
+ * `profileVersion` (see `CompetitorResearchProfile.analysisLanguage`'s own
+ * schema comment for why) — a language change should re-render existing
+ * analysis text, not re-judge whether content is semantically relevant, which
+ * is `profileVersion`'s job alone. So `versionBumped` can never observe a
+ * language-only save, and this function exists precisely to catch the case
+ * that leaves.
+ *
+ * True on the FIRST-EVER save for the identical reason
+ * `shouldRecomputeRelevanceOnSave` treats it specially: extraction does not
+ * require a persisted Research Profile to run (only relevance does — see
+ * `recomputeStaleRelevanceForCompany`'s own guard), so a company can already
+ * have `completed` `CompetitorIntelligence` rows analyzed under the safe
+ * application default (English) before anyone ever saves a profile. The first
+ * save may set `analysisLanguage` to something else entirely, and those rows
+ * are genuinely stale the instant it does — `existing === null` catches that
+ * even though there is no prior `analysisLanguage` to compare against.
+ *
+ * `languageChanged` is computed by the caller (`update-research-profile.
+ * service.ts`, which alone knows both the persisted and the incoming value)
+ * rather than here, mirroring `versionBumped`'s own split.
+ */
+export function shouldReopenStaleAnalysisOnSave(
+  existing: { analysisLanguage: string } | null,
+  languageChanged: boolean
+): boolean {
+  return existing === null || languageChanged;
+}

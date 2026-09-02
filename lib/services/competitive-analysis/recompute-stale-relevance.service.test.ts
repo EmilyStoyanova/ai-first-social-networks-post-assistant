@@ -8,6 +8,7 @@ import {
   type RelevanceRow,
 } from "./recompute-stale-relevance.service";
 import { MAX_RELEVANCE_ATTEMPTS, type RelevanceProfile } from "@/lib/ai/competitor-relevance";
+import { resolveRelevanceReason } from "./relevance-reason";
 import type { ILlmProvider } from "@/lib/ai/types";
 
 const VALID_REPLY = (topic: string) =>
@@ -85,7 +86,7 @@ const EMPTY_PROFILE: RelevanceProfile = { researchTopics: [], markets: [] };
 describe("recomputeRelevanceForRow — archived (§5, fresh per-row check)", () => {
   it("skips a row whose competitor is currently archived", async () => {
     const { db } = makeFakeDb(new Date());
-    const outcome = await recomputeRelevanceForRow(row(), PROFILE, 1, {
+    const outcome = await recomputeRelevanceForRow(row(), PROFILE, 1, "en", {
       db,
       resolveProvider: okProvider("home insulation"),
     });
@@ -94,7 +95,7 @@ describe("recomputeRelevanceForRow — archived (§5, fresh per-row check)", () 
 
   it("proceeds when the competitor is not archived", async () => {
     const { db } = makeFakeDb(null);
-    const outcome = await recomputeRelevanceForRow(row(), PROFILE, 1, {
+    const outcome = await recomputeRelevanceForRow(row(), PROFILE, 1, "en", {
       db,
       resolveProvider: okProvider("home insulation"),
     });
@@ -106,7 +107,7 @@ describe("recomputeRelevanceForRow — no research interests configured", () => 
   it("settles to out_of_scope with NO model call", async () => {
     let called = false;
     const { db, stored } = makeFakeDb(null);
-    const outcome = await recomputeRelevanceForRow(row(), EMPTY_PROFILE, 1, {
+    const outcome = await recomputeRelevanceForRow(row(), EMPTY_PROFILE, 1, "en", {
       db,
       resolveProvider: async () => {
         called = true;
@@ -142,6 +143,7 @@ describe("recomputeRelevanceForRow — optimistic concurrency guard", () => {
       row({ relevanceProfileVersion: null }),
       PROFILE,
       3,
+      "en",
       {
         db,
         resolveProvider: okProvider("home insulation"),
@@ -154,7 +156,7 @@ describe("recomputeRelevanceForRow — optimistic concurrency guard", () => {
 describe("recomputeRelevanceForRow — no provider", () => {
   it("returns no_provider without writing anything", async () => {
     const { db, writes } = makeFakeDb(null);
-    const outcome = await recomputeRelevanceForRow(row(), PROFILE, 1, {
+    const outcome = await recomputeRelevanceForRow(row(), PROFILE, 1, "en", {
       db,
       resolveProvider: async () => ({ ok: false }),
     });
@@ -171,6 +173,22 @@ describe("staleWhere", () => {
       { relevanceProfileVersion: { not: 5 } },
     ]);
   });
+
+  // 2026-09-02 ownership-boundary fix: an analysisLanguage change re-extracts
+  // a row WITHOUT bumping `profileVersion` (see CompetitorResearchProfile.
+  // analysisLanguage's own schema comment) — extraction's success write resets
+  // `relevanceProfileVersion` to null instead (see extract-competitor-
+  // intelligence.service.ts). This is the other half of that fix: proving the
+  // row is still reachable even though `profileVersion` itself never moved.
+  it("still matches a row whose relevanceProfileVersion was invalidated by re-extraction, even though profileVersion itself is unchanged", () => {
+    const where = staleWhere("co-1", 1) as { OR: Array<{ relevanceProfileVersion?: null }> }; // same version before and after the language change
+    const reExtractedRow = { relevanceProfileVersion: null };
+    const matchesNullClause = where.OR.some(
+      (clause) => "relevanceProfileVersion" in clause && clause.relevanceProfileVersion === null
+    );
+    assert.equal(matchesNullClause, true);
+    assert.equal(reExtractedRow.relevanceProfileVersion, null);
+  });
 });
 
 describe("recomputeStaleRelevanceForCompany — the §2 drain-race fix", () => {
@@ -179,7 +197,12 @@ describe("recomputeStaleRelevanceForCompany — the §2 drain-race fix", () => {
     // loadProfile returns), but by the time it finishes, a second Save has
     // already landed at version 5 (what currentProfileVersion now returns).
     const summary = await recomputeStaleRelevanceForCompany("co-1", {
-      loadProfile: async () => ({ researchTopics: ["x"], markets: [], profileVersion: 4 }),
+      loadProfile: async () => ({
+        researchTopics: ["x"],
+        markets: [],
+        profileVersion: 4,
+        analysisLanguage: "en",
+      }),
       findStaleRows: async () => [],
       currentProfileVersion: async () => 5,
       countRemaining: async (_companyId, version) => {
@@ -194,7 +217,12 @@ describe("recomputeStaleRelevanceForCompany — the §2 drain-race fix", () => {
 
   it("falls back to the run's own version when currentProfileVersion cannot resolve one", async () => {
     const summary = await recomputeStaleRelevanceForCompany("co-1", {
-      loadProfile: async () => ({ researchTopics: ["x"], markets: [], profileVersion: 4 }),
+      loadProfile: async () => ({
+        researchTopics: ["x"],
+        markets: [],
+        profileVersion: 4,
+        analysisLanguage: "en",
+      }),
       findStaleRows: async () => [],
       currentProfileVersion: async () => null,
       countRemaining: async (_companyId, version) => (version === 4 ? 3 : 0),
@@ -228,6 +256,7 @@ describe("recomputeStaleRelevanceForCompany — batch processing", () => {
         researchTopics: ["home insulation"],
         markets: [],
         profileVersion: 1,
+        analysisLanguage: "en",
       }),
       findStaleRows: async () => [row({ id: "a" }), row({ id: "b" })],
       currentProfileVersion: async () => 1,
@@ -247,6 +276,7 @@ describe("recomputeStaleRelevanceForCompany — batch processing", () => {
         researchTopics: ["home insulation"],
         markets: [],
         profileVersion: 1,
+        analysisLanguage: "en",
       }),
       findStaleRows: async () => [row({ id: "a" }), row({ id: "b" }), row({ id: "c" })],
       currentProfileVersion: async () => 1,
@@ -291,6 +321,7 @@ describe("recomputeRelevanceForRow — bounded retry (2026-09 relevance-retry fi
       row({ relevanceProfileVersion: null, relevanceAttemptCount: 0 }),
       PROFILE,
       1,
+      "en",
       { db, resolveProvider: failProvider() }
     );
     assert.deepEqual(outcome, { status: "failed" });
@@ -305,7 +336,7 @@ describe("recomputeRelevanceForRow — bounded retry (2026-09 relevance-retry fi
     const { db, stored } = makeFakeDb(null);
     let current = row({ relevanceProfileVersion: null, relevanceAttemptCount: 0 });
     for (let i = 1; i <= 2; i++) {
-      const outcome = await recomputeRelevanceForRow(current, PROFILE, 1, {
+      const outcome = await recomputeRelevanceForRow(current, PROFILE, 1, "en", {
         db,
         resolveProvider: failProvider(),
       });
@@ -330,6 +361,7 @@ describe("recomputeRelevanceForRow — bounded retry (2026-09 relevance-retry fi
       row({ relevanceProfileVersion: 1, relevanceAttemptCount: 3 }),
       PROFILE,
       1,
+      "en",
       {
         db,
         resolveProvider: async () => {
@@ -343,7 +375,14 @@ describe("recomputeRelevanceForRow — bounded retry (2026-09 relevance-retry fi
     // Settled: version stamped (leaves staleWhere), reason explains why, NOT
     // silently left "pending" with nothing to show — see the module comment.
     assert.equal(stored.relevanceProfileVersion, 1);
-    assert.ok((stored.relevanceReason as string).includes("failed after 3 attempts"));
+    // 2026-09-02 mixed-language fix — a canonical code, not an English
+    // sentence: this reason is system-written, so the UI localizes it by
+    // mapping. `resolveRelevanceReason` is what turns it back into text.
+    assert.equal(stored.relevanceReason, "code:attempts_exhausted");
+    assert.deepEqual(resolveRelevanceReason(stored.relevanceReason as string), {
+      kind: "code",
+      code: "attempts_exhausted",
+    });
     assert.equal(stored.relevanceAttemptCount, 0);
   });
 
@@ -355,6 +394,7 @@ describe("recomputeRelevanceForRow — bounded retry (2026-09 relevance-retry fi
       row({ relevanceProfileVersion: 1, relevanceAttemptCount: 3 }),
       PROFILE,
       2,
+      "en",
       { db, resolveProvider: okProvider("home insulation") }
     );
     assert.deepEqual(outcome, { status: "updated" });
@@ -368,6 +408,7 @@ describe("recomputeRelevanceForRow — bounded retry (2026-09 relevance-retry fi
       row({ relevanceProfileVersion: null, relevanceAttemptCount: 2 }),
       PROFILE,
       1,
+      "en",
       { db, resolveProvider: okProvider("home insulation") }
     );
     assert.equal(stored.relevanceAttemptCount, 0);
@@ -377,7 +418,7 @@ describe("recomputeRelevanceForRow — bounded retry (2026-09 relevance-retry fi
 describe("relevanceEvaluatedAt — set only on a genuine verdict (2026-09 relevance-retry fix)", () => {
   it("is stamped on a successful relevant/not-relevant verdict", async () => {
     const { db, stored } = makeFakeDb(null);
-    await recomputeRelevanceForRow(row(), PROFILE, 1, {
+    await recomputeRelevanceForRow(row(), PROFILE, 1, "en", {
       db,
       resolveProvider: okProvider("home insulation"),
     });
@@ -386,13 +427,13 @@ describe("relevanceEvaluatedAt — set only on a genuine verdict (2026-09 releva
 
   it("is stamped on the deterministic out_of_scope verdict (no research interests configured)", async () => {
     const { db, stored } = makeFakeDb(null);
-    await recomputeRelevanceForRow(row(), EMPTY_PROFILE, 1, { db });
+    await recomputeRelevanceForRow(row(), EMPTY_PROFILE, 1, "en", { db });
     assert.ok(stored.relevanceEvaluatedAt instanceof Date);
   });
 
   it("is NEVER stamped on a failed model call", async () => {
     const { db, stored } = makeFakeDb(null);
-    await recomputeRelevanceForRow(row({ relevanceAttemptCount: 0 }), PROFILE, 1, {
+    await recomputeRelevanceForRow(row({ relevanceAttemptCount: 0 }), PROFILE, 1, "en", {
       db,
       resolveProvider: failProvider(),
     });
@@ -405,6 +446,7 @@ describe("relevanceEvaluatedAt — set only on a genuine verdict (2026-09 releva
       row({ relevanceProfileVersion: 1, relevanceAttemptCount: 3 }),
       PROFILE,
       1,
+      "en",
       { db, resolveProvider: failProvider() }
     );
     assert.equal("relevanceEvaluatedAt" in stored, false);
@@ -419,6 +461,7 @@ describe("recomputeStaleRelevanceForCompany — progressed (2026-09 relevance-re
         researchTopics: ["home insulation"],
         markets: [],
         profileVersion: 1,
+        analysisLanguage: "en",
       }),
       findStaleRows: async () => [row({ id: "a" })],
       currentProfileVersion: async () => 1,
@@ -436,6 +479,7 @@ describe("recomputeStaleRelevanceForCompany — progressed (2026-09 relevance-re
         researchTopics: ["home insulation"],
         markets: [],
         profileVersion: 1,
+        analysisLanguage: "en",
       }),
       findStaleRows: async () => [row({ id: "a", relevanceAttemptCount: 0 })],
       currentProfileVersion: async () => 1,
@@ -453,6 +497,7 @@ describe("recomputeStaleRelevanceForCompany — progressed (2026-09 relevance-re
         researchTopics: ["home insulation"],
         markets: [],
         profileVersion: 1,
+        analysisLanguage: "en",
       }),
       findStaleRows: async () => [
         row({ id: "a", relevanceProfileVersion: 1, relevanceAttemptCount: 3 }),
@@ -476,6 +521,7 @@ describe("recomputeStaleRelevanceForCompany — progressed (2026-09 relevance-re
         researchTopics: ["home insulation"],
         markets: [],
         profileVersion: 1,
+        analysisLanguage: "en",
       }),
       findStaleRows: async () => [row({ id: "a" }), row({ id: "b" })],
       currentProfileVersion: async () => 1,
@@ -494,6 +540,7 @@ describe("recomputeStaleRelevanceForCompany — progressed (2026-09 relevance-re
         researchTopics: ["home insulation"],
         markets: [],
         profileVersion: 1,
+        analysisLanguage: "en",
       }),
       findStaleRows: async () => [row({ id: "a" }), row({ id: "b" })],
       currentProfileVersion: async () => 1,
@@ -515,6 +562,7 @@ describe("recomputeStaleRelevanceForCompany — progressed (2026-09 relevance-re
       researchTopics: ["home insulation"],
       markets: [],
       profileVersion: 1,
+      analysisLanguage: "en",
     });
     let attemptCount = 0;
     let profileVersion: number | null = null;
@@ -566,5 +614,158 @@ describe("recomputeStaleRelevanceForCompany — progressed (2026-09 relevance-re
     assert.equal(finalSummary.processed, 0);
     assert.equal(finalSummary.remaining, 0);
     assert.equal(finalSummary.progressed, false, "quiescent — not hot-looping");
+  });
+});
+
+describe("analysis language (2026-09-02 mixed-language fix)", () => {
+  function capturingProvider() {
+    const seen: string[] = [];
+    return {
+      seen,
+      resolveProvider: async () => ({
+        ok: true as const,
+        instance: {
+          generate: async (args: { systemPrompt: string }) => {
+            seen.push(args.systemPrompt);
+            return { text: VALID_REPLY("home insulation") };
+          },
+        } as unknown as ILlmProvider,
+        provider: "test",
+        model: "test-model",
+      }),
+    };
+  }
+
+  it("asks for the reason in Bulgarian when the row is evaluated in Bulgarian", async () => {
+    const { db } = makeFakeDb();
+    const { seen, resolveProvider } = capturingProvider();
+    await recomputeRelevanceForRow(row(), PROFILE, 1, "bg", { db, resolveProvider });
+    assert.match(seen[0], /Write "reason" in Bulgarian/);
+    // The two canonical fields stay canonical whatever the language is.
+    assert.match(seen[0], /never translated into Bulgarian/);
+  });
+
+  it("asks for the reason in English when the row is evaluated in English", async () => {
+    const { db } = makeFakeDb();
+    const { seen, resolveProvider } = capturingProvider();
+    await recomputeRelevanceForRow(row(), PROFILE, 1, "en", { db, resolveProvider });
+    assert.match(seen[0], /Write "reason" in English/);
+  });
+
+  it("derives the language from the Research Profile's own analysisLanguage, not a hard-coded default", async () => {
+    const { db } = makeFakeDb();
+    const { seen, resolveProvider } = capturingProvider();
+    await recomputeStaleRelevanceForCompany("co-1", {
+      db,
+      resolveProvider,
+      loadProfile: async () => ({
+        researchTopics: ["home insulation"],
+        markets: [],
+        profileVersion: 1,
+        analysisLanguage: "bg",
+      }),
+      findStaleRows: async () => [row()],
+      currentProfileVersion: async () => 1,
+      countRemaining: async () => 0,
+    });
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /Write "reason" in Bulgarian/);
+  });
+
+  it("normalizes an unexpected analysisLanguage rather than failing the run", async () => {
+    // `CompetitorResearchProfile.analysisLanguage` is a plain String column;
+    // a stray value must not stop a company's relevance from being evaluated
+    // at all.
+    const { db } = makeFakeDb();
+    const { seen, resolveProvider } = capturingProvider();
+    await recomputeStaleRelevanceForCompany("co-1", {
+      db,
+      resolveProvider,
+      loadProfile: async () => ({
+        researchTopics: ["home insulation"],
+        markets: [],
+        profileVersion: 1,
+        analysisLanguage: "de",
+      }),
+      findStaleRows: async () => [row()],
+      currentProfileVersion: async () => 1,
+      countRemaining: async () => 0,
+    });
+    assert.match(seen[0], /Write "reason" in English/);
+  });
+
+  it("keeps two companies isolated — each gets its own analysis language", async () => {
+    const captured: Record<string, string> = {};
+    for (const [companyId, lang] of [
+      ["co-en", "en"],
+      ["co-bg", "bg"],
+    ] as const) {
+      const { db } = makeFakeDb();
+      const { seen, resolveProvider } = capturingProvider();
+      await recomputeStaleRelevanceForCompany(companyId, {
+        db,
+        resolveProvider,
+        loadProfile: async () => ({
+          researchTopics: ["home insulation"],
+          markets: [],
+          profileVersion: 1,
+          analysisLanguage: lang,
+        }),
+        findStaleRows: async () => [row()],
+        currentProfileVersion: async () => 1,
+        countRemaining: async () => 0,
+      });
+      captured[companyId] = seen[0];
+    }
+    assert.match(captured["co-en"], /Write "reason" in English/);
+    assert.match(captured["co-bg"], /Write "reason" in Bulgarian/);
+  });
+
+  it("stores the empty-profile verdict as a canonical code, with no model call", async () => {
+    // Deterministic reason → localized by mapping, never by AI (§6). This is
+    // the one system-written reason the UI actually renders, and the exact
+    // English string that used to leak into the Bulgarian detail drawer.
+    let modelCalled = false;
+    const { db, stored } = makeFakeDb();
+    await recomputeRelevanceForRow(row(), EMPTY_PROFILE, 1, "bg", {
+      db,
+      resolveProvider: async () => {
+        modelCalled = true;
+        return { ok: false as const };
+      },
+    });
+    assert.equal(modelCalled, false);
+    assert.equal(stored.relevance, "out_of_scope");
+    assert.equal(stored.relevanceReason, "code:no_research_interests");
+    assert.deepEqual(resolveRelevanceReason(stored.relevanceReason as string), {
+      kind: "code",
+      code: "no_research_interests",
+    });
+  });
+
+  it("stores the model's own reason verbatim — it is already in the right language", async () => {
+    const { db, stored } = makeFakeDb();
+    await recomputeRelevanceForRow(row(), PROFILE, 1, "bg", {
+      db,
+      resolveProvider: async () => ({
+        ok: true as const,
+        instance: {
+          generate: async () => ({
+            text: JSON.stringify({
+              relevance: "relevant",
+              reason: "Съдържанието е изцяло за топлоизолация на жилища.",
+              matchedResearchTopics: ["home insulation"],
+            }),
+          }),
+        } as unknown as ILlmProvider,
+        provider: "test",
+        model: "test-model",
+      }),
+    });
+    assert.equal(stored.relevanceReason, "Съдържанието е изцяло за топлоизолация на жилища.");
+    // A research topic is echoed back VERBATIM in the user's own wording —
+    // never translated into the analysis language, which is what keeps
+    // cross-language grouping stable (§4).
+    assert.deepEqual(stored.matchedResearchTopics, ["home insulation"]);
   });
 });

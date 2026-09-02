@@ -6,6 +6,8 @@ import {
   type ExtractableIntelligenceItem,
 } from "./extract-competitor-intelligence.service";
 import type { ILlmProvider } from "@/lib/ai/types";
+import { resolveAnalysisError } from "./analysis-error";
+import { MIN_ANALYZABLE_CONTENT_LENGTH } from "@/lib/integrations/rss/article-extractor";
 
 const VALID_REPLY = JSON.stringify({
   topic: "Home insulation",
@@ -80,6 +82,7 @@ function item(overrides: Partial<ExtractableIntelligenceItem> = {}): Extractable
     competitorId: "c-1",
     status: "pending",
     attemptCount: 0,
+    analysisLanguage: "en",
     // 2026-09 content-acquisition fix: kept comfortably above
     // MIN_ANALYZABLE_CONTENT_LENGTH so this default fixture exercises the
     // ordinary extraction path, not the new content_too_short gate — see the
@@ -115,6 +118,23 @@ describe("extractCompetitorIntelligence — claim", () => {
     });
     assert.deepEqual(outcome, { status: "extracted" });
     assert.equal(row.status, "completed");
+  });
+
+  // 2026-09-02 ownership-boundary fix.
+  it("invalidates relevanceProfileVersion on every successful write, without touching relevance/relevanceReason/matchedResearchTopics", async () => {
+    const { db, writes } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    await extractCompetitorIntelligence(item(), { db, resolveProvider: okProvider });
+
+    const successWrite = writes.find((w) => w.data.status === "completed");
+    assert.ok(successWrite, "expected the success write");
+    assert.equal(successWrite!.data.relevanceProfileVersion, null);
+    // The §8 hard separation still holds — extraction never writes these,
+    // this write only ever invalidates the version marker.
+    for (const field of ["relevance", "relevanceReason", "matchedResearchTopics"]) {
+      assert.equal(field in successWrite!.data, false, `extraction must not write ${field}`);
+    }
   });
 
   it("skips as 'claimed' when the row is already being processed by another run (live lease)", async () => {
@@ -455,9 +475,16 @@ describe("extractCompetitorIntelligence — content_too_short", () => {
       db,
       resolveProvider: okProvider,
     });
-    assert.match(
-      String((row as unknown as { analysisError: string }).analysisError),
-      /too short/i,
+    // Stored as a canonical CODE, not an English sentence (2026-09-02
+    // analysis-error UX cleanup) — the measured length is preserved inside it
+    // so nothing the old prose recorded is lost, and the UI localizes it.
+    const stored = String((row as unknown as { analysisError: string }).analysisError);
+    assert.equal(stored, `code:content_too_short:10:${MIN_ANALYZABLE_CONTENT_LENGTH}`);
+    assert.deepEqual(
+      // retryable is irrelevant here — a deterministic condition's wording
+      // never depends on it (see analysis-error.test.ts).
+      resolveAnalysisError(stored, true),
+      { kind: "content_too_short", chars: 10, minimum: MIN_ANALYZABLE_CONTENT_LENGTH },
       "the reason must be distinguishable from a plain missing-content failure"
     );
   });
@@ -504,5 +531,94 @@ describe("extractCompetitorIntelligence — content_too_short", () => {
       { db, resolveProvider: okProvider }
     );
     assert.deepEqual(outcome, { status: "skipped", reason: "missing_content" });
+  });
+});
+
+describe("analysis language reaches the model (2026-09-02 mixed-language fix)", () => {
+  /** Captures the system prompt the item actually produced. */
+  function capturingProvider() {
+    const seen: string[] = [];
+    const resolveProvider = async () => ({
+      ok: true as const,
+      instance: {
+        generate: async (args: { systemPrompt: string }) => {
+          seen.push(args.systemPrompt);
+          return { text: VALID_REPLY };
+        },
+      } as unknown as ILlmProvider,
+      provider: "test",
+      model: "test-model",
+    });
+    return { seen, resolveProvider };
+  }
+
+  it("asks for Bulgarian analysis when the company's language is Bulgarian", async () => {
+    const { db } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    const { seen, resolveProvider } = capturingProvider();
+
+    const outcome = await extractCompetitorIntelligence(item({ analysisLanguage: "bg" }), {
+      db,
+      resolveProvider,
+    });
+
+    assert.deepEqual(outcome, { status: "extracted" });
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /Write these fields in Bulgarian/);
+    // The canonical half is unaffected by the language.
+    assert.match(seen[0], /always the exact English token from the list, never translated/);
+  });
+
+  it("asks for English analysis when the company's language is English", async () => {
+    const { db } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    const { seen, resolveProvider } = capturingProvider();
+
+    await extractCompetitorIntelligence(item({ analysisLanguage: "en" }), { db, resolveProvider });
+
+    assert.match(seen[0], /Write these fields in English/);
+    assert.ok(!seen[0].includes("Write these fields in Bulgarian"));
+  });
+
+  it("stores a hash that distinguishes the two languages — cross-company isolation", async () => {
+    // The same competitor article, monitored by two companies with different
+    // `defaultLang`. Each row must fingerprint its own analysis, so neither
+    // company's answer can ever look like a valid cached result for the other.
+    const hashes: string[] = [];
+    for (const analysisLanguage of ["en", "bg"] as const) {
+      const { db, row } = makeFakeDb({
+        row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+      });
+      await extractCompetitorIntelligence(item({ analysisLanguage }), {
+        db,
+        resolveProvider: okProvider,
+      });
+      hashes.push((row as unknown as { analysisHash: string }).analysisHash);
+    }
+    assert.ok(hashes[0]);
+    assert.notEqual(hashes[0], hashes[1]);
+  });
+
+  it("never rewrites the stored original content, whatever the analysis language", async () => {
+    // Extraction only ever writes ANALYSIS columns; the FeedItem's own title
+    // and body are not among them (§3: the competitor's article is never
+    // translated or rewritten).
+    const { db, writes } = makeFakeDb({
+      row: { id: "ci-1", status: "pending", leaseExpiresAt: null, attemptCount: 0 },
+    });
+    await extractCompetitorIntelligence(item({ analysisLanguage: "bg" }), {
+      db,
+      resolveProvider: okProvider,
+    });
+    for (const write of writes) {
+      for (const key of Object.keys(write.data)) {
+        assert.ok(
+          !["title", "content", "url", "feedItem", "manualEntry"].includes(key),
+          `extraction wrote ${key}, which belongs to the original content`
+        );
+      }
+    }
   });
 });

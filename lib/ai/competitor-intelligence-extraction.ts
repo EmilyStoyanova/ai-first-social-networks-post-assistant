@@ -21,6 +21,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { analysisLanguageEnglishName, type AnalysisLanguage } from "@/lib/i18n/analysis-language";
 
 // ─── Vocabulary — mirrors the CompetitorXxx enums in schema.prisma exactly ────
 
@@ -125,8 +126,13 @@ export const EXTRACTION_BATCH_SIZE = 10;
  * system prompt's rules, the vetting in `parseExtractionResponse`, or the reply
  * contract change in a way that could move an answer, so a reopened row is
  * genuinely re-asked rather than settling back to `completed` for free.
+ *
+ * 1 → 2 (2026-09-02 mixed-language fix): the system prompt now names the
+ * language the free-form fields must be written in. That unambiguously moves
+ * the answer, so every row analyzed under version 1 is honestly marked as
+ * produced under different semantics.
  */
-export const EXTRACTION_SEMANTIC_VERSION = 1;
+export const EXTRACTION_SEMANTIC_VERSION = 2;
 
 // ─── What gets extracted ──────────────────────────────────────────────────
 
@@ -150,18 +156,25 @@ export function extractionExcerpt(content: ExtractableContent): string {
 
 /**
  * A stable fingerprint of the exact input an extraction was derived from:
- * title + the (uncapped) body + the semantic version. The FULL body, not the
+ * title + the (uncapped) body + the analysis language + the semantic version.
+ * The FULL body, not the
  * capped excerpt — a change beyond the cap can never move the answer since the
  * model never sees it, but hashing the full text costs nothing and keeps this
  * function honest about what "the input" means, matching
  * `computeClassificationHash`'s own reasoning for hashing the uncapped body.
  */
-export function computeExtractionHash(content: ExtractableContent): string {
+export function computeExtractionHash(
+  content: ExtractableContent,
+  language: AnalysisLanguage
+): string {
   return createHash("sha256")
     .update(
-      [(content.title ?? "").trim(), content.body.trim(), String(EXTRACTION_SEMANTIC_VERSION)].join(
-        ""
-      )
+      [
+        (content.title ?? "").trim(),
+        content.body.trim(),
+        language,
+        String(EXTRACTION_SEMANTIC_VERSION),
+      ].join("")
     )
     .digest("hex");
 }
@@ -393,8 +406,15 @@ export function parseExtractionResponse(raw: string | null | undefined): Extract
  * governing instruction) and must not be able to lean on relevance-shaped
  * reasoning ("this matters to the company because…"). That is
  * `competitor-relevance.ts`'s call, made later from this output.
+ *
+ * `language` (2026-09-02 mixed-language fix) is the ONLY company-derived input
+ * here, and it is deliberately not an exception to the above: it says what
+ * language to write the free-form fields in, nothing about who the company is
+ * or what it cares about. See `lib/i18n/analysis-language.ts` for why the
+ * company's `defaultLang` — not the viewer's UI locale — is the anchor.
  */
-export function buildExtractionSystemPrompt(): string {
+export function buildExtractionSystemPrompt(language: AnalysisLanguage): string {
+  const languageName = analysisLanguageEnglishName(language);
   return [
     "You analyze ONE piece of competitor content — a blog/news article, or a pasted social media or ad post — and extract structured facts about it.",
     "",
@@ -425,6 +445,32 @@ export function buildExtractionSystemPrompt(): string {
     "2. Never fabricate a value you cannot support from the content. Use null (or an empty array for productsServicesMentioned) when the content genuinely does not say.",
     "3. Base every answer only on the content given below — never on outside knowledge about the source, the company that wrote it, or anyone else.",
     "",
+    // 2026-09-02 mixed-language fix. The free-form fields are what a reader
+    // actually reads in the UI, so they follow the reader's language; the enum
+    // fields are database values and must stay canonical English tokens
+    // whatever language the prose is in.
+    "## Output language",
+    "",
+    `Write these fields in ${languageName}: topic, subtopic, summary, angle, targetAudience, problemAddressed, keyMessage, tone. Write them in ${languageName} EVEN IF the content below is in another language — you are describing the content for a ${languageName}-speaking reader, not transcribing it.`,
+    "",
+    "These fields are NOT affected by the instruction above and never change with it:",
+    "",
+    "- hookType, structurePattern, contentType, commercialIntent, ctaType, angleCategory — always the exact English token from the list, never translated. They are stored identifiers, not text.",
+    "- productsServicesMentioned — copy each name VERBATIM as it appears in the content. Product, service and brand names are never translated.",
+    "- ctaText — the call to action AS THE CONTENT WORDS IT, in the content's own language. It is a quotation, not a description.",
+    '- originalLanguage — always the ISO 639-1 code of the CONTENT\'s language (e.g. "en", "bg"), never the language you are writing in.',
+    "",
+    ...(language === "bg"
+      ? [
+          "## Bulgarian quality — mandatory",
+          "",
+          "- Write as a native Bulgarian analyst. Do NOT translate an English answer into Bulgarian — form the thought in Bulgarian.",
+          "- Prefer short, direct phrasing. Avoid long compound clauses that come from translating English sentence structure.",
+          "- Choose the word a Bulgarian professional actually uses in this context, not the nearest dictionary equivalent of an English word.",
+          "- Keep established technical terms, product names and company names in their original form rather than inventing a Bulgarian rendering.",
+          "",
+        ]
+      : []),
     "Reply with a single JSON object with exactly these keys and nothing else — no prose before or after it, no markdown fences:",
     "",
     "{",

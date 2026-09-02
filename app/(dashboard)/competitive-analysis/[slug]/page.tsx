@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
+import { getLocale } from "next-intl/server";
 import { auth } from "@/lib/auth";
 import { getCompany } from "@/lib/services/company/get-company.service";
 import { getResearchProfileOrDefaults } from "@/lib/services/competitive-analysis/get-research-profile-or-defaults.service";
@@ -31,8 +32,14 @@ export default async function CompetitiveAnalysisOverviewPage({ params }: Props)
   const company = await getCompany(slug, session.user.id, session.user.isGlobalAdmin);
   if (!company) notFound();
 
+  // Current application locale — seeds an UNPERSISTED profile's
+  // `analysisLanguage` default only (2026-09-02 ownership-boundary fix); a
+  // saved profile's language always comes from the database. See
+  // get-research-profile-or-defaults.service.ts.
+  const appLocale = await getLocale();
+
   const [profileResult, competitorsResult] = await Promise.all([
-    getResearchProfileOrDefaults(slug, session.user.id, session.user.isGlobalAdmin),
+    getResearchProfileOrDefaults(slug, session.user.id, session.user.isGlobalAdmin, appLocale),
     listCompetitors(slug, session.user.id, session.user.isGlobalAdmin, "active"),
   ]);
 

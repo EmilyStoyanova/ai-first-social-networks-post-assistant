@@ -10,6 +10,7 @@ import { Card } from "@/components/ui/Card";
 import { Select } from "@/components/ui/Select";
 import { TagInput } from "@/components/ui/TagInput";
 import { ANALYSIS_PERIOD_DAYS } from "@/lib/validators/research-profile.schema";
+import { ANALYSIS_LANGUAGES, type AnalysisLanguage } from "@/lib/i18n/analysis-language";
 import type { ResearchProfileDTO } from "@/lib/services/competitive-analysis/get-research-profile-or-defaults.service";
 
 interface Props {
@@ -33,6 +34,7 @@ export function ResearchProfileForm({ slug, initialProfile, isOwner }: Props) {
   const [researchTopics, setResearchTopics] = useState(initialProfile.researchTopics);
   const [markets, setMarkets] = useState(initialProfile.markets);
   const [analysisPeriodDays, setAnalysisPeriodDays] = useState(initialProfile.analysisPeriodDays);
+  const [analysisLanguage, setAnalysisLanguage] = useState(initialProfile.analysisLanguage);
   const [status, setStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState("");
 
@@ -63,7 +65,7 @@ export function ResearchProfileForm({ slug, initialProfile, isOwner }: Props) {
       const res = await fetch(`/api/v1/companies/${slug}/competitive-analysis/research-profile`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ researchTopics, markets, analysisPeriodDays }),
+        body: JSON.stringify({ researchTopics, markets, analysisPeriodDays, analysisLanguage }),
       });
       if (!res.ok) {
         const json = (await res.json()) as { error?: { message?: string } };
@@ -157,6 +159,31 @@ export function ResearchProfileForm({ slug, initialProfile, isOwner }: Props) {
             {ANALYSIS_PERIOD_DAYS.map((days) => (
               <option key={days} value={days}>
                 {t("periodDays", { days })}
+              </option>
+            ))}
+          </Select>
+        </div>
+
+        {/* Competitive Analysis's OWN analysis language (2026-09-02
+            ownership-boundary fix) — independent of Brand's Default language.
+            The only setting that changes what re-analysis is triggered for
+            (see analysisLanguage's own schema comment); everything else on
+            this form only changes filtering/scope. */}
+        <div className="mb-6 max-w-xs">
+          <Select
+            id="rp-analysis-language"
+            label={t("analysisLanguage")}
+            value={analysisLanguage}
+            onChange={(e) => {
+              setAnalysisLanguage(e.target.value as AnalysisLanguage);
+              if (status !== "idle") setStatus("idle");
+            }}
+            disabled={disabled}
+            helperText={t("analysisLanguageHelp")}
+          >
+            {ANALYSIS_LANGUAGES.map((lang) => (
+              <option key={lang} value={lang}>
+                {t(`analysisLanguageOptions.${lang}`)}
               </option>
             ))}
           </Select>

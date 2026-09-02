@@ -20,6 +20,7 @@ function item(id: string, companyId = "co-1"): ExtractableIntelligenceItem {
     competitorId: "c-1",
     status: "pending",
     attemptCount: 0,
+    analysisLanguage: "en",
     feedItem: { title: "T", content: "Body" },
     manualEntry: null,
   };
@@ -488,6 +489,7 @@ describe("2026-09 production livelock — real row shape, end to end", () => {
       competitorId: "c-1",
       status: row.status,
       attemptCount: row.attemptCount,
+      analysisLanguage: "en",
       feedItem: { title: "Some article", content: null },
       manualEntry: null,
     };
@@ -571,6 +573,7 @@ describe("2026-09 production livelock — real row shape, end to end", () => {
       competitorId: "c-1",
       status: row.status,
       attemptCount: row.attemptCount,
+      analysisLanguage: "en",
       feedItem: { title: "T", content: "Body" },
       manualEntry: null,
     };

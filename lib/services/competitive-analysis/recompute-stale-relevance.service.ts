@@ -105,6 +105,8 @@ import {
   buildSupportedProvider,
   ProviderNotAvailableError,
 } from "@/lib/ai/llm/supported-providers";
+import { resolveAnalysisLanguage, type AnalysisLanguage } from "@/lib/i18n/analysis-language";
+import { relevanceReasonCodeValue } from "./relevance-reason";
 
 // A `type`, not `interface` — see the identical note on
 // `CompetitorIntelligenceExtractionSummary`; this shape is returned directly
@@ -235,6 +237,10 @@ export async function recomputeRelevanceForRow(
   row: RelevanceRow,
   profile: RelevanceProfile,
   version: number,
+  /** The company's analysis language (2026-09-02 mixed-language fix) —
+   *  positional and REQUIRED rather than an optional dep, so a future caller
+   *  cannot silently fall back to English the way the original code did. */
+  analysisLanguage: AnalysisLanguage,
   deps: RecomputeRelevanceRowDeps = {}
 ): Promise<RecomputeRelevanceRowOutcome> {
   const db = deps.db ?? prisma;
@@ -281,7 +287,13 @@ export async function recomputeRelevanceForRow(
     const written = await db.competitorIntelligence.updateMany({
       where: { id: row.id, relevanceProfileVersion: row.relevanceProfileVersion },
       data: {
-        relevanceReason: `Relevance evaluation failed after ${MAX_RELEVANCE_ATTEMPTS} attempts against this Research Profile version.`,
+        // 2026-09-02 mixed-language fix — a canonical code, not an English
+        // sentence: this reason is written by THIS function, not the model, so
+        // it is a finite vocabulary the UI localizes by mapping and never by
+        // an AI call. `relevance-reason.ts` still recognizes the English
+        // sentence that used to be stored here, so pre-existing rows localize
+        // too.
+        relevanceReason: relevanceReasonCodeValue("attempts_exhausted"),
         relevanceProfileVersion: version,
         relevanceAttemptCount: 0,
       },
@@ -300,7 +312,11 @@ export async function recomputeRelevanceForRow(
       where: { id: row.id, relevanceProfileVersion: row.relevanceProfileVersion },
       data: {
         relevance: "out_of_scope",
-        relevanceReason: "No research topics or markets are configured.",
+        // Deterministic, so localized by mapping — see the note on the
+        // exhausted-attempts write above. This one IS user-visible (the
+        // `out_of_scope` detail branch renders it), which is how it leaked
+        // English into the Bulgarian UI.
+        relevanceReason: relevanceReasonCodeValue("no_research_interests"),
         matchedResearchTopics: [],
         relevanceProfileVersion: version,
         relevanceAttemptCount: 0,
@@ -324,7 +340,7 @@ export async function recomputeRelevanceForRow(
     productsServicesMentioned: row.productsServicesMentioned,
   };
 
-  const systemPrompt = buildRelevanceSystemPrompt();
+  const systemPrompt = buildRelevanceSystemPrompt(analysisLanguage);
   let userPrompt = buildRelevanceUserPrompt(subject, profile);
 
   try {
@@ -451,13 +467,31 @@ export type RelevanceProfileRow = {
   researchTopics: string[];
   markets: string[];
   profileVersion: number;
+  /** Competitive Analysis's own analysis language, raw (2026-09-02
+   *  mixed-language fix; re-anchored 2026-09-02 ownership-boundary fix to
+   *  `CompetitorResearchProfile.analysisLanguage` itself — no relation/join
+   *  needed any more, since it now lives on this very row). Normalized by the
+   *  caller through `resolveAnalysisLanguage`, never trusted as-is. */
+  analysisLanguage: string;
 };
 
 async function defaultLoadProfile(companyId: string): Promise<RelevanceProfileRow | null> {
-  return prisma.competitorResearchProfile.findUnique({
+  const row = await prisma.competitorResearchProfile.findUnique({
     where: { companyId },
-    select: { researchTopics: true, markets: true, profileVersion: true },
+    select: {
+      researchTopics: true,
+      markets: true,
+      profileVersion: true,
+      analysisLanguage: true,
+    },
   });
+  if (!row) return null;
+  return {
+    researchTopics: row.researchTopics,
+    markets: row.markets,
+    profileVersion: row.profileVersion,
+    analysisLanguage: row.analysisLanguage,
+  };
 }
 
 export interface RecomputeStaleRelevanceDeps extends RecomputeRelevanceRowDeps {
@@ -499,6 +533,7 @@ export async function recomputeStaleRelevanceForCompany(
     markets: profileRow.markets,
   };
   const version = profileRow.profileVersion;
+  const analysisLanguage = resolveAnalysisLanguage(profileRow.analysisLanguage);
 
   const rows = await findStaleRows(companyId, version, RELEVANCE_BATCH_SIZE);
 
@@ -508,7 +543,7 @@ export async function recomputeStaleRelevanceForCompany(
   let progressed = false;
 
   for (const row of rows) {
-    const outcome = await recomputeRelevanceForRow(row, profile, version, {
+    const outcome = await recomputeRelevanceForRow(row, profile, version, analysisLanguage, {
       db: deps.db,
       resolveProvider: deps.resolveProvider,
       attemptTimeoutMs: deps.attemptTimeoutMs,

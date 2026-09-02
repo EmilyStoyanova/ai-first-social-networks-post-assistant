@@ -1,13 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { Alert } from "@/components/ui/Alert";
 import type { CompetitorContentDetail } from "@/lib/services/competitive-analysis/competitor-content-dto";
 import { relevanceBadgeVariant } from "./content-panel";
 import { relevanceDisplayState } from "@/lib/services/competitive-analysis/relevance-display-state";
+import { resolveRelevanceReason } from "@/lib/services/competitive-analysis/relevance-reason";
+import { languageDisplayName } from "@/lib/i18n/language-name";
 
 interface Props {
   slug: string;
@@ -25,6 +27,7 @@ interface Props {
 export function ContentItemDetail({ slug, intelligenceId, onClose, profileConfigured }: Props) {
   const t = useTranslations("competitiveAnalysis.content");
   const tCommon = useTranslations("common");
+  const locale = useLocale();
 
   const [item, setItem] = useState<CompetitorContentDetail | null>(null);
   const [error, setError] = useState("");
@@ -141,14 +144,28 @@ export function ContentItemDetail({ slug, intelligenceId, onClose, profileConfig
                       </div>
                     )}
 
-                    {item.relevanceReason && (
-                      <div>
-                        <div className="text-fg-faint text-micro font-medium tracking-wide uppercase">
-                          {t("relevanceSection.reason")}
+                    {/* The reason column holds two different kinds of value —
+                        a canonical code this function localizes, or the
+                        model's own sentence (already written in the company's
+                        analysis language). `resolveRelevanceReason` tells them
+                        apart, including for rows written before that split
+                        existed. See `relevance-reason.ts`. */}
+                    {(() => {
+                      const reason = resolveRelevanceReason(item.relevanceReason);
+                      if (!reason) return null;
+                      return (
+                        <div>
+                          <div className="text-fg-faint text-micro font-medium tracking-wide uppercase">
+                            {t("relevanceSection.reason")}
+                          </div>
+                          <p className="text-fg text-sm">
+                            {reason.kind === "code"
+                              ? t(`relevanceSection.reasonCode.${reason.code}`)
+                              : reason.text}
+                          </p>
                         </div>
-                        <p className="text-fg text-sm">{item.relevanceReason}</p>
-                      </div>
-                    )}
+                      );
+                    })()}
                   </div>
                 )}
 
@@ -174,7 +191,31 @@ export function ContentItemDetail({ slug, intelligenceId, onClose, profileConfig
             );
           })()}
 
-          {item.analysisError && <Alert variant="error">{item.analysisError}</Alert>}
+          {/* The analysis error is delivered ALREADY CLASSIFIED by the DTO —
+              a deterministic condition this pipeline decided on purpose, or
+              `unknown` for arbitrary provider/internal failure text. Only the
+              deterministic ones get a specific message; `unknown` gets one
+              honest generic line, because the raw text is a diagnostic written
+              for the logs, is not localizable, and may carry internal detail.
+              The generic line only PROMISES an automatic retry when one is
+              genuinely still coming — `retryable` is decided server-side from
+              the drain's own attempt cap. See `analysis-error.ts`. */}
+          {item.analysisError && (
+            <Alert variant="error">
+              {item.analysisError.kind === "no_readable_content"
+                ? t("analysisError.no_readable_content")
+                : item.analysisError.kind === "content_too_short"
+                  ? item.analysisError.chars !== null && item.analysisError.minimum !== null
+                    ? t("analysisError.content_too_short_detail", {
+                        chars: item.analysisError.chars,
+                        minimum: item.analysisError.minimum,
+                      })
+                    : t("analysisError.content_too_short")
+                  : item.analysisError.retryable
+                    ? t("analysisError.unknown")
+                    : t("analysisError.unknownTerminal")}
+            </Alert>
+          )}
 
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {field(t("fields.topic"), item.topic)}
@@ -200,7 +241,14 @@ export function ContentItemDetail({ slug, intelligenceId, onClose, profileConfig
             {field(t("fields.ctaType"), item.ctaType ? t(`ctaType.${item.ctaType}`) : null)}
             {field(t("fields.targetAudience"), item.targetAudience)}
             {field(t("fields.tone"), item.tone)}
-            {field(t("fields.originalLanguage"), item.originalLanguage)}
+            {/* The stored value is a canonical ISO 639-1 code and stays that
+                way in the database; only the label is localized, so a
+                Bulgarian UI reads "английски" instead of a bare "en". Pure
+                mapping via Intl — never an AI call. */}
+            {field(
+              t("fields.originalLanguage"),
+              languageDisplayName(item.originalLanguage, locale)
+            )}
           </div>
 
           {field(t("fields.summary"), item.summary)}
