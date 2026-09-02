@@ -26,6 +26,11 @@ interface Props {
  * then navigates via `companySwitchHref` to preserve the current sub-route
  * where the destination has one, or just refreshes in place (Dashboard/Admin)
  * when it doesn't.
+ *
+ * ONE responsibility: which company is active. The main nav answers what the
+ * user wants to do (Companies, Company Management), so this menu deliberately
+ * holds no management links — see the comment above `+ Add company`, the one
+ * action that has nowhere else to live.
  */
 export function CompanySelector({ activeCompany }: Props) {
   const t = useTranslations("header.companySelector");
@@ -144,24 +149,14 @@ export function CompanySelector({ activeCompany }: Props) {
 
           <div className="border-border my-1 border-t" />
 
-          {activeCompany && (
-            <Link
-              href={`/companies/${activeCompany.slug}`}
-              role="menuitem"
-              onClick={() => setIsOpen(false)}
-              className="hover:bg-surface-subtle duration-fast block px-3 py-2 text-sm transition-colors"
-            >
-              {t("manageCurrent")}
-            </Link>
-          )}
-          <Link
-            href="/companies"
-            role="menuitem"
-            onClick={() => setIsOpen(false)}
-            className="hover:bg-surface-subtle duration-fast block px-3 py-2 text-sm transition-colors"
-          >
-            {t("manageCompanies")}
-          </Link>
+          {/* "Manage current company" (→ /companies/[slug]) and "Manage
+              companies" (→ /companies) were removed 2026-09-02: the main nav
+              now carries both destinations as Company Management and
+              Companies, so keeping them here was the same navigation twice.
+              What remains is the one thing the nav genuinely cannot offer —
+              creating a company you do not have yet, which has no active
+              company to resolve and so no nav item of its own. */}
+
           {/* No RBAC restriction exists on creating a company today (verified
               against companies/new/page.tsx — any authenticated user may) —
               so this is unconditional, matching that. */}

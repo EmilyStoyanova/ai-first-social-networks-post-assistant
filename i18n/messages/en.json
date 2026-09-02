@@ -195,8 +195,6 @@
       "noCompany": "No company selected",
       "loading": "Loading…",
       "noCompanies": "No companies yet",
-      "manageCurrent": "Manage current company",
-      "manageCompanies": "Manage companies",
       "addCompany": "+ Add company",
       "switchTo": "Switch to {name}"
     }
