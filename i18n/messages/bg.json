@@ -195,6 +195,7 @@
       "noCompany": "Няма избрана компания",
       "loading": "Зареждане…",
       "noCompanies": "Все още няма компании",
+      "viewAllCompanies": "Всички компании",
       "addCompany": "+ Добави компания",
       "switchTo": "Превключи към {name}"
     }

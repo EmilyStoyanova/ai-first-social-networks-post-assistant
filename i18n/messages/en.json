@@ -195,6 +195,7 @@
       "noCompany": "No company selected",
       "loading": "Loading…",
       "noCompanies": "No companies yet",
+      "viewAllCompanies": "All companies",
       "addCompany": "+ Add company",
       "switchTo": "Switch to {name}"
     }

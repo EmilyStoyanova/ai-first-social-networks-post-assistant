@@ -149,13 +149,23 @@ export function CompanySelector({ activeCompany }: Props) {
 
           <div className="border-border my-1 border-t" />
 
-          {/* "Manage current company" (→ /companies/[slug]) and "Manage
-              companies" (→ /companies) were removed 2026-09-02: the main nav
-              now carries both destinations as Company Management and
-              Companies, so keeping them here was the same navigation twice.
-              What remains is the one thing the nav genuinely cannot offer —
-              creating a company you do not have yet, which has no active
-              company to resolve and so no nav item of its own. */}
+          {/* "Manage current company" (→ /companies/[slug]) was removed
+              2026-09-02: the main nav already carries that destination as
+              Company Management. "Manage companies" (→ /companies), removed
+              the same day for the same reason, came back 2026-09-03 once
+              Companies itself left the main nav (see `navigation.tsx`) — this
+              is now the only way back to the full list (search, role filter,
+              per-company draft counts), since the list above is this menu's
+              own compact switcher, not that page. */}
+          <Link
+            href="/companies"
+            role="menuitem"
+            onClick={() => setIsOpen(false)}
+            className="hover:bg-surface-subtle duration-fast flex items-center gap-1.5 px-3 py-2 text-sm transition-colors"
+          >
+            <Building2 className="h-3.5 w-3.5" aria-hidden="true" />
+            {t("viewAllCompanies")}
+          </Link>
 
           {/* No RBAC restriction exists on creating a company today (verified
               against companies/new/page.tsx — any authenticated user may) —
