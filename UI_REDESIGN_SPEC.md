@@ -409,16 +409,15 @@ The direction is unchanged: **the company becomes a workspace with tabs; setup m
 
 Status markers: ✅ shipped as specified · ⚠️ shipped divergently · ⬜ not built.
 
-**Superseded (2026-08-31): the persistent left sidebar is gone.** The global shell is a single horizontal bar. **Amended (2026-09-01):** the earlier "no Companies item, creation is its own module" position is itself superseded — see the two rows dated 2026-09-01 in §2.3. Companies returns to the nav as the _list_; **Company Management** replaces Content Creation and opens the active company's existing workspace; post generation returns to that workspace's Posts tab, beside the posts it creates.
+**Superseded (2026-08-31): the persistent left sidebar is gone.** The global shell is a single horizontal bar. **Amended (2026-09-01):** the earlier "no Companies item, creation is its own module" position is itself superseded — see the two rows dated 2026-09-01 in §2.3. Companies returns to the nav as the _list_; **Company Management** replaces Content Creation and opens the active company's existing workspace; post generation returns to that workspace's Posts tab, beside the posts it creates. **Amended (2026-09-03):** Companies is removed from the nav again — the CompanySelector dropdown already lists every accessible company (with a current-company check), making the nav item and the dropdown the same destination twice. `/companies` and `/companies/new` remain reachable (dashboard quick action, selector's "+ Add company"), just not as a top-level nav destination.
 
 ```
 GLOBAL PRODUCT NAV (single horizontal bar, no sidebar)                       ✅
 ├── Dashboard              → /dashboard                "what needs my attention" — cross-company, unaffected by the selector
-├── Companies              → /companies                 the LIST: every accessible company, + create one
 ├── Company Management     → /create → /companies/[slug]  the ACTIVE company's workspace (a resolver shim, not a page)
 ├── Competitive Analysis   → /competitive-analysis → /competitive-analysis/[slug]/...   competitor tracking for the active company
 ├── Admin (global admins only) → /admin               users · companies · LLM
-└── Right cluster: Current Company selector · account menu (avatar → name · language EN/BG · log out)
+└── Right cluster: Current Company selector (opens to every accessible company, + Add company) · account menu (avatar → name · language EN/BG · log out)
 
 GLOBAL CONTEXT
 Current Company selector (header, visually distinct from the nav): shows the
@@ -1274,9 +1273,9 @@ _(values as of 2026-07 — verify against each network at implementation time)_
 Format: **Purpose · Props · Variants · States · Used in**. All in `components/ui/` unless noted; existing primitives (Card, Button, Modal, Alert, Badge, Input, PageHeader, EmptyState, Section) are restyled to §6 and extended as below.
 
 1. **AppShell** — global layout: header (nav + selector) + content region, no sidebar (2026-08-31). Props: `user`, `activeCompany`, `children`. States: mobile nav open (inline disclosure panel under the header, not a drawer). Used: every authenticated page.
-2. **Navigation** — global nav list (Dashboard / Companies / Company Management / Competitive Analysis / Admin), horizontal. Props: `isGlobalAdmin`. States: item active/hover/focus — active is decided by `lib/navigation/nav-active.ts`, not a prefix match, because Company Management redirects into `/companies/[slug]`. Used: AppShell header, both desktop (horizontal) and mobile (vertical) variants of the same component.
+2. **Navigation** — global nav list (Dashboard / Company Management / Competitive Analysis / Admin), horizontal (2026-09-03: Companies removed, see §2.2). Props: `isGlobalAdmin`. States: item active/hover/focus — active is decided by `lib/navigation/nav-active.ts`, not a prefix match, because Company Management redirects into `/companies/[slug]`. Used: AppShell header, both desktop (horizontal) and mobile (vertical) variants of the same component.
    2b. **UserMenu** — the header's single account control (2026-09-01). Props: `name`, `email`. Renders an avatar (profile image → initials via `lib/user/user-initials.ts` → generic icon); the menu holds account identity, EN/Български, and Logout. Replaces the separate user-name span, LanguageSwitcher and LogoutButton in the header. Dismissal (outside click + Escape) mirrors CompanySelector. Used: AppShell header.
-   2a. **CompanySelector** — persistent "Current Company" control, visually distinct from the nav. Props: `activeCompany`. States: closed/open, loading (lazy-fetched company list), switching. Menu: company list with current-company check, Manage current company, Manage companies, + Add company (RBAC-gated). Used: AppShell header.
+   2a. **CompanySelector** — persistent "Current Company" control, visually distinct from the nav. Props: `activeCompany`. States: closed/open, loading (lazy-fetched company list), switching. Menu: every accessible company with a current-company check + switch-on-click, then + Add company (RBAC-gated) — "Manage current company" / "Manage companies" were removed 2026-09-02 as duplicate navigation once the nav carried both. Used: AppShell header.
 3. **PageHeader** — title + optional description + actions slot. Props: `title`, `description?`, `actions?`, `breadcrumb?`. Used: every page.
 4. **TabBar** — workspace/admin tabs. Props: `tabs: {label, href, count?}[]`, `active`. Variants: line (default). States: active, hover, overflow-scroll. Used: company workspace, Admin.
 5. **CompanyHeader** — workspace identity strip. Props: `name`, `automationMode`, `bufferStatus`. Used: all workspace tabs.

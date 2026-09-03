@@ -8,7 +8,7 @@ import { Navigation } from "./navigation";
 import { NavigationItem } from "./navigation-item";
 import { CompanySelector, type ActiveCompanySummary } from "./company-selector";
 import { UserMenu } from "./user-menu";
-import { COMPANIES_HREF, COMPANY_MANAGEMENT_HREF } from "@/lib/navigation/nav-active";
+import { COMPANY_MANAGEMENT_HREF } from "@/lib/navigation/nav-active";
 import { Logo } from "@/components/ui/Logo";
 import type { BreadcrumbItem } from "./dashboard-layout";
 
@@ -122,11 +122,6 @@ export function DashboardHeader({
             <NavigationItem
               href="/dashboard"
               label={t("navigation.dashboard")}
-              variant="vertical"
-            />
-            <NavigationItem
-              href={COMPANIES_HREF}
-              label={t("navigation.companies")}
               variant="vertical"
             />
             <NavigationItem
