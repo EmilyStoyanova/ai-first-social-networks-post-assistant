@@ -28,7 +28,8 @@
     "translate:next": "npx tsx scripts/translate-next-feed-item.ts",
     "ingest:one": "npx tsx scripts/ingest-one-source.ts",
     "typecheck": "tsc --noEmit",
-    "test": "npx tsx --test \"app/**/*.test.ts\" \"i18n/**/*.test.ts\" \"lib/**/*.test.ts\" \"scripts/**/*.test.ts\" \"worker/**/*.test.ts\""
+    "test": "npx tsx --test \"app/**/*.test.ts\" \"i18n/**/*.test.ts\" \"lib/**/*.test.ts\" \"scripts/**/*.test.ts\" \"worker/**/*.test.ts\"",
+    "crew:verify": "npx tsx scripts/verify-crew-sidecar.ts"
   },
   "lint-staged": {
     "*.{ts,tsx}": [

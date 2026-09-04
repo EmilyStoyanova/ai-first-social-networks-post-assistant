@@ -1,171 +1,39 @@
 import type { ILlmProvider } from "./types";
 import { parseLlmPost, type ParsedLlmPost } from "./parse-llm-post";
 import { LlmResponseParseError } from "./errors";
+import { type DuplicateCheckResult, type RecentPost } from "./quality/duplicate-detection";
+import { extractOpeningSignature, type OpeningDiversityResult } from "./quality/opening-diversity";
+import { type ComplianceResult } from "./quality/generation-compliance";
 import {
-  checkDuplicatePost,
-  SIMILARITY_THRESHOLD,
-  type DuplicateCheckResult,
-  type RecentPost,
-} from "./quality/duplicate-detection";
-import { type SemanticDecision } from "./quality/semantic-duplicate";
-import {
-  checkOpeningDiversity,
-  extractOpeningSignature,
-  type OpeningDiversityResult,
-} from "./quality/opening-diversity";
-import { assessCoreMessage } from "./quality/core-message-quality";
-import {
-  validateGenerationCompliance,
+  evaluateCandidate,
   NO_COMPLIANCE_CHECK,
-  type ComplianceResult,
-  type ComplianceDimension,
-} from "./quality/generation-compliance";
+  NO_DUPLICATE_CHECK,
+  NO_OPENING_CHECK,
+  NO_SEMANTIC_GATE,
+  type DuplicateCandidateContext,
+  type SemanticGate,
+  type SemanticGateResult,
+} from "./quality/evaluate-candidate";
 import { buildRetryUserPrompt } from "./prompt-builder";
 import { type ContentAngle, selectRetryAngle } from "./content-angle";
 import { type PostPattern, selectRetryPattern } from "./post-pattern";
 import { type ContentAspect, selectRetryAspect } from "./content-aspect";
-import { isTopicRepeated } from "./topic-memory";
 import type {
   AttemptRejectionReason,
   GenerationAttemptRecorder,
 } from "@/lib/generation-trace/attempt-record";
+import type { MultiAgentProvenance } from "./crew/provenance";
 
 export const MAX_GENERATION_ATTEMPTS = 3;
 
 /**
- * What this generation IS, for `[jaccard_duplicate]` diagnostics only — never
- * read by the comparison itself. Lets a flagged match be classified against
- * the candidate it was flagged for (same article? same content group? a
- * genuinely unrelated historical post?) without a second DB lookup.
+ * The gate types and the gate evaluator now live in `quality/evaluate-candidate.ts`
+ * so the multi-agent strategy judges its candidates with the SAME implementation
+ * rather than a copy (see that module's docblock). They are re-exported here
+ * because this module has always been where callers import them from, and moving
+ * an import path is churn with no benefit.
  */
-export interface DuplicateCandidateContext {
-  channel: string;
-  feedItemId: string | null;
-  contentGroupId: string | null;
-}
-
-/**
- * Logs everything needed to answer "what existing post did this get flagged
- * against, and was it a legitimate sibling or a real duplicate" — without
- * needing to re-query the database. `recentPosts` already carries the metadata
- * (see `RecentPost`); this only looks up the one that matched and classifies it.
- */
-function logJaccardDuplicate(
-  result: DuplicateCheckResult,
-  recentPosts: readonly RecentPost[],
-  candidateContext?: DuplicateCandidateContext
-): void {
-  const matched = recentPosts.find((p) => p.id === result.matchedPostId);
-  const candidateChannel = candidateContext?.channel ?? null;
-  const candidateFeedItemId = candidateContext?.feedItemId ?? null;
-  const candidateContentGroupId = candidateContext?.contentGroupId ?? null;
-  const matchedChannel = matched?.channel ?? null;
-  const matchedFeedItemId = matched?.feedItemId ?? null;
-  const matchedContentGroupId = matched?.contentGroupId ?? null;
-
-  const sameArticleSibling =
-    candidateFeedItemId !== null && matchedFeedItemId !== null
-      ? matchedFeedItemId === candidateFeedItemId
-      : false;
-  const sameContentGroupSibling =
-    !sameArticleSibling &&
-    candidateContentGroupId !== null &&
-    matchedContentGroupId !== null &&
-    matchedContentGroupId === candidateContentGroupId;
-  const sameChannel =
-    candidateChannel !== null && matchedChannel !== null && matchedChannel === candidateChannel;
-
-  const matchKind = sameArticleSibling
-    ? "same_article_sibling"
-    : sameContentGroupSibling
-      ? "same_content_group_sibling"
-      : "historical_post";
-  const matchLabel = sameArticleSibling
-    ? "same-article sibling"
-    : sameContentGroupSibling
-      ? "same-content-group sibling"
-      : `historical ${matchedChannel ?? "unknown"}`;
-
-  console.warn(
-    `[jaccard_duplicate] candidate ${candidateChannel ?? "unknown"} matched ${matchLabel} post ${
-      result.matchedPostId
-    } similarity ${result.similarityScore} threshold ${SIMILARITY_THRESHOLD}`,
-    {
-      candidateChannel,
-      candidateFeedItemId,
-      candidateContentGroupId,
-      similarity: result.similarityScore,
-      threshold: SIMILARITY_THRESHOLD,
-      matchedPostId: result.matchedPostId,
-      matchedPostChannel: matchedChannel,
-      matchedFeedItemId,
-      matchedContentGroupId,
-      matchedCreatedAt: matched?.createdAt ?? null,
-      matchKind,
-      sameChannel,
-      differentChannel: candidateChannel !== null && matchedChannel !== null && !sameChannel,
-    }
-  );
-}
-
-/** Neutral opening-diversity verdict for a run that never evaluated one. */
-const NO_OPENING_CHECK: OpeningDiversityResult = {
-  flagged: false,
-  matchType: null,
-  matchedPostId: null,
-  similarity: null,
-  candidateForm: "statement",
-  matchedOpening: null,
-};
-
-/**
- * Concise, and deliberately so: the opening excerpt is capped at 120 characters
- * by the signature extractor, so this can never spill a historical post into the
- * logs the way a full-text diff would.
- */
-function logOpeningConflict(result: OpeningDiversityResult, attempt: number): void {
-  console.warn(
-    `[generation-diversity] opening conflict: attempt=${attempt} matchType=${result.matchType} ` +
-      `candidateShape=${result.candidateForm} matchedPostId=${result.matchedPostId} ` +
-      `similarity=${result.similarity ?? "n/a"} matchedOpening="${result.matchedOpening ?? ""}"`
-  );
-}
-
-// ─── Semantic duplicate gate (Phase 1.4) ──────────────────────────────────────
-// The gate embeds a candidate's coreMessage and compares it against recent
-// accepted embeddings. It is injected (the DB + embedding provider live in the
-// service layer) so this module stays pure and testable.
-
-export interface SemanticGateResult {
-  decision: SemanticDecision;
-  /** Cosine similarity to the closest neighbor; null when there is no history. */
-  topSimilarity: number | null;
-  matchedPostId: string | null;
-  /** The repeated central claim — fed back to the LLM on a semantic retry. */
-  matchedCoreMessage: string | null;
-  /**
-   * True when the gate could not run (no provider, embedding or lookup failed).
-   * Fail-open: the candidate is accepted and the skip is surfaced for logging.
-   */
-  skipped: boolean;
-}
-
-export type SemanticGate = (candidate: {
-  coreMessage: string | null;
-  /** The candidate's declared topic — enriches the embedded document when present. */
-  topic?: string | null;
-  /** The aspect focus used for this candidate — enriches the embedded document. */
-  aspectFocus?: string | null;
-}) => Promise<SemanticGateResult>;
-
-/** Neutral result when no gate is wired — treated as "gate did not evaluate". */
-const NO_SEMANTIC_GATE: SemanticGateResult = {
-  decision: "accept",
-  topSimilarity: null,
-  matchedPostId: null,
-  matchedCoreMessage: null,
-  skipped: true,
-};
+export type { DuplicateCandidateContext, SemanticGate, SemanticGateResult };
 
 export interface DiversityOptions {
   /** The content angle baked into the initial baseUserPrompt. */
@@ -243,6 +111,17 @@ export interface GenerationLoopResult {
   selectedPattern?: PostPattern;
   /** The content aspect that produced the accepted (or last) result. */
   selectedAspect?: ContentAspect;
+  /**
+   * How this candidate was produced, when it was NOT the single-agent loop.
+   *
+   * Every field is optional so `generateWithRetry` leaves the whole object
+   * undefined and the type stays exactly as compatible as it was — that
+   * compatibility is what lets `bindMultiAgent` be a drop-in for
+   * `deps.generateWithRetry`. See `lib/ai/crew/provenance.ts` for the shape and
+   * for why the application provider label alone cannot establish A/B model
+   * equality.
+   */
+  multiAgent?: MultiAgentProvenance;
 }
 
 /**
@@ -280,11 +159,7 @@ export async function generateWithRetry(
   contentLanguage?: string | null
 ): Promise<GenerationLoopResult> {
   let lastParsed: ParsedLlmPost | null = null;
-  let lastDuplicateResult: DuplicateCheckResult = {
-    flagged: false,
-    similarityScore: null,
-    matchedPostId: null,
-  };
+  let lastDuplicateResult: DuplicateCheckResult = NO_DUPLICATE_CHECK;
   let lastSemanticResult: SemanticGateResult = NO_SEMANTIC_GATE;
   let lastCoreMessageGeneric = false;
   let lastTopicRepeated = false;
@@ -495,101 +370,33 @@ export async function generateWithRetry(
       throw err;
     }
 
-    lastDuplicateResult = checkDuplicatePost({
-      candidateText: lastParsed.text,
+    // Every deterministic gate, in one shared implementation — the same one the
+    // multi-agent strategy judges its candidates with. The loop itself never
+    // throws: the last candidate is returned with every verdict attached, and
+    // the caller decides which verdicts are fatal (the generation service aborts
+    // on an unresolved duplicate and on unresolved noncompliance — never on a
+    // repeated opening).
+    const verdict = await evaluateCandidate({
+      parsed: lastParsed,
       recentPosts,
+      semanticGate,
+      recentTopics: diversityOptions?.recentTopics,
+      contentLanguage,
+      aspectFocus: currentAspect?.focus,
+      attempt,
+      candidateContext,
     });
-    if (lastDuplicateResult.flagged) {
-      logJaccardDuplicate(lastDuplicateResult, recentPosts, candidateContext);
-    }
-    lastSemanticResult = semanticGate
-      ? await semanticGate({
-          coreMessage: lastParsed.coreMessage,
-          topic: lastParsed.topic,
-          aspectFocus: currentAspect?.focus,
-        })
-      : NO_SEMANTIC_GATE;
-    lastCoreMessageGeneric = assessCoreMessage(lastParsed.coreMessage).generic;
-    // Topic Memory: reject a candidate whose normalized topic was already used.
-    lastTopicRepeated = isTopicRepeated(lastParsed.topic, diversityOptions?.recentTopics ?? []);
-    // Post-generation compliance gate: is the text free of banned terms? The
-    // angle/hook/structure/CTA it was generated under are NOT re-verified here —
-    // they are generation guidance and never a gate (see generation-compliance.ts).
-    lastComplianceResult = validateGenerationCompliance({
-      text: lastParsed.text,
-      language: contentLanguage,
-    });
-    // Realised-opening diversity: does the first line this candidate ACTUALLY
-    // wrote repeat a recent post's first line? Deterministic, no extra LLM call,
-    // and it reuses the recent-post window already loaded for Jaccard — which is
-    // why it inherits that window's company+channel scoping for free.
-    lastOpeningResult = checkOpeningDiversity({
-      candidateText: lastParsed.text,
-      recentPosts,
-    });
-    if (lastOpeningResult.flagged) {
-      logOpeningConflict(lastOpeningResult, attempt);
-    }
 
-    // Diagnostic compliance logging. `enforced` names the dimensions that can
-    // actually block; everything absent from it (angle/hook/structure/CTA) is
-    // prompt guidance that is never verified after generation, so it can never
-    // appear as a failure here.
-    if (lastComplianceResult.evaluated) {
-      const enforcedDimensions = (
-        Object.entries(lastComplianceResult.checked) as Array<[ComplianceDimension, boolean]>
-      )
-        .filter(([, isEnforced]) => isEnforced)
-        .map(([dim]) => dim)
-        .join(",");
-      const failedDimensions =
-        lastComplianceResult.failures.length > 0
-          ? lastComplianceResult.failures.map((f) => f.dimension).join(",")
-          : "none";
-      console.info(
-        `[generation-compliance] attempt=${attempt} enforced=${enforcedDimensions || "none"} failed=${failedDimensions} (stylistic dimensions are guidance only)`
-      );
-      if (lastComplianceResult.failures.length > 0) {
-        lastComplianceResult.failures.forEach((failure) => {
-          console.info(`  ${failure.dimension}: ${failure.reason}`);
-        });
-      }
-    }
+    lastDuplicateResult = verdict.duplicateResult;
+    lastSemanticResult = verdict.semanticResult;
+    lastCoreMessageGeneric = verdict.coreMessageGeneric;
+    lastTopicRepeated = verdict.topicRepeated;
+    lastComplianceResult = verdict.complianceResult;
+    lastOpeningResult = verdict.openingResult;
 
-    // Retry on a near-verbatim (Jaccard) hit, a semantic-duplicate "regenerate",
-    // a generic coreMessage (broad praise hides real repetition), a repeated
-    // conceptual topic, a repeated OPENING, OR a failed compliance check. The
-    // loop itself never throws: the last candidate is returned with every
-    // verdict attached, and the caller decides which verdicts are fatal (the
-    // generation service aborts on an unresolved duplicate and on unresolved
-    // noncompliance — never on a repeated opening).
-    //
-    // Opening diversity is its own trigger on purpose. It is not semantic
-    // duplication (the claims differ), not Jaccard (the posts differ), and not
-    // compliance (nothing is prohibited) — it is the same sentence shape twice
-    // running, which every other gate is blind to by construction.
-    const needsRetry =
-      lastDuplicateResult.flagged ||
-      lastSemanticResult.decision === "regenerate" ||
-      lastCoreMessageGeneric ||
-      lastTopicRepeated ||
-      lastOpeningResult.flagged ||
-      lastComplianceResult.status === "failed";
-
+    const needsRetry = verdict.needsRetry;
     // Diagnostic: which of the triggers fired, and whether retries remain.
-    const rejectionReason: AttemptRejectionReason | null = !needsRetry
-      ? null
-      : lastDuplicateResult.flagged
-        ? "jaccard_duplicate"
-        : lastSemanticResult.decision === "regenerate"
-          ? "semantic_duplicate"
-          : lastCoreMessageGeneric
-            ? "generic_core_message"
-            : lastTopicRepeated
-              ? "repeated_topic"
-              : lastOpeningResult.flagged
-                ? "opening_repeated"
-                : "compliance_failed";
+    const rejectionReason: AttemptRejectionReason | null = verdict.rejectionReason;
     lastRejectionReason = rejectionReason;
     const willRetry = needsRetry && attempt < maxAttempts;
 

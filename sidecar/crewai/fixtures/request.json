@@ -1,0 +1,40 @@
+{
+  "articleUnderstanding": {
+    "mainSubject": "Residents are protesting new tourism development in a protected coastal area.",
+    "centralThesis": "The development would breach the area's protected status.",
+    "centralConflict": "Local livelihoods against conservation rules.",
+    "articleType": "news",
+    "secondaryTopics": ["tourism", "planning permission"],
+    "incidentalTopics": ["beaches", "hotels"],
+    "entities": ["Coastal Council"],
+    "confidence": 0.82,
+    "source": "understanding"
+  },
+  "platform": "facebook",
+  "language": "bg",
+  "brandContext": {
+    "companyName": "Example Ltd",
+    "companyDescription": "A regional property and interiors business.",
+    "toneOfVoice": "Warm, plain-spoken, never salesy.",
+    "targetAudience": "Homeowners in their 30s and 40s.",
+    "forbiddenWords": ["Стоп"]
+  },
+  "generationRequirements": {
+    "systemPrompt": "You write social posts for one company. Follow every requirement literally.",
+    "userPrompt": "Write one Facebook post in Bulgarian about the article above. Open with a contrast, use a short list, and end with a comment prompt.",
+    "maxTextLength": 2000,
+    "responseContract": "llm_post_json"
+  },
+  "inferenceConfig": {
+    "model": "qwen3.5:35b-a3b-q4_K_M",
+    "baseUrl": "http://127.0.0.1:11434",
+    "temperature": 0.85,
+    "numPredict": 1024
+  },
+  "attemptContext": {
+    "attempt": 1,
+    "maxAttempts": 3,
+    "maxQaRounds": 2,
+    "previousRejection": null
+  }
+}
