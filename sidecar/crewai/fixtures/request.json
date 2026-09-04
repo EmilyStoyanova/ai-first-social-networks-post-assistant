@@ -27,9 +27,7 @@
   },
   "inferenceConfig": {
     "model": "qwen3.5:35b-a3b-q4_K_M",
-    "baseUrl": "http://127.0.0.1:11434",
-    "temperature": 0.85,
-    "numPredict": 1024
+    "baseUrl": "http://127.0.0.1:11434"
   },
   "attemptContext": {
     "attempt": 1,

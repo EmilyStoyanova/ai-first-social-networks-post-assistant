@@ -60,9 +60,44 @@ except ImportError:  # pragma: no cover - depends on the installed layout
 
 from guards import assert_agent_posture
 
-# The routing logic lives in `qa_verdict.py`, which imports nothing beyond the
-# standard library, so it is testable without CrewAI or Ollama installed.
+# The routing logic and the LLM kwarg mapping both live in stdlib-only modules,
+# so each is testable without CrewAI or Ollama installed.
 from qa_verdict import QaVerdict, parse_qa_reply
+from inference_config import llm_kwargs
+
+
+def redact_llm_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The LLM configuration, safe to log.
+
+    Logged on every run because the defect that cost a live Mac cycle was a
+    SAMPLING value — `numPredict: 1024` strangling a thinking model — and the
+    sidecar's logs said nothing about what it had actually configured. One line
+    turns "why was the response empty" from a guess into a reading.
+
+    There is nothing secret in here (a model tag and a loopback URL), but the
+    `base_url` is still reduced to its host so a log shipped elsewhere never
+    carries an internal path.
+    """
+    safe = dict(kwargs)
+    url = safe.get("base_url")
+    if isinstance(url, str):
+        # scheme://host — the first three segments of a split on "/".
+        safe["base_url"] = "/".join(url.split("/")[:3])
+    return safe
+
+
+class StageFailure(RuntimeError):
+    """A named stage produced nothing usable.
+
+    Carries the STAGE, because "the run failed" and "the Writer came back empty"
+    lead to different investigations, and the sidecar's HTTP layer can only say
+    the second if the exception says it first.
+    """
+
+    def __init__(self, stage: str, detail: str) -> None:
+        super().__init__(f"{stage}: {detail}")
+        self.stage = stage
+        self.detail = detail
 
 
 @dataclass
@@ -95,26 +130,13 @@ def build_llm(inference: dict[str, Any]) -> LLM:
     is what makes the two arms' inference fingerprints comparable. A hosted
     provider is not reachable from here — no key for one is in the environment,
     so a mistake fails loudly rather than billing silently.
-    """
-    model = inference["model"]
-    if not model.startswith("ollama/"):
-        model = f"ollama/{model}"
-    base_url = inference.get("baseUrl", "http://127.0.0.1:11434")
-    if not base_url.startswith("http://127.0.0.1") and not base_url.startswith("http://localhost"):
-        raise ValueError(f"Refusing a non-loopback Ollama base_url: {base_url!r}")
 
-    kwargs: dict[str, Any] = {"model": model, "base_url": base_url}
-    for wire, arg in (
-        ("temperature", "temperature"),
-        ("topP", "top_p"),
-        ("topK", "top_k"),
-        ("seed", "seed"),
-        ("numPredict", "max_tokens"),
-        ("repeatPenalty", "repeat_penalty"),
-        ("stop", "stop"),
-    ):
-        if inference.get(wire) is not None:
-            kwargs[arg] = inference[wire]
+    The kwarg mapping lives in `inference_config.llm_kwargs`, which is stdlib
+    only and separately tested — read its docstring before pinning `numPredict`
+    against a thinking model.
+    """
+    kwargs = llm_kwargs(inference)
+    print(f"[crew-sidecar] LLM kwargs: {redact_llm_kwargs(kwargs)}")
     return LLM(**kwargs)
 
 
@@ -159,6 +181,19 @@ def build_agents(llm: LLM) -> tuple[Agent, Agent, Agent]:
             "verbose": False,
         },
     )
+    # The one kwarg the filter must NEVER be allowed to drop.
+    #
+    # An Agent constructed without an `llm` falls back to CrewAI's own default,
+    # which is OpenAI — so a renamed field would turn this filter into a silent
+    # cloud fallback, the exact thing the whole design forbids. Every other
+    # dropped kwarg degrades to a posture check that `assert_agent_posture`
+    # still catches; this one would degrade to billing someone.
+    if "llm" not in common:
+        raise StageFailure(
+            "build_agents",
+            "The installed CrewAI Agent does not declare an `llm` field, so the pinned "
+            "local model would be dropped and a default provider used. Refusing to run.",
+        )
     writer = Agent(
         role="Social media writer",
         goal="Write one social post that satisfies every requirement given, exactly as given.",
@@ -193,6 +228,15 @@ def build_agents(llm: LLM) -> tuple[Agent, Agent, Agent]:
         **common,
     )
     assert_agent_posture([writer, editor, qa])
+    # And the pinned model really is the one each agent holds — asserted on the
+    # CONSTRUCTED objects, so a version that silently substituted its own
+    # default is caught here rather than on someone's OpenAI invoice.
+    for agent in (writer, editor, qa):
+        if getattr(agent, "llm", None) is not llm:
+            raise StageFailure(
+                "build_agents",
+                f"Agent {agent.role!r} is not holding the pinned local model.",
+            )
     return writer, editor, qa
 
 
@@ -305,13 +349,25 @@ def run_flow(request: dict[str, Any]) -> FlowResult:
 
     # ── Writer → Editor → QA (3 calls) ──────────────────────────────────────
     counters.writer += 1
-    draft = _run_single(
-        writer,
-        base_instructions,
-        "A single JSON object holding the post.",
-    )
+    try:
+        draft = _run_single(
+            writer,
+            base_instructions,
+            "A single JSON object holding the post.",
+        )
+    except StageFailure:
+        raise
+    except Exception as err:  # noqa: BLE001 - re-raised, only the stage is added
+        # CrewAI's own "Invalid response from LLM call - None or empty" arrives
+        # here. Naming the stage is what turns a 503 into a diagnosis: with a
+        # thinking model, an empty reply is very often a `numPredict` cap
+        # consumed entirely by the reasoning preamble — see inference_config.py.
+        raise StageFailure("writer", f"{type(err).__name__}: {err}") from err
     if not draft or not draft.strip():
-        raise RuntimeError("The Writer produced no output.")
+        # NOT retried and NOT substituted. An empty candidate stays a failure,
+        # which is what makes the caller release its claimed article and report
+        # the run as unavailable rather than saving nothing-shaped-like-a-post.
+        raise StageFailure("writer", "The Writer produced no output.")
 
     candidate = _edit(editor, counters, draft, base_instructions)
     verdict = _judge(qa_agent, counters, candidate, base_instructions)

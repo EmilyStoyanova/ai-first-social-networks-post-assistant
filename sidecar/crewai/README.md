@@ -71,6 +71,58 @@ become the whole verdict), and a rejection naming nothing actionable is
 `rejected_unroutable` (a non-converged attempt, never acceptable even when every
 gate passes).
 
+## Sampling and thinking models — a defect that already bit
+
+A live run failed with the sidecar logging:
+
+```
+ERROR: crewai.flow.runtime: Invalid response from LLM call - None or empty
+POST /crew/post → 503
+```
+
+The cause was **`numPredict: 1024` in the fixture**. It maps to litellm's
+`max_tokens` and then to Ollama's `num_predict`, a cap on tokens the model may
+EMIT — and `qwen3.5:35b-a3b-q4_K_M` is a reasoning model whose `<think>`
+preamble is charged against that same budget. It was cut off mid-reasoning and
+emitted no answer, so CrewAI saw empty content. The isolated POC, which passed
+`model` and `base_url` and nothing else, worked; the multi-agent prompts are
+much longer, so the reasoning block is longer too.
+
+The same wall was hit elsewhere in this repo:
+`MAX_UNDERSTANDING_OUTPUT_TOKENS` went from 500 to 1200 because the old cap
+"left a capable local model no room to finish a maximal answer, let alone one
+that also emits a thinking preamble before its JSON".
+
+**The fixture now pins no sampling at all**, which reproduces the POC exactly.
+That is also the correct A/B default: the control arm's `TextWorkerProvider`
+forwards `temperature`/`maxTokens` to Ollama **only when `format` is set**, and
+post generation never sets it — so the control arm sends no sampling either. An
+arm that pinned it here would differ on sampling while reporting the same model,
+silently invalidating an experiment meant to vary orchestration alone.
+
+The mapping stays in `inference_config.py` for a phase that deliberately pins
+both arms. If you ever set `numPredict`, size it from a thinking model's real
+output — never copy the single-agent request's 1024, which on that path is
+never actually applied.
+
+Every run now logs its LLM configuration, so this is a reading rather than a
+guess:
+
+```
+[crew-sidecar] LLM kwargs: {'model': 'ollama/qwen3.5:35b-a3b-q4_K_M', 'base_url': 'http://127.0.0.1:11434'}
+```
+
+A stage that produces nothing names itself, so the 503 body says which:
+
+```
+[crew-sidecar] run failed in stage writer: RuntimeError: Invalid response from LLM call - None or empty
+```
+
+**An empty response remains a failure.** It is not retried, not substituted and
+never becomes a PASS — the caller classifies it `unavailable`, releases its
+claimed article and retries the job as multi-agent, with no strategy change and
+no cloud fallback.
+
 ## Verification on the Mac
 
 Two halves, and they are complementary rather than redundant. A real model
@@ -78,11 +130,14 @@ cannot be made to reject its own work on cue, so the ROUTING is proven
 deterministically against the real `run_flow`, and the LIVE path is proven
 separately against real Ollama. Neither half alone is sufficient.
 
-### 1. Verdict parsing — stdlib only, no CrewAI, no Ollama
+### 1. Pure logic — stdlib only, no CrewAI, no Ollama
 
 ```bash
-cd <repo>/sidecar/crewai && python3 -m unittest test_qa_verdict -v
+cd <repo>/sidecar/crewai && python3 -m unittest test_qa_verdict test_inference_config -v
 ```
+
+`test_inference_config` guards a defect that already cost a live Mac run — see
+**Sampling and thinking models** below.
 
 ### 2. The four Flow scenarios — real `run_flow`, no model call
 

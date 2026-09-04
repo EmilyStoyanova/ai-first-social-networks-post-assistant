@@ -196,6 +196,29 @@ describe("the shared request fixture", () => {
     // And it must be pinned to the validated Qwen, with no cloud model anywhere.
     assert.equal(fixture.inferenceConfig.model, "qwen3.5:35b-a3b-q4_K_M");
   });
+
+  it("pins NO sampling parameters", () => {
+    // A live Mac run failed with CrewAI's `Invalid response from LLM call -
+    // None or empty` because this fixture pinned `numPredict: 1024`. That
+    // becomes Ollama's `num_predict`, and qwen3.5 is a reasoning model whose
+    // `<think>` preamble is charged against the same budget — so it was cut off
+    // mid-reasoning and emitted no answer at all. The isolated POC, which
+    // passed model and base_url and nothing else, worked.
+    //
+    // Pinning nothing is also the CORRECT A/B default: the control arm's
+    // TextWorkerProvider forwards temperature/maxTokens to Ollama only when
+    // `format` is set, and post generation never sets it — so the control arm
+    // sends no sampling either. An arm that pinned it here would differ on
+    // sampling while reporting the same model, silently invalidating an
+    // experiment meant to vary orchestration alone.
+    const fixture: CrewPostRequest = JSON.parse(
+      readFileSync(join(process.cwd(), "sidecar", "crewai", "fixtures", "request.json"), "utf8")
+    );
+    const pinned = Object.keys(fixture.inferenceConfig).filter(
+      (k) => k !== "model" && k !== "baseUrl"
+    );
+    assert.deepEqual(pinned, [], `the fixture must pin no sampling, but pinned: ${pinned}`);
+  });
 });
 
 describe("resolveQaState", () => {

@@ -41,7 +41,7 @@ from guards import main_guard
 # cost map at import), so the suppression variables must already be set.
 main_guard()
 
-from crew_flow import run_flow  # noqa: E402 - must follow main_guard()
+from crew_flow import StageFailure, run_flow  # noqa: E402 - must follow main_guard()
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 49510
@@ -149,6 +149,15 @@ class Handler(BaseHTTPRequestHandler):
     def _generate(self, request: dict) -> None:
         try:
             result = run_flow(request)
+        except StageFailure as err:
+            # A named stage produced nothing usable. Still `unavailable` — the
+            # caller must classify it as infrastructure, retry the job and never
+            # change strategy — but the STAGE travels with it, because "the run
+            # failed" and "the Writer came back empty" lead to different
+            # investigations and only the sidecar knows which happened.
+            print(f"[crew-sidecar] run failed in stage {err.stage}: {err.detail}")
+            self._error(503, "unavailable", f"{err.stage}: {err.detail}")
+            return
         except Exception as err:  # noqa: BLE001
             # No usable Writer candidate. `unavailable` rather than a 500 body
             # with no code, so the caller classifies it as infrastructure and
