@@ -1070,6 +1070,10 @@
       "sourceLinkExclude": "Don't include",
       "llm": "AI model",
       "llmSystemDefault": "System default (auto)",
+      "strategy": "Generation strategy",
+      "strategySiteDefault": "Site default",
+      "strategySingle": "Single-agent",
+      "strategyMulti": "Multi-agent",
       "contentSource": "Content source",
       "contentSourceCompanyRules": "Use company rules (recommended)",
       "contentSourceCompanyMission": "Company Mission",
@@ -1365,7 +1369,24 @@
     "activateError": "Failed to activate provider.",
     "deactivateError": "Failed to deactivate provider.",
     "setDefaultError": "Failed to set default provider.",
-    "providerUpdateError": "Failed to update provider."
+    "providerUpdateError": "Failed to update provider.",
+    "generationStrategy": {
+      "section": "Generation strategy",
+      "title": "Default strategy and A/B experiment",
+      "hint": "How posts are generated across the whole site. The single-agent path is unchanged; the multi-agent path runs a Writer, Editor and QA loop under the same quality gates.",
+      "defaultLabel": "Site-wide default",
+      "defaultHint": "Used whenever a person does not choose a strategy for a post and no experiment applies.",
+      "single": "Single-agent",
+      "multi": "Multi-agent",
+      "experimentLabel": "Run the single vs multi experiment",
+      "experimentHint": "Assigns eligible generations to one strategy at random, deterministically and stably, so a post keeps its arm across retries. Explicit choices and posts with a fixed model are left out.",
+      "allocationLabel": "Multi-agent share",
+      "allocationHint": "Percent of assigned generations that go to the multi-agent arm. 50 is an even split.",
+      "experimentKeyLabel": "Experiment key",
+      "save": "Save",
+      "unsaved": "Unsaved changes",
+      "saveError": "Could not save the settings."
+    }
   },
   "contentMix": {
     "title": "Content mix",

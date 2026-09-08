@@ -46,13 +46,22 @@ import {
   type BulkRequestErrorCode,
 } from "@/lib/services/ai/validate-bulk-request.service";
 import { parseManualContentSource } from "@/lib/ai/manual-content-source";
+import { resolveStrategiesForUnits } from "@/lib/services/ai/resolve-strategy-for-request.service";
+import type { StrategyOverride } from "@/lib/ai/strategy/resolve-strategy";
 import type { Prisma } from "@prisma/client";
 
-/** The request, before the plan is minted onto it. */
+/**
+ * The request, before the plan is minted onto it.
+ *
+ * `resolvedStrategies` is omitted for the same reason `contentGroupIds` is: it
+ * is part of the PLAN, decided here, and a caller must not be able to hand one
+ * in — an arm supplied by a client would not be an assignment. What the caller
+ * may say is which strategy the person asked for, and that is `strategyOverride`.
+ */
 export type BulkGenerationRequest = Omit<
   BulkGenerationPayload,
-  "slug" | "userId" | "batchId" | "contentGroupIds"
->;
+  "slug" | "userId" | "batchId" | "contentGroupIds" | "resolvedStrategies"
+> & { strategyOverride?: StrategyOverride };
 
 export interface EnqueuedBulkGeneration {
   jobId: string;
@@ -202,15 +211,29 @@ export async function enqueueBulkGeneration(
   const batchId = newBatchId();
   const contentGroupIds = Array.from({ length: request.numberOfPosts }, () => newContentGroupId());
 
+  // And so is the strategy, for the same reason and against the same ids: the
+  // A/B unit is the content group, so each topic is assigned independently, and
+  // the answers are written down rather than left to be recomputed by an attempt
+  // that might read different settings.
+  //
+  // One settings read for the whole batch — a batch assigned half under one
+  // experiment and half under another would be two experiments in one run.
+  const { strategyOverride, ...bulkRequest } = request;
+  const resolvedStrategies = await resolveStrategiesForUnits(contentGroupIds, {
+    override: strategyOverride,
+    hasExplicitLlmConfig: Boolean(request.llmConfigId),
+  });
+
   // Validated on the way in as well as on the way out. The payload crosses a
   // process boundary, so the moment to find out it is malformed is now — while
   // there is still an HTTP response to say so on — not in a worker log.
   const payload = bulkGenerationPayloadSchema.safeParse({
-    ...request,
+    ...bulkRequest,
     slug,
     userId,
     batchId,
     contentGroupIds,
+    resolvedStrategies,
   });
   if (!payload.success) {
     return {

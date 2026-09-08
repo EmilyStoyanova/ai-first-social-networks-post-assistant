@@ -95,6 +95,7 @@ import {
 } from "./generate-draft-post.service";
 import { remainingBudgetMs } from "@/lib/http/request-deadline";
 import type { ManualContentSourceRef } from "@/lib/ai/manual-content-source";
+import type { ResolvedStrategy } from "@/lib/ai/strategy/resolve-strategy";
 
 /**
  * FLOOR for the time that must remain before ANOTHER channel is started.
@@ -256,6 +257,18 @@ export interface GenerateTopicInput {
    */
   alreadyGenerated?: readonly string[];
   /**
+   * Which orchestration writes every channel version of this topic.
+   *
+   * ONE value for the whole group, never one per channel, and that is the point
+   * of assigning by content group: a topic whose Facebook version was written by
+   * the multi-agent loop and whose LinkedIn version was written by the single
+   * one would be an incoherent group and an unusable observation.
+   *
+   * Passed straight through to each `generateDraftPost` call. This orchestrator
+   * never resolves or reconsiders it.
+   */
+  resolvedStrategy?: ResolvedStrategy;
+  /**
    * The queue job running this topic, when one is. Recorded on each channel's
    * generation trace so a run can be tied back to the job that executed it —
    * which is the difference between "the user's click" and "the worker's retry
@@ -368,6 +381,9 @@ export async function generateTopicAcrossChannels(
       generationBatchId: input.generationBatchId,
       contentGroupId: input.contentGroupId,
       contentSourceId: input.contentSourceId,
+      // The same strategy for every channel of the group — see the input's own
+      // note. Passed through unchanged, never re-resolved per channel.
+      resolvedStrategy: input.resolvedStrategy,
       // Each channel gets its OWN trace run, tied to its own post, and all of
       // them carry this group id — so "show me every channel version of this
       // topic's generation" is one indexed query. A batch id present here means

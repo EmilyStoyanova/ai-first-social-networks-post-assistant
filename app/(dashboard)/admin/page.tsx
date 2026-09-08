@@ -14,6 +14,8 @@ import { AdminOverview } from "@/components/admin/admin-overview";
 import { AdminUsersTable } from "@/components/admin/admin-users-table";
 import { AdminCompaniesTable } from "@/components/admin/admin-companies-table";
 import { LlmConfigSection } from "@/components/admin/llm-config-section";
+import { GenerationStrategySection } from "@/components/admin/generation-strategy-section";
+import { readGenerationStrategySettings } from "@/lib/services/admin/generation-strategy-settings.service";
 
 export const metadata: Metadata = {
   title: "Global Admin – AI-First Post Assistant",
@@ -27,10 +29,11 @@ export default async function AdminPage() {
   const t = await getTranslations("admin");
   const tNav = await getTranslations("navigation");
 
-  const [usersResult, companiesResult, providersResult] = await Promise.all([
+  const [usersResult, companiesResult, providersResult, strategyResult] = await Promise.all([
     listAdminUsers(session.user.isGlobalAdmin),
     listAdminCompanies(session.user.isGlobalAdmin),
     listLlmProviders(session.user.isGlobalAdmin),
+    readGenerationStrategySettings(session.user.isGlobalAdmin),
   ]);
 
   const users = usersResult.success ? usersResult.users : [];
@@ -38,6 +41,18 @@ export default async function AdminPage() {
   const adminCount = users.filter((u) => u.isGlobalAdmin).length;
 
   const providers = providersResult.success ? providersResult.providers : [];
+  // The service degrades to defaults on a read failure, and returns FORBIDDEN
+  // only for a non-admin — who cannot reach this page anyway. A fallback keeps
+  // the type honest without a branch the page can actually hit.
+  const strategySettings = strategyResult.success
+    ? strategyResult.settings
+    : {
+        defaultStrategy: "single" as const,
+        experimentEnabled: false,
+        experimentKey: null,
+        experimentAllocationPercent: 50,
+        updatedAt: null,
+      };
 
   // Display-only — a global admin may hold no company membership at all, in
   // which case the selector shows its "no company" state; that is expected
@@ -70,6 +85,10 @@ export default async function AdminPage() {
 
         <Section title={t("llmProviders")}>
           <LlmConfigSection initialProviders={providers} />
+        </Section>
+
+        <Section title={t("generationStrategy.section")}>
+          <GenerationStrategySection initialSettings={strategySettings} />
         </Section>
 
         <Section title={t("users")}>

@@ -76,6 +76,18 @@ import {
 } from "@/lib/generation-trace/feed-item-artifacts";
 import { excerpt } from "@/lib/generation-trace/redact";
 import { observeProvider } from "@/lib/generation-trace/observed-provider";
+import { SINGLE_BY_DEFAULT, type ResolvedStrategy } from "@/lib/ai/strategy/resolve-strategy";
+import {
+  EXPERIMENT_PINNED_PROVIDER,
+  modelVerificationFor,
+  pinnedInferenceProfile,
+} from "@/lib/ai/strategy/experiment-inference";
+import { bindMultiAgent, type MultiAgentDeps } from "@/lib/ai/generate-multi-agent";
+import { CrewSidecarClient } from "@/lib/ai/crew/crew-sidecar.client";
+import { loadArticleBrief } from "@/lib/ai/agents/load-article-brief";
+import { inferenceFingerprint } from "@/lib/ai/crew/provenance";
+import { LLM_PROVIDER_LABEL } from "@/lib/ai/llm/llm-provider-factory";
+import { getSupportedProviderInfo } from "@/lib/ai/llm/supported-providers";
 
 // ─── Mock response ─────────────────────────────────────────────────────────────
 
@@ -376,6 +388,25 @@ export interface GenerateDraftPostDeps {
    */
   generateWithRetry?: typeof generateWithRetry;
   /**
+   * Builds the MULTI-AGENT loop, when the resolved strategy asks for one.
+   *
+   * A separate seam from `generateWithRetry` above, deliberately. That one is
+   * the single-agent loop and every existing test injects it; if multi-agent
+   * reused it, a test that injected a single-agent double would silently
+   * satisfy a multi-agent run and the wiring would be unobservable. Two seams
+   * means a test can assert WHICH loop a strategy reached.
+   *
+   * Production default: `bindMultiAgent` over a sidecar client built FRESH from
+   * the environment per call. `CrewSidecarClient.fromEnv()` lives inside the
+   * default and not in the caller, so it — and its `not_configured` throw on a
+   * serverless deployment — is only ever reached on a run that actually resolved
+   * to `multi`. The seam takes everything EXCEPT the sidecar so a test can drive
+   * it without a socket.
+   */
+  buildMultiAgentLoop?: (deps: Omit<MultiAgentDeps, "sidecar">) => typeof generateWithRetry;
+  /** The article's stored brief, for the multi-agent request. Injected in tests. */
+  loadArticleBrief?: typeof loadArticleBrief;
+  /**
    * Resolves an ACTIVE provider-state row by id for per-generation selection.
    * Injected in tests; production reads the DB. Returns null when no active row
    * matches the id. Only the provider enum is returned — credentials and model
@@ -506,6 +537,21 @@ export interface GeneratePostOptions {
    * only detail in the trace, never behaviour.
    */
   trace?: PostGenerationTraceOrigin;
+  /**
+   * Which orchestration writes this post, DECIDED ALREADY.
+   *
+   * This function never resolves a strategy — it obeys one. The decision is made
+   * once at the request/enqueue boundary (`resolveGenerationStrategy`) and
+   * carried here, through a job payload where there is one, so a retry, a
+   * duplicate delivery or a worker wake-up cannot land the same post in a
+   * different A/B arm than the one it was assigned.
+   *
+   * Omitted means `SINGLE_BY_DEFAULT`: the single-agent loop, chosen by the site
+   * default, in no experiment. That is exactly today's behaviour, so every
+   * existing caller and test is unaffected — and, more importantly, a caller
+   * that forgets to resolve can never accidentally start a multi-agent run.
+   */
+  resolvedStrategy?: ResolvedStrategy;
 }
 
 export async function generateDraftPost(
@@ -533,6 +579,8 @@ export async function generateDraftPost(
     | "contentSourceId"
     // Descriptive only — who asked and through which job. Forwarded to the trace.
     | "trace"
+    // Decided by the caller before this was called; never re-decided here.
+    | "resolvedStrategy"
   > & {
     /**
      * The form's "Content source" choice, as it came off the wire. Omitted =
@@ -655,6 +703,9 @@ export async function generateDraftPost(
     // not a pick (the topic chose), so the group's quota attribution has to
     // travel with the instruction rather than be re-derived from it.
     contentSourceId: isPickedSource(selection) ? selection.sourceId : options.contentSourceId,
+    // Passed through unchanged. This wrapper resolves sources and access; it has
+    // no business re-deciding a strategy its caller already settled.
+    resolvedStrategy: options.resolvedStrategy,
     // Everything the trace can only learn HERE: which source the form picked and
     // how the article window was ordered. The trigger is left to the caller, or
     // derived — a group id already means "manual multi-channel", a batch id
@@ -801,7 +852,33 @@ async function runGeneration(
   const autoImage = deps.autoImage ?? autoGeneratePostImage;
   const autoSourceImage = deps.autoSourceImage ?? autoApplySourceImage;
   const recordCalibration = deps.recordCalibration ?? recordSemanticCalibration;
-  const runGenerationLoop = deps.generateWithRetry ?? generateWithRetry;
+  const singleAgentLoop = deps.generateWithRetry ?? generateWithRetry;
+  const buildMultiAgentLoop =
+    deps.buildMultiAgentLoop ??
+    ((multiDeps) => bindMultiAgent({ ...multiDeps, sidecar: CrewSidecarClient.fromEnv() }));
+  const readArticleBrief = deps.loadArticleBrief ?? loadArticleBrief;
+
+  /**
+   * The strategy, as decided by the caller. Never resolved here.
+   *
+   * Read once into a local so nothing below can be tempted to recompute it, and
+   * defaulted to `SINGLE_BY_DEFAULT` so an unaware caller gets today's behaviour
+   * rather than an accidental multi-agent run against a sidecar that may not
+   * exist in its process.
+   */
+  const strategy = options.resolvedStrategy ?? SINGLE_BY_DEFAULT;
+  // Recorded BEFORE any generation, so the assignment survives a run that then
+  // fails — which is the only case an A/B failure rate is about. `setStrategy`
+  // merges, so the measurement recorded afterwards cannot erase this.
+  tracer.setStrategy({
+    generationStrategy: strategy.strategy,
+    generationStrategySource: strategy.source,
+    experimentKey: strategy.experimentKey,
+    experimentArm: strategy.experimentArm,
+    experimentUnitId: strategy.experimentUnitId,
+    experimentBucket: strategy.experimentBucket,
+    experimentAllocation: strategy.experimentAllocation,
+  });
   /**
    * The trace's own extra reads — candidate eligibility and the article's
    * translation/classification state.
@@ -965,7 +1042,39 @@ async function runGeneration(
   if (!selectionResult.success) {
     return { success: false, code: selectionResult.code, message: selectionResult.message };
   }
-  const { selection } = selectionResult;
+
+  /**
+   * An A/B run is PINNED to one model, and the control arm is the one that moves.
+   *
+   * The multi arm has no choice — the sidecar may only reach Ollama on loopback
+   * — so holding the model constant means bringing the single arm to it. Without
+   * this, a company whose admin default is Claude would produce a "single vs
+   * multi" comparison that is really "Claude vs Qwen", and the experiment would
+   * measure the model while reporting on orchestration.
+   *
+   * Scoped precisely to `ab_split`. A `user_override` or `global_default` single
+   * run resolves its provider exactly as it always has — which is the whole of
+   * the "single-agent behaviour is unchanged outside an experiment" requirement.
+   * A run that reaches here with `ab_split` has already been checked for
+   * eligibility (an explicit `llmConfigId` makes it ineligible, so nobody's
+   * deliberate model choice is being overridden).
+   */
+  let selection = selectionResult.selection;
+  if (strategy.source === "ab_split" && selection.provider !== EXPERIMENT_PINNED_PROVIDER) {
+    const pinned = getSupportedProviderInfo(EXPERIMENT_PINNED_PROVIDER);
+    console.info(
+      `[ab] pinning the experiment arm to ${EXPERIMENT_PINNED_PROVIDER} ` +
+        `(was ${selection.provider}) so both arms run one model`
+    );
+    selection = {
+      provider: EXPERIMENT_PINNED_PROVIDER,
+      // Null, not the row that was resolved: the config the precedence picked is
+      // NOT the one being used, and recording it would misattribute the run.
+      llmConfigId: null,
+      providerLabel: LLM_PROVIDER_LABEL[EXPERIMENT_PINNED_PROVIDER],
+      model: pinned?.model ?? "unknown",
+    };
+  }
   const resolvedLlmConfigId = selection.llmConfigId;
 
   // Provenance reflects the resolved provider; the model comes from env (code).
@@ -1305,6 +1414,38 @@ async function runGeneration(
       excludeContentGroupId: options.contentGroupId ?? null,
     });
 
+  // ── The strategy, bound ───────────────────────────────────────────────────
+  //
+  // The ONE place the two strategies diverge. Everything above this line and
+  // everything below it is identical for both: the same prompts, the same
+  // article, the same diversity levers, the same semantic gate instance, the
+  // same recent-post window, the same persistence.
+  //
+  // That is what makes the comparison an orchestration comparison. The
+  // multi-agent binder returns a function with `generateWithRetry`'s exact
+  // signature (asserted at compile time by `_seamCheck` in
+  // generate-multi-agent.ts), so the call below is unchanged — and, critically,
+  // `evaluateCandidate` and every deterministic gate run INSIDE both loops. The
+  // gates are never duplicated in CrewAI and QA never replaces them; a
+  // multi-agent candidate that a gate turns down consumes an OUTER attempt
+  // exactly as a single-agent one does.
+  const pinnedInference = pinnedInferenceProfile();
+  const runGenerationLoop =
+    strategy.strategy === "multi"
+      ? buildMultiAgentLoop({
+          // The article's stored brief. Best-effort and supplementary: the whole
+          // article is already inside `userPrompt`, which travels verbatim. The
+          // sidecar itself is supplied by the seam's default (from the
+          // environment) or by a test double.
+          brief: await readArticleBrief(claimedFeedItemId),
+          companyName: context.company.name,
+          brand: context.brand,
+          maxTextLength: context.channel.maxTextLength,
+          inference: pinnedInference,
+          strategySource: strategy.source,
+        })
+      : singleAgentLoop;
+
   // ── Generate with retry (duplicate-aware) ─────────────────────────────────
   // Retries up to MAX_GENERATION_ATTEMPTS times when the candidate is a
   // near-verbatim (Jaccard) or semantic duplicate. Only the final accepted post
@@ -1402,6 +1543,66 @@ async function runGeneration(
     selectedPattern,
     selectedAspect,
   } = generationResult;
+
+  // ── The measurement half of the provenance ────────────────────────────────
+  //
+  // Recorded here rather than beside the post write, because every abort path
+  // below this line (uniqueness, compliance, length) returns without a post —
+  // and those runs are exactly the ones an A/B failure rate is made of. A
+  // measurement written only on success would report both arms as flawless.
+  //
+  // `setStrategy` merges, so the assignment recorded before the generation is
+  // preserved: this call adds counters, it never blanks the arm.
+  //
+  // The counters stay SEPARATE and are never summed. `attempts` is the OUTER
+  // loop (a deterministic gate refused a candidate); `qaRevisionRounds` is the
+  // INNER one (the critic asked for a revision). One number could answer
+  // neither question.
+  const multiAgent = generationResult.multiAgent;
+  tracer.setStrategy(
+    multiAgent
+      ? {
+          inferenceFingerprint: multiAgent.inferenceFingerprint,
+          modelTag: multiAgent.inference.modelTag,
+          modelDigest: multiAgent.inference.modelDigest,
+          modelVerification: modelVerificationFor(
+            pinnedInference.modelTag,
+            multiAgent.inference.modelTag,
+            multiAgent.inference.modelDigest
+          ),
+          qaState: multiAgent.qaState,
+          qaRevisionRounds: multiAgent.qaRevisionRounds,
+          agentCalls: multiAgent.agentCalls,
+          agentLatencyMs: Math.round(multiAgent.latencyMs),
+          degraded: multiAgent.degraded,
+          degradedStages: [...multiAgent.degradedStages],
+        }
+      : {
+          // A single-agent run: one model call per attempt, no critic, no agents.
+          // The fingerprint is computed over the SAME profile shape the multi arm
+          // reports, which is what makes the two comparable at all — and the
+          // model is the one this run resolved, not the one an experiment would
+          // have pinned, so a mismatch is visible rather than assumed away.
+          inferenceFingerprint: inferenceFingerprint({
+            modelTag: llmModelStr,
+            modelDigest: null,
+            settings: {},
+          }),
+          modelTag: llmModelStr,
+          // Never resolved on the single-agent path — the text worker is not
+          // asked, and a hosted provider has no digest at all.
+          modelDigest: null,
+          modelVerification: modelVerificationFor(pinnedInference.modelTag, llmModelStr, null),
+          // Not `"not_applicable"` as a string: there was no QA, and an absent
+          // verdict must never be storable as one.
+          qaState: null,
+          qaRevisionRounds: null,
+          agentCalls: null,
+          agentLatencyMs: null,
+          degraded: null,
+          degradedStages: [],
+        }
+  );
 
   // A near-exact opening repeat is treated as the SAME kind of failure as a
   // Jaccard duplicate — it is the same textual evidence, just measured over
@@ -1692,6 +1893,18 @@ async function runGeneration(
           notes: parsed.notes ?? null,
           llmProvider: llmProviderStr,
           llmModel: llmModelStr,
+          // Which orchestration wrote this post, and why it was chosen.
+          //
+          // Duplicated from GenerationRun on purpose: runs are written by the
+          // tracer, which an operator can switch off, and "which strategy wrote
+          // this post" is a product question that must not depend on an
+          // observability setting. The counters and the model identity stay on
+          // the run alone — they are measurement, and a run that produced no post
+          // is the only correct denominator for them anyway.
+          generationStrategy: strategy.strategy,
+          generationStrategySource: strategy.source,
+          experimentKey: strategy.experimentKey,
+          experimentArm: strategy.experimentArm,
           generatedById: generatedById ?? null,
           scheduleId: scheduleId ?? null,
           scheduledFor: scheduledFor ?? null,

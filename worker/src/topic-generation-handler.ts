@@ -274,6 +274,20 @@ export function createTopicGenerationHandler(deps: TopicGenerationHandlerDeps = 
                     remaining.map((c) => [c, new Date(input.scheduledFor as string)])
                   ),
                 }),
+            // The strategy the REQUEST resolved, obeyed rather than recomputed.
+            //
+            // This is where A/B integrity is actually kept. A retry, a duplicate
+            // delivery and a worker wake-up all read the same payload field, so
+            // every one of them runs this topic in the arm it was assigned to. A
+            // handler that re-resolved here could reach a different answer — an
+            // admin toggled the experiment while the job sat in the queue — and
+            // the post would end up in the other arm from the one recorded
+            // against it.
+            //
+            // Absent on a payload written before this field existed, which the
+            // generation service reads as the single-agent default: exactly the
+            // behaviour that payload was queued under.
+            resolvedStrategy: input.resolvedStrategy,
             // The topic an earlier attempt settled on. Null on a first attempt,
             // where the first channel to succeed settles it.
             anchor: resume?.anchor ?? null,

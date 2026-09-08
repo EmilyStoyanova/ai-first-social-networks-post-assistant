@@ -210,6 +210,21 @@ export function createBulkGenerationHandler(deps: BulkGenerationHandlerDeps = {}
     // the ones it already wrote into.
     let nextGroup = 0;
 
+    /**
+     * Each topic's A/B assignment, keyed by the content group it was hashed from.
+     *
+     * A map and not the array's index, because a resumed attempt takes some
+     * group ids from its recorded progress and mints the rest — an index counter
+     * would desynchronise the moment a retry skipped a completed topic, and
+     * topics would silently change arm between attempts. Keyed by the unit, the
+     * assignment simply cannot drift from what was recorded.
+     */
+    const strategyByGroup = new Map(
+      (input.resolvedStrategies ?? []).map(
+        (strategy, i) => [input.contentGroupIds[i], strategy] as const
+      )
+    );
+
     const result: BulkGeneratePostsResult = await generate(
       input.slug,
       input.userId,
@@ -218,6 +233,7 @@ export function createBulkGenerationHandler(deps: BulkGenerationHandlerDeps = {}
       {
         newBatchId: () => input.batchId,
         newContentGroupId: () => input.contentGroupIds[nextGroup++] ?? crypto.randomUUID(),
+        strategyForContentGroup: (contentGroupId) => strategyByGroup.get(contentGroupId),
         resume,
         // Every topic (and every channel within it) updates the job's `result`,
         // which is both what the UI polls and what the next attempt resumes

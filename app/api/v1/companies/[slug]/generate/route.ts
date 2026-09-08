@@ -8,6 +8,8 @@ import { refuseScheduleTime } from "@/lib/scheduling/reschedule-policy";
 import { createRequestDeadline, runInRequestDeadline } from "@/lib/http/request-deadline";
 import { BULK_CHANNELS } from "@/lib/queue/bulk-generation-payload";
 import { enqueueTopicGeneration } from "@/lib/services/queue/enqueue-topic-generation.service";
+import { STRATEGY_OVERRIDES } from "@/lib/ai/strategy/resolve-strategy";
+import { resolveStrategyForRequest } from "@/lib/services/ai/resolve-strategy-for-request.service";
 
 // Generation must never be cached or statically optimized.
 export const dynamic = "force-dynamic";
@@ -138,6 +140,16 @@ const bodySchema = z.object({
    * the same function the reschedule service uses.
    */
   scheduledFor: z.iso.datetime({ offset: true }).optional(),
+  /**
+   * Which orchestration should write this post. Omitted = `site_default`, which
+   * is what every existing client sends and what keeps their behaviour identical.
+   *
+   * An explicit `single` or `multi` always wins over the site default and over
+   * any running experiment — and is recorded as `user_override`, so it is
+   * excluded from the experiment's denominators rather than counted as a
+   * randomized assignment.
+   */
+  strategy: z.enum(STRATEGY_OVERRIDES).optional(),
 });
 
 /**
@@ -239,11 +251,56 @@ async function handlePost(req: Request, { params }: { params: Promise<{ slug: st
     }
   }
 
+  /**
+   * The content group, minted here for BOTH branches.
+   *
+   * It used to be minted in two places — here for the inline branch, in the
+   * enqueuer for the queued one. It has to be one place now, because the A/B arm
+   * is `hash(experimentKey + contentGroupId)`: the id has to exist before the
+   * strategy can be resolved, and it has to be the same id the run then executes
+   * under, or the assignment would describe a group that never existed.
+   */
+  const contentGroupId = crypto.randomUUID();
+
+  /**
+   * The strategy, resolved ONCE, here, before anything runs or is queued.
+   *
+   * This is the only place it is decided for a manual generation. Everything
+   * downstream — the enqueuer, the worker, the orchestrator, the generation
+   * service — receives the answer and obeys it, so a retry or a duplicate job
+   * delivery cannot move this topic into the other arm.
+   */
+  const strategy = await resolveStrategyForRequest({
+    override: parsed.data.strategy,
+    stableUnitId: contentGroupId,
+    // An explicit model choice excludes the run from the experiment: both arms
+    // must run one model, and overriding somebody's deliberate pick to achieve
+    // that would be worse than not measuring them.
+    hasExplicitLlmConfig: Boolean(parsed.data.llmConfigId),
+  });
+
+  /**
+   * Multi-agent generation is QUEUE-ONLY, so it is queued even for one channel.
+   *
+   * Not a preference. The CrewAI sidecar binds `127.0.0.1` on the Mac worker,
+   * and a serverless function dialling a loopback URL would reach its OWN
+   * loopback — the client refuses that outright as `not_configured`. So a
+   * one-channel multi request cannot be answered inline at all, and the honest
+   * thing is a 202 with a job to follow rather than a 502 explaining that this
+   * process is the wrong process.
+   *
+   * A one-channel SINGLE request is still answered inline exactly as before, so
+   * nothing changes for a client that never asks for multi and an installation
+   * whose default is single.
+   */
+  const mustQueue = channels.length > 1 || strategy.strategy === "multi";
+
   // Several channels is more work than a function cap allows — see the docblock.
   // Queued and answered 202, before any generation starts, so the client is
   // never left holding a connection over work that cannot finish on it.
-  if (channels.length > 1) {
+  if (mustQueue) {
     const queued = await enqueueTopicGeneration(slug, session.user.id, session.user.isGlobalAdmin, {
+      contentGroupId,
       channels,
       contentLanguage: parsed.data.contentLanguage,
       includeSourceLink: parsed.data.includeSourceLink,
@@ -251,6 +308,7 @@ async function handlePost(req: Request, { params }: { params: Promise<{ slug: st
       llmConfigId: parsed.data.llmConfigId,
       contentSource: parsed.data.contentSource,
       scheduledFor,
+      resolvedStrategy: strategy,
     });
 
     if (!queued.success) {
@@ -285,11 +343,13 @@ async function handlePost(req: Request, { params }: { params: Promise<{ slug: st
         slug,
         userId: session.user.id,
         isGlobalAdmin: session.user.isGlobalAdmin,
-        // Minted here rather than by the orchestrator so the id is decided in one
-        // place across both flows — bulk mints its groups at enqueue for exactly
-        // the same reason.
-        contentGroupId: crypto.randomUUID(),
+        // Minted above, for both branches — bulk mints its groups at enqueue for
+        // the same reason, and the A/B arm was hashed from this exact id.
+        contentGroupId,
         channels,
+        // Resolved above and passed through. The orchestrator and the generation
+        // service obey it; neither can re-decide it.
+        resolvedStrategy: strategy,
         contentLanguage: parsed.data.contentLanguage,
         includeSourceLinkOverride: parsed.data.includeSourceLink,
         autoGenerateImageOverride: parsed.data.generateImage,

@@ -267,12 +267,12 @@ describe("topic generation handler — failures are data, not retries", () => {
     await assert.rejects(() => h.run(), /no longer exists/);
   });
 
-  it("refuses a single-channel payload — that path is answered inline", async () => {
-    const h = makeHandler({});
-    await assert.rejects(
-      () => h.run(job({ payload: payload({ channels: ["linkedin"] }) })),
-      /Invalid topic-generation payload/
-    );
+  it("accepts a single-channel payload — a one-channel multi-agent run is queued", async () => {
+    // A one-channel SINGLE run is still answered inline by the route; a
+    // one-channel MULTI run cannot be (the sidecar is loopback-only on this
+    // process) and reaches the worker like any other queued topic.
+    const h = makeHandler({ stream: ["linkedin"] });
+    await h.run(job({ payload: payload({ channels: ["linkedin"] }) }));
   });
 });
 

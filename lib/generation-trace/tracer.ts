@@ -6,7 +6,12 @@ import type {
   SocialChannel,
 } from "@prisma/client";
 import { sanitizeForTrace } from "./redact";
-import { prismaTraceStore, type GenerationTraceStore, type PersistableStep } from "./store";
+import {
+  prismaTraceStore,
+  type GenerationTraceStore,
+  type PersistableStep,
+  type PersistableStrategy,
+} from "./store";
 import type { GenerationStepType } from "./step-types";
 
 /**
@@ -127,6 +132,7 @@ export class GenerationTracer {
   private jobId: string | null;
   private llmProvider: string | null = null;
   private llmModel: string | null = null;
+  private strategy: PersistableStrategy | null = null;
   private attempts = 0;
   private errorCode: string | null = null;
   private errorMessage: string | null = null;
@@ -256,6 +262,46 @@ export class GenerationTracer {
     if (Number.isFinite(attempts) && attempts > this.attempts) this.attempts = attempts;
   }
 
+  /**
+   * Records which orchestration ran and why, plus what the multi-agent loop cost.
+   *
+   * MERGES rather than replaces, and is called twice by design: once before the
+   * generation, with the decision (strategy, source, arm, hash inputs), and once
+   * after it, with the measurement (agent calls, QA state, latency, model
+   * identity). Merging is what makes the ASSIGNMENT survive a run that then
+   * failed — the case an A/B failure rate is entirely about. A replacing setter
+   * would have the second call erase the arm.
+   *
+   * Only defined keys are taken, so the second call cannot blank the first's
+   * fields by omitting them.
+   */
+  setStrategy(patch: Partial<PersistableStrategy>): void {
+    if (!this.enabled) return;
+    const base: PersistableStrategy = this.strategy ?? {
+      generationStrategy: null,
+      generationStrategySource: null,
+      experimentKey: null,
+      experimentArm: null,
+      experimentUnitId: null,
+      experimentBucket: null,
+      experimentAllocation: null,
+      inferenceFingerprint: null,
+      modelTag: null,
+      modelDigest: null,
+      modelVerification: null,
+      qaState: null,
+      qaRevisionRounds: null,
+      agentCalls: null,
+      agentLatencyMs: null,
+      degraded: null,
+      degradedStages: [],
+    };
+    const defined = Object.fromEntries(
+      Object.entries(patch).filter(([, v]) => v !== undefined)
+    ) as Partial<PersistableStrategy>;
+    this.strategy = { ...base, ...defined };
+  }
+
   /** Records the terminal failure. Does not itself end the run. */
   fail(code: string, message?: string | null): void {
     this.errorCode = code;
@@ -305,6 +351,7 @@ export class GenerationTracer {
         errorMessage: this.errorMessage,
         options: this.options,
         truncated: this.truncated,
+        strategy: this.strategy,
         steps: this.steps,
       });
     } catch (err) {
@@ -323,6 +370,11 @@ export class GenerationTracer {
   /** The steps recorded so far. For tests and for the in-process debug view. */
   peekSteps(): readonly PersistableStep[] {
     return this.steps;
+  }
+
+  /** The strategy recorded so far, for tests. Null until `setStrategy` runs. */
+  peekStrategy(): PersistableStrategy | null {
+    return this.strategy;
   }
 
   private sanitize(value: unknown): Prisma.InputJsonValue {

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { auth } from "@/lib/auth";
 import { enqueueBulkGeneration } from "@/lib/services/queue/enqueue-bulk-generation.service";
+import { STRATEGY_OVERRIDES } from "@/lib/ai/strategy/resolve-strategy";
 import { MAX_BULK_POSTS } from "@/lib/scheduling/bulk-schedule";
 import { BULK_CHANNELS } from "@/lib/queue/bulk-generation-payload";
 
@@ -119,6 +120,15 @@ const bodySchema = z.object({
   generateImage: z.boolean().optional(),
   llmConfigId: z.string().min(1).optional(),
   contentSource: z.string().min(1).optional(),
+  /**
+   * One choice for the whole batch, applied to every topic in it. Omitted =
+   * `site_default`, which is what an un-updated client sends.
+   *
+   * Note that this is the OVERRIDE, not the assignment: each topic in the batch
+   * is still assigned independently when no override is given, because the A/B
+   * unit is the content group and a batch is many of them.
+   */
+  strategy: z.enum(STRATEGY_OVERRIDES).optional(),
 });
 
 export async function POST(req: Request, { params }: { params: Promise<{ slug: string }> }) {
@@ -185,6 +195,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ slug: s
     includeSourceLink: parsed.data.includeSourceLink,
     generateImage: parsed.data.generateImage,
     llmConfigId: parsed.data.llmConfigId,
+    // The person's choice, if they made one. The per-topic assignment is the
+    // enqueuer's job, against the group ids it mints.
+    strategyOverride: parsed.data.strategy,
     contentSource: parsed.data.contentSource,
   });
 
