@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  crewHealthSchema,
   crewPostResponseSchema,
   resolveQaState,
   validateCallCounts,
@@ -218,6 +219,44 @@ describe("the shared request fixture", () => {
       (k) => k !== "model" && k !== "baseUrl"
     );
     assert.deepEqual(pinned, [], `the fixture must pin no sampling, but pinned: ${pinned}`);
+  });
+});
+
+describe("crewHealthSchema", () => {
+  it("reads the occupancy of a busy sidecar", () => {
+    const parsed = crewHealthSchema.safeParse({
+      status: "ok",
+      busy: true,
+      runningForMs: 546500,
+      clientDisconnected: true,
+    });
+    assert.equal(parsed.success, true);
+    assert.equal(parsed.data?.clientDisconnected, true);
+  });
+
+  it("accepts an older sidecar that reports only `status`", () => {
+    // Tolerant on purpose, unlike /crew/post: this endpoint has to answer while
+    // the sidecar is being upgraded.
+    const parsed = crewHealthSchema.safeParse({ status: "ok" });
+    assert.equal(parsed.success, true);
+    // And the absence stays an ABSENCE. Defaulting it to false would
+    // manufacture the "the sidecar is free" claim the field exists to stop
+    // anyone from assuming — the assumption that turned an abandoned run into a
+    // serialization PASS.
+    assert.equal(parsed.data?.busy, undefined);
+  });
+
+  it("REFUSES a body with no status — that is not this endpoint", () => {
+    assert.equal(crewHealthSchema.safeParse({}).success, false);
+  });
+
+  it("refuses a non-boolean busy rather than coercing it", () => {
+    assert.equal(crewHealthSchema.safeParse({ status: "ok", busy: "yes" }).success, false);
+  });
+
+  it("accepts a null runningForMs, which is what idle reports", () => {
+    const parsed = crewHealthSchema.safeParse({ status: "ok", busy: false, runningForMs: null });
+    assert.equal(parsed.success, true);
   });
 });
 

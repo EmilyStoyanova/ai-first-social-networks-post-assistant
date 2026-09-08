@@ -15,26 +15,44 @@ is a service that appears healthy and is never used.
 
 ── Serialization ───────────────────────────────────────────────────────────
 
-One active generation at a time, enforced by a non-blocking semaphore, with
+One active generation at a time, admitted by `occupancy.SingleFlight`, with
 `503 crew_busy` on overflow. A clean, retryable refusal rather than a queue,
 because a queue would hide latency inside a request the worker is already timing
 — and the worker's own job dedupe is the right place for the waiting.
+
+The slot carries WHO holds it and since when, not just a count, and `/health`
+reports that. The reason is a real defect: a client that stops waiting does not
+stop the generation, so the slot legitimately stays held afterwards and later
+calls are refused — and with only a count to look at, "an abandoned run is still
+occupying the service" is indistinguishable from "serialization works". See
+`occupancy.py`, which also explains why there is no cancellation to offer.
 
 Note what this does NOT solve: the Vercel app calls the Mac text worker inline
 (prompt-preview aspect mining, single-agent generation), and those can overlap a
 CrewAI run on the same local Qwen. No amount of serialization HERE addresses
 that. It is a measured, accepted cost.
+
+── Disconnect detection ────────────────────────────────────────────────────
+
+While a generation runs, a daemon thread peeks at the client socket. A peer that
+has closed becomes readable at EOF, which is how a disconnect is noticed without
+consuming a byte (`MSG_PEEK`) and without touching the running Flow. It records
+the fact and nothing more — the run is not interrupted, because it cannot be.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import select
+import socket
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from guards import main_guard
+from occupancy import Occupant, SingleFlight
 
 # The startup self-check runs BEFORE crew_flow is imported and before anything
 # binds — importing CrewAI is itself a network-touching act (litellm fetches its
@@ -47,7 +65,46 @@ HOST = "127.0.0.1"
 DEFAULT_PORT = 49510
 MAX_BODY_BYTES = 2 * 1024 * 1024
 
-_slot = threading.Semaphore(1)
+_slot = SingleFlight()
+
+#: How often the watcher checks whether the caller is still there. Long enough
+#: to be free, short enough that `/health` is useful while a run is in flight.
+_DISCONNECT_POLL_SECONDS = 2.0
+
+
+def _watch_for_disconnect(
+    connection: socket.socket, occupant: Occupant, done: threading.Event
+) -> None:
+    """Records the moment the caller goes away. Never interrupts the run.
+
+    A peer that has closed its end makes the socket readable at EOF, so a
+    zero-timeout `select` followed by a `MSG_PEEK` recv answers "is the client
+    still there?" without consuming anything the handler might need. The client
+    sends `connection: close` and this server speaks HTTP/1.0, so there is no
+    pipelined next request that could be mistaken for a disconnect.
+
+    Every failure here is swallowed: a watcher that cannot watch must degrade to
+    knowing nothing, never take down a generation that is proceeding fine.
+    """
+    while not done.wait(_DISCONNECT_POLL_SECONDS):
+        try:
+            readable, _, _ = select.select([connection], [], [], 0)
+            if not readable:
+                continue
+            if connection.recv(1, socket.MSG_PEEK) == b"":
+                occupant.mark_disconnected(time.monotonic())
+                print(
+                    "[crew-sidecar] the caller disconnected; the generation CANNOT be cancelled "
+                    "and continues to completion, holding the slot"
+                )
+                return
+        except OSError:
+            # A socket already torn down is itself a disconnect.
+            occupant.mark_disconnected(time.monotonic())
+            return
+        except Exception as err:  # noqa: BLE001 - observability must never be fatal
+            print(f"[crew-sidecar] disconnect watcher stopped: {type(err).__name__}: {err}")
+            return
 
 
 def _model_identity(inference: dict) -> dict:
@@ -92,18 +149,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def _json(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # The caller stopped waiting while the generation ran. Logged as the
+            # ordinary outcome it is rather than raised as a traceback: the work
+            # completed, and only its result was discarded. Nothing is retried
+            # here — the caller's queue owns that decision.
+            print(f"[crew-sidecar] the caller was gone when the {status} response was written")
 
     def _error(self, status: int, code: str, message: str) -> None:
         self._json(status, {"status": "error", "code": code, "message": message})
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's contract
         if self.path == "/health":
-            self._json(200, {"status": "ok"})
+            # Reachability AND the truthful busy state. `busy` is reported rather
+            # than implied, so a caller never has to infer occupancy from a
+            # refusal it cannot attribute.
+            self._json(200, {"status": "ok", **_slot.snapshot()})
             return
         self._error(404, "invalid_response", "Unknown path.")
 
@@ -138,13 +205,30 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # Non-blocking: an overflow is refused immediately rather than parked.
-        if not _slot.acquire(blocking=False):
-            self._error(503, "unavailable", "crew_busy")
+        # The message names the occupant's age and whether its client is gone,
+        # because "busy" alone cannot distinguish a real concurrent caller from
+        # an abandoned run that nobody is waiting for any more.
+        occupant = _slot.try_acquire()
+        if occupant is None:
+            self._error(503, "unavailable", _slot.busy_message())
             return
+
+        # Watch for the caller giving up. This RECORDS the disconnect; it does
+        # not cancel anything, because a synchronous CrewAI kickoff cannot be
+        # cancelled safely and Ollama would keep generating regardless.
+        done = threading.Event()
+        watcher = threading.Thread(
+            target=_watch_for_disconnect,
+            args=(self.connection, occupant, done),
+            name="crew-disconnect-watch",
+            daemon=True,
+        )
+        watcher.start()
         try:
             self._generate(request)
         finally:
-            _slot.release()
+            done.set()
+            _slot.release(occupant)
 
     def _generate(self, request: dict) -> None:
         try:

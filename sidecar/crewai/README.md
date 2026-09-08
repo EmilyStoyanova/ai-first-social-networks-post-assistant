@@ -123,6 +123,47 @@ never becomes a PASS — the caller classifies it `unavailable`, releases its
 claimed article and retries the job as multi-agent, with no strategy change and
 no cloud fallback.
 
+## The response arrives all at once — and that broke `fetch`
+
+This service sends **no byte of the response until the whole generation is
+done**. The handler runs the Flow synchronously and only then calls
+`send_response`. That is fine for one loopback caller, but it is exactly the
+shape that Node's global `fetch` refuses to wait for.
+
+A live run configured with `CREW_SIDECAR_TIMEOUT_MS=2700000` (45 minutes) failed
+at about five:
+
+```
+CrewAI sidecar unreachable (UND_ERR_HEADERS_TIMEOUT)
+cause=Headers Timeout Error
+```
+
+`fetch` is undici, and undici enforces its own `headersTimeout` — 300s by
+default — measured from the end of the request to the response's first byte. The
+configured budget was never consulted. Measured on Node 24.15 against a server
+that accepts and never answers:
+
+```
+[fetch]     REJECTED at 306.5s — cause=HeadersTimeoutError code=UND_ERR_HEADERS_TIMEOUT
+[node:http] still open at 365.0s
+```
+
+So the client dials with `node:http` instead (`lib/ai/crew/loopback-transport.ts`),
+which has no headers or body timeout at all. `CREW_SIDECAR_TIMEOUT_MS` is now
+the only deadline in the stack. Nothing global changed — every other `fetch` in
+the app keeps undici's behaviour.
+
+**Do not "simplify" that client back to `fetch`**, and do not raise undici's
+limits with `setGlobalDispatcher`, which would change the timeout behaviour of
+every outbound call in the process. If a transport ever imposes its own deadline
+again, the client refuses it as `invalid_response` and names
+`UND_ERR_HEADERS_TIMEOUT` explicitly rather than reporting an unreachable
+sidecar — the misdiagnosis that cost the first cycle.
+
+The same reasoning applies to any future streaming or progress endpoint: if this
+service ever sends early bytes, that would fix the symptom for `fetch` and the
+transport choice could be revisited. Until then it does not.
+
 ## Verification on the Mac
 
 Two halves, and they are complementary rather than redundant. A real model
@@ -133,11 +174,12 @@ separately against real Ollama. Neither half alone is sufficient.
 ### 1. Pure logic — stdlib only, no CrewAI, no Ollama
 
 ```bash
-cd <repo>/sidecar/crewai && python3 -m unittest test_qa_verdict test_inference_config -v
+cd <repo>/sidecar/crewai && python3 -m unittest test_qa_verdict test_inference_config test_occupancy -v
 ```
 
-`test_inference_config` guards a defect that already cost a live Mac run — see
-**Sampling and thinking models** below.
+`test_inference_config` and `test_occupancy` each guard a defect that already
+cost a live Mac run — see **Sampling and thinking models** above and
+**Serialization** below.
 
 ### 2. The four Flow scenarios — real `run_flow`, no model call
 
@@ -192,18 +234,75 @@ DATABASE_URL=postgres://x CREW_SIDECAR_API_KEY=k python app.py; echo "exit=$?"
 sudo lsof -nP -iTCP:49510 -sTCP:LISTEN   # expect no output
 ```
 
-### 4. Serialization
+### 4. Serialization — and why `503 + 503` is a FAILURE
 
-Covered by `npm run crew:verify -- --live` (§2b), which fires two concurrent
-requests and asserts one is refused. By hand:
+Covered by `npm run crew:verify -- --live` (§2b), which now proves three things
+rather than one:
+
+1. one request is **admitted** — observed via `/health` reporting `busy`;
+2. the overlapping request is refused **`503 crew_busy`**;
+3. the admitted request still returns a **legitimate, contract-valid result**.
+
+The old check passed if EITHER of two concurrent requests came back 503, and
+that is how a real defect slipped through. After undici cut a live request short
+(see below), the generation kept running, the slot stayed held, and both probes
+were refused — `503 + 503`, which the verifier reported as a serialization pass.
+It was the opposite: nothing had been serialized, because nothing had been
+admitted.
+
+`/health` is what makes the difference readable:
 
 ```bash
-# Two concurrent requests: the second must return 503 crew_busy immediately.
-for i in 1 2; do curl -s -o /dev/null -w "%{http_code}\n" \
-  -H "x-worker-api-key: $CREW_SIDECAR_API_KEY" \
-  -H 'content-type: application/json' \
-  --data @fixtures/request.json http://127.0.0.1:49510/crew/post & done; wait
+curl -s http://127.0.0.1:49510/health | python3 -m json.tool
+# idle: {"status":"ok","busy":false,"runningForMs":null,"clientDisconnected":false}
+# busy: {"status":"ok","busy":true,"runningForMs":546500,"clientDisconnected":true}
+#        ^ an ABANDONED run: its client gave up 9 minutes ago and it is still going
 ```
+
+By hand, in two terminals — concurrently, not as a `for` loop, because a loop
+cannot show which request was admitted:
+
+```bash
+# Terminal 1 — the admitted generation. Runs for minutes.
+curl -s -w '\n%{http_code}\n' -H "x-worker-api-key: $CREW_SIDECAR_API_KEY" \
+  -H 'content-type: application/json' \
+  --data @fixtures/request.json http://127.0.0.1:49510/crew/post
+
+# Terminal 2 — once /health reports busy. Must be 503, with `crew_busy` in the body.
+curl -s -w '\n%{http_code}\n' -H "x-worker-api-key: $CREW_SIDECAR_API_KEY" \
+  -H 'content-type: application/json' \
+  --data @fixtures/request.json http://127.0.0.1:49510/crew/post
+```
+
+### 4b. Cancellation — there is none, and nothing pretends there is
+
+A caller that stops waiting does **not** stop the generation. The handler thread
+is inside a synchronous CrewAI `kickoff`, which exposes no cancellation token;
+killing that thread is not safe in Python (it owns litellm's connection and
+CrewAI's state, and a blocking C-level read cannot be interrupted), and Ollama is
+a separate process that would keep generating regardless.
+
+So the sidecar records the disconnect and finishes the run:
+
+```
+[crew-sidecar] the caller disconnected; the generation CANNOT be cancelled and continues to completion, holding the slot
+[crew-sidecar] the caller was gone when the 200 response was written
+```
+
+The consequences are deliberate and must not be "fixed" by pretending
+otherwise:
+
+- `/health` keeps reporting `busy: true`, now with `clientDisconnected: true`.
+- Later calls are refused `crew_busy` — **correctly**. The message names the
+  occupant's age so the refusal can be attributed instead of guessed at.
+- A `timeout` on the caller's side means "we stopped waiting", never "it
+  stopped running", and the client's error message says so.
+- `npm run crew:verify -- --live` refuses to start a live run against an
+  occupied sidecar, and reports the occupancy instead of collecting a
+  `crew_busy` failure it would then blame on this run.
+
+To verify by hand: start a generation, kill the client (`Ctrl-C`), and watch
+`/health`. `busy` stays true and `clientDisconnected` flips to true.
 
 ### 5. Outbound audit — the authoritative control is a filter, not an observation
 

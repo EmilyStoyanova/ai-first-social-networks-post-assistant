@@ -19,6 +19,20 @@
  * `--live` spends real model time: one full Writer → Editor → QA pass, which at
  * R=0 is three Ollama calls. Expect minutes, not seconds.
  *
+ * ── Why the serialization check shares that one generation ──────────────────
+ *
+ * It used to fire two concurrent requests and pass if EITHER came back 503.
+ * That accepted 503 + 503, which is not serialization — it is the signature of
+ * a sidecar already occupied by an abandoned run, and it is exactly what the
+ * Mac produced after undici cut a live request short: the generation kept going,
+ * the slot stayed held, and both probes were refused. The verifier called it a
+ * pass.
+ *
+ * It now proves the three things that actually constitute serialization: one
+ * request is ADMITTED (observed via `/health` reporting busy), the overlapping
+ * one is refused `503 crew_busy`, and the admitted one still returns a
+ * legitimate, contract-valid result. 503 + 503 fails all three.
+ *
  * ── Why this file has no top-level await ────────────────────────────────────
  *
  * This repo's `package.json` declares no `"type": "module"`, so `tsx`
@@ -42,9 +56,15 @@ import {
   crewSidecarCeilingMs,
   crewSidecarConfigFromEnv,
   isLoopbackUrl,
+  UNDICI_DEFAULT_HEADERS_TIMEOUT_MS,
   type FetchLike,
 } from "@/lib/ai/crew/crew-sidecar.client";
-import type { CrewPostRequest } from "@/lib/ai/crew/crew-contract";
+import { loopbackFetch } from "@/lib/ai/crew/loopback-transport";
+import {
+  crewHealthSchema,
+  type CrewHealth,
+  type CrewPostRequest,
+} from "@/lib/ai/crew/crew-contract";
 import { parseLlmPost } from "@/lib/ai/parse-llm-post";
 import { inferenceFingerprint } from "@/lib/ai/crew/provenance";
 
@@ -124,10 +144,65 @@ class Report {
 export interface VerifyDeps {
   /** Defaults to `process.env`. Injected so a test needs no real configuration. */
   env?: Record<string, string | undefined>;
-  /** Defaults to global `fetch`, and is handed to the real client unchanged. */
+  /**
+   * Defaults to the client's own `node:http` transport — NOT global `fetch`,
+   * which would reimpose undici's 300s headers timeout on a request the sidecar
+   * answers only after minutes of generation. Injected by tests, and handed to
+   * the real client unchanged.
+   */
   fetchImpl?: FetchLike;
   /** Defaults to the repo's shared fixture. */
   fixturePath?: string;
+  /** Sleep between `/health` polls. Injected so tests need no real waiting. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** `/health`, parsed. `busy: undefined` means the sidecar did not say. */
+async function readHealth(
+  doFetch: FetchLike,
+  base: string
+): Promise<{ ok: true; health: CrewHealth } | { ok: false; problem: string }> {
+  try {
+    const res = await doFetch(`${base}/health`, { signal: AbortSignal.timeout(5_000) });
+    if (res.status !== 200) return { ok: false, problem: `status ${res.status}` };
+    const parsed = crewHealthSchema.safeParse(await res.json());
+    if (!parsed.success)
+      return { ok: false, problem: "the body did not match the health contract" };
+    return { ok: true, health: parsed.data };
+  } catch (err) {
+    return { ok: false, problem: describe(err) };
+  }
+}
+
+const BUSY_POLL_MS = 250;
+
+/**
+ * Waits until the sidecar reports itself busy, so the overlapping probe is
+ * fired while the admitted run genuinely holds the slot.
+ *
+ * Returns false on timeout, and that is a FAILED check rather than an ignored
+ * one: if occupancy never appeared, the two requests did not overlap and
+ * nothing about serialization was demonstrated.
+ */
+async function waitUntilBusy(
+  doFetch: FetchLike,
+  base: string,
+  timeoutMs: number,
+  sleep: (ms: number) => Promise<void>
+): Promise<boolean> {
+  // Bounded by attempts AND by wall clock: the attempt count is what terminates
+  // this promptly when `sleep` is injected as a no-op, and the wall clock is
+  // what terminates it honestly when a slow `/health` makes each attempt cost
+  // more than the poll interval.
+  const attempts = Math.max(1, Math.ceil(timeoutMs / BUSY_POLL_MS));
+  const until = Date.now() + timeoutMs;
+  for (let i = 0; i < attempts; i++) {
+    const health = await readHealth(doFetch, base);
+    if (health.ok && health.health.busy === true) return true;
+    if (Date.now() >= until) return false;
+    await sleep(BUSY_POLL_MS);
+  }
+  return false;
 }
 
 // ─── The verifier ─────────────────────────────────────────────────────────────
@@ -163,14 +238,26 @@ export async function main(argv: readonly string[] = [], deps: VerifyDeps = {}):
     config.apiKey.length > 0,
     `${config.apiKey.length} chars`
   );
+  const effectiveTimeoutMs = timeoutOverride ?? config.timeoutMs ?? crewSidecarCeilingMs(2);
   report.info(
-    `timeout: ${timeoutOverride ?? config.timeoutMs ?? crewSidecarCeilingMs(2)}ms` +
+    `timeout: ${effectiveTimeoutMs}ms` +
       (timeoutOverride
         ? " (--timeout override)"
         : config.timeoutMs
           ? ""
           : " (compile-time (3+3R)×300s ceiling — set from measured p95)")
   );
+
+  // The defect this section exists for: a 45-minute budget was preempted at
+  // five minutes by undici's own headersTimeout, because the sidecar sends no
+  // response byte until the whole generation is finished. Printed on every run
+  // so the transport in use is a reading rather than an assumption.
+  if (effectiveTimeoutMs > UNDICI_DEFAULT_HEADERS_TIMEOUT_MS) {
+    report.info(
+      `the budget exceeds undici's ${UNDICI_DEFAULT_HEADERS_TIMEOUT_MS}ms headersTimeout — ` +
+        "global fetch would abandon this request early"
+    );
+  }
 
   // The client refuses a non-loopback URL at construction, undialled. Proving
   // it here means the guard is live in THIS build, not merely in a unit test.
@@ -181,6 +268,20 @@ export async function main(argv: readonly string[] = [], deps: VerifyDeps = {}):
     report.check(
       "a non-loopback URL is refused at construction",
       err instanceof CrewSidecarError && err.code === "not_configured"
+    );
+  }
+
+  // Which transport will actually carry the live request. `node:http` is the
+  // only one with no headers/body timeout of its own; anything else means the
+  // configured budget is no longer the sole deadline.
+  const transportProbe = new CrewSidecarClient(config, deps.fetchImpl);
+  if (transportProbe.transport === "node:http") {
+    report.pass("the configured timeout is the only deadline", "transport=node:http");
+  } else {
+    report.note(
+      "transport=injected — this run's transport was supplied by the caller and\n" +
+        "        may impose deadlines of its own. Only the default node:http transport\n" +
+        "        guarantees CREW_SIDECAR_TIMEOUT_MS is authoritative."
     );
   }
 
@@ -214,14 +315,27 @@ export async function main(argv: readonly string[] = [], deps: VerifyDeps = {}):
 
   console.log("\n── Reachability ───────────────────────────────────────────────");
 
-  const doFetch: FetchLike = deps.fetchImpl ?? ((input, init) => fetch(input, init));
+  // The same `node:http` transport the client uses, for the same reason: the
+  // serialization probe below is fired against a service that answers only when
+  // its generation finishes, so a 300s transport deadline would break it too.
+  const doFetch: FetchLike = deps.fetchImpl ?? loopbackFetch();
   const base = config.url.replace(/\/$/, "");
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
-  try {
-    const res = await doFetch(`${base}/health`, { signal: AbortSignal.timeout(5_000) });
-    report.check("GET /health responds 200", res.status === 200, `status ${res.status}`);
-  } catch (err) {
-    report.fail("GET /health", `unreachable — is the sidecar running? (${describe(err)})`);
+  const health = await readHealth(doFetch, base);
+  if (health.ok) {
+    report.pass("GET /health responds 200");
+    // Reported on every run, `--live` or not, because an occupied sidecar is the
+    // context for everything below it: without this line, a `crew_busy` later on
+    // looks like a fault in this run rather than the tail of an earlier one.
+    report.info(
+      health.health.busy === undefined
+        ? "occupancy: not reported by this sidecar"
+        : `occupancy: busy=${health.health.busy} runningForMs=${health.health.runningForMs ?? "null"} ` +
+            `clientDisconnected=${health.health.clientDisconnected ?? "unknown"}`
+    );
+  } else {
+    report.fail("GET /health", `unreachable — is the sidecar running? (${health.problem})`);
   }
 
   // An unauthenticated POST must be refused, and must not leak why.
@@ -246,8 +360,37 @@ export async function main(argv: readonly string[] = [], deps: VerifyDeps = {}):
   }
 
   // ── 4. The live run, through the production client ────────────────────────
+  //
+  // The live generation and the serialization proof are ONE run, deliberately.
+  // The overlapping probe must be fired while a generation is genuinely in
+  // flight, and the admitted request must be shown to survive being overlapped
+  // — two facts about the same run. Firing a second generation to prove them
+  // would cost another few minutes of Qwen and prove less.
 
   console.log("\n── Live run (real Ollama, real Qwen) ──────────────────────────");
+
+  // Precondition. A sidecar that is already busy cannot demonstrate anything:
+  // the generation below would be refused `crew_busy` and the refusal would be
+  // read as a fault in this run. This is the exact state an ABANDONED run
+  // leaves behind — a client that gave up does not stop the generation — so it
+  // is reported as itself rather than allowed to corrupt the checks.
+  if (health.ok && health.health.busy === true) {
+    report.fail(
+      "the sidecar is idle before the live run",
+      `it is already occupied (runningForMs=${health.health.runningForMs ?? "unknown"}` +
+        `, clientDisconnected=${health.health.clientDisconnected ?? "unknown"}). A previous ` +
+        "generation is still running — most likely one whose client stopped waiting. " +
+        "Nothing can cancel it; wait for it to finish and re-run."
+    );
+    return report.summarize();
+  }
+  if (health.ok && health.health.busy === undefined) {
+    report.note(
+      "this sidecar does not report `busy` on /health, so occupancy could not be\n" +
+        "        checked. Upgrade it: without that field an abandoned run is\n" +
+        "        indistinguishable from working serialization."
+    );
+  }
 
   const client = new CrewSidecarClient(
     { ...config, ...(timeoutOverride ? { timeoutMs: timeoutOverride } : {}) },
@@ -255,14 +398,74 @@ export async function main(argv: readonly string[] = [], deps: VerifyDeps = {}):
   );
 
   const startedAt = Date.now();
+
+  // Started, NOT awaited: the overlapping probe has to arrive while this holds
+  // the slot. The rejection handler is attached immediately so a fast failure
+  // can never surface as an unhandled rejection.
+  const admitted = client.generate(request);
+  const admittedOutcome = admitted.then(
+    (outcome) => ({ ok: true as const, outcome }),
+    (err: unknown) => ({ ok: false as const, err })
+  );
+
+  // ── 4a. Serialization, proven against the run above ───────────────────────
+
+  console.log("\n── Serialization ──────────────────────────────────────────────");
+  report.info("one request admitted; an overlapping one must be refused 503 crew_busy.");
+
+  const overlapped = await waitUntilBusy(doFetch, base, 60_000, sleep);
+  if (!overlapped) {
+    // Not a pass and not a skip. Without observed occupancy the two requests
+    // may never have overlapped, so the probe would prove nothing either way.
+    report.fail(
+      "the admitted request occupies the sidecar",
+      "/health never reported busy within 60s, so no overlap could be established " +
+        "and serialization is UNPROVEN by this run"
+    );
+  } else {
+    report.pass("the admitted request occupies the sidecar", "/health reports busy");
+    try {
+      const res = await doFetch(`${base}/crew/post`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-worker-api-key": config.apiKey },
+        body: JSON.stringify(request),
+        signal: AbortSignal.timeout(30_000),
+      });
+      const body = await res.text();
+      // 503 alone is not enough — the sidecar must say it is BUSY, not merely
+      // that something went wrong. `crew_busy` is the only 503 that proves
+      // admission control refused a second generation.
+      report.check(
+        "the overlapping request is refused with 503 crew_busy",
+        res.status === 503 && body.includes("crew_busy"),
+        `status ${res.status}, body ${body.slice(0, 120)}`
+      );
+    } catch (err) {
+      report.fail("the overlapping request", describe(err));
+    }
+  }
+
+  // ── 4b. …and the admitted request still returns a legitimate result ───────
+
+  console.log("\n── Live run result ────────────────────────────────────────────");
+
+  const settled = await admittedOutcome;
   try {
+    if (!settled.ok) throw settled.err;
     // Everything below is validated by the client itself before it returns:
     // the strict response schema, `validateCallCounts` (which REFUSES a run
     // whose Editor count is short of 1 + writerRoutes + editorRoutes), and
     // `resolveQaState` (which refuses a mid-loop verdict as non_converged).
-    const outcome = await client.generate(request);
+    const { outcome } = settled;
     const wallMs = Date.now() - startedAt;
 
+    // The other half of the serialization proof: admission control is only
+    // correct if the request it ADMITTED still completed. A sidecar that
+    // refused both would fail here even if the 503 above looked right.
+    report.pass(
+      "the admitted request returned a legitimate result",
+      "it was not disturbed by the overlapping request"
+    );
     report.pass("the production client accepted the response", "schema + counters + verdict");
     report.info(
       `qa=${outcome.qaState} revisions=${outcome.qaRevisions} ` +
@@ -351,9 +554,11 @@ export async function main(argv: readonly string[] = [], deps: VerifyDeps = {}):
       report.fail(`the live run (${err.code})`, err.message);
       console.log(
         "\n  Failure-code map, for reference:\n" +
-          "    timeout          — exceeded CREW_SIDECAR_TIMEOUT_MS\n" +
+          "    timeout          — exceeded CREW_SIDECAR_TIMEOUT_MS (the generation is\n" +
+          "                       NOT cancelled by this and is probably still running)\n" +
           "    unavailable      — unreachable, 5xx, 503 crew_busy, or no candidate\n" +
-          "    invalid_response — off-contract body, or counters showing a bypassed Editor\n" +
+          "    invalid_response — off-contract body, counters showing a bypassed Editor,\n" +
+          "                       or a transport that imposed a deadline of its own\n" +
           "    non_converged    — a mid-loop verdict leaked out of the Flow\n" +
           "    qa_parse_error   — the sidecar failed the whole call over an unreadable QA\n" +
           "    not_configured   — no loopback URL for this process"
@@ -363,27 +568,22 @@ export async function main(argv: readonly string[] = [], deps: VerifyDeps = {}):
     }
   }
 
-  // ── 5. Serialization ──────────────────────────────────────────────────────
+  // ── 5. What the run left behind ───────────────────────────────────────────
+  //
+  // Reported rather than checked. A slot still held after the client has its
+  // answer is not necessarily wrong — the sidecar may be finishing its response
+  // — but a slot held for minutes is the abandoned-run signature, and a later
+  // run's `crew_busy` would otherwise arrive with no explanation.
 
-  console.log("\n── Serialization ──────────────────────────────────────────────");
-  report.info("firing two concurrent requests; the second must be refused.");
-  const fire = () =>
-    doFetch(`${base}/crew/post`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-worker-api-key": config.apiKey },
-      body: JSON.stringify(request),
-      signal: AbortSignal.timeout(timeoutOverride ?? crewSidecarCeilingMs(2)),
-    }).then((r) => r.status);
-
-  try {
-    const [a, b] = await Promise.all([fire(), fire()]);
-    report.check(
-      "one of two concurrent requests is refused with 503 crew_busy",
-      [a, b].includes(503),
-      `statuses ${a} and ${b}`
+  const after = await readHealth(doFetch, base);
+  if (after.ok && after.health.busy === true) {
+    report.note(
+      `the sidecar is still busy (runningForMs=${after.health.runningForMs ?? "unknown"}, ` +
+        `clientDisconnected=${after.health.clientDisconnected ?? "unknown"}).\n` +
+        "        A generation cannot be cancelled, so wait for it before re-running."
     );
-  } catch (err) {
-    report.fail("serialization check", describe(err));
+  } else if (after.ok) {
+    report.info("the sidecar is idle again");
   }
 
   return report.summarize();

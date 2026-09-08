@@ -269,6 +269,35 @@ describe("failures are explicit", () => {
     );
   });
 
+  it("keeps the sidecar's account of WHY it is busy", async () => {
+    // The sidecar's `crew_busy` message names how long the occupant has been
+    // running and whether its client is gone. That is the difference between a
+    // real concurrent caller and an abandoned run nobody is waiting for, and
+    // replacing it with this client's own generic wording would throw away the
+    // only evidence that distinguishes them.
+    const client = new CrewSidecarClient(
+      LOOPBACK,
+      async () =>
+        new Response(
+          JSON.stringify({
+            status: "error",
+            code: "unavailable",
+            message:
+              "crew_busy (a generation has been running for 546500ms, and its client has " +
+              "disconnected — an abandoned run that cannot be cancelled and must finish)",
+          }),
+          { status: 503 }
+        )
+    );
+    await assert.rejects(client.generate(request()), (err: unknown) => {
+      assert.ok(err instanceof CrewSidecarError);
+      assert.equal(err.code, "unavailable");
+      assert.match(err.message, /546500ms/);
+      assert.match(err.message, /disconnected/);
+      return true;
+    });
+  });
+
   it("preserves a declared failure code from an error body", async () => {
     const client = new CrewSidecarClient(
       LOOPBACK,

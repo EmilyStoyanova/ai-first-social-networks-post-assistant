@@ -232,6 +232,40 @@ export const crewFailureResponseSchema = z
   })
   .strict();
 
+// ─── Health ───────────────────────────────────────────────────────────────────
+
+/**
+ * `GET /health` — reachability AND the truthful single-flight state.
+ *
+ * The occupancy fields exist because of a real observation: a client that gives
+ * up on a request does NOT cancel the sidecar's generation, so the slot stays
+ * held for minutes afterwards and every later call is legitimately refused
+ * `crew_busy`. Without somewhere to read that, "both concurrent requests were
+ * refused" is indistinguishable from "serialization works", and the verifier
+ * read the first as the second.
+ *
+ * NOT `.strict()`, and every occupancy field optional — unlike `/crew/post`.
+ * This endpoint's job is to answer when the sidecar is old, new or mid-upgrade;
+ * an absent `busy` is reported as UNKNOWN rather than defaulted to `false`,
+ * because defaulting it would manufacture the very "the sidecar is free" claim
+ * the field was added to stop anyone from assuming.
+ */
+export const crewHealthSchema = z.object({
+  status: z.literal("ok"),
+  /** True while a generation holds the single-flight slot. */
+  busy: z.boolean().optional(),
+  /** How long the current occupant has been running. Null when idle. */
+  runningForMs: z.number().nonnegative().nullable().optional(),
+  /**
+   * True when the occupant's HTTP client has gone away but the generation is
+   * still running — an abandoned run. This is the state that explains a
+   * `crew_busy` nobody asked for.
+   */
+  clientDisconnected: z.boolean().optional(),
+});
+
+export type CrewHealth = z.infer<typeof crewHealthSchema>;
+
 // ─── Counter validation ───────────────────────────────────────────────────────
 
 export interface CallCountProblem {

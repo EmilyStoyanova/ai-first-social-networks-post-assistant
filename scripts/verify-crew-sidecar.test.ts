@@ -43,20 +43,73 @@ function passBody(overrides: Partial<CrewPostResponse> = {}): CrewPostResponse {
   };
 }
 
-/** A sidecar double: healthy `/health`, 401 on a wrong key, scripted otherwise. */
+/**
+ * A sidecar double: healthy `/health`, 401 on a wrong key, scripted otherwise.
+ *
+ * `/health` now carries the single-flight state, and the double models it the
+ * way the real sidecar behaves: BUSY while a generation is in flight. That is
+ * what lets the serialization checks run without a real sidecar — and it is why
+ * `busyWhileGenerating: false` (below) reproduces a sidecar whose occupancy is
+ * invisible.
+ */
 function fakeSidecar(
-  options: { post?: () => Response; health?: number; onCall?: (url: string) => void } = {}
+  options: {
+    /** The ADMITTED generation's response. Overlapping probes are separate. */
+    post?: () => Response;
+    health?: number;
+    healthBody?: unknown;
+    onCall?: (url: string) => void;
+    /**
+     * What an overlapping generation gets. `refuse` is a correct sidecar;
+     * `admit` is one with broken admission control; `refuse-always` is the
+     * observed abandoned-run state where even the FIRST request is refused.
+     */
+    overlap?: "refuse" | "admit" | "refuse-always";
+    /** Omit `busy` from /health, as an un-upgraded sidecar would. */
+    reportsBusy?: boolean;
+  } = {}
 ): FetchLike {
+  let inFlight = 0;
+  const busyBody = () =>
+    new Response(
+      JSON.stringify({ status: "error", code: "unavailable", message: "crew_busy (running)" }),
+      { status: 503 }
+    );
+
   return async (url, init) => {
     options.onCall?.(url);
     if (url.endsWith("/health")) {
-      return new Response("{}", { status: options.health ?? 200 });
+      const occupied = inFlight > 0 || options.overlap === "refuse-always";
+      const body =
+        options.healthBody ??
+        (options.reportsBusy === false
+          ? { status: "ok" }
+          : {
+              status: "ok",
+              busy: occupied,
+              runningForMs: occupied ? 1234 : null,
+              clientDisconnected: false,
+            });
+      return new Response(JSON.stringify(body), { status: options.health ?? 200 });
     }
     const key = new Headers(init?.headers).get("x-worker-api-key");
     if (key === "wrong-key") return new Response("", { status: 401 });
-    return options.post?.() ?? new Response(JSON.stringify(passBody()));
+    if (options.overlap === "refuse-always") return busyBody();
+    if (inFlight > 0 && options.overlap !== "admit") return busyBody();
+    inFlight++;
+    try {
+      // Real asynchrony, so the admitted generation is genuinely still in
+      // flight when the verifier polls /health and fires the overlap.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return options.post?.() ?? new Response(JSON.stringify(passBody()));
+    } finally {
+      inFlight--;
+    }
   };
 }
+
+/** No real waiting between the verifier's /health polls. */
+const noSleep = async (): Promise<void> => {};
 
 // `main` prints a report; silence it so the test output stays readable.
 const realLog = console.log;
@@ -146,8 +199,19 @@ describe("main — exit codes", () => {
       env: ENV,
       fetchImpl: async (url) =>
         url.endsWith("/health")
-          ? new Response("{}", { status: 200 })
+          ? new Response(JSON.stringify({ status: "ok", busy: false }), { status: 200 })
           : new Response(JSON.stringify(passBody()), { status: 200 }),
+      fixturePath: FIXTURE,
+    });
+    assert.equal(code, 1);
+  });
+
+  it("returns 1 when /health does not match the health contract", async () => {
+    // `{}` has no `status`, so this sidecar is not answering the endpoint the
+    // verifier reads occupancy from. Refused rather than treated as healthy.
+    const code = await main([], {
+      env: ENV,
+      fetchImpl: fakeSidecar({ healthBody: {} }),
       fixturePath: FIXTURE,
     });
     assert.equal(code, 1);
@@ -191,32 +255,76 @@ describe("main — the --live gate", () => {
     assert.equal(urls.filter((u) => u.endsWith("/crew/post")).length, 1);
   });
 
-  it("runs the generation and the serialization pair with --live", async () => {
-    let posts = 0;
+  it("passes when one request is admitted, the overlap refused, and the result returned", async () => {
     const code = await main(["--live"], {
       env: ENV,
-      fetchImpl: fakeSidecar({
-        post: () => {
-          posts++;
-          // The live generation and the first of the concurrent pair succeed;
-          // the third must be refused or the serialization check fails.
-          return posts >= 3
-            ? new Response("crew_busy", { status: 503 })
-            : new Response(JSON.stringify(passBody()));
-        },
-      }),
+      fetchImpl: fakeSidecar({ overlap: "refuse" }),
+      sleep: noSleep,
       fixturePath: FIXTURE,
     });
-    // 1 live generation + 2 concurrent = 3. The wrong-key auth probe is answered
-    // 401 by the double before it reaches this script, so it is not counted.
-    assert.equal(posts, 3);
     assert.equal(code, 0);
   });
 
-  it("returns 1 when neither concurrent request is refused", async () => {
+  it("returns 1 when the overlapping request is ADMITTED instead of refused", async () => {
+    // Broken admission control: two generations would hit the same local Ollama
+    // at once, which is the thing single-flight exists to prevent.
     const code = await main(["--live"], {
       env: ENV,
-      fetchImpl: fakeSidecar({ post: () => new Response(JSON.stringify(passBody())) }),
+      fetchImpl: fakeSidecar({ overlap: "admit" }),
+      sleep: noSleep,
+      fixturePath: FIXTURE,
+    });
+    assert.equal(code, 1);
+  });
+});
+
+describe("main — serialization is no longer satisfied by 503 + 503", () => {
+  /**
+   * THE regression guard for the reported defect.
+   *
+   * On the Mac, undici abandoned a live request at its own 300s headers
+   * timeout. The generation was never cancelled, so the slot stayed held and
+   * BOTH of the verifier's concurrent probes came back 503 — and the old check
+   * ("either status is 503") called that a serialization PASS.
+   */
+  it("FAILS when every request is refused because an abandoned run holds the slot", async () => {
+    const code = await main(["--live"], {
+      env: ENV,
+      fetchImpl: fakeSidecar({ overlap: "refuse-always" }),
+      sleep: noSleep,
+      fixturePath: FIXTURE,
+    });
+    assert.equal(code, 1, "503 + 503 must never pass");
+  });
+
+  it("does not even attempt the live run when /health already reports busy", async () => {
+    // The occupied sidecar is reported as itself. Running the generation anyway
+    // would collect a `crew_busy` failure and blame this run for it.
+    const posts: string[] = [];
+    const code = await main(["--live"], {
+      env: ENV,
+      fetchImpl: fakeSidecar({
+        overlap: "refuse-always",
+        onCall: (url) => {
+          if (url.endsWith("/crew/post")) posts.push(url);
+        },
+      }),
+      sleep: noSleep,
+      fixturePath: FIXTURE,
+    });
+    assert.equal(code, 1);
+    // Only the wrong-key auth probe from the reachability section — no generation.
+    assert.equal(posts.length, 1);
+  });
+
+  it("FAILS, rather than passing quietly, when occupancy can never be observed", async () => {
+    // A sidecar that admits the request but never reports `busy` leaves the
+    // overlap unproven. Unproven is a failure, not a skip: this is the exact
+    // blind spot that let 503 + 503 look like a pass.
+    const code = await main(["--live"], {
+      env: ENV,
+      fetchImpl: fakeSidecar({ overlap: "refuse", reportsBusy: false }),
+      sleep: noSleep,
       fixturePath: FIXTURE,
     });
     assert.equal(code, 1);
@@ -227,6 +335,7 @@ describe("main — the --live gate", () => {
     // did not complete, so it must say which.
     const code = await main(["--live"], {
       env: ENV,
+      sleep: noSleep,
       fetchImpl: fakeSidecar({
         post: () =>
           new Response(
@@ -249,6 +358,7 @@ describe("main — the --live gate", () => {
     // `validateCallCounts` rather than a re-check here.
     const code = await main(["--live"], {
       env: ENV,
+      sleep: noSleep,
       fetchImpl: fakeSidecar({
         post: () =>
           new Response(
@@ -268,6 +378,7 @@ describe("main — the --live gate", () => {
   it("returns 1 when the candidate does not parse as a post", async () => {
     const code = await main(["--live"], {
       env: ENV,
+      sleep: noSleep,
       fetchImpl: fakeSidecar({
         post: () =>
           new Response(
@@ -283,10 +394,21 @@ describe("main — the --live gate", () => {
     // A 1ms budget cannot survive a real await, so the generation aborts and the
     // run fails — which is exactly how the Mac procedure verifies the timeout
     // mapping (README.md step 8).
+    let healthCalls = 0;
     const code = await main(["--live", "--timeout", "1"], {
       env: ENV,
+      sleep: noSleep,
       fetchImpl: async (url, init) => {
-        if (url.endsWith("/health")) return new Response("{}", { status: 200 });
+        if (url.endsWith("/health")) {
+          // Idle for the precondition, then busy — otherwise the verifier would
+          // (correctly) refuse to start a live run at all and the timeout path
+          // would never be reached.
+          healthCalls++;
+          return new Response(
+            JSON.stringify({ status: "ok", busy: healthCalls > 1, runningForMs: 5 }),
+            { status: 200 }
+          );
+        }
         const key = new Headers(init?.headers).get("x-worker-api-key");
         if (key === "wrong-key") return new Response("", { status: 401 });
         await new Promise((resolve) => setTimeout(resolve, 30));

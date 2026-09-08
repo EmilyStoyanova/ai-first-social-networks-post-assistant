@@ -29,6 +29,28 @@
  * silently corrupts the experiment the strategy exists to run — and would do so
  * in exactly the conditions (sidecar down) most likely to correlate with
  * something else.
+ *
+ * ── One timeout, and it is the configured one ────────────────────────────────
+ *
+ * This client does NOT dial with global `fetch`. undici enforces a 300s
+ * `headersTimeout` that measures the wait for the response's first byte, and the
+ * sidecar sends no byte until the whole Writer → Editor → QA loop is done — so
+ * `fetch` abandoned a live 45-minute run at five minutes with
+ * `UND_ERR_HEADERS_TIMEOUT`, having never consulted the configured budget. The
+ * transport in `loopback-transport.ts` is `node:http`, which has no headers or
+ * body timeout at all, making `CREW_SIDECAR_TIMEOUT_MS` the single authoritative
+ * end-to-end deadline. Nothing global changes; only this client is affected.
+ *
+ * ── What a timeout does NOT do ───────────────────────────────────────────────
+ *
+ * Abandoning the request does not cancel the generation. The sidecar's handler
+ * runs `run_flow` synchronously and cannot see the disconnect, so CrewAI and
+ * Ollama keep working and the single-flight slot stays held until the run ends
+ * on its own. A `timeout` here therefore means "we stopped waiting", not "it
+ * stopped running", and the next request will legitimately be refused
+ * `crew_busy`. That is truthful rather than convenient: the sidecar reports the
+ * occupancy on `/health`, and `sidecar/crewai/occupancy.py` records whether the
+ * occupant's client is still connected.
  */
 
 import { z } from "zod";
@@ -42,7 +64,8 @@ import {
   type CrewPostResponse,
 } from "./crew-contract";
 import type { QaState } from "./provenance";
-import { requestSignal } from "@/lib/http/request-deadline";
+import { loopbackFetch, UNDICI_DEFAULT_HEADERS_TIMEOUT_MS } from "./loopback-transport";
+import { requestTimeoutMs } from "@/lib/http/request-deadline";
 
 /**
  * Hard abort cap for ONE `/crew/post` call.
@@ -60,6 +83,9 @@ export function crewSidecarCeilingMs(maxQaRounds: number): number {
 }
 
 export const DEFAULT_CREW_SIDECAR_TIMEOUT_MS = crewSidecarCeilingMs(2);
+
+/** Re-exported so callers can name the limit this client exists to escape. */
+export { UNDICI_DEFAULT_HEADERS_TIMEOUT_MS };
 
 /** Max QA REVISION cycles. Two, per the strategy's own bound (requirement 5). */
 export const DEFAULT_MAX_QA_ROUNDS = 2;
@@ -157,8 +183,17 @@ export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 export class CrewSidecarClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
-  private readonly timeoutMs: number;
+  readonly timeoutMs: number;
   private readonly fetchImpl: FetchLike;
+  /**
+   * Which transport is in use, so a live run can PRINT it.
+   *
+   * `node:http` is the only one with no timeout of its own. `injected` means a
+   * test (or the verifier's own `deps.fetchImpl`) supplied the transport and
+   * owns its deadlines — which is fine for a double, and would silently
+   * reintroduce undici's 300s cap if anyone ever injected global `fetch` here.
+   */
+  readonly transport: "node:http" | "injected";
 
   constructor(config: CrewSidecarConfig, fetchImpl?: FetchLike) {
     if (!isLoopbackUrl(config.url)) {
@@ -173,7 +208,11 @@ export class CrewSidecarClient {
     this.baseUrl = config.url.replace(/\/$/, "");
     this.apiKey = config.apiKey;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_CREW_SIDECAR_TIMEOUT_MS;
-    this.fetchImpl = fetchImpl ?? ((input, init) => fetch(input, init));
+    // NOT global `fetch`: undici's 300s headersTimeout would preempt every
+    // budget larger than itself, which is every realistic one. See the module
+    // header and `loopback-transport.ts`.
+    this.transport = fetchImpl ? "injected" : "node:http";
+    this.fetchImpl = fetchImpl ?? loopbackFetch();
   }
 
   /**
@@ -199,8 +238,22 @@ export class CrewSidecarClient {
   async generate(request: CrewPostRequest): Promise<CrewPostOutcome> {
     const maxQaRounds = request.attemptContext.maxQaRounds;
 
+    // The effective budget, computed ONCE so the signal and the timeout message
+    // cannot disagree. Under an ambient cron deadline this is the smaller of the
+    // configured budget and the headroom left — still an application decision,
+    // never a transport one.
+    const budgetMs = requestTimeoutMs(this.timeoutMs);
+
     let res: Response;
     try {
+      // The single deadline in the stack: `budgetMs` via this signal. The
+      // transport adds none of its own, so nothing can expire earlier.
+      console.info(
+        `[crew-sidecar] POST /crew/post transport=${this.transport} budget=${budgetMs}ms` +
+          (this.transport === "injected" && budgetMs > UNDICI_DEFAULT_HEADERS_TIMEOUT_MS
+            ? ` (WARNING: an injected transport may impose its own limit; undici's default is ${UNDICI_DEFAULT_HEADERS_TIMEOUT_MS}ms)`
+            : "")
+      );
       res = await this.fetchImpl(`${this.baseUrl}/crew/post`, {
         method: "POST",
         headers: {
@@ -208,14 +261,37 @@ export class CrewSidecarClient {
           "x-worker-api-key": this.apiKey,
         },
         body: JSON.stringify(request),
-        signal: requestSignal(this.timeoutMs),
+        signal: AbortSignal.timeout(budgetMs),
       });
     } catch (err) {
       if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
         console.warn("[crew-sidecar] transport failure: category=timeout");
+        // The generation is almost certainly STILL RUNNING: nothing here can
+        // cancel a synchronous CrewAI kickoff, so the sidecar keeps its slot
+        // until the run finishes and the next call is honestly `crew_busy`.
         throw new CrewSidecarError(
           "timeout",
-          `CrewAI sidecar request exceeded its ${this.timeoutMs}ms budget.`
+          `CrewAI sidecar request exceeded its ${budgetMs}ms budget. The sidecar's ` +
+            `generation is not cancelled by this and may still be running.`
+        );
+      }
+      // A transport-imposed deadline is a DIFFERENT fault from the configured
+      // one, and conflating them is what made the original defect look like an
+      // unreachable sidecar. Named explicitly so it can never be misread again.
+      const transportDeadline = transportCauseCode(err);
+      if (
+        transportDeadline === "UND_ERR_HEADERS_TIMEOUT" ||
+        transportDeadline === "UND_ERR_BODY_TIMEOUT"
+      ) {
+        console.warn(
+          `[crew-sidecar] transport failure: category=transport_deadline code=${transportDeadline}`
+        );
+        throw new CrewSidecarError(
+          "invalid_response",
+          `The HTTP transport abandoned the request after its own ${transportDeadline} ` +
+            `(undici's default is ${UNDICI_DEFAULT_HEADERS_TIMEOUT_MS}ms), not after the configured ` +
+            `${budgetMs}ms budget. This client must dial with the node:http transport; an injected ` +
+            `fetch based on undici reintroduces the defect.`
         );
       }
       const causeCode = transportCauseCode(err);
