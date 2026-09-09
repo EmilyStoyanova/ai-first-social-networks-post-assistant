@@ -1,7 +1,13 @@
 import { z } from "zod";
 import { LlmResponseParseError } from "./errors";
 
-const LlmPostSchema = z.object({
+/**
+ * The post contract, as one zod object. Exported so the CrewAI sidecar's
+ * response schema (`lib/ai/crew/crew-contract.ts`) validates the structured
+ * `candidate.json` the sidecar now returns against the SAME field rules,
+ * instead of re-`JSON.parse`-ing a model-authored string on this side.
+ */
+export const LlmPostSchema = z.object({
   text: z.string().min(1, "text must be non-empty"),
   hashtags: z.array(z.string()).default([]),
   // The single central claim/takeaway of the post (Phase 1.1) — one sentence,

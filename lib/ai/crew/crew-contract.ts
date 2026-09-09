@@ -30,6 +30,7 @@
  */
 
 import { z } from "zod";
+import { LlmPostSchema } from "@/lib/ai/parse-llm-post";
 import type { QaState } from "./provenance";
 
 // ─── Request ──────────────────────────────────────────────────────────────────
@@ -97,6 +98,14 @@ export interface CrewInferenceConfig {
   numPredict?: number;
   repeatPenalty?: number;
   stop?: readonly string[];
+  /**
+   * Reasoning-preamble toggle. Absent = the model default applies (every
+   * non-experiment run). `false` = the sidecar disables thinking via the field
+   * Ollama's `/v1/chat/completions` actually honours (`reasoning_effort:
+   * "none"`). Set only by the pinned A/B profile, to match the control arm's
+   * unconditional `think: false`.
+   */
+  think?: boolean;
 }
 
 export interface CrewAttemptContext {
@@ -177,10 +186,24 @@ const qaIssueSchema = z.object({
   detail: z.string(),
 });
 
-const candidateSchema = z.object({
-  /** The post JSON, as a string — parsed by the existing `parseLlmPost`. */
-  raw: z.string().min(1),
-});
+const candidateSchema = z
+  .object({
+    /**
+     * The post as the model wrote it. Provenance/debug only now — recorded on
+     * the attempt trace, never parsed for the candidate.
+     */
+    raw: z.string().min(1),
+    /**
+     * The AUTHORITATIVE candidate: the sidecar validated it against a strict
+     * Pydantic model and serialised it with Pydantic, so this side validates
+     * structured data against the SAME contract (`LlmPostSchema`) rather than
+     * running `JSON.parse` on an LLM-authored string. Ordinary quotation marks
+     * in Bulgarian post text cannot corrupt it — they are string content by the
+     * time it crosses the boundary.
+     */
+    json: LlmPostSchema,
+  })
+  .strict();
 
 /**
  * `.strict()`, matching the queue payload's own reasoning: a sidecar upgraded

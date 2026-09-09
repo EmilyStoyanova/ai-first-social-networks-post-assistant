@@ -1440,6 +1440,14 @@ async function runGeneration(
   // multi-agent candidate that a gate turns down consumes an OUTER attempt
   // exactly as a single-agent one does.
   const pinnedInference = pinnedInferenceProfile();
+  // `think: false` in the pinned profile is an EXPERIMENT-ONLY alignment: it is
+  // handed to the sidecar only for an `ab_split` run (matching the control
+  // arm's unconditional `think: false`). A `user_override` / `global_default`
+  // multi run is given an empty `settings`, so its wire contract carries no
+  // `think` and Ollama keeps its default reasoning behaviour — and its
+  // fingerprint is byte-identical to before this change.
+  const multiAgentInference =
+    strategy.source === "ab_split" ? pinnedInference : { ...pinnedInference, settings: {} };
   const runGenerationLoop =
     strategy.strategy === "multi"
       ? buildMultiAgentLoop({
@@ -1451,7 +1459,7 @@ async function runGeneration(
           companyName: context.company.name,
           brand: context.brand,
           maxTextLength: context.channel.maxTextLength,
-          inference: pinnedInference,
+          inference: multiAgentInference,
           strategySource: strategy.source,
         })
       : singleAgentLoop;
@@ -1636,7 +1644,11 @@ async function runGeneration(
           inferenceFingerprint: inferenceFingerprint({
             modelTag: llmModelStr,
             modelDigest: null,
-            settings: {},
+            // An `ab_split` single run's control-arm inference is `think: false`
+            // — the text worker already sends it unconditionally — so the
+            // fingerprint records that fact and matches the multi arm's pinned
+            // profile. Every non-experiment run keeps the empty settings it had.
+            settings: strategy.source === "ab_split" ? { think: false } : {},
           }),
           modelTag: llmModelStr,
           // Never resolved on the single-agent path — the text worker is not

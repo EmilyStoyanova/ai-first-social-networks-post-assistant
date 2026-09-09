@@ -498,24 +498,32 @@ export async function main(argv: readonly string[] = [], deps: VerifyDeps = {}):
       );
     }
 
-    // The candidate must survive the app's own post parser, not merely be a string.
-    try {
-      const parsed = parseLlmPost(outcome.raw);
-      report.pass(
-        "the candidate parses with the production parseLlmPost",
-        `${parsed.text.length} chars`
+    // The candidate is STRUCTURED now: the sidecar validated it against a strict
+    // Pydantic model and the client validated `candidate.json` against
+    // `LlmPostSchema`. So `outcome.parsed` is already a valid post — no
+    // `JSON.parse` of model text on this path. `raw` is checked separately, only
+    // to confirm the two representations agree.
+    const parsed = outcome.parsed;
+    report.pass("the sidecar returned a structured candidate", `${parsed.text.length} chars`);
+    report.check("the candidate declares a coreMessage", parsed.coreMessage.trim().length > 0);
+    const limit = request.generationRequirements.maxTextLength;
+    if (limit) {
+      report.check(
+        "the candidate is within the channel limit",
+        parsed.text.length <= limit,
+        `${parsed.text.length} / ${limit}`
       );
-      report.check("the candidate declares a coreMessage", parsed.coreMessage.trim().length > 0);
-      const limit = request.generationRequirements.maxTextLength;
-      if (limit) {
-        report.check(
-          "the candidate is within the channel limit",
-          parsed.text.length <= limit,
-          `${parsed.text.length} / ${limit}`
-        );
-      }
+    }
+    try {
+      const fromRaw = parseLlmPost(outcome.raw);
+      report.check(
+        "the raw candidate agrees with the structured one",
+        fromRaw.text === parsed.text && fromRaw.coreMessage === parsed.coreMessage
+      );
     } catch (err) {
-      report.fail("the candidate parses", describe(err));
+      report.note(
+        `raw candidate is not independently parseable (structured json is authoritative): ${describe(err)}`
+      );
     }
 
     // Model identity — what an A/B comparison must rest on.

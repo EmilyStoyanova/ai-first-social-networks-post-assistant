@@ -49,6 +49,7 @@ const CANDIDATE_JSON = JSON.stringify({
 function multiOutcome(overrides: Partial<CrewPostOutcome> = {}): CrewPostOutcome {
   return {
     raw: CANDIDATE_JSON,
+    parsed: JSON.parse(CANDIDATE_JSON) as CrewPostOutcome["parsed"],
     qaState: "pass",
     qaRevisions: 1,
     qaIssues: [],

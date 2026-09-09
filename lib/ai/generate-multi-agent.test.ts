@@ -34,8 +34,13 @@ function candidate(opts: { text?: string; coreMessage?: string; topic?: string }
 }
 
 function outcome(overrides: Partial<CrewPostOutcome> = {}): CrewPostOutcome {
+  const raw = overrides.raw ?? candidate();
   return {
-    raw: candidate(),
+    raw,
+    // Mirrors the real client: `parsed` comes from the sidecar's structured
+    // `candidate.json`, already validated against `LlmPostSchema`. Derived from
+    // `raw` here unless a test pins it explicitly.
+    parsed: overrides.parsed ?? (JSON.parse(raw) as CrewPostOutcome["parsed"]),
     qaState: "pass",
     qaRevisions: 0,
     qaIssues: [],
@@ -241,12 +246,43 @@ describe("bindMultiAgent — never falls back", () => {
     );
   });
 
-  it("propagates a parse failure rather than substituting a candidate", async () => {
-    const sidecar = scriptedSidecar([outcome({ raw: "I think this post would be lovely." })]);
+  it("does NOT parse the candidate on this path — a broken candidate is the sidecar's to refuse", async () => {
+    // The redundant `parseLlmPost(outcome.raw)` step is gone. A structurally
+    // broken candidate now fails at the sidecar (503) or the response contract
+    // (invalid_response) and arrives here as a thrown CrewSidecarError, never as
+    // a "successful" outcome to be re-parsed. It surfaces as a multi-agent
+    // infrastructure failure with no retry and no substitution.
+    const sidecar = scriptedSidecar([
+      new CrewSidecarError(
+        "invalid_response",
+        "CrewAI sidecar reply did not match the contract: candidate.json.text: too_small"
+      ),
+    ]);
     await assert.rejects(
       bindMultiAgent(deps(sidecar))(PROVIDER, "sys", "user", NO_RECENT),
-      (err: unknown) => err instanceof Error && err.name === "LlmResponseParseError"
+      (err: unknown) => {
+        assert.ok(err instanceof MultiAgentGenerationError);
+        assert.equal(err.multiAgentCode, "CREW_SIDECAR_UNAVAILABLE");
+        return true;
+      }
     );
+    assert.equal(sidecar.calls(), 1);
+  });
+
+  it("consumes the sidecar's structured candidate verbatim, quote-heavy text and all", async () => {
+    const text = 'Представи си „езеро и дворец“ 🏰\n"The Gentlemen" и "Ндра\'нгета".';
+    const sidecar = scriptedSidecar([
+      outcome({
+        raw: "{}",
+        parsed: {
+          text,
+          hashtags: ["#TheGentlemen"],
+          coreMessage: 'Окръгът не е „сърце", но "Ндра\'нгета" го използва.',
+        },
+      }),
+    ]);
+    const result = await bindMultiAgent(deps(sidecar))(PROVIDER, "sys", "user", NO_RECENT);
+    assert.equal(result.parsed.text, text);
   });
 
   it("is an LlmProviderError, so the existing service catch already handles it", async () => {
@@ -448,6 +484,36 @@ describe("bindMultiAgent — the request it builds", () => {
     assert.equal(req.inferenceConfig.model, "qwen3.5:35b-a3b-q4_K_M");
     assert.equal(req.inferenceConfig.baseUrl, "http://127.0.0.1:11434");
     assert.equal(req.inferenceConfig.temperature, 0.85);
+  });
+
+  it("carries think:false on the wire when the pinned profile sets it (A/B)", async () => {
+    const sidecar = scriptedSidecar([outcome()]);
+    await bindMultiAgent(
+      deps(sidecar, {
+        inference: {
+          modelTag: "qwen3.5:35b-a3b-q4_K_M",
+          modelDigest: null,
+          settings: { think: false },
+          baseUrl: "http://127.0.0.1:11434",
+        },
+      })
+    )(PROVIDER, "sys", "user", NO_RECENT);
+    assert.equal(sidecar.requests[0].inferenceConfig.think, false);
+  });
+
+  it("does NOT put think on the wire when the profile has empty settings (non-A/B)", async () => {
+    const sidecar = scriptedSidecar([outcome()]);
+    await bindMultiAgent(
+      deps(sidecar, {
+        inference: {
+          modelTag: "qwen3.5:35b-a3b-q4_K_M",
+          modelDigest: null,
+          settings: {},
+          baseUrl: "http://127.0.0.1:11434",
+        },
+      })
+    )(PROVIDER, "sys", "user", NO_RECENT);
+    assert.equal("think" in sidecar.requests[0].inferenceConfig, false);
   });
 
   it("caps QA revision cycles at 2 by default", async () => {

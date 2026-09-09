@@ -60,6 +60,18 @@ export interface InferenceSettings {
   numPredict?: number;
   repeatPenalty?: number;
   stop?: readonly string[];
+  /**
+   * Whether the model's reasoning preamble is enabled.
+   *
+   * Unlike the sampling parameters above, this one the control arm ALREADY
+   * pins: `TextWorkerProvider` → Ollama `/api/generate` sends `think: false` on
+   * every call, unconditionally. So recording `think: false` for an `ab_split`
+   * run is truthful about the control arm's existing runtime, and the multi arm
+   * is brought to match it (see `experiment-inference.ts` and the sidecar's
+   * `inference_config.py`). Absent means "not pinned — the model's default
+   * applies", which is every non-experiment run.
+   */
+  think?: boolean;
 }
 
 /** What Ollama ran, as opposed to which application path asked it to. */

@@ -100,6 +100,43 @@ class TestMapping(unittest.TestCase):
         self.assertEqual(llm_kwargs({"model": QWEN})["base_url"], "http://127.0.0.1:11434")
 
 
+class TestThinkOff(unittest.TestCase):
+    """`think: false` (A/B only) becomes the field Ollama's /v1 endpoint honours.
+
+    Probed 2026-09-09 against Ollama 0.33.1 + qwen3.5:35b-a3b-q4_K_M:
+    a top-level `think: false` on /v1/chat/completions is silently ignored;
+    `reasoning_effort: "none"` is what disables the reasoning preamble. CrewAI's
+    OpenAICompatibleCompletion merges `additional_params` into the OpenAI
+    client's `create(**params)`, and the SDK forwards `extra_body` as raw JSON.
+    """
+
+    def test_think_false_maps_to_reasoning_effort_none_via_extra_body(self) -> None:
+        kwargs = llm_kwargs({"model": QWEN, "think": False})
+        self.assertEqual(
+            kwargs["additional_params"],
+            {"extra_body": {"reasoning_effort": "none"}},
+        )
+
+    def test_absent_think_forwards_nothing(self) -> None:
+        self.assertNotIn("additional_params", llm_kwargs({"model": QWEN}))
+
+    def test_think_true_forwards_nothing(self) -> None:
+        # Only an explicit False acts. `true` leaves the model default alone.
+        self.assertNotIn("additional_params", llm_kwargs({"model": QWEN, "think": True}))
+
+    def test_think_off_does_not_disturb_sampling_mapping(self) -> None:
+        kwargs = llm_kwargs({"model": QWEN, "think": False, "temperature": 0.85})
+        self.assertEqual(kwargs["temperature"], 0.85)
+        self.assertEqual(kwargs["additional_params"], {"extra_body": {"reasoning_effort": "none"}})
+
+    def test_the_returned_additional_params_is_a_fresh_dict(self) -> None:
+        # Mutating one request's kwargs must not bleed into the next.
+        a = llm_kwargs({"model": QWEN, "think": False})
+        a["additional_params"]["extra_body"]["reasoning_effort"] = "high"
+        b = llm_kwargs({"model": QWEN, "think": False})
+        self.assertEqual(b["additional_params"], {"extra_body": {"reasoning_effort": "none"}})
+
+
 class TestLoopbackGuard(unittest.TestCase):
     def test_accepts_loopback(self) -> None:
         for url in (

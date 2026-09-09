@@ -64,6 +64,7 @@ import {
   type CrewPostResponse,
 } from "./crew-contract";
 import type { QaState } from "./provenance";
+import type { ParsedLlmPost } from "@/lib/ai/parse-llm-post";
 import { loopbackFetch, UNDICI_DEFAULT_HEADERS_TIMEOUT_MS } from "./loopback-transport";
 import { requestTimeoutMs } from "@/lib/http/request-deadline";
 
@@ -151,8 +152,17 @@ export function crewSidecarConfigFromEnv(
 
 /** What one successful sidecar call yielded, already validated. */
 export interface CrewPostOutcome {
-  /** The candidate's raw JSON text — parsed by the existing `parseLlmPost`. */
+  /**
+   * The candidate as the model wrote it. Kept for the attempt trace only —
+   * the multi-agent loop no longer parses it.
+   */
   raw: string;
+  /**
+   * The structured candidate, validated against `LlmPostSchema` by the response
+   * contract. This is what the caller consumes; no `JSON.parse` of model text
+   * happens on the CrewAI path any more.
+   */
+  parsed: ParsedLlmPost;
   qaState: QaState;
   qaRevisions: number;
   qaIssues: CrewPostResponse["qa"]["issues"];
@@ -354,6 +364,7 @@ export class CrewSidecarClient {
 
     return {
       raw: response.candidate.raw,
+      parsed: response.candidate.json,
       qaState: qa.state,
       qaRevisions: response.qa.revisions,
       qaIssues: response.qa.issues,

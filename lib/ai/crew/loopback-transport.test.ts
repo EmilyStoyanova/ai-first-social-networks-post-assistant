@@ -49,7 +49,10 @@ function stallingServer(): { server: Server; port: Promise<number>; open: Server
 function passBody(overrides: Partial<CrewPostResponse> = {}): CrewPostResponse {
   return {
     status: "ok",
-    candidate: { raw: '{"text":"a post","coreMessage":"a claim"}' },
+    candidate: {
+      raw: '{"text":"a post","coreMessage":"a claim"}',
+      json: { text: "a post", hashtags: [], coreMessage: "a claim" },
+    },
     qa: { finalDecision: "pass", revisions: 0, issues: [], routes: [] },
     agentCalls: { writer: 1, editor: 1, qa: 1 },
     latencyMs: 10,

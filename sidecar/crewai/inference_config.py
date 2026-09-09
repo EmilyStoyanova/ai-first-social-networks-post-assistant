@@ -45,6 +45,17 @@ would differ on temperature and token budget while reporting the same model and
 the same provider — silently invalidating an experiment that is supposed to
 vary orchestration alone. Pinning neither is the resolution that requires no
 change to existing single-agent behaviour.
+
+── The one field that IS pinned for an A/B run: `think` ────────────────────
+
+`think` is not sampling. The control arm ALREADY pins it — `TextWorkerProvider`
+sends `think: false` to Ollama's native `/api/generate` on every call — while
+this sidecar, reaching Ollama through CrewAI's `openai_compatible` provider
+(`/v1/chat/completions`), sends nothing and inherits the model default
+(thinking ON for a reasoning tag). So an `ab_split` request carries
+`inferenceConfig.think == false`, and `llm_kwargs` below translates it to the
+field `/v1` actually honours. A non-experiment request never carries `think`,
+so nothing changes for it. See `THINK_OFF_KWARGS`.
 """
 
 from __future__ import annotations
@@ -67,6 +78,25 @@ SAMPLING_ARGS: tuple[tuple[str, str], ...] = (
     ("repeatPenalty", "repeat_penalty"),
     ("stop", "stop"),
 )
+
+# The request-body field that actually disables Qwen's reasoning preamble on the
+# path this sidecar uses.
+#
+# The multi-agent arm reaches Ollama through CrewAI's NATIVE `openai_compatible`
+# provider — Ollama's OpenAI-compatible `/v1/chat/completions` endpoint — not
+# through litellm (which is not installed) and not through Ollama's native
+# `/api/*`. On `/v1`, Ollama's native `think` field is SILENTLY IGNORED;
+# `reasoning_effort: "none"` is what turns thinking off. Probed directly against
+# Ollama 0.33.1 + `qwen3.5:35b-a3b-q4_K_M` on 2026-09-09:
+#   baseline            -> `message.reasoning` populated, no answer in 64 tokens
+#   {"think": false}     -> `message.reasoning` STILL populated (ignored)
+#   {"reasoning_effort": "none"} -> no reasoning, answer "437" in 4 tokens
+#
+# CrewAI's OpenAICompatibleCompletion merges `additional_params` straight into
+# the OpenAI client's `chat.completions.create(**params)` call, and the OpenAI
+# SDK forwards `extra_body` as raw JSON in the request body — so
+# `additional_params={"extra_body": {"reasoning_effort": "none"}}` is the wire.
+THINK_OFF_KWARGS: dict[str, Any] = {"extra_body": {"reasoning_effort": "none"}}
 
 
 class NonLoopbackOllamaError(ValueError):
@@ -94,6 +124,16 @@ def llm_kwargs(inference: dict[str, Any]) -> dict[str, Any]:
     for wire, arg in SAMPLING_ARGS:
         if inference.get(wire) is not None:
             kwargs[arg] = inference[wire]
+
+    # `think` is NOT a sampling knob and is handled apart from SAMPLING_ARGS.
+    # Only an explicit `false` acts — absent / `None` / `true` leave the model's
+    # default alone, so a non-experiment multi run is unchanged. See
+    # THINK_OFF_KWARGS above for why this becomes `reasoning_effort: "none"`.
+    if inference.get("think") is False:
+        kwargs["additional_params"] = {
+            key: dict(value) if isinstance(value, dict) else value
+            for key, value in THINK_OFF_KWARGS.items()
+        }
     return kwargs
 
 

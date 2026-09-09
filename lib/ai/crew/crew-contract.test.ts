@@ -15,7 +15,10 @@ import {
 function passResponse(overrides: Partial<CrewPostResponse> = {}): CrewPostResponse {
   return {
     status: "ok",
-    candidate: { raw: '{"text":"a post","coreMessage":"a claim"}' },
+    candidate: {
+      raw: '{"text":"a post","coreMessage":"a claim"}',
+      json: { text: "a post", hashtags: [], coreMessage: "a claim" },
+    },
     qa: { finalDecision: "pass", revisions: 0, issues: [], routes: [] },
     agentCalls: { writer: 1, editor: 1, qa: 1 },
     latencyMs: 1200,
@@ -58,9 +61,53 @@ describe("crewPostResponseSchema", () => {
     assert.equal(crewPostResponseSchema.safeParse(body).success, false);
   });
 
-  it("REFUSES an empty candidate", () => {
-    const parsed = crewPostResponseSchema.safeParse(passResponse({ candidate: { raw: "" } }));
+  it("REFUSES an empty raw candidate", () => {
+    const parsed = crewPostResponseSchema.safeParse(
+      passResponse({
+        candidate: { raw: "", json: { text: "a post", hashtags: [], coreMessage: "a claim" } },
+      })
+    );
     assert.equal(parsed.success, false);
+  });
+
+  it("REFUSES a candidate whose structured json breaks the post contract", () => {
+    // The whole point of the structured field: a candidate that is not a valid
+    // post is refused here, not re-parsed downstream.
+    for (const badJson of [
+      { text: "", hashtags: [], coreMessage: "a claim" }, // empty text
+      { text: "a post", hashtags: [], coreMessage: "   " }, // blank coreMessage
+      { text: "a post", hashtags: "growth", coreMessage: "a claim" }, // hashtags not an array
+      { hashtags: [], coreMessage: "a claim" }, // missing text
+    ]) {
+      const parsed = crewPostResponseSchema.safeParse(
+        passResponse({
+          candidate: { raw: '{"text":"a post"}', json: badJson as never },
+        })
+      );
+      assert.equal(parsed.success, false, JSON.stringify(badJson));
+    }
+  });
+
+  it("REFUSES a candidate with no structured json at all — an older sidecar", () => {
+    const body = passResponse() as unknown as { candidate: Record<string, unknown> };
+    delete body.candidate.json;
+    assert.equal(crewPostResponseSchema.safeParse(body).success, false);
+  });
+
+  it("accepts the quote-heavy Bulgarian candidate that broke JSON.parse", () => {
+    const parsed = crewPostResponseSchema.safeParse(
+      passResponse({
+        candidate: {
+          raw: "{}",
+          json: {
+            text: 'Представи си „езеро и дворец“ 🏰\n"The Gentlemen" и "Ндра\'нгета".',
+            hashtags: ["#TheGentlemen"],
+            coreMessage: 'Окръгът не е „сърце", но "Ндра\'нгета" го използва.',
+          },
+        },
+      })
+    );
+    assert.equal(parsed.success, true);
   });
 
   it("accepts a null digest — an Ollama build that exposes none", () => {

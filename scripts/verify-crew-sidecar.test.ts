@@ -33,7 +33,14 @@ const FIXTURE = join(process.cwd(), "sidecar", "crewai", "fixtures", "request.js
 function passBody(overrides: Partial<CrewPostResponse> = {}): CrewPostResponse {
   return {
     status: "ok",
-    candidate: { raw: '{"text":"A good post about the coast.","coreMessage":"A real claim."}' },
+    candidate: {
+      raw: '{"text":"A good post about the coast.","coreMessage":"A real claim."}',
+      json: {
+        text: "A good post about the coast.",
+        hashtags: [],
+        coreMessage: "A real claim.",
+      },
+    },
     qa: { finalDecision: "pass", revisions: 0, issues: [], routes: [] },
     agentCalls: { writer: 1, editor: 1, qa: 1 },
     latencyMs: 900,
@@ -375,14 +382,25 @@ describe("main — serialization is no longer satisfied by 503 + 503", () => {
     assert.equal(code, 1);
   });
 
-  it("returns 1 when the candidate does not parse as a post", async () => {
+  it("returns 1 when the structured candidate is not a valid post", async () => {
+    // A candidate whose `json` breaks `LlmPostSchema` is refused by the client
+    // as invalid_response — the verifier must surface that as a failure, not a
+    // pass. (A raw string that "does not parse" can no longer even reach here:
+    // the sidecar validates before returning.)
     const code = await main(["--live"], {
       env: ENV,
       sleep: noSleep,
       fetchImpl: fakeSidecar({
         post: () =>
           new Response(
-            JSON.stringify(passBody({ candidate: { raw: "I think this would be lovely." } }))
+            JSON.stringify(
+              passBody({
+                candidate: {
+                  raw: "I think this would be lovely.",
+                  json: { text: "", hashtags: [], coreMessage: "x" } as never,
+                },
+              })
+            )
           ),
       }),
       fixturePath: FIXTURE,

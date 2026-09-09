@@ -259,7 +259,16 @@ class Handler(BaseHTTPRequestHandler):
             200,
             {
                 "status": "ok",
-                "candidate": {"raw": result.candidate},
+                # `raw` is provenance/debug only. `json` is authoritative: a
+                # strict Pydantic model, serialised by Pydantic, so the envelope
+                # `json.dumps` below is valid whatever quote characters the post
+                # text contains. `exclude_none` keeps the shape identical to what
+                # a minimal post JSON produced before — absent optionals stay
+                # absent rather than becoming explicit nulls.
+                "candidate": {
+                    "raw": result.candidate,
+                    "json": result.parsed.model_dump(exclude_none=True),
+                },
                 "qa": {
                     "finalDecision": result.qa.decision,
                     "revisions": counters.revisions,

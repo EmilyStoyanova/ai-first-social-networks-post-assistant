@@ -63,7 +63,10 @@ function ok(body: unknown, status = 200): FetchLike {
 function passBody(overrides: Partial<CrewPostResponse> = {}): CrewPostResponse {
   return {
     status: "ok",
-    candidate: { raw: '{"text":"a post","coreMessage":"a claim"}' },
+    candidate: {
+      raw: '{"text":"a post","coreMessage":"a claim"}',
+      json: { text: "a post", hashtags: [], coreMessage: "a claim" },
+    },
     qa: { finalDecision: "pass", revisions: 0, issues: [], routes: [] },
     agentCalls: { writer: 1, editor: 1, qa: 1 },
     latencyMs: 900,
@@ -183,6 +186,49 @@ describe("successful outcomes", () => {
     assert.equal(outcome.qaRevisions, 0);
     assert.deepEqual(outcome.agentCalls, { writer: 1, editor: 1, qa: 1 });
     assert.equal(outcome.model.tag, "qwen3.5:35b-a3b-q4_K_M");
+  });
+
+  it("exposes the structured candidate as `parsed`, not a string to re-parse", async () => {
+    const client = new CrewSidecarClient(
+      LOOPBACK,
+      ok(
+        passBody({
+          candidate: {
+            raw: "{}",
+            json: {
+              text: 'Представи си „езеро и дворец“ 🏰\n"The Gentlemen" и "Ндра\'нгета".',
+              hashtags: ["#TheGentlemen"],
+              coreMessage: 'Окръгът не е „сърце", но "Ндра\'нгета" го използва.',
+            },
+          },
+        })
+      )
+    );
+    const outcome = await client.generate(request());
+    // The exact quote-mixing that broke JSON.parse in the live run, now plain
+    // string content on a validated object.
+    assert.match(outcome.parsed.text, /"The Gentlemen"/);
+    assert.match(outcome.parsed.text, /„езеро и дворец“/);
+    assert.equal(outcome.parsed.hashtags[0], "#TheGentlemen");
+    assert.equal(outcome.raw, "{}"); // raw is kept, but it is not the source of truth
+  });
+
+  it("REFUSES a run whose structured candidate is not a valid post", async () => {
+    const client = new CrewSidecarClient(
+      LOOPBACK,
+      ok(
+        passBody({
+          candidate: {
+            raw: '{"text":"a post"}',
+            json: { text: "", hashtags: [], coreMessage: "a claim" } as never,
+          },
+        })
+      )
+    );
+    await assert.rejects(
+      client.generate(request()),
+      (err: unknown) => err instanceof CrewSidecarError && err.code === "invalid_response"
+    );
   });
 
   it("returns an unavailable QA as a DEGRADED success, never as a pass", async () => {

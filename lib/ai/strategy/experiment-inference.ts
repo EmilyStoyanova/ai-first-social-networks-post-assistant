@@ -17,18 +17,35 @@
  * be pinned is not entered into the experiment at all (see the resolver's
  * `pinned_model_unavailable`) rather than compared across models.
  *
- * The second is handled by PINNING NOTHING, which is the counter-intuitive half
- * and is already written down in `sidecar/crewai/inference_config.py`:
- * `TextWorkerProvider.generate` forwards `temperature`/`maxTokens` into Ollama's
- * `options` only when `request.format` is set, and post generation never sets
- * `format` — only translation does. So the control arm sends no sampling options
- * and inherits the tag's Modelfile defaults. If the sidecar pinned sampling
- * while the control arm pinned none, the arms would differ on temperature while
- * reporting the same model. Sending nothing on BOTH sides is the resolution that
- * requires no change whatsoever to single-agent behaviour.
+ * The second is handled by PINNING NOTHING for SAMPLING, which is the
+ * counter-intuitive half and is already written down in
+ * `sidecar/crewai/inference_config.py`: `TextWorkerProvider.generate` forwards
+ * `temperature`/`maxTokens` into Ollama's `options` only when `request.format`
+ * is set, and post generation never sets `format` — only translation does. So
+ * the control arm sends no sampling options and inherits the tag's Modelfile
+ * defaults. If the sidecar pinned sampling while the control arm pinned none,
+ * the arms would differ on temperature while reporting the same model. Sending
+ * nothing on BOTH sides is the resolution that requires no change to
+ * single-agent behaviour, so `settings` carries no sampling keys.
  *
- * That is why `settings` below is empty and stays empty. It is not an omission
- * to be filled in later: filling it in on one side only is the bug.
+ * ── The one setting that IS pinned: `think` ────────────────────────────────
+ *
+ * `think` is not sampling and the symmetry argument above does not apply to it.
+ * The control arm already pins it: `TextWorkerProvider` → Ollama `/api/generate`
+ * sends `think: false` on EVERY call, unconditionally. The multi arm, reaching
+ * Ollama through CrewAI's native `openai_compatible` provider
+ * (`/v1/chat/completions`), sends nothing and so inherits the model default,
+ * which for a reasoning tag is thinking ON — an unrecorded, effective-inference
+ * difference between the arms.
+ *
+ * So the pinned profile carries `think: false`. On the control side this only
+ * makes the provenance state a fact that was already true at runtime; on the
+ * multi side the sidecar translates it to the field Ollama's `/v1` endpoint
+ * actually honours (`reasoning_effort: "none"` — `think` is silently ignored
+ * there; probed against Ollama 0.33.1 + `qwen3.5:35b-a3b-q4_K_M` on
+ * 2026-09-09). This is applied to the `ab_split` path ONLY — a `user_override`
+ * or `global_default` multi run is handed a profile with empty `settings` and
+ * keeps the model default.
  *
  * ── Why the digest is not asserted ──────────────────────────────────────────
  *
@@ -93,8 +110,11 @@ export function pinnedInferenceProfile(
     // Not resolved on this side. The sidecar reports what Ollama told it; the
     // single-agent path never asks, and reports null honestly.
     modelDigest: null,
-    // Empty, and it must stay empty. See the module docblock.
-    settings: {},
+    // No SAMPLING keys — see the module docblock. `think: false` is the one
+    // pinned setting: it matches the control arm's existing unconditional
+    // `think: false`, and the caller hands this profile to the sidecar only for
+    // an `ab_split` run (a non-experiment multi run gets `settings: {}`).
+    settings: { think: false },
     baseUrl: ollamaBaseUrl(env),
   };
 }

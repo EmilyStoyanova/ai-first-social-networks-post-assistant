@@ -43,6 +43,28 @@ describe("inferenceFingerprint", () => {
     };
     assert.equal(inferenceFingerprint(withUndefined), inferenceFingerprint(QWEN));
   });
+
+  it("distinguishes an empty settings object from one that pins think:false", () => {
+    const base: InferenceProfile = {
+      modelTag: "qwen3.5:35b-a3b-q4_K_M",
+      modelDigest: null,
+      settings: {},
+    };
+    const thinkOff: InferenceProfile = { ...base, settings: { think: false } };
+    assert.notEqual(inferenceFingerprint(base), inferenceFingerprint(thinkOff));
+  });
+
+  it("distinguishes think:false from think:true", () => {
+    const base: InferenceProfile = {
+      modelTag: "qwen3.5:35b-a3b-q4_K_M",
+      modelDigest: null,
+      settings: {},
+    };
+    assert.notEqual(
+      inferenceFingerprint({ ...base, settings: { think: false } }),
+      inferenceFingerprint({ ...base, settings: { think: true } })
+    );
+  });
 });
 
 describe("compareInference — the hard report guard", () => {

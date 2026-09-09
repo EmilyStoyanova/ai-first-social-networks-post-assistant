@@ -3,13 +3,29 @@ import assert from "node:assert/strict";
 import { modelVerificationFor, pinnedInferenceProfile } from "./experiment-inference";
 
 describe("pinnedInferenceProfile", () => {
-  it("pins NO sampling settings — the empty object is the point", () => {
+  it("pins NO sampling settings — temperature and friends are left to the model", () => {
     // The control arm's text-worker path sends no sampling options for
     // generation (only translation sets `format`), so pinning anything on the
     // sidecar side would make the arms differ on temperature while reporting the
-    // same model. Both sides send nothing.
+    // same model. Both sides send no sampling.
     const profile = pinnedInferenceProfile({ TEXT_WORKER_MODEL: "qwen3.5:35b-a3b-q4_K_M" });
-    assert.deepEqual(profile.settings, {});
+    for (const k of [
+      "temperature",
+      "topP",
+      "topK",
+      "seed",
+      "numCtx",
+      "numPredict",
+      "repeatPenalty",
+      "stop",
+    ]) {
+      assert.equal((profile.settings as Record<string, unknown>)[k], undefined, k);
+    }
+  });
+
+  it("pins think:false — the one setting the control arm already sends unconditionally", () => {
+    const profile = pinnedInferenceProfile({ TEXT_WORKER_MODEL: "qwen3.5:35b-a3b-q4_K_M" });
+    assert.equal(profile.settings.think, false);
   });
 
   it("does not assert a digest — that is resolved at runtime or not at all", () => {

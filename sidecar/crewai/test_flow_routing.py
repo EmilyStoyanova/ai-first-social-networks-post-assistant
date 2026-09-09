@@ -430,3 +430,89 @@ class QaAspectRubric(unittest.TestCase):
         self.assertEqual(result.qa.decision, "pass")
         self.assertNotEqual(result.qa.decision, "rejected_unroutable")
         self.assertEqual(result.counters.revisions, 0)
+
+
+class StructuredCandidateOutput(unittest.TestCase):
+    """The response_format constraint and the Python-side validation boundary.
+
+    Neither needs Ollama: `_prepare_completion_params` is offline, and
+    `_run_single` is stubbed so no model call happens.
+    """
+
+    def _capture_llms(self, scripted: ScriptedAgents):
+        captured: dict[str, object] = {}
+        real = crew_flow.build_agents
+
+        def capturing(candidate_llm, qa_llm):
+            captured["candidate_llm"] = candidate_llm
+            captured["qa_llm"] = qa_llm
+            return real(candidate_llm, qa_llm)
+
+        with mock.patch.object(crew_flow, "build_agents", side_effect=capturing), mock.patch.object(
+            crew_flow, "_run_single", side_effect=scripted
+        ):
+            result = crew_flow.run_flow(REQUEST)
+        return captured, result
+
+    def test_only_the_writer_editor_model_carries_the_post_response_format(self) -> None:
+        scripted = ScriptedAgents([post_json()], [post_json()], [qa_pass()])
+        captured, _ = self._capture_llms(scripted)
+
+        msg = [{"role": "user", "content": "x"}]
+        candidate_params = captured["candidate_llm"]._prepare_completion_params(msg)
+        qa_params = captured["qa_llm"]._prepare_completion_params(msg)
+
+        self.assertIn("response_format", candidate_params)
+        self.assertEqual(
+            candidate_params["response_format"]["json_schema"]["name"], "PostCandidate"
+        )
+        # QA must be free to answer in the verdict shape.
+        self.assertNotIn("response_format", qa_params)
+        # And no tool/function-calling was introduced on either path.
+        self.assertNotIn("tools", candidate_params)
+        self.assertNotIn("tool_choice", candidate_params)
+
+    def test_the_think_off_extra_body_still_coexists_with_response_format(self) -> None:
+        scripted = ScriptedAgents([post_json()], [post_json()], [qa_pass()])
+        think_off_request = {
+            **REQUEST,
+            "inferenceConfig": {**REQUEST["inferenceConfig"], "think": False},
+        }
+        captured: dict[str, object] = {}
+        real = crew_flow.build_agents
+
+        def capturing(candidate_llm, qa_llm):
+            captured["candidate_llm"] = candidate_llm
+            return real(candidate_llm, qa_llm)
+
+        with mock.patch.object(crew_flow, "build_agents", side_effect=capturing), mock.patch.object(
+            crew_flow, "_run_single", side_effect=scripted
+        ):
+            crew_flow.run_flow(think_off_request)
+
+        params = captured["candidate_llm"]._prepare_completion_params(
+            [{"role": "user", "content": "x"}]
+        )
+        self.assertIn("response_format", params)
+        # reasoning_effort:"none" rides in extra_body; the two must not clobber.
+        self.assertEqual(params.get("extra_body"), {"reasoning_effort": "none"})
+
+    def test_a_valid_candidate_is_parsed_onto_the_result(self) -> None:
+        scripted = ScriptedAgents([post_json()], [post_json()], [qa_pass()])
+        _, result = self._capture_llms(scripted)
+        self.assertEqual(result.qa.decision, "pass")
+        self.assertIsNotNone(result.parsed)
+        self.assertEqual(result.parsed.coreMessage, result.parsed.coreMessage.strip())
+        self.assertTrue(result.parsed.text)
+
+    def test_a_structurally_broken_final_candidate_raises_a_candidate_stage_failure(self) -> None:
+        # A bare unescaped quote — the live failure class. The Editor is the last
+        # hand, so its output is what the boundary validates.
+        broken = '{"text": "a „quote" breaks it", "hashtags": [], "coreMessage": "x"}'
+        scripted = ScriptedAgents([post_json()], [broken], [qa_pass()])
+        with mock.patch.object(crew_flow, "_run_single", side_effect=scripted):
+            with self.assertRaises(crew_flow.StageFailure) as ctx:
+                crew_flow.run_flow(REQUEST)
+        self.assertEqual(ctx.exception.stage, "candidate")
+        # It is NOT repaired into a success.
+        self.assertIn("schema validation", ctx.exception.detail)

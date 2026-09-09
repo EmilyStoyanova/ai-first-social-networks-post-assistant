@@ -64,6 +64,12 @@ from guards import assert_agent_posture
 # so each is testable without CrewAI or Ollama installed.
 from qa_verdict import QaVerdict, parse_qa_reply
 from inference_config import llm_kwargs
+from post_candidate import (
+    POST_CANDIDATE_RESPONSE_FORMAT,
+    PostCandidate,
+    PostCandidateError,
+    parse_post_candidate,
+)
 
 
 def redact_llm_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -83,6 +89,13 @@ def redact_llm_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     if isinstance(url, str):
         # scheme://host — the first three segments of a split on "/".
         safe["base_url"] = "/".join(url.split("/")[:3])
+    # The response-format JSON schema is long and fixed. Log its presence, not
+    # its body, so the one line stays readable.
+    additional = safe.get("additional_params")
+    if isinstance(additional, dict) and "response_format" in additional:
+        summary = dict(additional)
+        summary["response_format"] = "<json_schema:PostCandidate>"
+        safe["additional_params"] = summary
     return safe
 
 
@@ -116,14 +129,18 @@ class RunCounters:
 
 @dataclass
 class FlowResult:
+    #: The final candidate as the model wrote it — kept for provenance/debug.
     candidate: str | None
+    #: The same candidate, validated. The authoritative value the app consumes;
+    #: `run_flow` only builds a `FlowResult` once this has parsed cleanly.
+    parsed: PostCandidate
     qa: QaVerdict
     counters: RunCounters
     latency_ms: int
 
 
-def build_llm(inference: dict[str, Any]) -> LLM:
-    """The ONE model every agent uses, pinned by the CALLER.
+def build_llm(inference: dict[str, Any], *, response_format: dict[str, Any] | None = None) -> LLM:
+    """A model pinned by the CALLER, optionally with a constrained output shape.
 
     The sidecar never chooses a model and has no fallback: for an A/B run this
     is the same tag and the same sampling the control arm was pinned to, which
@@ -134,8 +151,19 @@ def build_llm(inference: dict[str, Any]) -> LLM:
     The kwarg mapping lives in `inference_config.llm_kwargs`, which is stdlib
     only and separately tested — read its docstring before pinning `numPredict`
     against a thinking model.
+
+    `response_format`, when given, is an OpenAI `{"type": "json_schema", …}`
+    envelope. It is MERGED into `additional_params` alongside whatever the think
+    toggle already put there (`{"extra_body": {"reasoning_effort": "none"}}` for
+    an A/B run), and CrewAI's OpenAI-compatible provider forwards it straight to
+    Ollama's `/v1/chat/completions`, which constrains decoding against it. Only
+    the Writer/Editor model gets one — QA answers in a different shape.
     """
     kwargs = llm_kwargs(inference)
+    if response_format is not None:
+        additional = dict(kwargs.get("additional_params") or {})
+        additional["response_format"] = response_format
+        kwargs["additional_params"] = additional
     print(f"[crew-sidecar] LLM kwargs: {redact_llm_kwargs(kwargs)}")
     return LLM(**kwargs)
 
@@ -162,13 +190,14 @@ def _accepted_kwargs(cls: type, desired: dict[str, Any]) -> dict[str, Any]:
     return {name: value for name, value in desired.items() if name in fields}
 
 
-def build_agents(llm: LLM) -> tuple[Agent, Agent, Agent]:
-    """Three agents, no tools, no delegation, no memory.
+def _agent_common(llm: LLM) -> dict[str, Any]:
+    """The shared Agent kwargs, with `llm` guaranteed present.
 
-    `allow_delegation=False` on all three is what keeps the routing THIS file's
-    decision. With delegation on, an agent could hand work sideways and the
-    reported counters would stop describing the loop that actually ran — which
-    would defeat the client-side arithmetic check as well as the design.
+    An Agent constructed without an `llm` falls back to CrewAI's own default,
+    which is OpenAI — so a renamed field would turn the kwarg filter into a
+    silent cloud fallback, the exact thing the whole design forbids. Every other
+    dropped kwarg degrades to a posture check that `assert_agent_posture` still
+    catches; this one would degrade to billing someone.
     """
     common = _accepted_kwargs(
         Agent,
@@ -181,19 +210,31 @@ def build_agents(llm: LLM) -> tuple[Agent, Agent, Agent]:
             "verbose": False,
         },
     )
-    # The one kwarg the filter must NEVER be allowed to drop.
-    #
-    # An Agent constructed without an `llm` falls back to CrewAI's own default,
-    # which is OpenAI — so a renamed field would turn this filter into a silent
-    # cloud fallback, the exact thing the whole design forbids. Every other
-    # dropped kwarg degrades to a posture check that `assert_agent_posture`
-    # still catches; this one would degrade to billing someone.
     if "llm" not in common:
         raise StageFailure(
             "build_agents",
             "The installed CrewAI Agent does not declare an `llm` field, so the pinned "
             "local model would be dropped and a default provider used. Refusing to run.",
         )
+    return common
+
+
+def build_agents(candidate_llm: LLM, qa_llm: LLM) -> tuple[Agent, Agent, Agent]:
+    """Three agents, no tools, no delegation, no memory.
+
+    The Writer and Editor hold `candidate_llm` — the one carrying the
+    `PostCandidate` `response_format`, so their output is grammar-constrained to
+    the post schema. QA holds `qa_llm`, WITHOUT that constraint: QA answers in
+    the verdict shape (`QA_JSON_CONTRACT`), which the post schema would forbid.
+    Two `LLM` instances, one Ollama tag and one sampling config — the A/B
+    fingerprint is unaffected because it is computed from the wire
+    `inferenceConfig`, not from how many `LLM` objects the sidecar built.
+
+    `allow_delegation=False` on all three is what keeps the routing THIS file's
+    decision. With delegation on, an agent could hand work sideways and the
+    reported counters would stop describing the loop that actually ran — which
+    would defeat the client-side arithmetic check as well as the design.
+    """
     writer = Agent(
         role="Social media writer",
         goal="Write one social post that satisfies every requirement given, exactly as given.",
@@ -203,7 +244,7 @@ def build_agents(llm: LLM) -> tuple[Agent, Agent, Agent]:
             "the character limit are instructions, not suggestions. You never invent facts the "
             "brief does not contain."
         ),
-        **common,
+        **_agent_common(candidate_llm),
     )
     editor = Agent(
         role="Editor",
@@ -214,7 +255,7 @@ def build_agents(llm: LLM) -> tuple[Agent, Agent, Agent]:
             "subject — that is the writer's job, and silently replacing it would hide a problem "
             "the reviewer needs to see. You always return the full edited post."
         ),
-        **common,
+        **_agent_common(candidate_llm),
     )
     qa = Agent(
         role="Quality reviewer",
@@ -230,14 +271,14 @@ def build_agents(llm: LLM) -> tuple[Agent, Agent, Agent]:
             "specific and supported by the source article is acceptable even when it "
             "summarises a different true part of the article than the aspect does."
         ),
-        **common,
+        **_agent_common(qa_llm),
     )
     assert_agent_posture([writer, editor, qa])
     # And the pinned model really is the one each agent holds — asserted on the
     # CONSTRUCTED objects, so a version that silently substituted its own
     # default is caught here rather than on someone's OpenAI invoice.
-    for agent in (writer, editor, qa):
-        if getattr(agent, "llm", None) is not llm:
+    for agent, expected in ((writer, candidate_llm), (editor, candidate_llm), (qa, qa_llm)):
+        if getattr(agent, "llm", None) is not expected:
             raise StageFailure(
                 "build_agents",
                 f"Agent {agent.role!r} is not holding the pinned local model.",
@@ -356,8 +397,13 @@ def run_flow(request: dict[str, Any]) -> FlowResult:
     attempt_ctx = request.get("attemptContext") or {}
     max_qa_rounds = int(attempt_ctx.get("maxQaRounds", 2))
 
-    llm = build_llm(request["inferenceConfig"])
-    writer, editor, qa_agent = build_agents(llm)
+    inference = request["inferenceConfig"]
+    # Two models off ONE pinned config: the Writer/Editor model's decoding is
+    # constrained to the post schema, the QA model's is not (it answers in the
+    # verdict shape). See build_agents.
+    candidate_llm = build_llm(inference, response_format=POST_CANDIDATE_RESPONSE_FORMAT)
+    qa_llm = build_llm(inference)
+    writer, editor, qa_agent = build_agents(candidate_llm, qa_llm)
 
     brief = _brief_block(request.get("articleUnderstanding") or {})
     max_len = reqs.get("maxTextLength")
@@ -439,8 +485,27 @@ def run_flow(request: dict[str, Any]) -> FlowResult:
     if verdict.decision in {"revise_writer", "revise_editor"}:
         verdict = QaVerdict("rejected_unroutable", verdict.issues)
 
+    # The transport boundary. The candidate must be a valid `PostCandidate`
+    # before this run is reported as anything but a failure — no heuristic
+    # repair, no "success" wrapping a broken string. Constrained decoding on the
+    # Writer/Editor model makes reaching this `except` unlikely; if it happens
+    # anyway (Ollama ignored the grammar, a schema-compiler bug) it is a genuine
+    # infrastructure anomaly, and a `StageFailure` → 503 unavailable is the
+    # honest report: retryable, not a pass, nothing persisted.
+    try:
+        parsed = parse_post_candidate(candidate)
+    except PostCandidateError as err:
+        print(
+            f"[crew-sidecar] final candidate rejected by schema ({err}); "
+            f"raw candidate: {candidate!r}"
+        )
+        raise StageFailure(
+            "candidate", f"final candidate failed schema validation: {err}"
+        ) from err
+
     return FlowResult(
         candidate=candidate,
+        parsed=parsed,
         qa=verdict,
         counters=counters,
         latency_ms=int((time.monotonic() - started) * 1000),

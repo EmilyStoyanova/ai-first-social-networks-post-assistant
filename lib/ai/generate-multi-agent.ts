@@ -56,8 +56,8 @@
  * likely to correlate with something else about the run.
  */
 
-import { LlmProviderError, LlmResponseParseError } from "./errors";
-import { parseLlmPost, type ParsedLlmPost } from "./parse-llm-post";
+import { LlmProviderError } from "./errors";
+import type { ParsedLlmPost } from "./parse-llm-post";
 import { extractOpeningSignature } from "./quality/opening-diversity";
 import {
   evaluateCandidate,
@@ -442,30 +442,12 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
       outcome.degradedStages.forEach((s) => degradedStages.add(s));
       lastQaState = outcome.qaState;
 
-      // A parse failure here is the sidecar's contract being broken, not the
-      // ordinary "the model wrote prose" case: the Writer's output was already
-      // shaped by the Editor and judged by QA before it was returned. Recorded
-      // and thrown, exactly as the single-agent loop treats an unparseable
-      // reply, so the outer service maps it to LLM_RESPONSE_PARSE_ERROR.
-      try {
-        lastParsed = parseLlmPost(outcome.raw);
-      } catch (err) {
-        report({
-          ...attemptBase(),
-          rawResponse: outcome.raw,
-          parsed: null,
-          error: {
-            name: err instanceof Error ? err.name : "Error",
-            message: err instanceof Error ? err.message : String(err),
-            category:
-              err instanceof LlmResponseParseError ? (err.category ?? undefined) : undefined,
-          },
-          accepted: false,
-          rejectionReason: "parse_error" satisfies AttemptRejectionReason,
-          willRetry: false,
-        });
-        throw err;
-      }
+      // No parse step on this path any more. `outcome.parsed` is the sidecar's
+      // strict Pydantic candidate, already validated against `LlmPostSchema` by
+      // the response contract — a structurally broken candidate was refused at
+      // the sidecar (503) or at `crewPostResponseSchema` (invalid_response) and
+      // was thrown above, never reaching here as a "successful" outcome.
+      lastParsed = outcome.parsed;
 
       // THE gates — the same implementation the single-agent loop runs, so a
       // candidate cannot be accepted here that would be refused there.
