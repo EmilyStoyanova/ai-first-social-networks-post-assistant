@@ -36,6 +36,10 @@ export const API_ERROR_CODES = [
   "LLM_RESPONSE_PARSE_ERROR",
   "LLM_RATE_LIMITED",
   "LLM_PROVIDER_ERROR",
+  // Multi-agent generation stopped because too little worker budget remained to
+  // start another Writer→Editor→QA attempt. Not a provider error — a clean,
+  // retryable stop.
+  "MULTI_AGENT_BUDGET_EXHAUSTED",
   "INVALID_REQUEST",
   "INVALID_PROFILE",
   // Publishing — the chosen Buffer profile is on a different social network

@@ -83,6 +83,7 @@ import {
   inferenceFingerprint,
   isAcceptableQaState,
   type InferenceProfile,
+  type MultiAgentPartialProvenance,
   type MultiAgentProvenance,
   type QaState,
   type StrategySource,
@@ -90,6 +91,20 @@ import {
 import { NO_ARTICLE_BRIEF } from "./agents/research-brief";
 import type { BrandContext } from "./types";
 import type { AttemptRejectionReason } from "@/lib/generation-trace/attempt-record";
+import { remainingBudgetMs as ambientRemainingBudgetMs } from "@/lib/http/request-deadline";
+
+/**
+ * The least generation budget that may remain before a FRESH outer attempt is
+ * started. Below this, a full Writer→Editor→QA pass against a local 35B model
+ * cannot realistically finish, so the loop stops cleanly with
+ * `MULTI_AGENT_BUDGET_EXHAUSTED` instead of launching a request that will be
+ * aborted mid-flight and misreported as a provider outage.
+ *
+ * 25 minutes: comfortably above the ~22.5 min a single outer attempt cost in
+ * validation, and well under the sidecar's own 45-minute per-request ceiling.
+ * The FIRST attempt is never gated — a request must always get one real try.
+ */
+export const MIN_MULTI_AGENT_ATTEMPT_BUDGET_MS = 1_500_000;
 
 /**
  * A multi-agent run that produced nothing usable, with the reason a route or a
@@ -102,12 +117,19 @@ import type { AttemptRejectionReason } from "@/lib/generation-trace/attempt-reco
  *                                    unactionably. Retry probably does not help.
  *   • `CREW_SIDECAR_NOT_CONFIGURED` — this process has no sidecar and must not
  *                                    have attempted the call at all.
+ *   • `MULTI_AGENT_BUDGET_EXHAUSTED` — a fresh outer attempt was NOT started
+ *                                    because too little generation budget
+ *                                    remained to finish one. A clean stop, not
+ *                                    a transport timeout: no request was made.
  * Gate exhaustion is NOT here: it stays the outer service's
  * `CANNOT_GENERATE_UNIQUE_POST` / `POST_FAILED_COMPLIANCE`, unchanged, because
  * the gates and their aborts are untouched by this strategy.
  */
 export type MultiAgentErrorCode =
-  "CREW_SIDECAR_UNAVAILABLE" | "CREW_SIDECAR_NOT_CONFIGURED" | "QA_NOT_CONVERGED";
+  | "CREW_SIDECAR_UNAVAILABLE"
+  | "CREW_SIDECAR_NOT_CONFIGURED"
+  | "QA_NOT_CONVERGED"
+  | "MULTI_AGENT_BUDGET_EXHAUSTED";
 
 /**
  * Extends `LlmProviderError` so the outer service's EXISTING catch already
@@ -127,7 +149,15 @@ export class MultiAgentGenerationError extends LlmProviderError {
     readonly multiAgentCode: MultiAgentErrorCode,
     message: string,
     /** The sidecar failure underneath, when there was one. */
-    readonly sidecarError?: CrewSidecarError
+    readonly sidecarError?: CrewSidecarError,
+    /**
+     * Objective measurement from the outer attempts that completed before this
+     * terminal failure — present only when at least one did. The generation
+     * service persists it onto the failed `GenerationRun` so a failed multi-agent
+     * run still records what the provider actually did and cost. Never carries a
+     * QA verdict (see `MultiAgentPartialProvenance`).
+     */
+    readonly partialProvenance?: MultiAgentPartialProvenance
   ) {
     super(message);
     this.name = "MultiAgentGenerationError";
@@ -169,6 +199,19 @@ export interface MultiAgentDeps {
   strategySource: StrategySource;
   /** Max QA REVISION cycles. Two by default (requirement 5). */
   maxQaRounds?: number;
+  /**
+   * ms of generation budget still left, read fresh each time it is asked.
+   * Defaults to the ambient request deadline — `+Infinity` outside one, so the
+   * per-attempt gate below is inert on the interactive path and in tests that
+   * install no deadline. Injected so a budget test need not install one.
+   */
+  remainingBudgetMs?: () => number;
+  /**
+   * The least budget that may remain before a FRESH outer attempt is started.
+   * Defaults to `MIN_MULTI_AGENT_ATTEMPT_BUDGET_MS`. The first attempt is never
+   * gated.
+   */
+  minAttemptBudgetMs?: number;
 }
 
 /**
@@ -183,6 +226,8 @@ export interface MultiAgentDeps {
  */
 export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
   const maxQaRounds = deps.maxQaRounds ?? DEFAULT_MAX_QA_ROUNDS;
+  const readRemainingBudgetMs = deps.remainingBudgetMs ?? ambientRemainingBudgetMs;
+  const minAttemptBudgetMs = deps.minAttemptBudgetMs ?? MIN_MULTI_AGENT_ATTEMPT_BUDGET_MS;
 
   return async function generateMultiAgent(
     _provider,
@@ -215,6 +260,36 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
     let maxQaRevisionRounds = 0;
     let latencyMs = 0;
     const degradedStages = new Set<string>();
+
+    /**
+     * How many outer attempts got a provider response back. Incremented only
+     * after `sidecar.generate` returns, so the counters above are exactly the
+     * completed-attempt totals whenever a later attempt throws.
+     */
+    let completedProviderAttempts = 0;
+
+    /**
+     * Objective measurement to carry on a terminal error, so a FAILED run still
+     * records what the provider did. Undefined until an attempt has completed —
+     * a run that threw before any provider response has nothing truthful to
+     * report and its measurement fields stay NULL. Never carries a QA verdict.
+     */
+    const partialProvenanceSnapshot = (
+      terminalStage: string
+    ): MultiAgentPartialProvenance | undefined => {
+      if (completedProviderAttempts === 0) return undefined;
+      const stages = [...degradedStages];
+      if (!stages.includes(terminalStage)) stages.push(terminalStage);
+      return {
+        inference: profile,
+        inferenceFingerprint: inferenceFingerprint(profile),
+        agentCalls: writerCalls + editorCalls + qaCalls,
+        agentLatencyMs: Math.round(latencyMs),
+        degraded: true,
+        degradedStages: stages,
+        completedAttempts: completedProviderAttempts,
+      };
+    };
 
     /**
      * Whether any outer attempt ended with a critic that ran, refused, and
@@ -304,6 +379,41 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
         aspect: diversityOptions?.initialAspect,
       });
 
+      // ── Budget gate: never START an outer attempt that cannot finish ──────
+      // From attempt 2 on only — a request must always get one real try. A
+      // fresh Writer→Editor→QA pass is minutes-to-tens-of-minutes against a
+      // local 35B model; starting one with less than `minAttemptBudgetMs` left
+      // guarantees a mid-flight abort that would be misreported as a provider
+      // outage AND would consume the remaining budget. Stop cleanly instead.
+      // The previous rejected candidate is NOT accepted: this is terminal, and
+      // the outer service releases the claimed article as for any other failure.
+      if (attempt > 1) {
+        const remaining = readRemainingBudgetMs();
+        if (remaining < minAttemptBudgetMs) {
+          const message =
+            `Stopped before outer attempt ${attempt}/${maxAttempts}: ` +
+            `${Math.round(remaining / 1000)}s of generation budget remained, below the ` +
+            `${Math.round(minAttemptBudgetMs / 1000)}s a full Writer→Editor→QA attempt needs. ` +
+            `No CrewAI request was made.`;
+          console.warn(`[crew-diag] ${message}`);
+          report({
+            ...attemptBase(),
+            rawResponse: null,
+            parsed: null,
+            error: { name: "MultiAgentBudgetExhausted", message },
+            accepted: false,
+            rejectionReason: "budget_exhausted" satisfies AttemptRejectionReason,
+            willRetry: false,
+          });
+          throw new MultiAgentGenerationError(
+            "MULTI_AGENT_BUDGET_EXHAUSTED",
+            message,
+            undefined,
+            partialProvenanceSnapshot("budget_exhausted")
+          );
+        }
+      }
+
       let outcome: CrewPostOutcome;
       try {
         outcome = await deps.sidecar.generate(request);
@@ -320,9 +430,10 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
           rejectionReason: "provider_error" satisfies AttemptRejectionReason,
           willRetry: false,
         });
-        throw toGenerationError(err);
+        throw toGenerationError(err, partialProvenanceSnapshot("provider_error"));
       }
 
+      completedProviderAttempts += 1;
       writerCalls += outcome.agentCalls.writer;
       editorCalls += outcome.agentCalls.editor;
       qaCalls += outcome.agentCalls.qa;
@@ -427,7 +538,9 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
         "QA_NOT_CONVERGED",
         sawUnroutableRejection
           ? `QA rejected every candidate across ${attemptsMade} attempt(s) without naming an actionable dimension.`
-          : `QA did not reach a passing verdict in ${attemptsMade} attempt(s).`
+          : `QA did not reach a passing verdict in ${attemptsMade} attempt(s).`,
+        undefined,
+        partialProvenanceSnapshot("qa_not_converged")
       );
     }
 
@@ -486,15 +599,25 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
  * failed the whole call over it, which is an infrastructure fault (requirement
  * 7: never a PASS).
  */
-function toGenerationError(err: unknown): unknown {
+function toGenerationError(err: unknown, partialProvenance?: MultiAgentPartialProvenance): unknown {
   if (!(err instanceof CrewSidecarError)) return err;
   if (err.code === "not_configured") {
-    return new MultiAgentGenerationError("CREW_SIDECAR_NOT_CONFIGURED", err.message, err);
+    return new MultiAgentGenerationError(
+      "CREW_SIDECAR_NOT_CONFIGURED",
+      err.message,
+      err,
+      partialProvenance
+    );
   }
   if (err.code === "non_converged") {
-    return new MultiAgentGenerationError("QA_NOT_CONVERGED", err.message, err);
+    return new MultiAgentGenerationError("QA_NOT_CONVERGED", err.message, err, partialProvenance);
   }
-  return new MultiAgentGenerationError("CREW_SIDECAR_UNAVAILABLE", err.message, err);
+  return new MultiAgentGenerationError(
+    "CREW_SIDECAR_UNAVAILABLE",
+    err.message,
+    err,
+    partialProvenance
+  );
 }
 
 /**

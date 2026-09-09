@@ -44,6 +44,7 @@
     "LLM_RESPONSE_PARSE_ERROR": "The AI returned an unexpected response. Please try again.",
     "LLM_RATE_LIMITED": "The AI provider is temporarily rate limited. Please try again shortly.",
     "LLM_PROVIDER_ERROR": "The AI provider returned an error. Please try again.",
+    "MULTI_AGENT_BUDGET_EXHAUSTED": "Multi-agent generation ran out of time before it could finish. Please try again.",
     "INVALID_REQUEST": "Invalid request.",
     "INVALID_PROFILE": "Invalid Buffer profile.",
     "CHANNEL_MISMATCH": "That Buffer profile belongs to a different social network. Pick a profile for this post's channel.",

@@ -262,6 +262,122 @@ describe("bindMultiAgent — never falls back", () => {
   });
 });
 
+describe("bindMultiAgent — the per-attempt budget gate", () => {
+  /** An outcome that is NOT accepted, so the loop wants another outer attempt. */
+  const NEEDS_RETRY = outcome({
+    qaState: "rejected_unroutable",
+    qaRevisions: 2,
+    agentCalls: { writer: 2, editor: 3, qa: 3 },
+    latencyMs: 1_350_000,
+  });
+
+  it("does NOT start outer attempt 2 when less than the minimum budget remains", async () => {
+    const sidecar = scriptedSidecar([NEEDS_RETRY, outcome({ qaState: "pass" })]);
+    await assert.rejects(
+      bindMultiAgent(
+        deps(sidecar, {
+          remainingBudgetMs: () => 60_000, // 60s left — far below the 25-min floor
+          minAttemptBudgetMs: 1_500_000,
+        })
+      )(PROVIDER, "sys", "user", NO_RECENT),
+      (err: unknown) =>
+        err instanceof MultiAgentGenerationError &&
+        err.multiAgentCode === "MULTI_AGENT_BUDGET_EXHAUSTED"
+    );
+    // Attempt 1 ran; attempt 2 was never dialled.
+    assert.equal(sidecar.calls(), 1);
+  });
+
+  it("carries the completed-attempt measurement on the budget-exhausted error", async () => {
+    const sidecar = scriptedSidecar([NEEDS_RETRY]);
+    let caught: MultiAgentGenerationError | null = null;
+    try {
+      await bindMultiAgent(
+        deps(sidecar, { remainingBudgetMs: () => 60_000, minAttemptBudgetMs: 1_500_000 })
+      )(PROVIDER, "sys", "user", NO_RECENT);
+    } catch (err) {
+      caught = err as MultiAgentGenerationError;
+    }
+    assert.ok(caught instanceof MultiAgentGenerationError);
+    const partial = caught.partialProvenance;
+    assert.ok(partial, "the error carries the objective measurement from attempt 1");
+    assert.equal(partial!.completedAttempts, 1);
+    assert.equal(partial!.agentCalls, 8); // 2 + 3 + 3
+    assert.equal(partial!.agentLatencyMs, 1_350_000);
+    assert.equal(partial!.degraded, true);
+    assert.ok(partial!.degradedStages.includes("budget_exhausted"));
+    assert.match(partial!.inferenceFingerprint, /^[0-9a-f]{64}$/);
+    // Never a QA verdict — that stays scoped to the per-attempt trace.
+    assert.equal((partial as unknown as { qaState?: unknown }).qaState, undefined);
+  });
+
+  it("permits outer attempt 2 when enough budget remains", async () => {
+    const sidecar = scriptedSidecar([NEEDS_RETRY, outcome({ qaState: "pass" })]);
+    const result = await bindMultiAgent(
+      deps(sidecar, { remainingBudgetMs: () => 3_000_000, minAttemptBudgetMs: 1_500_000 })
+    )(PROVIDER, "sys", "user", NO_RECENT);
+    assert.ok(result.parsed.text.length > 0);
+    assert.equal(sidecar.calls(), 2);
+    assert.equal(result.multiAgent!.qaState, "pass");
+  });
+
+  it("never gates the FIRST attempt, however little budget remains", async () => {
+    const sidecar = scriptedSidecar([outcome({ qaState: "pass" })]);
+    const result = await bindMultiAgent(
+      deps(sidecar, { remainingBudgetMs: () => 1, minAttemptBudgetMs: 1_500_000 })
+    )(PROVIDER, "sys", "user", NO_RECENT);
+    assert.ok(result.parsed.text.length > 0);
+    assert.equal(sidecar.calls(), 1);
+  });
+
+  it("is inert with no injected budget reader (ambient deadline absent → +Infinity)", async () => {
+    const sidecar = scriptedSidecar([NEEDS_RETRY, outcome({ qaState: "pass" })]);
+    const result = await bindMultiAgent(deps(sidecar))(PROVIDER, "sys", "user", NO_RECENT);
+    assert.equal(sidecar.calls(), 2);
+    assert.ok(result.parsed.text.length > 0);
+  });
+});
+
+describe("bindMultiAgent — partial provenance on a mid-run throw", () => {
+  it("carries attempt-1 measurement when the sidecar throws on attempt 2", async () => {
+    const sidecar = scriptedSidecar([
+      outcome({
+        qaState: "rejected_unroutable",
+        qaRevisions: 1,
+        agentCalls: { writer: 1, editor: 1, qa: 1 },
+        latencyMs: 5000,
+      }),
+      new CrewSidecarError("timeout", "exceeded its budget"),
+    ]);
+    let caught: MultiAgentGenerationError | null = null;
+    try {
+      await bindMultiAgent(deps(sidecar))(PROVIDER, "sys", "user", NO_RECENT);
+    } catch (err) {
+      caught = err as MultiAgentGenerationError;
+    }
+    assert.ok(caught instanceof MultiAgentGenerationError);
+    assert.equal(caught!.multiAgentCode, "CREW_SIDECAR_UNAVAILABLE");
+    const partial = caught!.partialProvenance;
+    assert.ok(partial);
+    assert.equal(partial!.completedAttempts, 1);
+    assert.equal(partial!.agentCalls, 3);
+    assert.equal(partial!.agentLatencyMs, 5000);
+    assert.ok(partial!.degradedStages.includes("provider_error"));
+  });
+
+  it("has NO partial provenance when the sidecar throws on the very first attempt", async () => {
+    const sidecar = scriptedSidecar([new CrewSidecarError("timeout", "exceeded its budget")]);
+    let caught: MultiAgentGenerationError | null = null;
+    try {
+      await bindMultiAgent(deps(sidecar))(PROVIDER, "sys", "user", NO_RECENT);
+    } catch (err) {
+      caught = err as MultiAgentGenerationError;
+    }
+    assert.ok(caught instanceof MultiAgentGenerationError);
+    assert.equal(caught!.partialProvenance, undefined);
+  });
+});
+
 describe("bindMultiAgent — counters and provenance", () => {
   it("sums agent calls across outer attempts and keeps the max revision rounds", async () => {
     const sidecar = scriptedSidecar([

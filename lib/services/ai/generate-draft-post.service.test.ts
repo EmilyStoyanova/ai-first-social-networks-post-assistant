@@ -10,6 +10,9 @@ import type { AutoGenerateImageInput } from "./auto-generate-post-image.service"
 import type { AutoApplySourceImageInput } from "./auto-apply-source-image.service";
 import type { SemanticGate } from "@/lib/ai/generate-with-retry";
 import type { GenerationContext } from "@/lib/ai/types";
+import { GenerationTracer } from "@/lib/generation-trace/tracer";
+import type { GenerationTraceStore, PersistableRun } from "@/lib/generation-trace/store";
+import { MultiAgentGenerationError } from "@/lib/ai/generate-multi-agent";
 
 const ACCEPT_GATE: SemanticGate = async () => ({
   decision: "accept",
@@ -3253,4 +3256,177 @@ describe("generatePostFromContext — opening-diversity and language hardening",
     };
     return { deps, calls: () => calls };
   }
+});
+
+describe("generatePostFromContext — failed multi-agent run keeps objective provenance", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  function makeStore(): { store: GenerationTraceStore; saved: () => PersistableRun[] } {
+    const runs: PersistableRun[] = [];
+    return { store: { saveRun: async (run) => void runs.push(run) }, saved: () => runs };
+  }
+
+  const MULTI_STRATEGY = {
+    strategy: "multi" as const,
+    source: "user_override" as const,
+    experimentKey: null,
+    experimentArm: null,
+    experimentUnitId: null,
+    experimentBucket: null,
+    experimentAllocation: null,
+    abIneligibleReason: null,
+  };
+
+  const PARTIAL = {
+    inference: {
+      modelTag: "qwen3.5:35b-a3b-q4_K_M",
+      modelDigest: null,
+      settings: {},
+    },
+    inferenceFingerprint: "a".repeat(64),
+    agentCalls: 8,
+    agentLatencyMs: 1_350_000,
+    degraded: true as const,
+    degradedStages: ["provider_error"],
+    completedAttempts: 1,
+  };
+
+  const ARTICLE_CONTEXT = () =>
+    makeContext({
+      feedItems: [
+        {
+          id: "feed-1",
+          title: "Launch incoming",
+          content: "We are preparing something big for our audience.",
+          url: "https://example.com/launch",
+          publishedAt: null,
+        },
+      ],
+      hasArticleSources: true,
+    });
+
+  /** A bound multi-agent loop that throws before returning a candidate. */
+  function throwingMultiAgent(err: MultiAgentGenerationError) {
+    return () => async () => {
+      throw err;
+    };
+  }
+
+  it("persists modelTag / fingerprint / agentCalls / latency / degraded, and leaves qaState NULL", async () => {
+    const { deps } = makeDeps();
+    const { store } = makeStore();
+    const tracer = GenerationTracer.start({
+      kind: "post_generation",
+      trigger: "manual",
+      companyId: "co-1",
+      channel: "LinkedIn",
+      userId: "user-1",
+      store,
+      newId: () => "run-1",
+    });
+    deps.tracer = tracer;
+    deps.loadArticleBrief = async () => null as never;
+    deps.buildMultiAgentLoop = throwingMultiAgent(
+      new MultiAgentGenerationError(
+        "CREW_SIDECAR_UNAVAILABLE",
+        "CrewAI sidecar request exceeded its budget.",
+        undefined,
+        PARTIAL
+      )
+    ) as never;
+
+    const result = await generatePostFromContext(
+      ARTICLE_CONTEXT(),
+      "co-1",
+      { resolvedStrategy: MULTI_STRATEGY },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "LLM_PROVIDER_ERROR");
+
+    const s = tracer.peekStrategy();
+    assert.ok(s, "the strategy row was written");
+    // Objective measurement from the one completed attempt is preserved.
+    assert.equal(s!.modelTag, "qwen3.5:35b-a3b-q4_K_M");
+    assert.equal(s!.modelDigest, null);
+    assert.equal(s!.inferenceFingerprint, "a".repeat(64));
+    assert.equal(s!.agentCalls, 8);
+    assert.equal(s!.agentLatencyMs, 1_350_000);
+    assert.equal(s!.degraded, true);
+    assert.deepEqual(s!.degradedStages, ["provider_error"]);
+    // No post was saved → the run reached no run-level QA outcome.
+    assert.equal(s!.qaState, null);
+    assert.equal(s!.qaRevisionRounds, null);
+    // The assignment half still stands.
+    assert.equal(s!.generationStrategy, "multi");
+    assert.equal(s!.generationStrategySource, "user_override");
+  });
+
+  it("maps a budget-exhausted multi-agent failure to its own code, not LLM_PROVIDER_ERROR", async () => {
+    const { deps } = makeDeps();
+    deps.loadArticleBrief = async () => null as never;
+    deps.buildMultiAgentLoop = throwingMultiAgent(
+      new MultiAgentGenerationError(
+        "MULTI_AGENT_BUDGET_EXHAUSTED",
+        "Stopped before outer attempt 2/3.",
+        undefined,
+        { ...PARTIAL, degradedStages: ["budget_exhausted"] }
+      )
+    ) as never;
+
+    const result = await generatePostFromContext(
+      ARTICLE_CONTEXT(),
+      "co-1",
+      { resolvedStrategy: MULTI_STRATEGY },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "MULTI_AGENT_BUDGET_EXHAUSTED");
+  });
+
+  it("writes no objective measurement when no attempt completed (partial provenance absent)", async () => {
+    const { deps } = makeDeps();
+    const { store } = makeStore();
+    const tracer = GenerationTracer.start({
+      kind: "post_generation",
+      trigger: "manual",
+      companyId: "co-1",
+      channel: "LinkedIn",
+      userId: "user-1",
+      store,
+      newId: () => "run-2",
+    });
+    deps.tracer = tracer;
+    deps.loadArticleBrief = async () => null as never;
+    deps.buildMultiAgentLoop = throwingMultiAgent(
+      new MultiAgentGenerationError("CREW_SIDECAR_UNAVAILABLE", "unreachable", undefined, undefined)
+    ) as never;
+
+    const result = await generatePostFromContext(
+      ARTICLE_CONTEXT(),
+      "co-1",
+      { resolvedStrategy: MULTI_STRATEGY },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    const s = tracer.peekStrategy();
+    // Assignment half is there; objective measurement fields stay NULL.
+    assert.equal(s!.generationStrategy, "multi");
+    assert.equal(s!.agentCalls, null);
+    assert.equal(s!.inferenceFingerprint, null);
+    assert.equal(s!.qaState, null);
+  });
 });

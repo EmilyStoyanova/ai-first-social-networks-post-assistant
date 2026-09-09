@@ -333,3 +333,100 @@ class DegradationAndBounds(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QaAspectRubric(unittest.TestCase):
+    """ISSUE 1 regression — QA must not reject solely on `coreMessage != aspect`.
+
+    The failure class discovered in the Test 2 validation run:
+      - the source article is fundamentally a reader competition (prize,
+        eligibility, closing date);
+      - the mined aspect is "seasonal autumn actions like foraging, stargazing";
+      - the post BODY materially discusses those seasonal actions;
+      - the `coreMessage` truthfully summarises the competition / prize / who may
+        enter;
+      - QA then rejected `content`/`factual` for the coreMessage "not restating
+        the mandated aspect", burned both revision rounds, and the whole outer
+        attempt was lost as `rejected_unroutable`.
+
+    A real model cannot be scripted to reject on cue, so what is asserted here is
+    (a) the scoping rubric reaches QA on the SAME call the reviewer judges from,
+    and (b) when QA follows it, the real loop converges to `pass`.
+    """
+
+    COMPETITION_REQUEST = {
+        **REQUEST,
+        "articleUnderstanding": {
+            **REQUEST["articleUnderstanding"],
+            "mainSubject": (
+                "A weekly reader competition: share a UK autumn day-out tip to win a "
+                "200-pound voucher; UK residents only; closes in one week."
+            ),
+        },
+        "generationRequirements": {
+            **REQUEST["generationRequirements"],
+            "systemPrompt": "sys",
+            "userPrompt": (
+                "Write about this competition article. Mandatory aspect to build the post "
+                "body around: suggest specific seasonal autumn actions like foraging, "
+                "stargazing, or visiting fiery gardens."
+            ),
+        },
+    }
+
+    # Body honours the aspect (foraging / stargazing); coreMessage states the
+    # competition fact — factual, specific, article-supported.
+    CANDIDATE = json.dumps(
+        {
+            "text": (
+                "Autumn in the UK is the season to get outside — forage for berries, "
+                "stargaze on a clear night, or walk a garden ablaze with colour."
+            ),
+            "hashtags": ["autumn"],
+            "coreMessage": (
+                "The weekly competition lets UK residents win a 200-pound voucher for "
+                "sharing their best autumn day-out tip."
+            ),
+            "topic": "UK autumn competition",
+        }
+    )
+
+    def test_the_aspect_rubric_reaches_qa_on_the_call_it_judges_from(self) -> None:
+        seen: dict[str, str] = {}
+
+        def capture(agent, description: str, expected_output: str) -> str:
+            role = agent.role.lower()
+            if "review" in role or "quality" in role:
+                seen["qa"] = description
+                return qa_pass()
+            return self.CANDIDATE
+
+        with mock.patch.object(crew_flow, "_run_single", side_effect=capture):
+            result = crew_flow.run_flow(self.COMPETITION_REQUEST)
+
+        self.assertEqual(result.qa.decision, "pass")
+        qa_text = seen["qa"].lower()
+        # The reviewer is told the coreMessage need not match the aspect …
+        self.assertIn("coremessage", qa_text)
+        self.assertIn("aspect", qa_text)
+        self.assertTrue(
+            "not require" in qa_text
+            or "do not require" in qa_text
+            or "need not" in qa_text
+            or "not merely because" in qa_text,
+            f"QA task is missing the coreMessage/aspect scoping rubric:\n{seen['qa']}",
+        )
+        # … and it still received the mandated aspect itself to judge the body against.
+        self.assertIn("foraging", qa_text)
+
+    def test_loop_converges_to_pass_when_qa_follows_the_rubric(self) -> None:
+        # QA obeys the rubric: the body honours the aspect and the coreMessage is
+        # a supported fact, so it passes on the first judge call — no revision
+        # rounds, no rejected_unroutable.
+        scripted = ScriptedAgents([self.CANDIDATE], [self.CANDIDATE], [qa_pass()])
+        with mock.patch.object(crew_flow, "_run_single", side_effect=scripted):
+            result = crew_flow.run_flow(self.COMPETITION_REQUEST)
+
+        self.assertEqual(result.qa.decision, "pass")
+        self.assertNotEqual(result.qa.decision, "rejected_unroutable")
+        self.assertEqual(result.counters.revisions, 0)

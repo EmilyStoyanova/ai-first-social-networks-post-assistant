@@ -177,6 +177,38 @@ export interface MultiAgentProvenance {
 }
 
 /**
+ * The objective, non-outcome measurements from the outer attempts that DID
+ * complete before a multi-agent run threw its terminal error.
+ *
+ * Carried on `MultiAgentGenerationError` so the generation service can persist
+ * "what the provider actually did and cost" onto a FAILED `GenerationRun` —
+ * which is exactly the run an A/B failure-rate analysis is made of, and which
+ * would otherwise carry only NULLs because the throw skips the normal
+ * measurement write.
+ *
+ * Deliberately excludes `qaState` and `qaRevisionRounds`: those describe a
+ * run-level QA outcome, and a run that saved no post reached none. The last
+ * completed attempt's QA verdict stays where it is correctly scoped — the
+ * per-attempt `generation_steps` provider payload.
+ */
+export interface MultiAgentPartialProvenance {
+  /** The pinned profile — its tag/digest/settings are known before any call. */
+  inference: InferenceProfile;
+  /** `inferenceFingerprint(inference)`, precomputed. */
+  inferenceFingerprint: string;
+  /** Summed agent calls across the attempts that returned. Never estimated. */
+  agentCalls: number;
+  /** Summed wall-clock ms across the attempts that returned. Never estimated. */
+  agentLatencyMs: number;
+  /** Always true: a run that failed mid-way is degraded by definition. */
+  degraded: true;
+  /** Named stages, plus the terminal failure stage (`provider_error` / `budget_exhausted`). */
+  degradedStages: string[];
+  /** How many outer attempts produced a provider response before the failure. */
+  completedAttempts: number;
+}
+
+/**
  * The five QA states, and the whole reason the taxonomy is not three.
  *
  * The asymmetry between `rejected_unroutable` and `unavailable` is deliberate.

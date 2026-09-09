@@ -4,8 +4,11 @@ import {
   createTopicGenerationHandler,
   mergeTopicProgress,
   toTopicResumeState,
+  DEFAULT_TOPIC_BUDGET_MS,
+  DEFAULT_MULTI_AGENT_TOPIC_BUDGET_MS,
   TOPIC_GENERATION_JOB_TYPE,
 } from "./topic-generation-handler";
+import { remainingBudgetMs } from "@/lib/http/request-deadline";
 import type { JobRecord } from "./job-store";
 import type { Logger } from "./logger";
 import type {
@@ -329,6 +332,84 @@ describe("topic generation handler — resuming a half-written topic", () => {
 
     assert.equal(h.calls().length, 0, "nothing is generated a second time");
     assert.equal(result.posts.length, 3);
+  });
+});
+
+describe("topic generation handler — budget selection by strategy", () => {
+  const FIXED_NOW = 1_000_000_000_000;
+
+  const RESOLVED = (strategy: "single" | "multi") => ({
+    strategy,
+    source: "user_override" as const,
+    experimentKey: null,
+    experimentArm: null,
+    experimentUnitId: null,
+    experimentBucket: null,
+    experimentAllocation: null,
+    abIneligibleReason: null,
+  });
+
+  /**
+   * Runs the handler with a fixed clock and captures the ambient budget the
+   * generation step sees. With `now` frozen, `remainingBudgetMs()` inside the
+   * deadline is exactly the budget the handler installed.
+   */
+  async function budgetSeenBy(
+    payloadOverrides: Record<string, unknown>,
+    handlerDeps: { budgetMs?: number; multiAgentBudgetMs?: number } = {}
+  ): Promise<number> {
+    let seen = -1;
+    const handler = createTopicGenerationHandler({
+      ...handlerDeps,
+      now: () => FIXED_NOW,
+      resolveRequester: async () => ({ isGlobalAdmin: false }),
+      generateTopic: async () => {
+        seen = remainingBudgetMs();
+        return {
+          contentGroupId: GROUP_ID,
+          companyId: "company-1",
+          posts: [],
+          failures: [],
+          notAttempted: [],
+          anchor: null,
+        };
+      },
+    });
+    await handler({
+      job: job({ payload: payload(payloadOverrides) }),
+      logger: silentLogger,
+      reportProgress: async () => {},
+    });
+    return seen;
+  }
+
+  it("a multi-agent topic gets WORKER_MULTI_AGENT_BUDGET_MS", async () => {
+    const seen = await budgetSeenBy(
+      { channels: ["facebook"], resolvedStrategy: RESOLVED("multi") },
+      { budgetMs: 900_000, multiAgentBudgetMs: 5_400_000 }
+    );
+    assert.equal(seen, 5_400_000);
+  });
+
+  it("a multi-agent topic falls back to DEFAULT_MULTI_AGENT_TOPIC_BUDGET_MS", async () => {
+    const seen = await budgetSeenBy({
+      channels: ["facebook"],
+      resolvedStrategy: RESOLVED("multi"),
+    });
+    assert.equal(seen, DEFAULT_MULTI_AGENT_TOPIC_BUDGET_MS);
+  });
+
+  it("a single-agent topic still gets the single-agent (bulk) budget", async () => {
+    const seen = await budgetSeenBy(
+      { channels: ["facebook"], resolvedStrategy: RESOLVED("single") },
+      { budgetMs: 900_000, multiAgentBudgetMs: 5_400_000 }
+    );
+    assert.equal(seen, 900_000);
+  });
+
+  it("a topic with no resolved strategy is treated as single-agent", async () => {
+    const seen = await budgetSeenBy({ channels: ["facebook"] });
+    assert.equal(seen, DEFAULT_TOPIC_BUDGET_MS);
   });
 });
 

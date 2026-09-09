@@ -223,7 +223,12 @@ def build_agents(llm: LLM) -> tuple[Agent, Agent, Agent]:
             "You are a critic, not an editor: you never rewrite. You decide whether the post "
             "meets the requirements and, when it does not, name the ONE dimension that fails "
             "most and whether it is a matter of style/clarity or of fact/content. You answer "
-            "only in the JSON shape you are given. You never approve a post to be agreeable."
+            "only in the JSON shape you are given. You never approve a post to be agreeable. "
+            "The requirements may name an 'aspect' or 'angle' to build the post around: judge "
+            "whether the POST BODY substantially does so — never require the one-sentence "
+            "`coreMessage` to restate or match that aspect. A `coreMessage` that is factual, "
+            "specific and supported by the source article is acceptable even when it "
+            "summarises a different true part of the article than the aspect does."
         ),
         **common,
     )
@@ -280,6 +285,29 @@ QA_JSON_CONTRACT = (
     'is wrong, in one sentence>" } ] }\n'
     'Use "pass" only when nothing fails. When you use "revise" you MUST name at least one issue '
     "with a dimension from that list — a rejection that names nothing cannot be acted on."
+)
+
+# How to weigh the mined aspect/angle when judging. Delivered on EVERY QA call
+# (initial and each revision round), because a real reviewer, told to "name the
+# ONE dimension that fails most", will otherwise treat any gap between the
+# one-sentence `coreMessage` and the mined aspect as a `content`/`factual`
+# failure — which the deterministic gates and the single-agent path never
+# enforce, and which turns a publishable post into a non-converged rejection.
+QA_ASPECT_RUBRIC = (
+    "## How to judge the aspect / angle\n"
+    "\n"
+    "- The 'aspect' or 'angle' in the requirements is guidance for what the POST BODY should "
+    "build around. Judge whether the body substantially honours it. Do NOT require the "
+    "one-sentence `coreMessage` to restate, paraphrase or match the aspect.\n"
+    "- A `coreMessage` is acceptable when it is factual, specific, and supported by the source "
+    "article — even if it summarises a different true part of the article than the aspect does "
+    "(for example: the body explores the aspect while the `coreMessage` states the article's "
+    "prize, rule or headline fact).\n"
+    "- Raise a `content` or `factual` issue about the `coreMessage` ONLY when it is unsupported "
+    "by the source, vague or generic, or contradicts the article — never merely because it does "
+    "not name the aspect.\n"
+    "- This narrows one criterion only. Genuine factual errors, safety problems, forbidden "
+    "terms, wrong language, and body text that ignores the aspect entirely all remain issues."
 )
 
 
@@ -466,6 +494,8 @@ def _judge(qa_agent: Agent, counters: RunCounters, candidate: str, base_instruct
                     "## Judge this post against the requirements above",
                     "",
                     candidate,
+                    "",
+                    QA_ASPECT_RUBRIC,
                     "",
                     QA_JSON_CONTRACT,
                 ]

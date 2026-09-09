@@ -43,6 +43,25 @@ const envSchema = z.object({
   WORKER_BULK_BUDGET_MS: z.coerce.number().int().positive().default(1_800_000),
 
   /**
+   * Wall-clock budget for ONE multi-agent topic-generation attempt.
+   *
+   * Separate from `WORKER_BULK_BUDGET_MS` because the two operations have
+   * incomparable economics. A single-agent bulk run is dozens of ~45s
+   * generations; ONE multi-agent generation is a Writer→Editor→QA loop against a
+   * local 35B model — measured at ~22.5 minutes for a single outer attempt with
+   * two QA revision rounds, and bounded by the sidecar's own 45-minute
+   * per-request ceiling. 90 minutes is two full worst-case attempts back to
+   * back, so the outer loop's own "enough budget left for another attempt" gate
+   * (`MIN_MULTI_AGENT_ATTEMPT_BUDGET_MS` in generate-multi-agent.ts) can still
+   * admit a genuine second attempt after a slow first one, rather than starting
+   * a third attempt that cannot finish.
+   *
+   * Applied ONLY to a topic whose resolved strategy is `multi`. A single-agent
+   * topic keeps `WORKER_BULK_BUDGET_MS` unchanged.
+   */
+  WORKER_MULTI_AGENT_BUDGET_MS: z.coerce.number().int().positive().default(5_400_000),
+
+  /**
    * How long the queue must stay empty before the worker goes DORMANT: stops
    * polling and closes its database connection.
    *
@@ -127,6 +146,7 @@ export interface WorkerConfig {
   leaseTtlMs: number;
   shutdownGraceMs: number;
   bulkBudgetMs: number;
+  multiAgentBudgetMs: number;
   dormantAfterMs: number;
   fallbackPollMs: number;
   dormantCleanupTimeoutMs: number;
@@ -154,6 +174,7 @@ export function loadWorkerConfig(
     leaseTtlMs: parsed.WORKER_LEASE_TTL_MS,
     shutdownGraceMs: parsed.WORKER_SHUTDOWN_GRACE_MS,
     bulkBudgetMs: parsed.WORKER_BULK_BUDGET_MS,
+    multiAgentBudgetMs: parsed.WORKER_MULTI_AGENT_BUDGET_MS,
     dormantAfterMs: parsed.WORKER_DORMANT_AFTER_MS,
     fallbackPollMs: parsed.WORKER_FALLBACK_POLL_MS,
     dormantCleanupTimeoutMs: parsed.WORKER_DORMANT_CLEANUP_TIMEOUT_MS,

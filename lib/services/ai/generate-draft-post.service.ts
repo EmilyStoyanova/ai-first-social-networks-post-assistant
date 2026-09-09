@@ -82,7 +82,11 @@ import {
   modelVerificationFor,
   pinnedInferenceProfile,
 } from "@/lib/ai/strategy/experiment-inference";
-import { bindMultiAgent, type MultiAgentDeps } from "@/lib/ai/generate-multi-agent";
+import {
+  bindMultiAgent,
+  MultiAgentGenerationError,
+  type MultiAgentDeps,
+} from "@/lib/ai/generate-multi-agent";
 import { CrewSidecarClient } from "@/lib/ai/crew/crew-sidecar.client";
 import { loadArticleBrief } from "@/lib/ai/agents/load-article-brief";
 import { inferenceFingerprint } from "@/lib/ai/crew/provenance";
@@ -259,7 +263,13 @@ export type GenerateDraftPostErrorCode =
   // nothing extracted yet, or any source disabled/deleted between the form
   // rendering and the click. Never a silent fallback — an explicit pick
   // that cannot be honoured is reported, not substituted.
-  | "SELECTED_SOURCE_UNAVAILABLE";
+  | "SELECTED_SOURCE_UNAVAILABLE"
+  // Multi-agent only: a fresh Writer→Editor→QA outer attempt was NOT started
+  // because too little generation budget remained to finish one. A clean stop,
+  // not a transport timeout — no CrewAI request was made and no rejected
+  // candidate was accepted. Distinct from LLM_PROVIDER_ERROR so a budget
+  // shortfall is never mistaken for a sidecar outage.
+  | "MULTI_AGENT_BUDGET_EXHAUSTED";
 
 export interface GenerateDraftPostFailure {
   success: false;
@@ -1502,6 +1512,46 @@ async function runGeneration(
     );
   } catch (err) {
     await releaseClaimedFeedItem();
+
+    // A multi-agent failure that completed at least one outer attempt carries
+    // the objective measurement from those attempts. Persist it onto the FAILED
+    // run — the run an A/B failure rate is made of — BEFORE returning, since the
+    // normal measurement write below this catch never runs on a throw. Only
+    // objective fields: `qaState`/`qaRevisionRounds` stay NULL because no post
+    // was saved and the run reached no run-level QA outcome. The last completed
+    // attempt's QA verdict stays in the per-attempt `generation_steps`.
+    if (err instanceof MultiAgentGenerationError && err.partialProvenance) {
+      const partial = err.partialProvenance;
+      tracer.setStrategy({
+        modelTag: partial.inference.modelTag,
+        modelDigest: partial.inference.modelDigest,
+        modelVerification: modelVerificationFor(
+          pinnedInference.modelTag,
+          partial.inference.modelTag,
+          partial.inference.modelDigest
+        ),
+        inferenceFingerprint: partial.inferenceFingerprint,
+        agentCalls: partial.agentCalls,
+        agentLatencyMs: partial.agentLatencyMs,
+        degraded: true,
+        degradedStages: partial.degradedStages,
+      });
+    }
+
+    // A budget shortfall is its own terminal outcome, not a provider outage: no
+    // CrewAI request was made. Mapped to a dedicated code (HTTP 503) so it is
+    // never conflated with LLM_PROVIDER_ERROR. Must precede the LlmProviderError
+    // branch — MultiAgentGenerationError extends it.
+    if (
+      err instanceof MultiAgentGenerationError &&
+      err.multiAgentCode === "MULTI_AGENT_BUDGET_EXHAUSTED"
+    ) {
+      console.warn(
+        "[llm-diag] generation aborted → code=MULTI_AGENT_BUDGET_EXHAUSTED (maps to HTTP 503)"
+      );
+      return { success: false, code: "MULTI_AGENT_BUDGET_EXHAUSTED", message: err.message };
+    }
+
     // Diagnostic: the terminal error code the route maps to HTTP 502. No prompt,
     // key, or model content is logged — the code (and parse category) suffice to
     // classify the failure. The provider already logged worker status/transport.

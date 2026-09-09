@@ -195,7 +195,11 @@ export type BulkFailureReason =
   | "provider_error"
   | "configuration"
   | "channel_limit"
-  | "access";
+  | "access"
+  // Multi-agent only: the run stopped because too little worker budget remained
+  // to start another Writer→Editor→QA attempt. Not a provider fault — a clean
+  // stop that a later run (with a fresh budget) can complete.
+  | "time_budget";
 
 export interface BulkGenerationFailure {
   /** 1-based position of the TOPIC this attempt was for. */
@@ -527,6 +531,8 @@ export function classifyBulkFailure(code: GenerateDraftPostErrorCode): BulkFailu
       return "configuration";
     case "POST_TOO_LONG_WITH_URL":
       return "channel_limit";
+    case "MULTI_AGENT_BUDGET_EXHAUSTED":
+      return "time_budget";
     case "NOT_FOUND":
     case "FORBIDDEN":
     case "INVALID_CHANNEL":
@@ -543,6 +549,7 @@ const DEFAULT_MESSAGES: Record<BulkFailureReason, string> = {
   configuration: "No usable AI model is configured for this generation.",
   channel_limit: "The generated post exceeded the channel's character limit.",
   access: "This company or channel is not available.",
+  time_budget: "Multi-agent generation ran out of time before it could finish. Try again.",
 };
 
 // ─── Service ───────────────────────────────────────────────────────────────────

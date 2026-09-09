@@ -79,6 +79,20 @@ export type TopicGenerationDiagnostics = Record<string, unknown>;
  */
 export const DEFAULT_TOPIC_BUDGET_MS = 900_000;
 
+/**
+ * The default ceiling for a MULTI-AGENT topic — one whose resolved strategy is
+ * `multi`. Far larger than `DEFAULT_TOPIC_BUDGET_MS` because a single multi-agent
+ * generation is a Writer→Editor→QA loop against a local 35B model (~22.5 min for
+ * one outer attempt with two QA revision rounds, 45 min hard ceiling per sidecar
+ * request). 90 minutes covers two full worst-case attempts, so the outer loop's
+ * `MIN_MULTI_AGENT_ATTEMPT_BUDGET_MS` gate can still admit a real second attempt
+ * after a slow first one instead of launching a third that cannot finish.
+ *
+ * Single-agent topics are unaffected — they keep `DEFAULT_TOPIC_BUDGET_MS` /
+ * `WORKER_BULK_BUDGET_MS`.
+ */
+export const DEFAULT_MULTI_AGENT_TOPIC_BUDGET_MS = 5_400_000;
+
 /** Reads the requester's CURRENT admin rights. Null when the user is gone. */
 export type ResolveRequester = (userId: string) => Promise<{ isGlobalAdmin: boolean } | null>;
 
@@ -178,8 +192,17 @@ export interface TopicGenerationHandlerDeps {
   generateTopic?: typeof generateTopicAcrossChannels;
   /** Reads the requester's current admin rights. */
   resolveRequester?: ResolveRequester;
-  /** Wall-clock ceiling for one attempt. See the docblock — a ceiling, not a pace. */
+  /**
+   * Wall-clock ceiling for one SINGLE-AGENT attempt. See the docblock — a
+   * ceiling, not a pace.
+   */
   budgetMs?: number;
+  /**
+   * Wall-clock ceiling for one attempt of a MULTI-AGENT topic (resolved
+   * strategy `multi`). Defaults to `DEFAULT_MULTI_AGENT_TOPIC_BUDGET_MS`. A
+   * single-agent topic never consults this value.
+   */
+  multiAgentBudgetMs?: number;
   /** Injected so a budget test need not wait for one. */
   now?: () => number;
 }
@@ -244,7 +267,17 @@ export function createTopicGenerationHandler(deps: TopicGenerationHandlerDeps = 
       ) as unknown as TopicGenerationDiagnostics;
     }
 
-    const budgetMs = deps.budgetMs ?? DEFAULT_TOPIC_BUDGET_MS;
+    // A multi-agent topic gets its own, far larger ceiling: one Writer→Editor→QA
+    // generation is minutes-to-tens-of-minutes, not the ~45s a single-agent
+    // generation costs, so the single-agent budget would guarantee a doomed
+    // final outer attempt (see generate-multi-agent.ts's per-attempt gate).
+    // Read off the payload's resolved strategy — the same field the generation
+    // service obeys — so a retry, which reads the same payload, picks the same
+    // budget.
+    const isMultiAgentTopic = input.resolvedStrategy?.strategy === "multi";
+    const budgetMs = isMultiAgentTopic
+      ? (deps.multiAgentBudgetMs ?? DEFAULT_MULTI_AGENT_TOPIC_BUDGET_MS)
+      : (deps.budgetMs ?? DEFAULT_TOPIC_BUDGET_MS);
 
     const outcome = await runInRequestDeadline(
       createRequestDeadline(now() + budgetMs, now),
@@ -330,8 +363,12 @@ export function createTopicGenerationHandler(deps: TopicGenerationHandlerDeps = 
 
 /** The production handler, wired to the real orchestrator. */
 export function topicGenerationHandlerFor(config: WorkerConfig): JobHandler {
-  // The worker's generation ceiling, shared with bulk: both bound one attempt of
-  // an LLM-and-image run, and a second env var to keep in step would be two
-  // names for one operational decision.
-  return createTopicGenerationHandler({ budgetMs: config.bulkBudgetMs });
+  // Single-agent topics share the bulk ceiling: both bound one attempt of an
+  // LLM-and-image run. Multi-agent topics get their own, because a
+  // Writer→Editor→QA generation is a different order of magnitude and the two
+  // knobs answer different operational questions.
+  return createTopicGenerationHandler({
+    budgetMs: config.bulkBudgetMs,
+    multiAgentBudgetMs: config.multiAgentBudgetMs,
+  });
 }

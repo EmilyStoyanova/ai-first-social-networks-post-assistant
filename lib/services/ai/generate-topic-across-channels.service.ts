@@ -555,6 +555,8 @@ function defaultFailureMessage(failure: GenerateDraftPostFailure): string {
       return "There was nothing left to write from for this channel.";
     case "POST_TOO_LONG_WITH_URL":
       return "The post plus its source link exceeded this channel's character limit.";
+    case "MULTI_AGENT_BUDGET_EXHAUSTED":
+      return "Multi-agent generation ran out of time before it could finish this channel.";
     default:
       return "This channel's post could not be generated.";
   }
