@@ -485,3 +485,133 @@ describe("generatePostFromContext — multi-agent thinking is disabled on every 
     assert.equal(h2.savedRun()!.strategy?.experimentBucket, null);
   });
 });
+
+// ─── The model the multi loop actually runs, end to end ───────────────────────
+//
+// The production defect: `pinnedModelTag()` sourced BOTH arms from
+// TEXT_WORKER_MODEL, so a `user_override` multi run in production would have
+// used qwen3:8b — the single-agent model — rather than the model the
+// Writer→Editor→QA loop was validated on. These drive the real service and
+// assert the tag that reaches the sidecar request, not just the helper.
+describe("generatePostFromContext — multi-agent model selection by strategy source", () => {
+  const DEDICATED = "qwen3.5:35b-a3b-q4_K_M";
+  const AB_TAG = pinnedInferenceProfile().modelTag;
+
+  let prevMock: string | undefined;
+  let prevMultiModel: string | undefined;
+  before(() => {
+    prevMock = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+    prevMultiModel = process.env.MULTI_AGENT_MODEL;
+  });
+  after(() => {
+    if (prevMock === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMock;
+    if (prevMultiModel === undefined) delete process.env.MULTI_AGENT_MODEL;
+    else process.env.MULTI_AGENT_MODEL = prevMultiModel;
+  });
+
+  /** Runs one multi generation with MULTI_AGENT_MODEL set (or explicitly unset). */
+  async function runWithModel(
+    strategy: ResolvedStrategy,
+    dedicated: string | undefined
+  ): Promise<Harness> {
+    if (dedicated === undefined) delete process.env.MULTI_AGENT_MODEL;
+    else process.env.MULTI_AGENT_MODEL = dedicated;
+    const h = makeHarness({});
+    const r = await generatePostFromContext(
+      makeContext(),
+      "co-1",
+      { resolvedStrategy: strategy },
+      h.deps
+    );
+    assert.ok(r.success, "the mocked multi run should succeed");
+    return h;
+  }
+
+  it("B — user_override multi runs MULTI_AGENT_MODEL, on the wire and in provenance", async () => {
+    const h = await runWithModel(USER_MULTI, DEDICATED);
+    assert.equal(h.multiInference()!.modelTag, DEDICATED);
+    assert.equal(h.sidecarRequest()!.inferenceConfig.model, DEDICATED);
+    assert.equal(h.savedRun()!.strategy?.modelTag, DEDICATED);
+  });
+
+  it("C — global_default multi runs MULTI_AGENT_MODEL", async () => {
+    const h = await runWithModel(GLOBAL_MULTI, DEDICATED);
+    assert.equal(h.multiInference()!.modelTag, DEDICATED);
+    assert.equal(h.sidecarRequest()!.inferenceConfig.model, DEDICATED);
+  });
+
+  it("D — ab_split multi still runs TEXT_WORKER_MODEL, preserving model fairness", async () => {
+    // The load-bearing case: an experiment must vary orchestration alone, so the
+    // dedicated model is deliberately ignored for an assigned run.
+    const h = await runWithModel(AB_MULTI, DEDICATED);
+    assert.equal(h.multiInference()!.modelTag, AB_TAG);
+    assert.equal(h.sidecarRequest()!.inferenceConfig.model, AB_TAG);
+    assert.notEqual(h.sidecarRequest()!.inferenceConfig.model, DEDICATED);
+  });
+
+  it("E — with MULTI_AGENT_MODEL absent, normal multi falls back to TEXT_WORKER_MODEL", async () => {
+    for (const strategy of [USER_MULTI, GLOBAL_MULTI]) {
+      const h = await runWithModel(strategy, undefined);
+      assert.equal(h.sidecarRequest()!.inferenceConfig.model, AB_TAG, strategy.source);
+    }
+  });
+
+  it("F/G — think:false survives the model split on every source", async () => {
+    for (const strategy of [USER_MULTI, GLOBAL_MULTI, AB_MULTI]) {
+      const h = await runWithModel(strategy, DEDICATED);
+      assert.equal(h.multiInference()!.settings.think, false, strategy.source);
+      assert.equal(h.sidecarRequest()!.inferenceConfig.think, false, strategy.source);
+    }
+  });
+
+  it("H — the recorded fingerprint follows the model that actually ran", async () => {
+    const normal = await runWithModel(USER_MULTI, DEDICATED);
+    const split = await runWithModel(AB_MULTI, DEDICATED);
+    const fpNormal = normal.savedRun()!.strategy?.inferenceFingerprint;
+    const fpSplit = split.savedRun()!.strategy?.inferenceFingerprint;
+
+    assert.equal(
+      fpNormal,
+      inferenceFingerprint({
+        modelTag: DEDICATED,
+        modelDigest: null,
+        settings: { think: false },
+      })
+    );
+    assert.equal(
+      fpSplit,
+      inferenceFingerprint({ modelTag: AB_TAG, modelDigest: null, settings: { think: false } })
+    );
+    assert.notEqual(fpNormal, fpSplit, "different models must fingerprint differently");
+  });
+
+  it("H — model verification stays tag_matched_only for a normal run on the dedicated model", async () => {
+    // Regression guard: verifying the observed tag against the A/B tag instead
+    // of the tag this run pinned would report `unknown` for every healthy
+    // user_override run the moment the two models differ.
+    const h = await runWithModel(USER_MULTI, DEDICATED);
+    assert.equal(h.savedRun()!.strategy?.modelVerification, "tag_matched_only");
+  });
+
+  it("I — A/B assignment metadata is unaffected by the model split", async () => {
+    const h = await runWithModel(AB_MULTI, DEDICATED);
+    const run = h.savedRun()!.strategy;
+    assert.equal(run?.experimentKey, "exp-1");
+    assert.equal(run?.experimentArm, "multi");
+    assert.equal(run?.experimentBucket, 42);
+    assert.equal(run?.experimentAllocation, 50);
+  });
+
+  it("J — the single-agent path never sees MULTI_AGENT_MODEL", async () => {
+    process.env.MULTI_AGENT_MODEL = DEDICATED;
+    const h = makeHarness({});
+    const r = await generatePostFromContext(makeContext(), "co-1", {}, h.deps);
+    assert.ok(r.success);
+    assert.equal(h.multiBuilds(), 0);
+    assert.equal(h.singleAgentCalls(), 1);
+    assert.equal(h.sidecarRequest(), null);
+    assert.notEqual(h.savedRun()!.strategy?.modelTag, DEDICATED);
+  });
+});

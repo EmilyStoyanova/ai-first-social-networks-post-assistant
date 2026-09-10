@@ -61,7 +61,7 @@
  * make every run claim a verification nobody performed.
  */
 
-import type { InferenceProfile } from "@/lib/ai/crew/provenance";
+import type { InferenceProfile, StrategySource } from "@/lib/ai/crew/provenance";
 import type { ModelVerification } from "@prisma/client";
 import { getSupportedProviderInfo } from "@/lib/ai/llm/supported-providers";
 import type { LlmProvider } from "@prisma/client";
@@ -81,7 +81,7 @@ export function ollamaBaseUrl(env: Record<string, string | undefined> = process.
 }
 
 /**
- * The tag both arms must run.
+ * The tag both arms of an EXPERIMENT must run.
  *
  * Read from `TEXT_WORKER_MODEL` rather than from a constant of its own, and that
  * is the point: the control arm's model comes from that variable
@@ -89,6 +89,11 @@ export function ollamaBaseUrl(env: Record<string, string | undefined> = process.
  * makes them equal BY CONSTRUCTION. A second variable would be a second thing to
  * keep in step, and the day they drifted the experiment would silently compare
  * two models.
+ *
+ * That argument binds the `ab_split` path and ONLY it. A normal multi run is not
+ * a measurement and has nothing to be fair to, so it resolves its tag through
+ * `multiAgentModelTag()` instead — see that function for why the two must be
+ * allowed to differ.
  */
 export function pinnedModelTag(env: Record<string, string | undefined> = process.env): string {
   return getSupportedProviderInfo(EXPERIMENT_PINNED_PROVIDER)?.model ?? env.TEXT_WORKER_MODEL ?? "";
@@ -97,6 +102,60 @@ export function pinnedModelTag(env: Record<string, string | undefined> = process
 /** Whether the pinned provider can actually run here. */
 export function pinnedModelAvailable(): boolean {
   return getSupportedProviderInfo(EXPERIMENT_PINNED_PROVIDER)?.status === "available";
+}
+
+/**
+ * The tag a NORMAL multi-agent run uses — `user_override` and `global_default`.
+ *
+ * Deliberately NOT the A/B tag. The two answer different questions:
+ *
+ *  • `pinnedModelTag()` answers "what must both arms run so the experiment
+ *    measures orchestration?" — one variable, `TEXT_WORKER_MODEL`, shared with
+ *    the control arm BY CONSTRUCTION (see that function).
+ *  • this answers "what should the multi-agent product actually run?" — which
+ *    has no reason to be the single-agent model at all. The Writer→Editor→QA
+ *    loop was validated end-to-end on `qwen3.5:35b-a3b-q4_K_M`; the
+ *    single-agent path runs `qwen3:8b` in production and must keep doing so.
+ *
+ * Sourcing both from one variable is what forced the choice between "change the
+ * single-agent model for everyone" and "run multi on an unvalidated model".
+ * Splitting them removes the choice.
+ *
+ * Falls back to `pinnedModelTag(env)` when unset, so an installation that never
+ * sets `MULTI_AGENT_MODEL` keeps exactly today's behaviour rather than failing
+ * or resolving to an empty tag. A blank/whitespace value is treated as unset —
+ * an operator who clears the line means "use the default", not "run the model
+ * named empty string".
+ */
+export function multiAgentModelTag(env: Record<string, string | undefined> = process.env): string {
+  const dedicated = env.MULTI_AGENT_MODEL?.trim();
+  return dedicated ? dedicated : pinnedModelTag(env);
+}
+
+/**
+ * The profile handed to the sidecar for ONE multi-agent run, by strategy source.
+ *
+ * `ab_split` returns the pinned profile UNCHANGED. That is the whole point: an
+ * experiment comparing `single` against `multi` is worthless if the arms also
+ * differ in the model, so an assigned run keeps running `TEXT_WORKER_MODEL`
+ * even when a dedicated multi-agent model is configured. The dedicated tag is
+ * for the product, never for the measurement.
+ *
+ * Everything except the tag is shared with `pinnedInferenceProfile` — same
+ * `think: false`, same absence of sampling, same loopback base URL, same
+ * unasserted digest — because none of those have any reason to vary by source,
+ * and a second profile builder would be the drift this module exists to
+ * prevent. `inferenceFingerprint` is computed downstream from whatever this
+ * returns, so the recorded provenance is truthful about the tag that actually
+ * ran without a second edit anywhere.
+ */
+export function multiAgentInferenceProfile(
+  source: StrategySource,
+  env: Record<string, string | undefined> = process.env
+): InferenceProfile & { baseUrl: string } {
+  const pinned = pinnedInferenceProfile(env);
+  if (source === "ab_split") return pinned;
+  return { ...pinned, modelTag: multiAgentModelTag(env) };
 }
 
 /**

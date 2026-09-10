@@ -80,6 +80,7 @@ import { SINGLE_BY_DEFAULT, type ResolvedStrategy } from "@/lib/ai/strategy/reso
 import {
   EXPERIMENT_PINNED_PROVIDER,
   modelVerificationFor,
+  multiAgentInferenceProfile,
   pinnedInferenceProfile,
 } from "@/lib/ai/strategy/experiment-inference";
 import {
@@ -1451,7 +1452,14 @@ async function runGeneration(
   // }`, so `ab_split` is byte-identical and every multi run now shares one wire
   // contract. `bindMultiAgent` computes the fingerprint from these same
   // settings, so the recorded provenance stays truthful without a second edit.
-  const multiAgentInference = pinnedInference;
+  //
+  // The MODEL, unlike the settings, is source-aware. A normal multi run
+  // (`user_override` / `global_default`) uses `MULTI_AGENT_MODEL` when it is
+  // configured, because the Writer→Editor→QA loop was validated on a model the
+  // single-agent path does not run and must not be moved onto. An `ab_split`
+  // run keeps `TEXT_WORKER_MODEL` so the experiment still measures
+  // orchestration rather than model quality. See `multiAgentInferenceProfile`.
+  const multiAgentInference = multiAgentInferenceProfile(strategy.source);
   const runGenerationLoop =
     strategy.strategy === "multi"
       ? buildMultiAgentLoop({
@@ -1537,8 +1545,12 @@ async function runGeneration(
       tracer.setStrategy({
         modelTag: partial.inference.modelTag,
         modelDigest: partial.inference.modelDigest,
+        // Verified against the tag THIS run pinned, which for a normal multi run
+        // is the dedicated multi-agent model rather than the A/B one. Comparing
+        // against `pinnedInference` here would report `unknown` for every
+        // healthy `user_override` run the moment the two tags differ.
         modelVerification: modelVerificationFor(
-          pinnedInference.modelTag,
+          multiAgentInference.modelTag,
           partial.inference.modelTag,
           partial.inference.modelDigest
         ),
@@ -1627,8 +1639,11 @@ async function runGeneration(
           inferenceFingerprint: multiAgent.inferenceFingerprint,
           modelTag: multiAgent.inference.modelTag,
           modelDigest: multiAgent.inference.modelDigest,
+          // Against the multi profile's tag — see the partial-provenance branch
+          // above. The single-agent branch below still verifies against
+          // `pinnedInference`, which is the tag THAT path is expected to run.
           modelVerification: modelVerificationFor(
-            pinnedInference.modelTag,
+            multiAgentInference.modelTag,
             multiAgent.inference.modelTag,
             multiAgent.inference.modelDigest
           ),
