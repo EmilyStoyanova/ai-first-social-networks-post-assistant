@@ -155,6 +155,106 @@ describe("bindMultiAgent — the acceptance rule", () => {
     assert.equal(sidecar.calls(), MAX_GENERATION_ATTEMPTS, "every outer attempt is consumed");
   });
 
+  /**
+   * The production regression (Instagram run e41b5d62, post 696f0be0).
+   *
+   * Every outer attempt ended `rejected_unroutable`, and the FINAL attempt
+   * additionally tripped a SOFT opening signal. That made the last gate verdict
+   * `needsRetry: true`, which the old exhaustion guard read as "a gate had the
+   * last word" and used to SKIP the QA_NOT_CONVERGED throw — returning the
+   * QA-rejected candidate as a normal success. The service never re-checks
+   * `qaState` and does not abort on a soft opening signal, so it persisted a
+   * Draft whose critic had refused it on factual grounds.
+   *
+   * A gate verdict can only ever ADD a reason to reject. It can never supply the
+   * passing critic verdict the acceptance rule requires.
+   */
+  const SOFT_OPENING_CASES = [
+    {
+      matchType: "repeated_form",
+      // One rhetorical-reflection opening already in the window: the family
+      // limit is one, so a second one is a soft repeat.
+      recent: [
+        {
+          id: "rf-1",
+          text: "Have you ever wondered whether the right mixer changes a bathroom?\nIt decides small daily things.",
+        },
+      ] as RecentPost[],
+      text:
+        "Did you know a ceramic cartridge outlasts a rubber washer by years?\n" +
+        "The difference shows up in the third winter, not the first.",
+    },
+    {
+      matchType: "saturated_form",
+      // Four question openings in the window: any further question saturates it.
+      recent: [
+        {
+          id: "s1",
+          text: "How much water does a modern mixer save each month?\nMore than most expect.",
+        },
+        { id: "s2", text: "Why do cartridges fail so quickly in winter?\nCold changes the seal." },
+        {
+          id: "s3",
+          text: "When is the right moment to replace an old lever?\nSooner than you think.",
+        },
+        {
+          id: "s4",
+          text: "Where can you buy quality bathroom fittings?\nFewer places than you would hope.",
+        },
+      ] as RecentPost[],
+      text:
+        "Is the pricier mixer worth it over the long run?\n" +
+        "We tracked four households for a year before answering that.",
+    },
+  ] as const;
+
+  for (const soft of SOFT_OPENING_CASES) {
+    it(`REFUSES rejected_unroutable when the final attempt only trips the SOFT ${soft.matchType} opening signal`, async () => {
+      const records: GenerationAttemptRecord[] = [];
+      const sidecar = scriptedSidecar([
+        outcome({
+          qaState: "rejected_unroutable",
+          qaRevisions: 2,
+          raw: candidate({ text: soft.text }),
+        }),
+      ]);
+
+      await assert.rejects(
+        bindMultiAgent(deps(sidecar))(
+          PROVIDER,
+          "sys",
+          "user",
+          soft.recent,
+          undefined,
+          undefined,
+          MAX_GENERATION_ATTEMPTS,
+          (r) => records.push(r)
+        ),
+        (err: unknown) => {
+          assert.ok(
+            err instanceof MultiAgentGenerationError,
+            "a QA-rejected candidate must never be RETURNED as a successful result"
+          );
+          assert.equal(err.multiAgentCode, "QA_NOT_CONVERGED");
+          assert.match(err.message, /without naming an actionable dimension/);
+          return true;
+        }
+      );
+
+      assert.equal(sidecar.calls(), MAX_GENERATION_ATTEMPTS, "every outer attempt is consumed");
+
+      // The test would pass for the wrong reason if the soft signal never fired
+      // — that is the old "gates clean" case, which was already covered. Prove
+      // the final attempt really did have `needsRetry: true` from a SOFT gate.
+      const last = records.at(-1);
+      assert.ok(last, "the final attempt was recorded");
+      assert.equal(last.openingDiversity?.flagged, true, "the soft opening signal fired");
+      assert.equal(last.openingDiversity?.matchType, soft.matchType);
+      assert.equal(last.rejectionReason, "opening_repeated", "the gate had a rejection to report");
+      assert.equal(last.accepted, false);
+    });
+  }
+
   it("retries and then accepts when a later attempt reaches a pass", async () => {
     const sidecar = scriptedSidecar([
       outcome({ qaState: "rejected_unroutable" }),

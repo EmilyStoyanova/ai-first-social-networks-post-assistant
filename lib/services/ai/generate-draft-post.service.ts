@@ -90,7 +90,7 @@ import {
 } from "@/lib/ai/generate-multi-agent";
 import { CrewSidecarClient } from "@/lib/ai/crew/crew-sidecar.client";
 import { loadArticleBrief } from "@/lib/ai/agents/load-article-brief";
-import { inferenceFingerprint } from "@/lib/ai/crew/provenance";
+import { inferenceFingerprint, isAcceptableQaState } from "@/lib/ai/crew/provenance";
 import { LLM_PROVIDER_LABEL } from "@/lib/ai/llm/llm-provider-factory";
 import { getSupportedProviderInfo } from "@/lib/ai/llm/supported-providers";
 
@@ -1684,6 +1684,52 @@ async function runGeneration(
           degradedStages: [],
         }
   );
+
+  // ── QA acceptance invariant (multi-agent only) ────────────────────────────
+  // Defense in depth for the ONE rule the multi-agent loop already enforces:
+  // a candidate the critic refused is never persistable. `generateMultiAgent`
+  // throws `QA_NOT_CONVERGED` for exactly this case, so reaching here means the
+  // loop's guard was bypassed — which is precisely the defect that once let a
+  // `rejected_unroutable` Instagram candidate become a normal Draft. Refuse it
+  // here too, rather than trusting a single guard with a correctness rule.
+  //
+  // Deliberately narrow: `multiAgent` is null for every single-agent run, so
+  // that path cannot reach this branch at all. `pass` and `unavailable` (the
+  // designed degraded fallback, which keeps `degraded: true` and persists as
+  // before) are both acceptable — only a critic that RAN AND REFUSED is not.
+  //
+  // Placed after the measurement `setStrategy` above so the run still records
+  // the truthful provenance of what happened, and before every quality guard so
+  // no post, image, or audit-log side effect is produced.
+  if (multiAgent && !isAcceptableQaState(multiAgent.qaState)) {
+    await releaseClaimedFeedItem();
+    console.error(
+      `[generation] Aborted after ${attempts} attempts → code=LLM_PROVIDER_ERROR ` +
+        `reason=QA_NOT_CONVERGED qaState=${multiAgent.qaState} (post not saved). ` +
+        `A QA-rejected multi-agent candidate reached the persistence boundary — ` +
+        `the generate-multi-agent guard should have thrown first.`
+    );
+    tracer.step({
+      type: "validation",
+      label: "QA acceptance abort — post NOT saved",
+      status: "failed",
+      output: {
+        reason: "qa_not_converged",
+        qaState: multiAgent.qaState,
+        qaRevisionRounds: multiAgent.qaRevisionRounds,
+        attempts,
+        claimReleased: ownedClaimId !== null,
+      },
+      metadata: {
+        note: "Multi-agent only. QA rejected the candidate; a deterministic gate verdict can never substitute for a passing critic.",
+      },
+    });
+    return {
+      success: false,
+      code: "LLM_PROVIDER_ERROR",
+      message: `QA rejected every candidate across ${attempts} attempt(s) without naming an actionable dimension.`,
+    };
+  }
 
   // A near-exact opening repeat is treated as the SAME kind of failure as a
   // Jaccard duplicate — it is the same textual evidence, just measured over

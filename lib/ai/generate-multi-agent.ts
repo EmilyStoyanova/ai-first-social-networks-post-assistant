@@ -509,13 +509,18 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
       if (accepted) break;
     }
 
-    // Every attempt ran and none was accepted. When the gates were clean
-    // throughout, the refusal came from QA alone — a critic that ran and said
-    // no — and that has its own terminal code. When a gate was the last word,
-    // the run returns its last candidate exactly as the single-agent loop does
+    // Every attempt ran and none was accepted. QA's refusal is terminal on its
+    // own, INDEPENDENTLY of what the deterministic gates said on the final
+    // attempt. A gate verdict can only ever add a reason to reject; it can
+    // never supply the passing critic verdict the acceptance rule requires. In
+    // particular a SOFT opening signal (`repeated_form` / `saturated_form`),
+    // which the service deliberately does not abort on, must not be able to
+    // suppress this throw and turn a `rejected_unroutable` candidate into a
+    // returned success — that is exactly how a QA-rejected draft once reached
+    // persistence. When QA is acceptable and a gate was the last word, the run
+    // still returns its last candidate exactly as the single-agent loop does
     // and the SERVICE decides (uniqueness abort / compliance abort), untouched.
-    const gatesClean = lastVerdict !== null && !lastVerdict.needsRetry;
-    if (lastParsed !== null && gatesClean && !isAcceptableQaState(lastQaState)) {
+    if (lastParsed !== null && !isAcceptableQaState(lastQaState)) {
       throw new MultiAgentGenerationError(
         "QA_NOT_CONVERGED",
         sawUnroutableRejection

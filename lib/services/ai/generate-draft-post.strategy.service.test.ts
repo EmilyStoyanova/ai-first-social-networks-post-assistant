@@ -132,6 +132,12 @@ function makeHarness(opts: {
   sidecar?: (req: unknown) => Promise<CrewPostOutcome>;
   semanticGate?: SemanticGate;
   singleAgentThrows?: boolean;
+  /**
+   * Replaces the real CrewAI loop entirely. Only for the persistence-invariant
+   * tests, which must hand the service a result the real loop would refuse to
+   * produce — that is the whole point of a second guard.
+   */
+  multiLoopOverride?: typeof generateWithRetry;
 }): Harness {
   let createdData: Prisma.PostUncheckedCreateInput | null = null;
   let savedRun: PersistableRun | null = null;
@@ -204,6 +210,7 @@ function makeHarness(opts: {
       buildMultiAgentLoop: (multiDeps) => {
         multiBuilds++;
         capturedInference = multiDeps.inference as typeof capturedInference;
+        if (opts.multiLoopOverride) return opts.multiLoopOverride;
         return bindMultiAgent({
           ...multiDeps,
           sidecar: {
@@ -371,6 +378,136 @@ describe("generatePostFromContext — strategy wiring", () => {
     // provider resolution is untouched for a non-experiment run.
     assert.equal(h.created()!.generationStrategySource, "user_override");
     assert.equal(h.created()!.experimentKey, null);
+  });
+
+  // ── The QA acceptance invariant at the persistence boundary ──────────────
+  //
+  // Regression cover for the production defect (Instagram run e41b5d62, post
+  // 696f0be0): a `rejected_unroutable` candidate persisted as a normal Draft.
+  // Two independent guards now stand between QA's refusal and a saved post, and
+  // each is tested on its own — a correctness rule must not rest on one check.
+
+  it("END TO END: a QA-rejected multi-agent run saves no post and fails the run", async () => {
+    const h = makeHarness({
+      singleAgentThrows: true, // a QA refusal must never fall back to single-agent
+      sidecar: async () => multiOutcome({ qaState: "rejected_unroutable", qaRevisions: 2 }),
+    });
+    const r = await generatePostFromContext(
+      makeContext(),
+      "co-1",
+      { resolvedStrategy: USER_MULTI },
+      h.deps
+    );
+    assert.equal(r.success, false);
+    assert.equal(r.success ? "" : r.code, "LLM_PROVIDER_ERROR");
+    assert.equal(h.created(), null, "a QA-rejected candidate is never persisted");
+    assert.equal(h.singleAgentCalls(), 0, "must not fall through to single-agent");
+    const run = h.savedRun();
+    assert.equal(run!.status, "failed", "the run is failed, never a false 'completed'");
+    assert.equal(run!.errorCode, "LLM_PROVIDER_ERROR");
+    assert.match(run!.errorMessage ?? "", /without naming an actionable dimension/);
+  });
+
+  /**
+   * The second guard in isolation. The loop is replaced by a double that hands
+   * the service exactly what the old bug produced: a SUCCESSFUL loop result
+   * carrying `qaState: "rejected_unroutable"`. The real loop can no longer emit
+   * this — which is why it has to be forged here to prove the service refuses it
+   * on its own rather than trusting the loop.
+   */
+  function loopReturning(qaState: CrewPostOutcome["qaState"]): typeof generateWithRetry {
+    return (async () => ({
+      parsed: JSON.parse(CANDIDATE_JSON) as never,
+      duplicateResult: { flagged: false, matchedPostId: null, similarityScore: 0, checked: 0 },
+      semanticResult: {
+        decision: "accept",
+        topSimilarity: null,
+        matchedPostId: null,
+        matchedCoreMessage: null,
+        skipped: false,
+      },
+      coreMessageGeneric: false,
+      topicRepeated: false,
+      complianceResult: { status: "passed", reasons: [], checked: [] },
+      openingResult: {
+        flagged: false,
+        matchType: null,
+        matchedPostId: null,
+        similarity: null,
+        candidateForm: "statement",
+        matchedOpening: null,
+      },
+      attempts: 3,
+      multiAgent: {
+        strategy: "multi",
+        strategySource: "user_override",
+        inference: { modelTag: "qwen3.5:35b-a3b-q4_K_M", modelDigest: null, settings: {} },
+        inferenceFingerprint: "fp",
+        writerCalls: 3,
+        editorCalls: 3,
+        qaCalls: 3,
+        qaRevisionRounds: 2,
+        agentCalls: 9,
+        latencyMs: 1000,
+        degraded: false,
+        degradedStages: [],
+        qaState,
+      },
+    })) as unknown as typeof generateWithRetry;
+  }
+
+  it("the service REFUSES to persist a rejected_unroutable result even when the loop returns it", async () => {
+    const h = makeHarness({ multiLoopOverride: loopReturning("rejected_unroutable") });
+    const r = await generatePostFromContext(
+      makeContext(),
+      "co-1",
+      { resolvedStrategy: USER_MULTI },
+      h.deps
+    );
+    assert.equal(r.success, false, "gates clean and compliance passed — QA alone must stop this");
+    assert.equal(r.success ? "" : r.code, "LLM_PROVIDER_ERROR");
+    assert.equal(h.created(), null, "no post written");
+    const run = h.savedRun();
+    assert.equal(run!.status, "failed");
+    // Provenance stays truthful: the measurement is still recorded on the
+    // failed run, `degraded` is NOT reinterpreted, and the QA verdict is kept.
+    assert.equal(run!.strategy?.qaState, "rejected_unroutable");
+    assert.equal(run!.strategy?.qaRevisionRounds, 2);
+    assert.equal(run!.strategy?.degraded, false);
+  });
+
+  it("the invariant leaves qaState=pass alone — a passing multi run persists normally", async () => {
+    const h = makeHarness({ multiLoopOverride: loopReturning("pass") });
+    const r = await generatePostFromContext(
+      makeContext(),
+      "co-1",
+      { resolvedStrategy: USER_MULTI },
+      h.deps
+    );
+    assert.ok(r.success);
+    assert.ok(h.created(), "a passing candidate is saved");
+    assert.equal(h.savedRun()!.strategy?.qaState, "pass");
+  });
+
+  it("the invariant leaves qaState=unavailable alone — the designed degraded fallback still saves", async () => {
+    const h = makeHarness({ multiLoopOverride: loopReturning("unavailable") });
+    const r = await generatePostFromContext(
+      makeContext(),
+      "co-1",
+      { resolvedStrategy: USER_MULTI },
+      h.deps
+    );
+    assert.ok(r.success, "a critic that could not RUN is not a critic that refused");
+    assert.ok(h.created(), "the degraded fallback is persisted, as designed");
+    assert.equal(h.savedRun()!.strategy?.qaState, "unavailable");
+  });
+
+  it("the invariant cannot touch the single-agent path — it has no QA verdict at all", async () => {
+    const h = makeHarness({});
+    const r = await generatePostFromContext(makeContext(), "co-1", {}, h.deps);
+    assert.ok(r.success, "a single-agent run is unaffected by a multi-agent-only guard");
+    assert.ok(h.created());
+    assert.equal(h.savedRun()!.strategy?.qaState, null);
   });
 
   it("a single-agent run records its own inference fingerprint and tag_matched verification", async () => {
