@@ -68,6 +68,26 @@ QA_DIMENSION_ORDER: tuple[str, ...] = EDITOR_DIMENSION_ORDER + WRITER_DIMENSION_
 
 VALID_SEVERITIES = frozenset(SEVERITY_ORDER)
 
+# ── Advisory dimensions — rotation guidance, not a gate ─────────────────────
+#
+# `angle`, `hook` and `cta` are the levers the diversity rotation varies so a
+# feed does not read the same way twice. EVERYWHERE ELSE in the generation
+# system they are guidance, never a rejection reason: `generation-compliance`
+# lists exactly these under `notChecked` ("a post is never rejected for missing
+# one"), and the single-agent path never revises for them. QA is brought into
+# parity here — it MAY still name one, and the `detail` is kept on the verdict
+# as a note, but a rejection whose ONLY issues are advisory is NOT a blocking
+# failure: the router resolves it to `pass`, carrying the notes, instead of
+# spending revision rounds and an outer attempt on guidance no gate enforces.
+#
+# `structure` is guidance too, but it is not in `QA_DIMENSION_ORDER`, so the
+# response schema already stops the critic from raising it — nothing to do here.
+#
+# Ordered tuple + frozenset, like the vocabularies above: the prompt lists them
+# in this order, and there is exactly one place to add one.
+ADVISORY_DIMENSION_ORDER: tuple[str, ...] = ("angle", "hook", "cta")
+ADVISORY_DIMENSIONS = frozenset(ADVISORY_DIMENSION_ORDER)
+
 
 @dataclass
 class QaVerdict:
@@ -78,14 +98,21 @@ class QaVerdict:
 def parse_qa_reply(raw: str | None) -> QaVerdict:
     """Turns a QA reply into a verdict, refusing to guess.
 
-      * `pass`                — decision "pass" and nothing listed as failing.
+      * `pass`                — decision "pass" and nothing listed as failing,
+                                OR decision "revise" whose ONLY issues are
+                                advisory rotation guidance (`angle`/`hook`/
+                                `cta`). Those issues stay on the verdict as
+                                notes; they do not block, matching how every
+                                deterministic check already treats them.
       * `revise_editor` /
-        `revise_writer`       — a recognised complaint, routed by severity first
-                                and by the dimension table second.
+        `revise_writer`       — a recognised BLOCKING complaint, routed by
+                                severity first and by the dimension table
+                                second. Advisory issues alongside a blocking one
+                                ride along but do not decide the route.
       * `rejected_unroutable` — the critic rejected the post but named nothing
-                                actionable: no issues, an unknown dimension, or
-                                a "pass" that also lists failures. A
-                                non-converged attempt — never acceptable, even
+                                actionable: no issues, only an unknown
+                                dimension, or a "pass" that also lists failures.
+                                A non-converged attempt — never acceptable, even
                                 when every deterministic gate passes.
       * `unavailable`         — the reply could not be read at all. Degraded;
                                 the caller's gates become the whole verdict.
@@ -120,7 +147,17 @@ def parse_qa_reply(raw: str | None) -> QaVerdict:
     if not issues:
         return QaVerdict("rejected_unroutable", [])
 
-    primary = issues[0]
+    # Rotation guidance (`angle`/`hook`/`cta`) is advisory everywhere else in
+    # the system, so QA is held to the same rule: those issues stay on the
+    # verdict as notes, but the routing/terminal decision is taken from the
+    # rest. A rejection that named nothing BUT advisory dimensions converges —
+    # as a `pass` carrying the notes — instead of burning revision rounds and an
+    # outer attempt on guidance the deterministic gates never checked.
+    blocking = [issue for issue in issues if issue["dimension"] not in ADVISORY_DIMENSIONS]
+    if not blocking:
+        return QaVerdict("pass", issues)
+
+    primary = blocking[0]
     if primary["severity"] in {"factual", "content"} or primary["dimension"] in WRITER_DIMENSIONS:
         return QaVerdict("revise_writer", issues)
     if primary["severity"] in {"style", "clarity"} or primary["dimension"] in EDITOR_DIMENSIONS:

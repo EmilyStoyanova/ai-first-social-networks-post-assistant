@@ -63,6 +63,7 @@ from guards import assert_agent_posture
 # The routing logic and the LLM kwarg mapping both live in stdlib-only modules,
 # so each is testable without CrewAI or Ollama installed.
 from qa_verdict import (
+    ADVISORY_DIMENSION_ORDER,
     QA_DIMENSION_ORDER,
     QA_VERDICT_RESPONSE_FORMAT,
     SEVERITY_ORDER,
@@ -369,7 +370,14 @@ QA_ASPECT_RUBRIC = (
     "- Raise a `content` or `factual` issue about the `coreMessage` ONLY when it is unsupported "
     "by the source, vague or generic, or contradicts the article — never merely because it does "
     "not name the aspect.\n"
-    "- This narrows one criterion only. Genuine factual errors, safety problems, forbidden "
+    "- "
+    + ", ".join(f"`{dimension}`" for dimension in ADVISORY_DIMENSION_ORDER)
+    + " are ROTATION GUIDANCE, not requirements. You MAY note a weak or off-brief one, but do "
+    "NOT return `revise` for it alone: a missing or imperfect angle/hook/CTA is not a blocking "
+    "failure here, exactly as the deterministic checks never reject a post for one. Reserve "
+    "`revise` for grounding, accuracy, factual or substantive-content problems, forbidden "
+    "terms, wrong language, unsafe content, or a body that ignores the aspect entirely.\n"
+    "- This narrows two criteria only. Genuine factual errors, safety problems, forbidden "
     "terms, wrong language, and body text that ignores the aspect entirely all remain issues."
 )
 

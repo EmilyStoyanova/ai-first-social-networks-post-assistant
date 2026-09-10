@@ -65,11 +65,12 @@ export interface InferenceSettings {
    *
    * Unlike the sampling parameters above, this one the control arm ALREADY
    * pins: `TextWorkerProvider` → Ollama `/api/generate` sends `think: false` on
-   * every call, unconditionally. So recording `think: false` for an `ab_split`
-   * run is truthful about the control arm's existing runtime, and the multi arm
-   * is brought to match it (see `experiment-inference.ts` and the sidecar's
-   * `inference_config.py`). Absent means "not pinned — the model's default
-   * applies", which is every non-experiment run.
+   * every call, unconditionally. So recording `think: false` is truthful about
+   * that runtime, and as of 2026-09-10 EVERY multi run pins it too — the
+   * sidecar reaches Ollama's `/v1` where `reasoning_effort: "none"` is the
+   * field that actually disables the preamble (see `experiment-inference.ts`
+   * and the sidecar's `inference_config.py`). Absent means "not pinned — the
+   * model's default applies", which is every non-experiment SINGLE-agent run.
    */
   think?: boolean;
 }

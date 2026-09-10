@@ -3436,7 +3436,7 @@ describe("generatePostFromContext — failed multi-agent run keeps objective pro
   });
 });
 
-describe("generatePostFromContext — A/B think alignment (ab_split only)", () => {
+describe("generatePostFromContext — multi-agent think:false alignment", () => {
   let prevMockMode: string | undefined;
 
   before(() => {
@@ -3578,7 +3578,10 @@ describe("generatePostFromContext — A/B think alignment (ab_split only)", () =
     assert.equal(seen()!.modelTag.length > 0, true);
   });
 
-  it("user_override MULTI hands the sidecar NO think setting", async () => {
+  it("user_override MULTI hands the sidecar an inference profile with think:false", async () => {
+    // Changed 2026-09-10: the reasoning preamble was the dominant per-call
+    // latency (proxy-attributed benchmark), so every multi run — not only
+    // `ab_split` — now pins `think: false`.
     const { deps } = makeDeps();
     const seen = captureMultiInference(deps);
     await generatePostFromContext(
@@ -3587,10 +3590,10 @@ describe("generatePostFromContext — A/B think alignment (ab_split only)", () =
       { resolvedStrategy: strat("multi", "user_override") },
       deps
     );
-    assert.equal("think" in seen()!.settings, false);
+    assert.equal(seen()!.settings.think, false);
   });
 
-  it("global_default MULTI hands the sidecar NO think setting", async () => {
+  it("global_default MULTI hands the sidecar an inference profile with think:false", async () => {
     const { deps } = makeDeps();
     const seen = captureMultiInference(deps);
     await generatePostFromContext(
@@ -3599,6 +3602,6 @@ describe("generatePostFromContext — A/B think alignment (ab_split only)", () =
       { resolvedStrategy: strat("multi", "global_default") },
       deps
     );
-    assert.equal("think" in seen()!.settings, false);
+    assert.equal(seen()!.settings.think, false);
   });
 });

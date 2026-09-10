@@ -43,9 +43,13 @@
  * multi side the sidecar translates it to the field Ollama's `/v1` endpoint
  * actually honours (`reasoning_effort: "none"` — `think` is silently ignored
  * there; probed against Ollama 0.33.1 + `qwen3.5:35b-a3b-q4_K_M` on
- * 2026-09-09). This is applied to the `ab_split` path ONLY — a `user_override`
- * or `global_default` multi run is handed a profile with empty `settings` and
- * keeps the model default.
+ * 2026-09-09). As of 2026-09-10 this profile is handed to the sidecar for
+ * EVERY multi run — `user_override` and `global_default` as well as `ab_split`
+ * — after a proxy-attributed benchmark showed the reasoning preamble is the
+ * dominant per-call latency on this model with no offsetting quality or
+ * call-count cost. The single-agent path is untouched: the text worker already
+ * sends `think: false` unconditionally, and a non-experiment single run still
+ * records empty `settings`.
  *
  * ── Why the digest is not asserted ──────────────────────────────────────────
  *
@@ -112,8 +116,9 @@ export function pinnedInferenceProfile(
     modelDigest: null,
     // No SAMPLING keys — see the module docblock. `think: false` is the one
     // pinned setting: it matches the control arm's existing unconditional
-    // `think: false`, and the caller hands this profile to the sidecar only for
-    // an `ab_split` run (a non-experiment multi run gets `settings: {}`).
+    // `think: false`, and as of 2026-09-10 the caller hands this profile to the
+    // sidecar for every multi run (`ab_split`, `user_override`,
+    // `global_default`), not only the experiment path.
     settings: { think: false },
     baseUrl: ollamaBaseUrl(env),
   };

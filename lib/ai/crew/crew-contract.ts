@@ -99,11 +99,12 @@ export interface CrewInferenceConfig {
   repeatPenalty?: number;
   stop?: readonly string[];
   /**
-   * Reasoning-preamble toggle. Absent = the model default applies (every
-   * non-experiment run). `false` = the sidecar disables thinking via the field
-   * Ollama's `/v1/chat/completions` actually honours (`reasoning_effort:
-   * "none"`). Set only by the pinned A/B profile, to match the control arm's
-   * unconditional `think: false`.
+   * Reasoning-preamble toggle. Absent = the model default applies. `false` =
+   * the sidecar disables thinking via the field Ollama's `/v1/chat/completions`
+   * actually honours (`reasoning_effort: "none"`). As of 2026-09-10 the pinned
+   * profile sets `false` for EVERY multi run (`ab_split`, `user_override`,
+   * `global_default`) — the reasoning preamble was the dominant per-call
+   * latency with no offsetting benefit; the single-agent path is unchanged.
    */
   think?: boolean;
 }

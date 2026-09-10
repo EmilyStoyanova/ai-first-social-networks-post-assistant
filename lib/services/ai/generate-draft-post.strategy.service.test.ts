@@ -4,8 +4,15 @@ import type { SocialChannel } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { generatePostFromContext } from "./generate-draft-post.service";
 import type { GenerateDraftPostDb, GenerateDraftPostDeps } from "./generate-draft-post.service";
-import { bindMultiAgent, MultiAgentGenerationError } from "@/lib/ai/generate-multi-agent";
+import {
+  bindMultiAgent,
+  MultiAgentGenerationError,
+  type MultiAgentDeps,
+} from "@/lib/ai/generate-multi-agent";
 import type { CrewPostOutcome } from "@/lib/ai/crew/crew-sidecar.client";
+import type { CrewPostRequest } from "@/lib/ai/crew/crew-contract";
+import { inferenceFingerprint } from "@/lib/ai/crew/provenance";
+import { pinnedInferenceProfile } from "@/lib/ai/strategy/experiment-inference";
 import type { SemanticGate, generateWithRetry } from "@/lib/ai/generate-with-retry";
 import type { GenerationContext } from "@/lib/ai/types";
 import type { ResolvedStrategy } from "@/lib/ai/strategy/resolve-strategy";
@@ -89,6 +96,8 @@ const USER_MULTI: ResolvedStrategy = {
   abIneligibleReason: null,
 };
 
+const GLOBAL_MULTI: ResolvedStrategy = { ...USER_MULTI, source: "global_default" };
+
 function makeContext(): GenerationContext {
   return {
     company: { name: "Acme", website: null, automationMode: "manual", defaultLang: "en" },
@@ -113,6 +122,10 @@ interface Harness {
   savedRun: () => PersistableRun | null;
   singleAgentCalls: () => number;
   multiBuilds: () => number;
+  /** The `inference` profile the service handed the multi-agent binder. */
+  multiInference: () => (MultiAgentDeps["inference"] & Record<string, unknown>) | null;
+  /** The `CrewPostRequest` the sidecar mock actually received. */
+  sidecarRequest: () => CrewPostRequest | null;
 }
 
 function makeHarness(opts: {
@@ -124,6 +137,8 @@ function makeHarness(opts: {
   let savedRun: PersistableRun | null = null;
   let singleCalls = 0;
   let multiBuilds = 0;
+  let capturedInference: (MultiAgentDeps["inference"] & Record<string, unknown>) | null = null;
+  let capturedSidecarReq: CrewPostRequest | null = null;
 
   const db: GenerateDraftPostDb = {
     post: {
@@ -188,10 +203,14 @@ function makeHarness(opts: {
       generateWithRetry: singleAgentLoop,
       buildMultiAgentLoop: (multiDeps) => {
         multiBuilds++;
+        capturedInference = multiDeps.inference as typeof capturedInference;
         return bindMultiAgent({
           ...multiDeps,
           sidecar: {
-            generate: opts.sidecar ?? (async () => multiOutcome()),
+            generate: async (req) => {
+              capturedSidecarReq = req;
+              return (opts.sidecar ?? (async () => multiOutcome()))(req);
+            },
           },
         });
       },
@@ -206,6 +225,8 @@ function makeHarness(opts: {
     savedRun: () => savedRun,
     singleAgentCalls: () => singleCalls,
     multiBuilds: () => multiBuilds,
+    multiInference: () => capturedInference,
+    sidecarRequest: () => capturedSidecarReq,
   };
 }
 
@@ -359,5 +380,108 @@ describe("generatePostFromContext — strategy wiring", () => {
     assert.ok(run!.strategy?.inferenceFingerprint);
     assert.equal(run!.strategy?.qaState, null, "no QA on the single-agent path");
     assert.equal(run!.strategy?.agentCalls, null);
+  });
+});
+
+describe("generatePostFromContext — multi-agent thinking is disabled on every path", () => {
+  let prevMock: string | undefined;
+  before(() => {
+    prevMock = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+  after(() => {
+    if (prevMock === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMock;
+  });
+
+  const PINNED_TAG = pinnedInferenceProfile().modelTag;
+  const THINK_OFF_FP = inferenceFingerprint({
+    modelTag: PINNED_TAG,
+    modelDigest: null,
+    settings: { think: false },
+  });
+  const THINK_OMITTED_FP = inferenceFingerprint({
+    modelTag: PINNED_TAG,
+    modelDigest: null,
+    settings: {},
+  });
+
+  async function runMulti(strategy: ResolvedStrategy): Promise<Harness> {
+    const h = makeHarness({});
+    const r = await generatePostFromContext(
+      makeContext(),
+      "co-1",
+      { resolvedStrategy: strategy },
+      h.deps
+    );
+    assert.ok(r.success, "the mocked multi run should succeed");
+    return h;
+  }
+
+  // A + E/F/G: user_override multi → think:false reaches the sidecar for the
+  // single Writer→Editor→QA request (the sidecar applies it to all three agents;
+  // `inference_config.llm_kwargs` + its tests cover that fan-out).
+  it("A/E/F/G — user_override multi sends think:false on the wire", async () => {
+    const h = await runMulti(USER_MULTI);
+    assert.equal(h.multiInference()!.settings.think, false);
+    assert.equal(h.sidecarRequest()!.inferenceConfig.think, false);
+  });
+
+  it("B — global_default multi sends think:false on the wire", async () => {
+    const h = await runMulti(GLOBAL_MULTI);
+    assert.equal(h.multiInference()!.settings.think, false);
+    assert.equal(h.sidecarRequest()!.inferenceConfig.think, false);
+  });
+
+  it("C — ab_split multi still sends think:false on the wire (unchanged)", async () => {
+    const h = await runMulti(AB_MULTI);
+    assert.equal(h.multiInference()!.settings.think, false);
+    assert.equal(h.sidecarRequest()!.inferenceConfig.think, false);
+  });
+
+  // D: the sidecar's translation of `think:false` → `reasoning_effort:"none"`
+  // on the OpenAI-compatible request is covered by the Python suite
+  // (test_flow_routing.StructuredCandidateOutput.test_the_qa_constraint_does_not
+  // _disturb_the_think_off_extra_body and inference_config's own tests). Asserted
+  // here only that the wire flag that triggers it is present — see above.
+
+  it("H/I — response_format contract is untouched: the request still declares llm_post_json", async () => {
+    const h = await runMulti(USER_MULTI);
+    assert.equal(h.sidecarRequest()!.generationRequirements.responseContract, "llm_post_json");
+  });
+
+  it("J — the recorded provenance fingerprint reflects think:false, not think-omitted", async () => {
+    for (const strategy of [USER_MULTI, GLOBAL_MULTI, AB_MULTI]) {
+      const h = await runMulti(strategy);
+      const fp = h.savedRun()!.strategy?.inferenceFingerprint;
+      assert.equal(fp, THINK_OFF_FP, `${strategy.source} must fingerprint as think:false`);
+      assert.notEqual(
+        fp,
+        THINK_OMITTED_FP,
+        `${strategy.source} must not fingerprint as think-omitted`
+      );
+    }
+  });
+
+  it("K — single-agent generation is untouched: no multi binder, no think on any wire", async () => {
+    const h = makeHarness({});
+    await generatePostFromContext(makeContext(), "co-1", {}, h.deps);
+    assert.equal(h.multiBuilds(), 0);
+    assert.equal(h.singleAgentCalls(), 1);
+    assert.equal(h.sidecarRequest(), null, "the sidecar is never called on the single-agent path");
+  });
+
+  it("L — A/B assignment fields are recorded unchanged for an ab_split multi run", async () => {
+    const h = await runMulti(AB_MULTI);
+    const run = h.savedRun()!.strategy;
+    assert.equal(run?.generationStrategySource, "ab_split");
+    assert.equal(run?.experimentKey, "exp-1");
+    assert.equal(run?.experimentArm, "multi");
+    assert.equal(run?.experimentBucket, 42);
+    assert.equal(run?.experimentAllocation, 50);
+    // …and a non-experiment multi run carries none of them.
+    const h2 = await runMulti(USER_MULTI);
+    assert.equal(h2.savedRun()!.strategy?.experimentKey, null);
+    assert.equal(h2.savedRun()!.strategy?.experimentBucket, null);
   });
 });

@@ -1440,14 +1440,18 @@ async function runGeneration(
   // multi-agent candidate that a gate turns down consumes an OUTER attempt
   // exactly as a single-agent one does.
   const pinnedInference = pinnedInferenceProfile();
-  // `think: false` in the pinned profile is an EXPERIMENT-ONLY alignment: it is
-  // handed to the sidecar only for an `ab_split` run (matching the control
-  // arm's unconditional `think: false`). A `user_override` / `global_default`
-  // multi run is given an empty `settings`, so its wire contract carries no
-  // `think` and Ollama keeps its default reasoning behaviour — and its
-  // fingerprint is byte-identical to before this change.
-  const multiAgentInference =
-    strategy.source === "ab_split" ? pinnedInference : { ...pinnedInference, settings: {} };
+  // `think: false` for EVERY multi run — `user_override` and `global_default`
+  // alike, not only `ab_split`. A proxy-attributed benchmark of the real
+  // `Crew.kickoff()` path (2026-09-10) showed Qwen's reasoning preamble is
+  // 70-91% of each Writer/Editor/QA call's wall time on this model, at no
+  // change to the 1:1 logical-stage-to-Ollama-call ratio or to output
+  // validity. The A/B arm already ran this way (matching the control arm's
+  // unconditional `think: false`); the non-experiment paths are brought into
+  // line. `pinnedInferenceProfile()` already carries `settings: { think: false
+  // }`, so `ab_split` is byte-identical and every multi run now shares one wire
+  // contract. `bindMultiAgent` computes the fingerprint from these same
+  // settings, so the recorded provenance stays truthful without a second edit.
+  const multiAgentInference = pinnedInference;
   const runGenerationLoop =
     strategy.strategy === "multi"
       ? buildMultiAgentLoop({

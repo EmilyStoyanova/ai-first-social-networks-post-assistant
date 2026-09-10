@@ -13,6 +13,8 @@ from __future__ import annotations
 import unittest
 
 from qa_verdict import (
+    ADVISORY_DIMENSION_ORDER,
+    ADVISORY_DIMENSIONS,
     EDITOR_DIMENSIONS,
     QA_DIMENSION_ORDER,
     QA_VERDICT_RESPONSE_FORMAT,
@@ -205,7 +207,9 @@ class TestResponseFormatSchema(unittest.TestCase):
     def test_every_enumerated_dimension_actually_routes(self) -> None:
         # The strongest form of "schema and router cannot drift": drive each
         # value the model is permitted to emit through the real parser and
-        # require an actionable route, never `rejected_unroutable`.
+        # require a NON-`rejected_unroutable` terminal outcome. A blocking
+        # dimension routes for revision; an advisory one (`angle`/`hook`/`cta`)
+        # converges to `pass` with the note kept — never a stuck rejection.
         for dimension in QA_DIMENSION_ORDER:
             for severity in SEVERITY_ORDER:
                 with self.subTest(dimension=dimension, severity=severity):
@@ -213,7 +217,11 @@ class TestResponseFormatSchema(unittest.TestCase):
                         '{"decision": "revise", "issues": [%s]}'
                         % _json(issue(dimension, severity))
                     )
-                    self.assertIn(verdict.decision, {"revise_writer", "revise_editor"})
+                    if dimension in ADVISORY_DIMENSIONS:
+                        self.assertEqual(verdict.decision, "pass")
+                        self.assertEqual(len(verdict.issues), 1)
+                    else:
+                        self.assertIn(verdict.decision, {"revise_writer", "revise_editor"})
 
     def test_the_decision_enum_is_what_the_MODEL_may_say(self) -> None:
         # Two words, not the five `QaDecision` states — the other three are
@@ -253,6 +261,153 @@ class TestResponseFormatSchema(unittest.TestCase):
             parse_qa_reply('{"decision": "revise", "issues": []}').decision,
             "rejected_unroutable",
         )
+
+
+class TestAdvisoryDimensions(unittest.TestCase):
+    """Rotation guidance (`angle`/`hook`/`cta`) is a note, never a blocker.
+
+    Parity with the rest of the generation system: `generation-compliance`
+    lists exactly these under `notChecked` and the single-agent path never
+    revises for them, so QA cannot fail a whole outer attempt on them either. A
+    rejection whose ONLY issues are advisory converges to `pass` with the notes
+    kept; a blocking issue alongside still routes and can still exhaust to
+    `rejected_unroutable`.
+    """
+
+    def test_the_advisory_set_is_a_subset_of_the_schema_enum(self) -> None:
+        # The critic can only emit what the schema enumerates; every advisory
+        # dimension must therefore be one the model is actually allowed to say.
+        self.assertTrue(ADVISORY_DIMENSIONS.issubset(set(QA_DIMENSION_ORDER)))
+        self.assertEqual(list(ADVISORY_DIMENSION_ORDER), ["angle", "hook", "cta"])
+
+    def test_the_advisory_set_touches_nothing_that_must_block(self) -> None:
+        # None of the genuinely mandatory dimensions may leak into the advisory
+        # set, or a real failure would be silently downgraded to a note.
+        must_block = {
+            "grounding",
+            "accuracy",
+            "substance",
+            "factual",
+            "content",
+            "forbidden_term",
+            "language_quality",
+        }
+        self.assertEqual(ADVISORY_DIMENSIONS & must_block, set())
+
+    # ── 1 & 2 & 3: a lone soft issue cannot terminally reject ───────────────
+    def test_angle_alone_cannot_block(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s]}'
+            % _json(issue("angle", "content", "not framed as an industry trend"))
+        )
+        self.assertEqual(v.decision, "pass")
+
+    def test_cta_alone_cannot_block(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s]}'
+            % _json(issue("cta", "content", "no reflection-style call to action"))
+        )
+        self.assertEqual(v.decision, "pass")
+
+    def test_hook_alone_cannot_block(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s]}' % _json(issue("hook", "style", "weak hook"))
+        )
+        self.assertEqual(v.decision, "pass")
+
+    def test_several_advisory_issues_together_still_only_a_pass(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s, %s]}'
+            % (_json(issue("angle", "content")), _json(issue("cta", "style")))
+        )
+        self.assertEqual(v.decision, "pass")
+
+    def test_the_advisory_note_is_kept_on_the_verdict(self) -> None:
+        # Downgraded to non-blocking, NOT discarded — the detail still reaches
+        # the trace so a human can see what the critic flagged.
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s]}'
+            % _json(issue("angle", "content", "reads as a single-hotel feature"))
+        )
+        self.assertEqual(v.decision, "pass")
+        self.assertEqual(len(v.issues), 1)
+        self.assertEqual(v.issues[0]["dimension"], "angle")
+        self.assertEqual(v.issues[0]["detail"], "reads as a single-hotel feature")
+
+    # ── 4: a blocking issue alongside advisory still routes ─────────────────
+    def test_a_blocking_issue_after_an_advisory_one_still_routes_writer(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s, %s]}'
+            % (_json(issue("angle", "content")), _json(issue("grounding", "factual")))
+        )
+        self.assertEqual(v.decision, "revise_writer")
+        self.assertEqual(len(v.issues), 2)
+
+    def test_a_blocking_issue_before_an_advisory_one_still_routes_writer(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s, %s]}'
+            % (_json(issue("grounding", "factual")), _json(issue("cta", "content")))
+        )
+        self.assertEqual(v.decision, "revise_writer")
+
+    def test_an_advisory_issue_alongside_an_editor_issue_routes_editor(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s, %s]}'
+            % (_json(issue("hook", "style")), _json(issue("language_quality", "style")))
+        )
+        self.assertEqual(v.decision, "revise_editor")
+
+    # ── 5 & 6: genuinely mandatory dimensions still reject ──────────────────
+    def test_language_quality_still_blocks(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s]}'
+            % _json(issue("language_quality", "style", "calque from English, unnatural Bulgarian"))
+        )
+        self.assertEqual(v.decision, "revise_editor")
+
+    def test_forbidden_term_still_blocks(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s]}'
+            % _json(issue("forbidden_term", "style", "uses a banned word"))
+        )
+        self.assertEqual(v.decision, "revise_editor")
+
+    def test_factual_and_grounding_still_route_to_the_writer(self) -> None:
+        for dimension in ("factual", "grounding", "accuracy", "substance", "content"):
+            with self.subTest(dimension=dimension):
+                v = parse_qa_reply(
+                    '{"decision": "revise", "issues": [%s]}'
+                    % _json(issue(dimension, "content"))
+                )
+                self.assertEqual(v.decision, "revise_writer")
+
+    # ── regressions: the filter must not weaken the other refusals ──────────
+    def test_an_unknown_dimension_alone_is_still_unroutable(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s]}' % _json(issue("vibes", "unknowable"))
+        )
+        self.assertEqual(v.decision, "rejected_unroutable")
+
+    def test_an_unknown_dimension_alongside_advisory_is_still_unroutable(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s, %s]}'
+            % (_json(issue("cta", "style")), _json(issue("vibes", "unknowable")))
+        )
+        self.assertEqual(v.decision, "rejected_unroutable")
+
+    def test_an_empty_revise_is_still_unroutable(self) -> None:
+        self.assertEqual(
+            parse_qa_reply('{"decision": "revise", "issues": []}').decision,
+            "rejected_unroutable",
+        )
+
+    def test_a_pass_that_lists_only_advisory_failures_is_still_refused(self) -> None:
+        # `decision: pass` + issues is a self-contradiction regardless of which
+        # dimensions — the advisory downgrade applies only to `revise`.
+        v = parse_qa_reply(
+            '{"decision": "pass", "issues": [%s]}' % _json(issue("angle", "content"))
+        )
+        self.assertEqual(v.decision, "rejected_unroutable")
 
 
 def _json(obj: dict[str, str]) -> str:

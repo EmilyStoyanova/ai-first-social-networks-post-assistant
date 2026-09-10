@@ -57,6 +57,18 @@ def qa_revise(dimension: str, severity: str) -> str:
     )
 
 
+def qa_revise_many(*pairs: tuple[str, str]) -> str:
+    return json.dumps(
+        {
+            "decision": "revise",
+            "issues": [
+                {"dimension": dimension, "severity": severity, "detail": "needs work"}
+                for dimension, severity in pairs
+            ],
+        }
+    )
+
+
 REQUEST = {
     "articleUnderstanding": {
         "mainSubject": "Residents are protesting new tourism development in a protected area.",
@@ -277,6 +289,77 @@ class RoutingScenarios(unittest.TestCase):
         # It ended the inner loop immediately rather than spending revisions on
         # a complaint it could not act on.
         self.assertEqual(result.counters.revisions, 0)
+
+
+class AdvisoryDimensionRouting(unittest.TestCase):
+    """Rotation guidance (`angle`/`hook`/`cta`) cannot fail an outer attempt.
+
+    The real convergence failure from the 2026-09-10 UI run: attempt 1 died on
+    `angle/content`, attempt 3 on `cta/content` — dimensions the deterministic
+    gates and the single-agent path treat as guidance, never as a rejection.
+    Driven through the REAL `run_flow` with only `_run_single` stubbed.
+    """
+
+    def run_with(self, scripted: ScriptedAgents, request: dict | None = None):
+        with mock.patch.object(crew_flow, "_run_single", side_effect=scripted):
+            return crew_flow.run_flow(request or REQUEST)
+
+    def test_a_soft_only_rejection_converges_to_pass_not_unroutable(self) -> None:
+        # QA rejects on `angle` forever. Before parity this exhausted both
+        # rounds and lost the attempt as `rejected_unroutable`; now it converges
+        # on the first judge call, note kept, no revision spent.
+        scripted = ScriptedAgents(
+            [post_json()], [post_json()], [qa_revise("angle", "content")]
+        )
+        result = self.run_with(scripted)
+
+        self.assertEqual(result.qa.decision, "pass")
+        self.assertNotEqual(result.qa.decision, "rejected_unroutable")
+        self.assertEqual(result.counters.revisions, 0)
+        self.assertEqual(result.counters.routes, [])
+        self.assertEqual(
+            (result.counters.writer, result.counters.editor, result.counters.qa), (1, 1, 1)
+        )
+        self.assertEqual(scripted.order, ["writer", "editor", "qa"])
+        # The critique survives as an advisory note on the verdict.
+        self.assertEqual(len(result.qa.issues), 1)
+        self.assertEqual(result.qa.issues[0]["dimension"], "angle")
+
+    def test_a_soft_cta_rejection_also_converges_to_pass(self) -> None:
+        scripted = ScriptedAgents(
+            [post_json()], [post_json()], [qa_revise("cta", "content")]
+        )
+        result = self.run_with(scripted)
+        self.assertEqual(result.qa.decision, "pass")
+        self.assertEqual(result.counters.revisions, 0)
+
+    def test_a_hard_issue_alongside_advisory_still_routes_and_can_exhaust(self) -> None:
+        # `angle` (advisory) + `grounding/factual` (blocking): the blocking one
+        # decides the route, and a critic that never lets go still exhausts to
+        # `rejected_unroutable` after maxQaRounds — requirement 7.
+        scripted = ScriptedAgents(
+            [post_json()],
+            [post_json()],
+            [qa_revise_many(("angle", "content"), ("grounding", "factual"))],
+        )
+        result = self.run_with(scripted)
+
+        self.assertEqual(result.qa.decision, "rejected_unroutable")
+        self.assertEqual(result.counters.revisions, 2)
+        self.assertEqual(result.counters.routes, ["writer", "writer"])
+        self.assertEqual(
+            (result.counters.writer, result.counters.editor, result.counters.qa), (3, 3, 3)
+        )
+
+    def test_a_soft_rejection_that_becomes_a_pass_needs_no_second_judge(self) -> None:
+        # Only ONE qa reply is scripted; if the loop tried a revision round it
+        # would re-consume it and the call order would show it.
+        scripted = ScriptedAgents(
+            [post_json()], [post_json()], [qa_revise("hook", "style")]
+        )
+        result = self.run_with(scripted)
+        self.assertEqual(result.qa.decision, "pass")
+        self.assertEqual(scripted.order.count("qa"), 1)
 
 
 class DegradationAndBounds(unittest.TestCase):
@@ -517,6 +600,15 @@ class StructuredCandidateOutput(unittest.TestCase):
             self.assertIn(dimension, crew_flow.QA_JSON_CONTRACT)
         for severity in qa_verdict.SEVERITY_ORDER:
             self.assertIn(f'"{severity}"', crew_flow.QA_JSON_CONTRACT)
+
+    def test_the_qa_rubric_names_the_advisory_dimensions_as_guidance(self) -> None:
+        # The prompt must agree with the router: angle/hook/cta are rotation
+        # guidance, not requirements, so the critic is told not to `revise` on
+        # one alone — matching what `parse_qa_reply` now does with such a reply.
+        rubric = crew_flow.QA_ASPECT_RUBRIC.lower()
+        for dimension in qa_verdict.ADVISORY_DIMENSION_ORDER:
+            self.assertIn(f"`{dimension}`", rubric)
+        self.assertIn("rotation guidance", rubric)
 
     def test_the_think_off_extra_body_still_coexists_with_response_format(self) -> None:
         scripted = ScriptedAgents([post_json()], [post_json()], [qa_pass()])

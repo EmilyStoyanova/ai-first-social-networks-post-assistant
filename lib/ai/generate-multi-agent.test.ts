@@ -486,7 +486,7 @@ describe("bindMultiAgent — the request it builds", () => {
     assert.equal(req.inferenceConfig.temperature, 0.85);
   });
 
-  it("carries think:false on the wire when the pinned profile sets it (A/B)", async () => {
+  it("carries think:false on the wire when the pinned profile sets it", async () => {
     const sidecar = scriptedSidecar([outcome()]);
     await bindMultiAgent(
       deps(sidecar, {
@@ -501,7 +501,11 @@ describe("bindMultiAgent — the request it builds", () => {
     assert.equal(sidecar.requests[0].inferenceConfig.think, false);
   });
 
-  it("does NOT put think on the wire when the profile has empty settings (non-A/B)", async () => {
+  it("omits think from the wire when the profile carries no think setting", async () => {
+    // The binder is a faithful pass-through of `deps.inference.settings`; it is
+    // the CALLER (`generate-draft-post.service`) that decides whether a multi
+    // run's profile carries `think: false`. As of 2026-09-10 every multi run's
+    // does — see generate-draft-post.strategy.service.test.ts.
     const sidecar = scriptedSidecar([outcome()]);
     await bindMultiAgent(
       deps(sidecar, {
