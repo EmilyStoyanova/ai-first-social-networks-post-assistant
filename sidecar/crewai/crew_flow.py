@@ -62,7 +62,13 @@ from guards import assert_agent_posture
 
 # The routing logic and the LLM kwarg mapping both live in stdlib-only modules,
 # so each is testable without CrewAI or Ollama installed.
-from qa_verdict import QaVerdict, parse_qa_reply
+from qa_verdict import (
+    QA_DIMENSION_ORDER,
+    QA_VERDICT_RESPONSE_FORMAT,
+    SEVERITY_ORDER,
+    QaVerdict,
+    parse_qa_reply,
+)
 from inference_config import llm_kwargs
 from post_candidate import (
     POST_CANDIDATE_RESPONSE_FORMAT,
@@ -89,12 +95,18 @@ def redact_llm_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     if isinstance(url, str):
         # scheme://host — the first three segments of a split on "/".
         safe["base_url"] = "/".join(url.split("/")[:3])
-    # The response-format JSON schema is long and fixed. Log its presence, not
-    # its body, so the one line stays readable.
+    # The response-format JSON schema is long and fixed. Log its NAME, not its
+    # body, so the one line stays readable — and the name, not a constant, so a
+    # log line cannot claim the Writer's schema while the QA model carries its
+    # own.
     additional = safe.get("additional_params")
     if isinstance(additional, dict) and "response_format" in additional:
         summary = dict(additional)
-        summary["response_format"] = "<json_schema:PostCandidate>"
+        response_format = summary["response_format"]
+        name = "unknown"
+        if isinstance(response_format, dict):
+            name = str((response_format.get("json_schema") or {}).get("name") or "unknown")
+        summary["response_format"] = f"<json_schema:{name}>"
         safe["additional_params"] = summary
     return safe
 
@@ -156,8 +168,12 @@ def build_llm(inference: dict[str, Any], *, response_format: dict[str, Any] | No
     envelope. It is MERGED into `additional_params` alongside whatever the think
     toggle already put there (`{"extra_body": {"reasoning_effort": "none"}}` for
     an A/B run), and CrewAI's OpenAI-compatible provider forwards it straight to
-    Ollama's `/v1/chat/completions`, which constrains decoding against it. Only
-    the Writer/Editor model gets one — QA answers in a different shape.
+    Ollama's `/v1/chat/completions`, which constrains decoding against it.
+
+    Both models get one, and they are DIFFERENT: the Writer/Editor is
+    constrained to `PostCandidate`, QA to `QaVerdict`. Neither schema would
+    admit the other's answer, which is why there are two `LLM` instances rather
+    than one shared object with a swapped parameter.
     """
     kwargs = llm_kwargs(inference)
     if response_format is not None:
@@ -224,11 +240,12 @@ def build_agents(candidate_llm: LLM, qa_llm: LLM) -> tuple[Agent, Agent, Agent]:
 
     The Writer and Editor hold `candidate_llm` — the one carrying the
     `PostCandidate` `response_format`, so their output is grammar-constrained to
-    the post schema. QA holds `qa_llm`, WITHOUT that constraint: QA answers in
-    the verdict shape (`QA_JSON_CONTRACT`), which the post schema would forbid.
-    Two `LLM` instances, one Ollama tag and one sampling config — the A/B
-    fingerprint is unaffected because it is computed from the wire
-    `inferenceConfig`, not from how many `LLM` objects the sidecar built.
+    the post schema. QA holds `qa_llm`, carrying its OWN constraint: the
+    `QaVerdict` schema, which is the verdict shape `QA_JSON_CONTRACT` describes
+    and which the post schema would forbid. Two `LLM` instances, one Ollama tag
+    and one sampling config — the A/B fingerprint is unaffected because it is
+    computed from the wire `inferenceConfig`, not from how many `LLM` objects
+    the sidecar built or which schemas they carry.
 
     `allow_delegation=False` on all three is what keeps the routing THIS file's
     decision. With delegation on, an agent could hand work sideways and the
@@ -318,12 +335,17 @@ POST_JSON_CONTRACT = (
     'label>" }'
 )
 
+# The vocabulary comes from `qa_verdict`, the same tuples the router matches on
+# and the response schema's enums are built from. Written out here once meant
+# the prompt could list a dimension the router had dropped, and the critic would
+# have been told to use a word that made its verdict unroutable.
 QA_JSON_CONTRACT = (
     "Reply with a SINGLE JSON object and nothing else:\n"
-    '{ "decision": "pass" | "revise", "issues": [ { "dimension": "<one of: voice, tone, length, '
-    'language_quality, clarity, forbidden_term, cta, hook, grounding, accuracy, angle, substance, '
-    'factual, content>", "severity": "style" | "clarity" | "factual" | "content", "detail": "<what '
-    'is wrong, in one sentence>" } ] }\n'
+    '{ "decision": "pass" | "revise", "issues": [ { "dimension": "<one of: '
+    + ", ".join(QA_DIMENSION_ORDER)
+    + '>", "severity": '
+    + " | ".join(f'"{severity}"' for severity in SEVERITY_ORDER)
+    + ', "detail": "<what is wrong, in one sentence>" } ] }\n'
     'Use "pass" only when nothing fails. When you use "revise" you MUST name at least one issue '
     "with a dimension from that list — a rejection that names nothing cannot be acted on."
 )
@@ -398,11 +420,12 @@ def run_flow(request: dict[str, Any]) -> FlowResult:
     max_qa_rounds = int(attempt_ctx.get("maxQaRounds", 2))
 
     inference = request["inferenceConfig"]
-    # Two models off ONE pinned config: the Writer/Editor model's decoding is
-    # constrained to the post schema, the QA model's is not (it answers in the
-    # verdict shape). See build_agents.
+    # Two models off ONE pinned config, each constrained to the shape ITS stage
+    # must answer in: the Writer/Editor to the post schema, QA to the verdict
+    # schema. Two schemas and not one — the post schema would forbid a verdict
+    # and vice versa. See build_agents.
     candidate_llm = build_llm(inference, response_format=POST_CANDIDATE_RESPONSE_FORMAT)
-    qa_llm = build_llm(inference)
+    qa_llm = build_llm(inference, response_format=QA_VERDICT_RESPONSE_FORMAT)
     writer, editor, qa_agent = build_agents(candidate_llm, qa_llm)
 
     brief = _brief_block(request.get("articleUnderstanding") or {})

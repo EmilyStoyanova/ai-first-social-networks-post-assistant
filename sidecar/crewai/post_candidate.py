@@ -136,8 +136,9 @@ def _response_format_schema() -> dict[str, Any]:
 
 #: Passed to the Writer/Editor LLM as
 #: `additional_params={"response_format": POST_CANDIDATE_RESPONSE_FORMAT}`.
-#: NOT applied to the QA agent — QA answers in its own verdict shape
-#: (`crew_flow.QA_JSON_CONTRACT`), which this schema would forbid.
+#: NOT applied to the QA agent — QA answers in its own verdict shape, which this
+#: schema would forbid, and carries its own constraint for it
+#: (`qa_verdict.QA_VERDICT_RESPONSE_FORMAT`).
 POST_CANDIDATE_RESPONSE_FORMAT: dict[str, Any] = {
     "type": "json_schema",
     "json_schema": {

@@ -12,7 +12,15 @@ from __future__ import annotations
 
 import unittest
 
-from qa_verdict import parse_qa_reply
+from qa_verdict import (
+    EDITOR_DIMENSIONS,
+    QA_DIMENSION_ORDER,
+    QA_VERDICT_RESPONSE_FORMAT,
+    SEVERITY_ORDER,
+    VALID_SEVERITIES,
+    WRITER_DIMENSIONS,
+    parse_qa_reply,
+)
 
 
 def issue(dimension: str, severity: str = "style", detail: str = "d") -> dict[str, str]:
@@ -158,6 +166,93 @@ class TestNormalization(unittest.TestCase):
             '{"decision": "revise", "issues": [%s]}' % _json(issue("GROUNDING", "unknown"))
         )
         self.assertEqual(v.decision, "revise_writer")
+
+
+class TestResponseFormatSchema(unittest.TestCase):
+    """The constraint Ollama compiles, and its one source of truth.
+
+    The schema exists to make `rejected_unroutable`-by-vocabulary unreachable:
+    a critic that cannot SAY an unknown dimension cannot produce a complaint the
+    router must refuse. That guarantee holds only while the enum and the routing
+    table are the same list, which is what these tests pin.
+    """
+
+    def _issue_properties(self) -> dict:
+        return QA_VERDICT_RESPONSE_FORMAT["json_schema"]["schema"]["properties"]["issues"][
+            "items"
+        ]["properties"]
+
+    def test_it_is_a_strict_json_schema_envelope(self) -> None:
+        self.assertEqual(QA_VERDICT_RESPONSE_FORMAT["type"], "json_schema")
+        envelope = QA_VERDICT_RESPONSE_FORMAT["json_schema"]
+        self.assertEqual(envelope["name"], "QaVerdict")
+        self.assertIs(envelope["strict"], True)
+
+    def test_the_dimension_enum_IS_the_routing_table(self) -> None:
+        # Not "contains" — equal as a set. An enum offering a dimension the
+        # router does not know would reintroduce the unroutable verdict; an
+        # enum missing one the router accepts would silently narrow the critic.
+        enum = self._issue_properties()["dimension"]["enum"]
+        self.assertEqual(set(enum), EDITOR_DIMENSIONS | WRITER_DIMENSIONS)
+        self.assertEqual(enum, list(QA_DIMENSION_ORDER))
+        self.assertEqual(len(enum), len(set(enum)))
+
+    def test_the_severity_enum_IS_the_canonical_severity_set(self) -> None:
+        enum = self._issue_properties()["severity"]["enum"]
+        self.assertEqual(set(enum), VALID_SEVERITIES)
+        self.assertEqual(enum, list(SEVERITY_ORDER))
+
+    def test_every_enumerated_dimension_actually_routes(self) -> None:
+        # The strongest form of "schema and router cannot drift": drive each
+        # value the model is permitted to emit through the real parser and
+        # require an actionable route, never `rejected_unroutable`.
+        for dimension in QA_DIMENSION_ORDER:
+            for severity in SEVERITY_ORDER:
+                with self.subTest(dimension=dimension, severity=severity):
+                    verdict = parse_qa_reply(
+                        '{"decision": "revise", "issues": [%s]}'
+                        % _json(issue(dimension, severity))
+                    )
+                    self.assertIn(verdict.decision, {"revise_writer", "revise_editor"})
+
+    def test_the_decision_enum_is_what_the_MODEL_may_say(self) -> None:
+        # Two words, not the five `QaDecision` states — the other three are
+        # DERIVED by the router from the decision plus the issues.
+        schema = QA_VERDICT_RESPONSE_FORMAT["json_schema"]["schema"]
+        self.assertEqual(schema["properties"]["decision"]["enum"], ["pass", "revise"])
+
+    def test_unspecified_keys_are_forbidden_at_both_levels(self) -> None:
+        schema = QA_VERDICT_RESPONSE_FORMAT["json_schema"]["schema"]
+        self.assertIs(schema["additionalProperties"], False)
+        self.assertIs(schema["properties"]["issues"]["items"]["additionalProperties"], False)
+
+    def test_required_fields_are_explicit(self) -> None:
+        schema = QA_VERDICT_RESPONSE_FORMAT["json_schema"]["schema"]
+        self.assertEqual(sorted(schema["required"]), ["decision", "issues"])
+        self.assertEqual(
+            sorted(schema["properties"]["issues"]["items"]["required"]),
+            ["detail", "dimension", "severity"],
+        )
+
+    def test_a_schema_valid_pass_and_a_schema_valid_revise_both_parse(self) -> None:
+        # The constraint narrows what the critic may say; `parse_qa_reply`
+        # stays authoritative over what it means.
+        self.assertEqual(parse_qa_reply('{"decision": "pass", "issues": []}').decision, "pass")
+        self.assertEqual(
+            parse_qa_reply(
+                '{"decision": "revise", "issues": [%s]}' % _json(issue("grounding", "factual"))
+            ).decision,
+            "revise_writer",
+        )
+
+    def test_the_constraint_does_NOT_remove_rejected_unroutable(self) -> None:
+        # A schema-valid `revise` naming nothing is still unroutable, and a
+        # schema-valid `revise` after the last allowed round is a genuine
+        # convergence failure the loop must still be able to report.
+        self.assertEqual(
+            parse_qa_reply('{"decision": "revise", "issues": []}').decision,
+            "rejected_unroutable",
+        )
 
 
 def _json(obj: dict[str, str]) -> str:

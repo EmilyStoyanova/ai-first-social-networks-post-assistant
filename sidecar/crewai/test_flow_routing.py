@@ -30,6 +30,7 @@ import unittest
 from unittest import mock
 
 import crew_flow
+import qa_verdict
 
 
 def post_json(text: str = "A perfectly good post about the coast.") -> str:
@@ -454,7 +455,7 @@ class StructuredCandidateOutput(unittest.TestCase):
             result = crew_flow.run_flow(REQUEST)
         return captured, result
 
-    def test_only_the_writer_editor_model_carries_the_post_response_format(self) -> None:
+    def test_each_model_carries_its_OWN_response_format(self) -> None:
         scripted = ScriptedAgents([post_json()], [post_json()], [qa_pass()])
         captured, _ = self._capture_llms(scripted)
 
@@ -466,11 +467,56 @@ class StructuredCandidateOutput(unittest.TestCase):
         self.assertEqual(
             candidate_params["response_format"]["json_schema"]["name"], "PostCandidate"
         )
-        # QA must be free to answer in the verdict shape.
-        self.assertNotIn("response_format", qa_params)
+        # QA answers in the VERDICT shape, and is constrained to it — not to the
+        # post schema, which would forbid a verdict outright.
+        self.assertIn("response_format", qa_params)
+        self.assertEqual(qa_params["response_format"]["json_schema"]["name"], "QaVerdict")
+        self.assertTrue(qa_params["response_format"]["json_schema"]["strict"])
+        # The two constraints must not be the same object or the same schema.
+        self.assertNotEqual(
+            candidate_params["response_format"], qa_params["response_format"]
+        )
         # And no tool/function-calling was introduced on either path.
         self.assertNotIn("tools", candidate_params)
         self.assertNotIn("tool_choice", candidate_params)
+        self.assertNotIn("tools", qa_params)
+        self.assertNotIn("tool_choice", qa_params)
+
+    def test_the_qa_constraint_does_not_disturb_the_think_off_extra_body(self) -> None:
+        # The A/B control arm's `reasoning_effort: "none"` rides in
+        # `extra_body`; merging a second schema in must not clobber it, on the
+        # QA model any more than on the candidate model.
+        scripted = ScriptedAgents([post_json()], [post_json()], [qa_pass()])
+        think_off_request = {
+            **REQUEST,
+            "inferenceConfig": {**REQUEST["inferenceConfig"], "think": False},
+        }
+        captured: dict[str, object] = {}
+        real = crew_flow.build_agents
+
+        def capturing(candidate_llm, qa_llm):
+            captured["qa_llm"] = qa_llm
+            return real(candidate_llm, qa_llm)
+
+        with mock.patch.object(crew_flow, "build_agents", side_effect=capturing), mock.patch.object(
+            crew_flow, "_run_single", side_effect=scripted
+        ):
+            crew_flow.run_flow(think_off_request)
+
+        params = captured["qa_llm"]._prepare_completion_params(
+            [{"role": "user", "content": "x"}]
+        )
+        self.assertEqual(params["response_format"]["json_schema"]["name"], "QaVerdict")
+        self.assertEqual(params.get("extra_body"), {"reasoning_effort": "none"})
+
+    def test_the_qa_contract_prompt_lists_exactly_the_routable_vocabulary(self) -> None:
+        # The prompt and the schema are built from the same tuples, so a
+        # dimension can never be offered to the critic that the router would
+        # then refuse as unroutable.
+        for dimension in qa_verdict.QA_DIMENSION_ORDER:
+            self.assertIn(dimension, crew_flow.QA_JSON_CONTRACT)
+        for severity in qa_verdict.SEVERITY_ORDER:
+            self.assertIn(f'"{severity}"', crew_flow.QA_JSON_CONTRACT)
 
     def test_the_think_off_extra_body_still_coexists_with_response_format(self) -> None:
         scripted = ScriptedAgents([post_json()], [post_json()], [qa_pass()])

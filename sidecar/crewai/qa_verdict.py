@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 QaDecision = Literal[
     "pass",
@@ -32,12 +32,41 @@ QaDecision = Literal[
 # routed to whichever agent seems closest: it becomes `rejected_unroutable`, a
 # non-converged attempt. Revising against a critique the router did not
 # understand is worse than admitting it did not understand it.
-EDITOR_DIMENSIONS = frozenset(
-    {"voice", "tone", "length", "language_quality", "clarity", "forbidden_term", "cta", "hook"}
+#
+# Declared as ORDERED tuples and frozen from them, rather than the other way
+# round. Two things read this vocabulary — the router below and the response
+# schema further down — and a `frozenset` iterates in an arbitrary order, which
+# would make the schema (and therefore the grammar Ollama compiles, and every
+# test asserting on it) differ between runs. The tuple order is also the order
+# the prompt lists them in, so there is exactly one place to add a dimension.
+EDITOR_DIMENSION_ORDER: tuple[str, ...] = (
+    "voice",
+    "tone",
+    "length",
+    "language_quality",
+    "clarity",
+    "forbidden_term",
+    "cta",
+    "hook",
 )
-WRITER_DIMENSIONS = frozenset({"grounding", "accuracy", "angle", "substance", "factual", "content"})
+WRITER_DIMENSION_ORDER: tuple[str, ...] = (
+    "grounding",
+    "accuracy",
+    "angle",
+    "substance",
+    "factual",
+    "content",
+)
+SEVERITY_ORDER: tuple[str, ...] = ("style", "clarity", "factual", "content")
 
-VALID_SEVERITIES = frozenset({"style", "clarity", "factual", "content"})
+EDITOR_DIMENSIONS = frozenset(EDITOR_DIMENSION_ORDER)
+WRITER_DIMENSIONS = frozenset(WRITER_DIMENSION_ORDER)
+
+#: Every dimension the router can act on, editor-routed first. The single source
+#: for both the QA prompt's list and the response schema's enum.
+QA_DIMENSION_ORDER: tuple[str, ...] = EDITOR_DIMENSION_ORDER + WRITER_DIMENSION_ORDER
+
+VALID_SEVERITIES = frozenset(SEVERITY_ORDER)
 
 
 @dataclass
@@ -124,3 +153,70 @@ def _normalize_issues(raw_issues: object) -> list[dict[str, str]]:
             }
         )
     return issues
+
+
+def _qa_verdict_schema() -> dict[str, Any]:
+    """The JSON schema Ollama constrains the QA reply's decoding against.
+
+    Built from the routing table above, never from a second hand-written list:
+    an enum that drifted from `EDITOR_DIMENSIONS`/`WRITER_DIMENSIONS` would let
+    the model emit a dimension the router cannot act on, which is precisely the
+    `rejected_unroutable` outcome this constraint exists to make unreachable.
+
+    Hand-written rather than derived from a Pydantic model, deliberately: this
+    module is standard-library only (see the module docstring) so the rule that
+    an unreadable critic is never a pass stays testable without CrewAI, Pydantic
+    or Ollama installed. `post_candidate.py` can use `model_json_schema()`
+    because it already depends on Pydantic for its validation boundary; nothing
+    here does.
+
+    `decision` is `pass | revise` — the two words the MODEL may say. The five
+    `QaDecision` states are what `parse_qa_reply` DERIVES from that plus the
+    issues, and `rejected_unroutable` in particular must stay reachable: a
+    schema-valid `revise` after the last allowed revision round is a genuine
+    convergence failure, not a formatting one.
+    """
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["decision", "issues"],
+        "properties": {
+            "decision": {"type": "string", "enum": ["pass", "revise"]},
+            # Required and always present, empty on a pass. An absent key would
+            # be legal JSON but leaves "did the critic name nothing, or forget
+            # the key" ambiguous, and the two route differently.
+            "issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["dimension", "severity", "detail"],
+                    "properties": {
+                        "dimension": {"type": "string", "enum": list(QA_DIMENSION_ORDER)},
+                        "severity": {"type": "string", "enum": list(SEVERITY_ORDER)},
+                        "detail": {"type": "string"},
+                    },
+                },
+            },
+        },
+    }
+
+
+#: Passed to the QA LLM as
+#: `additional_params={"response_format": QA_VERDICT_RESPONSE_FORMAT}` — the
+#: counterpart of `post_candidate.POST_CANDIDATE_RESPONSE_FORMAT`, which
+#: constrains the Writer/Editor. Measured against `qwen3.5:35b-a3b-q4_K_M` on
+#: 2026-09-09: an unconstrained QA reply cost 3,179-4,986 output tokens (the
+#: model reasons at length before its JSON); the same judgement under this
+#: schema cost 50, in one Ollama call, and `parse_qa_reply` routed it.
+#:
+#: It constrains what the critic MAY SAY. It does not weaken what we CHECK —
+#: `parse_qa_reply` remains authoritative over every reply, constrained or not.
+QA_VERDICT_RESPONSE_FORMAT: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "QaVerdict",
+        "strict": True,
+        "schema": _qa_verdict_schema(),
+    },
+}
