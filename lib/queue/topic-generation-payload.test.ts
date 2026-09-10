@@ -30,11 +30,19 @@ describe("topicGenerationPayloadSchema", () => {
     assert.deepEqual(parsed.data.channels, ["linkedin", "facebook"]);
   });
 
-  it("refuses a single channel — that path is answered inline", () => {
+  it("accepts a single channel — a one-channel multi-agent run has to be queued", () => {
+    // Was refused when one channel always meant an inline run. The CrewAI
+    // sidecar is loopback-only on the Mac worker, so a one-channel MULTI run
+    // has no inline path and is queued like any other topic. A one-channel
+    // SINGLE run is still answered inline and never produces this payload.
     assert.equal(
       topicGenerationPayloadSchema.safeParse(payload({ channels: ["linkedin"] })).success,
-      false
+      true
     );
+  });
+
+  it("refuses an empty channel list", () => {
+    assert.equal(topicGenerationPayloadSchema.safeParse(payload({ channels: [] })).success, false);
   });
 
   it("refuses a repeated channel", () => {

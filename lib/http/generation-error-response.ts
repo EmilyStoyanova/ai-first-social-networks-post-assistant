@@ -177,5 +177,21 @@ export function generationErrorResponse(result: GenerateDraftPostFailure): NextR
         },
         { status: 409 }
       );
+
+    case "MULTI_AGENT_BUDGET_EXHAUSTED":
+      // 503: the request was fine and nothing is broken — the worker simply ran
+      // out of time to start another multi-agent attempt. Retryable, like
+      // NO_ACTIVE_PROVIDER, and never a provider error.
+      return NextResponse.json(
+        {
+          error: {
+            code: "MULTI_AGENT_BUDGET_EXHAUSTED",
+            message:
+              result.message ??
+              "Multi-agent generation ran out of time before it could finish. Try again.",
+          },
+        },
+        { status: 503 }
+      );
   }
 }

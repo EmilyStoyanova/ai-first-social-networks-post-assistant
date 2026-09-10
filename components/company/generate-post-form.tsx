@@ -251,6 +251,11 @@ export function GeneratePostForm({
   const [contentSource, setContentSource] = useState<string>(COMPANY_RULES_VALUE);
   // Empty string = "System default (auto)"; otherwise an LlmConfig id (v2-5).
   const [llmConfigId, setLlmConfigId] = useState("");
+  // "site_default" = let the site setting (and any running experiment) decide;
+  // "single"/"multi" = an explicit choice that always wins and is excluded from
+  // the experiment. The default keeps a form that never touches this identical
+  // to what it sent before.
+  const [strategy, setStrategy] = useState<"site_default" | "single" | "multi">("site_default");
   const [availableLlms, setAvailableLlms] = useState<AvailableLlm[]>([]);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
@@ -1010,6 +1015,10 @@ export function GeneratePostForm({
       // Omit entirely when "System default" is selected so the server keeps
       // its env-var default provider path unchanged (v2-5).
       ...(llmConfigId ? { llmConfigId } : {}),
+      // Omitted for "Site default" so an un-updated client and this default
+      // send an identical body. An explicit choice always wins over the site
+      // setting and any running experiment.
+      ...(strategy !== "site_default" ? { strategy } : {}),
     };
   }
 
@@ -1489,6 +1498,26 @@ export function GeneratePostForm({
             </select>
           </div>
         )}
+
+        <div className="min-w-[200px]">
+          <label
+            htmlFor="generate-strategy"
+            className="text-fg-muted mb-1.5 block text-sm font-medium"
+          >
+            {t("strategy")}
+          </label>
+          <select
+            id="generate-strategy"
+            value={strategy}
+            onChange={(e) => setStrategy(e.target.value as "site_default" | "single" | "multi")}
+            disabled={generating || bulkRunning || topicRunning}
+            className="rounded-control border-border-strong bg-surface duration-fast focus:border-accent focus:ring-accent/20 w-full border px-3.5 py-2.5 text-sm transition-all outline-none focus:ring-2 focus:ring-offset-0 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <option value="site_default">{t("strategySiteDefault")}</option>
+            <option value="single">{t("strategySingle")}</option>
+            <option value="multi">{t("strategyMulti")}</option>
+          </select>
+        </div>
 
         {/* When the post goes out. Optional, and the only field here that is:
             leaving it empty writes the unscheduled draft this form has always

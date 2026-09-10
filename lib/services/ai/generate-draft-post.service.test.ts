@@ -10,6 +10,10 @@ import type { AutoGenerateImageInput } from "./auto-generate-post-image.service"
 import type { AutoApplySourceImageInput } from "./auto-apply-source-image.service";
 import type { SemanticGate } from "@/lib/ai/generate-with-retry";
 import type { GenerationContext } from "@/lib/ai/types";
+import { GenerationTracer } from "@/lib/generation-trace/tracer";
+import type { GenerationTraceStore, PersistableRun } from "@/lib/generation-trace/store";
+import { MultiAgentGenerationError, type MultiAgentDeps } from "@/lib/ai/generate-multi-agent";
+import { inferenceFingerprint } from "@/lib/ai/crew/provenance";
 
 const ACCEPT_GATE: SemanticGate = async () => ({
   decision: "accept",
@@ -3253,4 +3257,351 @@ describe("generatePostFromContext — opening-diversity and language hardening",
     };
     return { deps, calls: () => calls };
   }
+});
+
+describe("generatePostFromContext — failed multi-agent run keeps objective provenance", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  function makeStore(): { store: GenerationTraceStore; saved: () => PersistableRun[] } {
+    const runs: PersistableRun[] = [];
+    return { store: { saveRun: async (run) => void runs.push(run) }, saved: () => runs };
+  }
+
+  const MULTI_STRATEGY = {
+    strategy: "multi" as const,
+    source: "user_override" as const,
+    experimentKey: null,
+    experimentArm: null,
+    experimentUnitId: null,
+    experimentBucket: null,
+    experimentAllocation: null,
+    abIneligibleReason: null,
+  };
+
+  const PARTIAL = {
+    inference: {
+      modelTag: "qwen3.5:35b-a3b-q4_K_M",
+      modelDigest: null,
+      settings: {},
+    },
+    inferenceFingerprint: "a".repeat(64),
+    agentCalls: 8,
+    agentLatencyMs: 1_350_000,
+    degraded: true as const,
+    degradedStages: ["provider_error"],
+    completedAttempts: 1,
+  };
+
+  const ARTICLE_CONTEXT = () =>
+    makeContext({
+      feedItems: [
+        {
+          id: "feed-1",
+          title: "Launch incoming",
+          content: "We are preparing something big for our audience.",
+          url: "https://example.com/launch",
+          publishedAt: null,
+        },
+      ],
+      hasArticleSources: true,
+    });
+
+  /** A bound multi-agent loop that throws before returning a candidate. */
+  function throwingMultiAgent(err: MultiAgentGenerationError) {
+    return () => async () => {
+      throw err;
+    };
+  }
+
+  it("persists modelTag / fingerprint / agentCalls / latency / degraded, and leaves qaState NULL", async () => {
+    const { deps } = makeDeps();
+    const { store } = makeStore();
+    const tracer = GenerationTracer.start({
+      kind: "post_generation",
+      trigger: "manual",
+      companyId: "co-1",
+      channel: "LinkedIn",
+      userId: "user-1",
+      store,
+      newId: () => "run-1",
+    });
+    deps.tracer = tracer;
+    deps.loadCandidateFacts = async () => [];
+    deps.loadFeedItemArtifacts = async () => null as never;
+    deps.loadArticleBrief = async () => null as never;
+    deps.buildMultiAgentLoop = throwingMultiAgent(
+      new MultiAgentGenerationError(
+        "CREW_SIDECAR_UNAVAILABLE",
+        "CrewAI sidecar request exceeded its budget.",
+        undefined,
+        PARTIAL
+      )
+    ) as never;
+
+    const result = await generatePostFromContext(
+      ARTICLE_CONTEXT(),
+      "co-1",
+      { resolvedStrategy: MULTI_STRATEGY },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "LLM_PROVIDER_ERROR");
+
+    const s = tracer.peekStrategy();
+    assert.ok(s, "the strategy row was written");
+    // Objective measurement from the one completed attempt is preserved.
+    assert.equal(s!.modelTag, "qwen3.5:35b-a3b-q4_K_M");
+    assert.equal(s!.modelDigest, null);
+    assert.equal(s!.inferenceFingerprint, "a".repeat(64));
+    assert.equal(s!.agentCalls, 8);
+    assert.equal(s!.agentLatencyMs, 1_350_000);
+    assert.equal(s!.degraded, true);
+    assert.deepEqual(s!.degradedStages, ["provider_error"]);
+    // No post was saved → the run reached no run-level QA outcome.
+    assert.equal(s!.qaState, null);
+    assert.equal(s!.qaRevisionRounds, null);
+    // The assignment half still stands.
+    assert.equal(s!.generationStrategy, "multi");
+    assert.equal(s!.generationStrategySource, "user_override");
+  });
+
+  it("maps a budget-exhausted multi-agent failure to its own code, not LLM_PROVIDER_ERROR", async () => {
+    const { deps } = makeDeps();
+    deps.loadArticleBrief = async () => null as never;
+    deps.buildMultiAgentLoop = throwingMultiAgent(
+      new MultiAgentGenerationError(
+        "MULTI_AGENT_BUDGET_EXHAUSTED",
+        "Stopped before outer attempt 2/3.",
+        undefined,
+        { ...PARTIAL, degradedStages: ["budget_exhausted"] }
+      )
+    ) as never;
+
+    const result = await generatePostFromContext(
+      ARTICLE_CONTEXT(),
+      "co-1",
+      { resolvedStrategy: MULTI_STRATEGY },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (!result.success) assert.equal(result.code, "MULTI_AGENT_BUDGET_EXHAUSTED");
+  });
+
+  it("writes no objective measurement when no attempt completed (partial provenance absent)", async () => {
+    const { deps } = makeDeps();
+    const { store } = makeStore();
+    const tracer = GenerationTracer.start({
+      kind: "post_generation",
+      trigger: "manual",
+      companyId: "co-1",
+      channel: "LinkedIn",
+      userId: "user-1",
+      store,
+      newId: () => "run-2",
+    });
+    deps.tracer = tracer;
+    deps.loadCandidateFacts = async () => [];
+    deps.loadFeedItemArtifacts = async () => null as never;
+    deps.loadArticleBrief = async () => null as never;
+    deps.buildMultiAgentLoop = throwingMultiAgent(
+      new MultiAgentGenerationError("CREW_SIDECAR_UNAVAILABLE", "unreachable", undefined, undefined)
+    ) as never;
+
+    const result = await generatePostFromContext(
+      ARTICLE_CONTEXT(),
+      "co-1",
+      { resolvedStrategy: MULTI_STRATEGY },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    const s = tracer.peekStrategy();
+    // Assignment half is there; objective measurement fields stay NULL.
+    assert.equal(s!.generationStrategy, "multi");
+    assert.equal(s!.agentCalls, null);
+    assert.equal(s!.inferenceFingerprint, null);
+    assert.equal(s!.qaState, null);
+  });
+});
+
+describe("generatePostFromContext — multi-agent think:false alignment", () => {
+  let prevMockMode: string | undefined;
+
+  before(() => {
+    prevMockMode = process.env.AI_MOCK_MODE;
+    process.env.AI_MOCK_MODE = "true";
+  });
+  after(() => {
+    if (prevMockMode === undefined) delete process.env.AI_MOCK_MODE;
+    else process.env.AI_MOCK_MODE = prevMockMode;
+  });
+
+  function makeStore(): { store: GenerationTraceStore; saved: () => PersistableRun[] } {
+    const runs: PersistableRun[] = [];
+    return { store: { saveRun: async (run) => void runs.push(run) }, saved: () => runs };
+  }
+  function tracer(store: GenerationTraceStore) {
+    return GenerationTracer.start({
+      kind: "post_generation",
+      trigger: "manual",
+      companyId: "co-1",
+      channel: "LinkedIn",
+      userId: "user-1",
+      store,
+      newId: () => "run-x",
+    });
+  }
+
+  /**
+   * Injecting a store-backed tracer flips `tracer.enabled` true, which makes the
+   * service fall back to the REAL `loadCandidateFacts` / `loadFeedItemArtifacts`
+   * (they hit the shared prisma client). No `DATABASE_URL` in tests → those
+   * connects pile up in Neon's pool until an `await` blocks forever. Every other
+   * test in this file avoids that by running with a disabled tracer; these
+   * stubs give the enabled-tracer tests the same DB-free isolation.
+   */
+  function stubTraceReads(deps: GenerateDraftPostDeps) {
+    deps.loadCandidateFacts = async () => [];
+    deps.loadFeedItemArtifacts = async () => null as never;
+  }
+  const strat = (
+    strategy: "single" | "multi",
+    source: "ab_split" | "user_override" | "global_default"
+  ) => ({
+    strategy,
+    source,
+    experimentKey: source === "ab_split" ? "exp-1" : null,
+    experimentArm: source === "ab_split" ? strategy : null,
+    experimentUnitId: source === "ab_split" ? "unit-1" : null,
+    experimentBucket: source === "ab_split" ? 1234 : null,
+    experimentAllocation: source === "ab_split" ? 50 : null,
+    abIneligibleReason: null,
+  });
+  const ARTICLE = () =>
+    makeContext({
+      feedItems: [
+        {
+          id: "feed-1",
+          title: "Launch incoming",
+          content: "We are preparing something big for our audience.",
+          url: "https://example.com/launch",
+          publishedAt: null,
+        },
+      ],
+      hasArticleSources: true,
+    });
+
+  /** Captures the inference profile handed to the multi-agent binder, then bails. */
+  function captureMultiInference(deps: GenerateDraftPostDeps) {
+    let seen: MultiAgentDeps["inference"] | null = null;
+    deps.loadArticleBrief = async () => null as never;
+    deps.buildMultiAgentLoop = ((mDeps: Omit<MultiAgentDeps, "sidecar">) => {
+      seen = mDeps.inference;
+      return () => {
+        throw new MultiAgentGenerationError("CREW_SIDECAR_UNAVAILABLE", "stop after capture");
+      };
+    }) as never;
+    return () => seen;
+  }
+
+  it("ab_split SINGLE records think:false in the inference fingerprint", async () => {
+    const { deps } = makeDeps();
+    const { store } = makeStore();
+    const t = tracer(store);
+    deps.tracer = t;
+    stubTraceReads(deps);
+    const result = await generatePostFromContext(
+      ARTICLE(),
+      "co-1",
+      { resolvedStrategy: strat("single", "ab_split") },
+      deps
+    );
+    assert.ok(result.success);
+    const s = t.peekStrategy();
+    assert.equal(
+      s!.inferenceFingerprint,
+      inferenceFingerprint({
+        modelTag: s!.modelTag!,
+        modelDigest: null,
+        settings: { think: false },
+      })
+    );
+    // and it is NOT the empty-settings fingerprint
+    assert.notEqual(
+      s!.inferenceFingerprint,
+      inferenceFingerprint({ modelTag: s!.modelTag!, modelDigest: null, settings: {} })
+    );
+  });
+
+  it("user_override SINGLE keeps the empty-settings fingerprint (unchanged)", async () => {
+    const { deps } = makeDeps();
+    const { store } = makeStore();
+    const t = tracer(store);
+    deps.tracer = t;
+    stubTraceReads(deps);
+    const result = await generatePostFromContext(
+      ARTICLE(),
+      "co-1",
+      { resolvedStrategy: strat("single", "user_override") },
+      deps
+    );
+    assert.ok(result.success);
+    const s = t.peekStrategy();
+    assert.equal(
+      s!.inferenceFingerprint,
+      inferenceFingerprint({ modelTag: s!.modelTag!, modelDigest: null, settings: {} })
+    );
+  });
+
+  it("ab_split MULTI hands the sidecar an inference profile with think:false", async () => {
+    const { deps } = makeDeps();
+    const seen = captureMultiInference(deps);
+    await generatePostFromContext(
+      ARTICLE(),
+      "co-1",
+      { resolvedStrategy: strat("multi", "ab_split") },
+      deps
+    );
+    assert.equal(seen()!.settings.think, false);
+    assert.equal(seen()!.modelTag.length > 0, true);
+  });
+
+  it("user_override MULTI hands the sidecar an inference profile with think:false", async () => {
+    // Changed 2026-09-10: the reasoning preamble was the dominant per-call
+    // latency (proxy-attributed benchmark), so every multi run — not only
+    // `ab_split` — now pins `think: false`.
+    const { deps } = makeDeps();
+    const seen = captureMultiInference(deps);
+    await generatePostFromContext(
+      ARTICLE(),
+      "co-1",
+      { resolvedStrategy: strat("multi", "user_override") },
+      deps
+    );
+    assert.equal(seen()!.settings.think, false);
+  });
+
+  it("global_default MULTI hands the sidecar an inference profile with think:false", async () => {
+    const { deps } = makeDeps();
+    const seen = captureMultiInference(deps);
+    await generatePostFromContext(
+      ARTICLE(),
+      "co-1",
+      { resolvedStrategy: strat("multi", "global_default") },
+      deps
+    );
+    assert.equal(seen()!.settings.think, false);
+  });
 });

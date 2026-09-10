@@ -32,7 +32,13 @@ export type AttemptRejectionReason =
   | "opening_repeated"
   | "compliance_failed"
   | "parse_error"
-  | "provider_error";
+  | "provider_error"
+  /**
+   * Multi-agent only: an outer attempt was NOT started because too little of the
+   * generation budget remained to finish a Writer→Editor→QA pass. No provider
+   * request was made — this is a clean stop, not a transport failure.
+   */
+  | "budget_exhausted";
 
 export interface GenerationAttemptRecord {
   attempt: number;

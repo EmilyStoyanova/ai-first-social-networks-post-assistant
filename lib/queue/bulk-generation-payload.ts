@@ -34,6 +34,7 @@
 
 import { z } from "zod";
 import { MAX_BULK_POSTS } from "@/lib/scheduling/bulk-schedule";
+import { resolvedStrategySchema } from "@/lib/ai/strategy/resolve-strategy";
 
 /** The channels a bulk request may name. Mirrors the `SocialChannel` enum. */
 export const BULK_CHANNELS = ["facebook", "linkedin", "instagram", "tiktok"] as const;
@@ -93,6 +94,26 @@ export const bulkGenerationPayloadSchema = z
      * topics un-resumable.
      */
     contentGroupIds: z.array(z.string().min(1)).min(1).max(MAX_BULK_POSTS),
+    /**
+     * The resolved strategy for each TOPIC, in the same order as
+     * `contentGroupIds`.
+     *
+     * An array and not one value, because the A/B unit is the content group: a
+     * bulk run of five topics is five independent assignments, and collapsing
+     * them to one would make a whole batch a single unit — fewer effective
+     * observations, and a batch-level confound (whatever made someone run a
+     * batch) attached to every post in it.
+     *
+     * Resolved at enqueue and carried, rather than recomputed worker-side, for
+     * the reason `contentGroupIds` is minted at enqueue: attempt 2 must reach the
+     * same answer as attempt 1, and the only way to guarantee that against
+     * settings an admin can change mid-run is to write the answer down.
+     *
+     * OPTIONAL for the same reason the topic payload's field is: jobs already in
+     * the queue when this deploys have none, and absent means the single-agent
+     * default those payloads were written under.
+     */
+    resolvedStrategies: z.array(resolvedStrategySchema).min(1).max(MAX_BULK_POSTS).optional(),
 
     // ── The request ─────────────────────────────────────────────────────────
     /** Every channel each topic is written for. Deduped and non-empty. */
@@ -116,6 +137,13 @@ export const bulkGenerationPayloadSchema = z
   .refine((p) => p.contentGroupIds.length === p.numberOfPosts, {
     message: "contentGroupIds must have exactly one id per requested topic",
     path: ["contentGroupIds"],
+  })
+  // A short list would silently leave the last topics with no assignment, which
+  // the worker would then read as the single-agent default — an experiment
+  // quietly under-assigning its own tail. Refused at the schema instead.
+  .refine((p) => !p.resolvedStrategies || p.resolvedStrategies.length === p.numberOfPosts, {
+    message: "resolvedStrategies must have exactly one entry per requested topic",
+    path: ["resolvedStrategies"],
   })
   .refine((p) => new Set(p.channels).size === p.channels.length, {
     message: "channels must not repeat",

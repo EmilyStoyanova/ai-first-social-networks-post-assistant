@@ -109,6 +109,46 @@ enum CronStatus {
   failed
 }
 
+// ─── Generation strategy & A/B (multi-agent) ──────────────────────────────────
+//
+// Which orchestration wrote a post. `single` is the long-standing one-call path
+// (generateWithRetry against one provider); `multi` is the CrewAI sidecar's
+// Writer → Editor → QA loop under the SAME deterministic gates and the same
+// outer retry. The gates, the acceptance rule and the prompts are identical
+// between the two — orchestration is the only thing that varies, which is what
+// makes an A/B between them meaningful.
+enum GenerationStrategy {
+  single
+  multi
+}
+
+// WHY that strategy was chosen, kept strictly separate from the strategy itself.
+//
+// The distinction is the whole basis of correct reporting: "multi because an
+// experiment assigned it" and "multi because a person asked for it" are
+// different populations, and only the first may enter an A/B denominator. The
+// second is confounded by self-selection — somebody chose multi for a post they
+// had a reason to choose it for.
+enum StrategySource {
+  global_default
+  user_override
+  ab_split
+}
+
+// On what evidence two arms were established to have run the same model.
+//
+// `digest_verified` requires a digest resolved AUTHORITATIVELY at runtime (the
+// sidecar reads Ollama's /api/show). `tag_matched_only` is the honest state when
+// the tags match but no runtime digest was available — which is what the live
+// sidecar reports today. A known audited digest is NEVER promoted into
+// `digest_verified`: knowing what the digest should be is not the same as having
+// observed it, and a report that conflates them overstates its own rigour.
+enum ModelVerification {
+  digest_verified
+  tag_matched_only
+  unknown
+}
+
 // ─── Background job queue (Phase 0) ───────────────────────────────────────────
 // Lifecycle of a queued unit of work. A closed, well-defined set, so it is an
 // enum (unlike Job.type, which is a plain string — see the Job model). Terminal
@@ -321,6 +361,9 @@ model User {
   apiKeys                 ApiKey[]
   preferredLlmConfig      LlmConfig?               @relation("UserPreferredLlm", fields: [preferredLlmConfigId], references: [id], onDelete: SetNull)
   emailVerificationTokens EmailVerificationToken[]
+  /// The site-wide generation settings this user last changed. A list only
+  /// because Prisma requires the back-relation; there is exactly one row.
+  strategySettingsEdits   GenerationStrategySettings[] @relation("GenerationStrategySettingsEditor")
 
   @@map("users")
 }
@@ -493,6 +536,58 @@ model LlmConfig {
   preferredByUsers User[] @relation("UserPreferredLlm")
 
   @@map("llm_configs")
+}
+
+// The site-wide generation strategy default, and the A/B experiment definition.
+//
+// A SINGLETON: exactly one row, id `global`. A fixed primary key rather than an
+// `isDefault` flag (LlmConfig's shape) because there is nothing here to have
+// several of — this is one set of site settings, and a table that can hold two
+// of them invites the question of which one is live. Reads upsert-on-read
+// semantics in the service: an absent row means "nothing has been configured",
+// which resolves to `single` and no experiment, i.e. exactly today's behaviour.
+//
+// Not on Company: the product decision is site-wide (one default for the whole
+// installation), and an experiment split per company would be a different
+// experiment with a different unit.
+model GenerationStrategySettings {
+  id String @id @default("global")
+
+  /// What a generation uses when nothing else decides. `single` is the value an
+  /// unconfigured installation behaves as, so adding this table changes nothing
+  /// until an admin says otherwise.
+  defaultStrategy GenerationStrategy @default(single) @map("default_strategy")
+
+  /// Whether the single-vs-multi experiment is running. False leaves every
+  /// generation on `defaultStrategy` (or an explicit user override).
+  experimentEnabled Boolean @default(false) @map("experiment_enabled")
+
+  /// The experiment's identity, and HALF OF THE HASH INPUT.
+  ///
+  /// Load-bearing rather than a label: assignment is `hash(experimentKey +
+  /// unitId)`, so a new key re-randomizes every unit — which is precisely what
+  /// starting a second experiment must do. Reusing the key would carry the first
+  /// experiment's assignment into the second and correlate the two.
+  ///
+  /// NULL while no experiment has ever been enabled. An enabled experiment with
+  /// a NULL key cannot assign anything, and the resolver treats that as "not
+  /// eligible" rather than inventing a key at generation time.
+  experimentKey String? @map("experiment_key")
+
+  /// Percent of eligible units assigned to the MULTI arm, 0–100. 50 = an even
+  /// split. Stored as an integer percent rather than a float ratio so the value
+  /// an admin typed is the value that is compared, with no rounding to explain.
+  experimentAllocationPercent Int @default(50) @map("experiment_allocation_percent")
+
+  /// Who last changed this, and when. SetNull rather than Cascade: deleting an
+  /// admin must never delete the record of the settings they set.
+  updatedById String?  @map("updated_by")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  updatedBy User? @relation("GenerationStrategySettingsEditor", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@map("generation_strategy_settings")
 }
 
 model ContentSource {
@@ -894,6 +989,34 @@ model Post {
   promptSnapshot       Json?              @map("prompt_snapshot")
   llmProvider          String?            @map("llm_provider")
   llmModel             String?            @map("llm_model")
+  // ── Generation strategy ────────────────────────────────────────────────────
+  // Which orchestration wrote this post, and why it was chosen. Four columns,
+  // and deliberately only four: everything else a measurement wants (agent
+  // calls, QA revisions, latency, model identity, the arm's hash inputs) lives
+  // on GenerationRun, which is the record of the RUN and exists even for runs
+  // that produced no post at all — the only correct denominator for a failure
+  // rate.
+  //
+  // These four are duplicated here for one reason. GenerationRun is written by
+  // the tracer, and tracing can be switched off (GENERATION_TRACE_ENABLED). A
+  // post that exists must always be able to say which strategy wrote it and
+  // whether that was an experiment assignment or somebody's explicit choice —
+  // that is the product question, and it must not depend on an observability
+  // setting.
+  //
+  // All NULL for every post written before this column existed, and there is no
+  // backfill. NULL means UNKNOWN, never `single`: those posts were written by
+  // the single-agent path, but recording a value nobody observed would let a
+  // report count them into an arm they were never assigned to.
+  generationStrategy       GenerationStrategy? @map("generation_strategy")
+  generationStrategySource StrategySource?     @map("generation_strategy_source")
+  // The experiment this post was assigned by, when it was assigned by one. NULL
+  // for every post whose source is not `ab_split`.
+  experimentKey            String?             @map("experiment_key")
+  // The arm assigned. Equal to `generationStrategy` for an `ab_split` post, and
+  // stored separately anyway: a run that was ASSIGNED multi and could not reach
+  // its sidecar must never look like an assignment to single.
+  experimentArm            GenerationStrategy? @map("experiment_arm")
   approvedById         String?            @map("approved_by")
   approvedAt           DateTime?          @map("approved_at")
   rejectedById         String?            @map("rejected_by")
@@ -939,6 +1062,10 @@ model Post {
   // Backs the grouped posts list — "which channel versions belong together" —
   // which is always asked within one company. NULL for every ungrouped post.
   @@index([companyId, contentGroupId])
+  // Backs the A/B report's outcome half: "of the posts assigned to this arm, how
+  // many were approved / rejected". NULL for every post outside an experiment,
+  // so the index stays small.
+  @@index([experimentKey, experimentArm])
   @@map("posts")
 }
 
@@ -1207,7 +1334,97 @@ model GenerationRun {
 
   /// How many generation attempts the run made (1..MAX_GENERATION_ATTEMPTS). 0
   /// for a run that never reached the model.
+  ///
+  /// This is the OUTER counter — attempts driven by a deterministic gate turning
+  /// a candidate down. It is deliberately never merged with
+  /// `qaRevisionRounds` below, which counts the multi-agent INNER loop: one
+  /// outer attempt can contain up to `maxQaRounds` QA revision cycles, and a
+  /// single number cannot answer either "how many times did the gates refuse us"
+  /// or "how much did the critic cost".
   attempts Int @default(0)
+
+  // ── Generation strategy & A/B provenance ───────────────────────────────────
+  //
+  // Every column here is NULLABLE with no backfill, and that is load-bearing:
+  // NULL means "this run predates the field / did not record it", never a
+  // substantive value. The one place that principle already bit this codebase
+  // was the sidecar's health contract, where defaulting an absent `busy` to
+  // false would have manufactured a claim that the service was free — so an
+  // absent `degraded` here is not `false`, and an absent strategy is not
+  // `single`.
+  //
+  // Explicit columns rather than one Json blob, deliberately. This is a
+  // measurement table: every breakdown the A/B report needs (per arm, per
+  // channel, per experiment) is a GROUP BY, and the schema's own objection to a
+  // "300KB column that must be parsed whole to show a timeline header" applies
+  // just as much to a column that must be parsed whole to count runs. Nullable
+  // columns cost nothing in Postgres; a Json read per row in a report does.
+
+  /// Which orchestration ran, and why it was chosen. See the enums.
+  generationStrategy       GenerationStrategy? @map("generation_strategy")
+  generationStrategySource StrategySource?     @map("generation_strategy_source")
+
+  /// The experiment and the arm assigned, when this run was assigned by one.
+  ///
+  /// `experimentArm` records the ASSIGNMENT and `generationStrategy` records
+  /// what actually ran. They are equal for every healthy run and stored
+  /// separately so they can disagree audibly: a run assigned `multi` whose
+  /// sidecar was unreachable is a FAILED MULTI run, and must never be counted as
+  /// an assignment to `single`.
+  experimentKey String?             @map("experiment_key")
+  experimentArm GenerationStrategy? @map("experiment_arm")
+
+  /// Enough to REPRODUCE the assignment, not merely to read it off.
+  ///
+  /// The arm is `hash(experimentKey + experimentUnitId) % 10000 → bucket`, so
+  /// with the unit and the bucket recorded, any later reader can recompute the
+  /// decision and confirm it. The allocation is stored as it was AT ASSIGNMENT
+  /// TIME: an admin who later moves the split from 50 to 70 must not retroactively
+  /// make yesterday's assignments unexplainable.
+  experimentUnitId     String? @map("experiment_unit_id")
+  experimentBucket     Int?    @map("experiment_bucket")
+  experimentAllocation Int?    @map("experiment_allocation")
+
+  /// What Ollama actually ran, as opposed to which application path asked it to.
+  ///
+  /// `llmProvider`/`llmModel` above describe the CALLER and legitimately differ
+  /// between the arms (text_worker vs the CrewAI sidecar) — that is honest
+  /// provenance about the path, and it is exactly why it cannot establish that
+  /// the two arms ran the same model. The fingerprint is a SHA-256 over the
+  /// canonical JSON of {tag, digest, sampling settings}, which is the thing an
+  /// A/B comparison must actually be equal on. See lib/ai/crew/provenance.ts.
+  inferenceFingerprint String?            @map("inference_fingerprint")
+  modelTag             String?            @map("model_tag")
+  /// NULL is a legitimate, common value — the installed Ollama did not expose a
+  /// digest — and it is reported as `tag_matched_only` rather than promoted.
+  modelDigest          String?            @map("model_digest")
+  modelVerification    ModelVerification? @map("model_verification")
+
+  /// The multi-agent run's own account of itself. All NULL on a single-agent
+  /// run, which has no critic, no agents and no revision loop — `not_applicable`
+  /// as an absence rather than as a magic string.
+  ///
+  /// `qaState` is a plain String holding one of lib/ai/crew/provenance.ts's
+  /// canonical QaState values. A String and not an enum for the reason Job.type
+  /// and AuditLog.action are: the vocabulary is defined on the far side of a
+  /// process boundary (the Python sidecar, which is upgraded independently of
+  /// this repo), and a second definition here would be a second thing to keep in
+  /// step — with a failed write, not a clear error, when they drifted.
+  qaState          String? @map("qa_state")
+  /// QA REVISION cycles — the INNER loop. Never merged with `attempts`.
+  qaRevisionRounds Int?    @map("qa_revision_rounds")
+  /// Total Writer + Editor + QA calls. The cost figure.
+  agentCalls       Int?    @map("agent_calls")
+  /// Wall-clock ms the sidecar reported across every call this run made. Distinct
+  /// from `durationMs`, which is the whole run including gates and persistence.
+  agentLatencyMs   Int?    @map("agent_latency_ms")
+
+  /// A usable candidate exists but a stage did not complete — an Editor that
+  /// failed, or a QA that could not run. NULLABLE, so a run that recorded
+  /// nothing reads as unknown rather than as "not degraded".
+  degraded       Boolean? @map("degraded")
+  /// Which stages degraded, named. Empty when nothing did.
+  degradedStages String[] @map("degraded_stages")
 
   startedAt   DateTime  @map("started_at")
   completedAt DateTime? @map("completed_at")
@@ -1246,6 +1463,10 @@ model GenerationRun {
   /// "Show me every channel version of this topic's generation."
   @@index([contentGroupId])
   @@index([generationBatchId])
+  /// The A/B report's exposure half: every run ASSIGNED to an arm, newest first,
+  /// including the ones that produced no post. NULL for every non-experiment
+  /// run, so the index covers only what the report reads.
+  @@index([experimentKey, experimentArm, startedAt(sort: Desc)])
   @@map("generation_runs")
 }
 

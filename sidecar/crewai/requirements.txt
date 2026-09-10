@@ -1,0 +1,13 @@
+# The sidecar's ONLY declared dependency.
+#
+# Pinned exactly, and to the version validated on the Mac (CrewAI 1.15.18,
+# Python 3.13). The HTTP layer is stdlib `http.server` on purpose — two
+# endpoints and one caller do not need a web framework, and every extra package
+# is one more thing that runs at import with this process's privileges and one
+# more row in the licence inventory.
+#
+# `pip install -r requirements.txt` then `pip freeze > requirements.lock`, and
+# review the lock rather than this file: a transitive dependency is what a
+# licence audit and an outbound-destination audit actually have to cover. Both
+# audits are re-run on every bump — see README.md §5.
+crewai==1.15.18

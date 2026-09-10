@@ -1275,6 +1275,7 @@ describe("classifyBulkFailure", () => {
       LLM_CONFIG_NOT_FOUND: "configuration",
       PROVIDER_CONFIG_MISSING: "configuration",
       POST_TOO_LONG_WITH_URL: "channel_limit",
+      MULTI_AGENT_BUDGET_EXHAUSTED: "time_budget",
       NOT_FOUND: "access",
       FORBIDDEN: "access",
       INVALID_CHANNEL: "access",

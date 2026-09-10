@@ -10,6 +10,8 @@ import {
   type PostingWindowEntry,
 } from "@/lib/scheduling/posting-windows";
 import { generatePostFromContext } from "@/lib/services/ai/generate-draft-post.service";
+import { resolveStrategyForRequest } from "@/lib/services/ai/resolve-strategy-for-request.service";
+import type { ResolvedStrategy } from "@/lib/ai/strategy/resolve-strategy";
 import {
   COMPANY_CONTENT_SOURCE_ID,
   contentMixTotal,
@@ -217,6 +219,11 @@ export interface GenerateWeeklyScheduleDeps {
   db?: GenerateWeeklyScheduleDb;
   buildContext?: typeof buildGenerationContextForCompany;
   generate?: typeof generatePostFromContext;
+  /**
+   * Resolves which orchestration this week's posts use. Injected in tests so the
+   * A/B decision can be exercised without a settings table.
+   */
+  resolveStrategy?: typeof resolveStrategyForRequest;
   /** Injected in tests so week boundaries are deterministic. */
   now?: () => Date;
   /**
@@ -241,6 +248,11 @@ interface FillContext {
   summary: WeeklyScheduleSummary;
   buildContext: typeof buildGenerationContextForCompany;
   generate: typeof generatePostFromContext;
+  /**
+   * The week's strategy, decided once for the whole schedule before any post is
+   * written. Carried on the fill context so no fill loop can re-decide it.
+   */
+  strategy: ResolvedStrategy;
   /** Soft deadline hook — stops the fill loop between posts at the cron time budget. */
   shouldStop: () => boolean;
 }
@@ -284,6 +296,7 @@ export async function generateWeeklySchedule(
   const db: GenerateWeeklyScheduleDb = deps.db ?? prisma;
   const buildContext = deps.buildContext ?? buildGenerationContextForCompany;
   const generate = deps.generate ?? generatePostFromContext;
+  const resolveStrategy = deps.resolveStrategy ?? resolveStrategyForRequest;
   const shouldStop = deps.shouldStop ?? (() => false);
 
   const weekStart = nextWeekStart(deps.now ? deps.now() : new Date());
@@ -414,6 +427,43 @@ export async function generateWeeklySchedule(
 
   const budget: RunBudget = { remaining: MAX_GENERATIONS_PER_RUN };
 
+  /**
+   * The strategy for every post this week's schedule produces, resolved ONCE.
+   *
+   * ── Why the unit is the weekly schedule ────────────────────────────────────
+   *
+   * Cron is the one entry point with no per-post payload to write a decision
+   * into: it is a global sweep, so there is nothing that could carry a
+   * per-generation assignment across a retry. The unit therefore has to be
+   * something that already exists before any generation starts and is stable
+   * across every resumption of the week — and `schedule.id` is the only
+   * identifier that qualifies. A content group would not: cron posts have none,
+   * and the claimed article is not known until the generation is under way.
+   *
+   * The consequence is honest and worth stating: cron is CLUSTER-RANDOMIZED by
+   * company-week, not randomized per post. One company's whole week goes to one
+   * arm. That is a real statistical cost — fewer effective units than the post
+   * count suggests — and it buys the property that matters more here, which is
+   * that a mid-week resumption cannot split a week across both arms and make its
+   * posts incomparable with each other.
+   *
+   * Determinism does the work a payload does elsewhere: the same schedule id and
+   * the same experiment key always yield the same arm, so a run that stops at
+   * its budget and resumes tomorrow continues in the arm it started in. The one
+   * thing that can move it is an admin changing the settings mid-week, and for a
+   * sweep with no payload there is nowhere to freeze that against.
+   */
+  const strategy = await resolveStrategy({
+    stableUnitId: schedule.id,
+    // Cron never names a model — it uses the admin default — so there is no
+    // explicit choice to exclude it from the experiment.
+    hasExplicitLlmConfig: false,
+  });
+  console.info(
+    `[cron] weekly schedule ${schedule.id}: strategy=${strategy.strategy} ` +
+      `source=${strategy.source}${strategy.experimentKey ? ` experiment=${strategy.experimentKey}` : ""}`
+  );
+
   for (const config of schedulable) {
     const generatedBySource = new Map<string | null, number>();
     for (const row of existingPosts) {
@@ -433,6 +483,7 @@ export async function generateWeeklySchedule(
       summary,
       buildContext,
       generate,
+      strategy,
       shouldStop,
     };
 
@@ -464,8 +515,17 @@ async function fillChannelPooled(
   fill: FillContext,
   generatedBySource: ReadonlyMap<string | null, number>
 ): Promise<void> {
-  const { companyId, scheduleId, weekStart, config, budget, summary, buildContext, generate } =
-    fill;
+  const {
+    companyId,
+    scheduleId,
+    weekStart,
+    config,
+    budget,
+    summary,
+    buildContext,
+    generate,
+    strategy,
+  } = fill;
   // Decided at the gate: the weekly target already capped at the per-channel
   // ceiling and at the number of days this channel configured.
   const target = config.target;
@@ -502,6 +562,11 @@ async function fillChannelPooled(
       // which is what lets autoApprovePosts tell a system draft apart from a
       // human's own WIP draft on a fully_automated channel.
       initialStatus: "draft",
+      // The week's strategy, decided once for the whole schedule before any post
+      // was written — see the resolution note in generateWeeklySchedule. No fill
+      // loop re-decides it, which is what keeps a week from splitting arms when a
+      // run stops at its budget and resumes tomorrow.
+      resolvedStrategy: strategy,
       // Descriptive only, for the generation trace: the `scheduleId` above
       // already derives `cron`, and this adds how the article window was ordered.
       trace: { trigger: "cron", priority: contextResult.priority },
@@ -566,8 +631,17 @@ async function fillChannelFromMix(
   mix: readonly MixQuota[],
   existing: ReadonlyMap<string | null, number>
 ): Promise<void> {
-  const { companyId, scheduleId, weekStart, config, budget, summary, buildContext, generate } =
-    fill;
+  const {
+    companyId,
+    scheduleId,
+    weekStart,
+    config,
+    budget,
+    summary,
+    buildContext,
+    generate,
+    strategy,
+  } = fill;
   // The channel's week, split along the company's recipe. contentMixTotal of the
   // result is the channel's target — scaleMixToTotal hits the number exactly —
   // except for an all-zero recipe, which has no proportions to apply and
@@ -646,6 +720,9 @@ async function fillChannelFromMix(
       // human's own WIP draft on a fully_automated channel.
       initialStatus: "draft",
       contentSourceId: due.sourceId,
+      // The week's strategy, decided once by the caller — see the resolution
+      // note there. Every post of this schedule uses the same one.
+      resolvedStrategy: strategy,
       // Descriptive only, for the generation trace — see the pooled path above.
       trace: { trigger: "cron", priority: contextResult.priority },
     });

@@ -38,11 +38,19 @@ import {
 } from "@/lib/queue/topic-generation-payload";
 import type { Prisma } from "@prisma/client";
 
-/** The request, before the group id is minted onto it. */
+/**
+ * The request, before the group id is minted onto it.
+ *
+ * `contentGroupId` is accepted OPTIONALLY, which it did not used to be. The
+ * caller needs it before this call now: the A/B arm is assigned per content
+ * group, so the route has to mint the group in order to resolve a strategy at
+ * all, and it then has to be the same group the job runs under. Omitted, one is
+ * minted here exactly as before.
+ */
 export type TopicGenerationRequest = Omit<
   TopicGenerationPayload,
   "slug" | "userId" | "contentGroupId"
->;
+> & { contentGroupId?: string };
 
 export interface EnqueuedTopicGeneration {
   jobId: string;
@@ -80,7 +88,10 @@ export async function enqueueTopicGeneration(
   const access = await resolveAccess(slug, userId, isGlobalAdmin);
   if (!access) return { success: false, code: "NOT_FOUND" };
 
-  const contentGroupId = newContentGroupId();
+  // The caller's group id wins. It has to: when the route resolved an A/B arm it
+  // hashed THIS id, and minting a different one here would run the job under a
+  // group whose assignment nobody computed.
+  const contentGroupId = request.contentGroupId ?? newContentGroupId();
 
   // Validated on the way in as well as on the way out. The payload crosses a
   // process boundary, so the moment to find out it is malformed is now — while

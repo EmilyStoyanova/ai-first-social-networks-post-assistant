@@ -57,6 +57,7 @@ import {
   type TopicGenerationOutcome,
 } from "./generate-topic-across-channels.service";
 import type { ManualContentSourceRef } from "@/lib/ai/manual-content-source";
+import type { ResolvedStrategy } from "@/lib/ai/strategy/resolve-strategy";
 import { createAuditLog, AUDIT_ACTIONS } from "@/lib/services/audit/audit-log.service";
 import {
   COMPANY_CONTENT_SOURCE_ID,
@@ -194,7 +195,11 @@ export type BulkFailureReason =
   | "provider_error"
   | "configuration"
   | "channel_limit"
-  | "access";
+  | "access"
+  // Multi-agent only: the run stopped because too little worker budget remained
+  // to start another Writer→Editor→QA attempt. Not a provider fault — a clean
+  // stop that a later run (with a fresh budget) can complete.
+  | "time_budget";
 
 export interface BulkGenerationFailure {
   /** 1-based position of the TOPIC this attempt was for. */
@@ -385,6 +390,24 @@ export interface BulkGeneratePostsDeps {
   /** What an earlier attempt of this batch already wrote. */
   resume?: BulkResumeState;
   /**
+   * The strategy assigned to one topic, looked up BY ITS CONTENT GROUP ID.
+   *
+   * Keyed by the group id rather than by the topic's index, and that is not a
+   * stylistic choice. The A/B arm was assigned by hashing the content group id,
+   * so keying the lookup on the same value makes the arm follow the unit it was
+   * computed from — by construction, with no ordering to keep in step.
+   *
+   * Index-keying would be wrong here in a way that is easy to miss: a resumed
+   * run takes some group ids from its recorded progress and mints the rest, so a
+   * counter over the payload's list desynchronises the moment a retry skips a
+   * completed topic, and topics would silently swap arms mid-batch.
+   *
+   * Returns undefined for a topic the payload has no assignment for (a legacy
+   * payload, or a group minted by a fallback), which the generation service
+   * reads as the single-agent default.
+   */
+  strategyForContentGroup?: (contentGroupId: string) => ResolvedStrategy | undefined;
+  /**
    * Reads the channel's posting windows so slots land at its usual hour — and so
    * a channel with none is refused as `NO_POSTING_WINDOWS` rather than scheduled
    * at an hour nobody chose. Both the check and the plan use this one reader.
@@ -508,6 +531,8 @@ export function classifyBulkFailure(code: GenerateDraftPostErrorCode): BulkFailu
       return "configuration";
     case "POST_TOO_LONG_WITH_URL":
       return "channel_limit";
+    case "MULTI_AGENT_BUDGET_EXHAUSTED":
+      return "time_budget";
     case "NOT_FOUND":
     case "FORBIDDEN":
     case "INVALID_CHANNEL":
@@ -524,6 +549,7 @@ const DEFAULT_MESSAGES: Record<BulkFailureReason, string> = {
   configuration: "No usable AI model is configured for this generation.",
   channel_limit: "The generated post exceeded the channel's character limit.",
   access: "This company or channel is not available.",
+  time_budget: "Multi-agent generation ran out of time before it could finish. Try again.",
 };
 
 // ─── Service ───────────────────────────────────────────────────────────────────
@@ -914,6 +940,10 @@ export async function bulkGeneratePosts(
             includeSourceLinkOverride: input.includeSourceLinkOverride,
             autoGenerateImageOverride: input.autoGenerateImageOverride,
             llmConfigId: input.llmConfigId,
+            // This topic's assignment, found by the group id it was hashed from.
+            // Undefined for a legacy payload, which reads as the single-agent
+            // default — the behaviour that payload was queued under.
+            resolvedStrategy: deps.strategyForContentGroup?.(contentGroupId),
             // The topic an earlier attempt settled on, so the channels still
             // missing continue THAT story instead of each choosing a new one.
             anchor: deps.resume?.anchors[topicIndex] ?? null,

@@ -30,6 +30,7 @@
 
 import { z } from "zod";
 import { BULK_CHANNELS } from "./bulk-generation-payload";
+import { resolvedStrategySchema } from "@/lib/ai/strategy/resolve-strategy";
 
 const channelSchema = z
   .string()
@@ -62,10 +63,33 @@ export const topicGenerationPayloadSchema = z
      */
     contentGroupId: z.string().min(1),
     /**
-     * Every channel to write, in attempt order. At least two: one channel is
-     * answered inline and never reaches the queue.
+     * Every channel to write, in attempt order.
+     *
+     * At least ONE, not two. It used to be two, because a single channel always
+     * fitted inside the function cap and was therefore answered inline. That
+     * stopped being universally true when multi-agent generation arrived: the
+     * CrewAI sidecar binds loopback on the Mac worker, so a serverless function
+     * has no sidecar to dial and a one-channel MULTI run has to be queued like
+     * any other. A one-channel SINGLE run is still answered inline, unchanged.
      */
-    channels: z.array(channelSchema).min(2).max(BULK_CHANNELS.length),
+    channels: z.array(channelSchema).min(1).max(BULK_CHANNELS.length),
+    /**
+     * Which orchestration writes this topic, decided before the job was queued.
+     *
+     * The load-bearing field for A/B integrity. It is resolved once, at the
+     * request, and obeyed here — so a retry, a duplicate delivery or a worker
+     * wake-up cannot land this topic in the other arm. Every channel version of
+     * the topic shares it, which is why the arm is assigned per content group
+     * rather than per post.
+     *
+     * OPTIONAL, and absent means `SINGLE_BY_DEFAULT`. Not for new callers'
+     * convenience but for the jobs already in the queue when this deploys: a
+     * payload written by the previous version has no such field, and under
+     * `.strict()` a required one would fail every one of them. Absent therefore
+     * means "the behaviour that payload was written under", which is precisely
+     * the single-agent default.
+     */
+    resolvedStrategy: resolvedStrategySchema.optional(),
 
     // ── Identical to the synchronous generate route ─────────────────────────
     contentLanguage: z.enum(["en", "bg"]).optional(),

@@ -171,7 +171,13 @@ describe("enqueueTopicGeneration — the plan", () => {
 });
 
 describe("enqueueTopicGeneration — refusing a request that cannot run", () => {
-  it("refuses a single channel: that path is answered inline", async () => {
+  it("accepts a single channel — a one-channel multi-agent run has to be queued", async () => {
+    // This used to be refused: one channel always fitted inside the function cap
+    // and was answered inline. That stopped being universally true when
+    // multi-agent generation arrived — the CrewAI sidecar is loopback-only on
+    // the Mac worker, so a serverless function has no sidecar to dial and a
+    // one-channel MULTI run must be queued. A one-channel SINGLE run is still
+    // answered inline by the route and never reaches here.
     const { deps, enqueues } = makeDeps();
 
     const result = await enqueueTopicGeneration(
@@ -182,10 +188,8 @@ describe("enqueueTopicGeneration — refusing a request that cannot run", () => 
       deps
     );
 
-    assert.equal(result.success, false);
-    if (result.success) return;
-    assert.equal(result.code, "INVALID_PAYLOAD");
-    assert.equal(enqueues().length, 0);
+    assert.equal(result.success, true);
+    assert.equal(enqueues().length, 1);
   });
 
   it("refuses a repeated channel", async () => {
