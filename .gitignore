@@ -31,3 +31,10 @@ tsconfig.tsbuildinfo
 
 .vercel
 .env*
+
+# Python — CrewAI sidecar build artifacts
+__pycache__/
+*.py[cod]
+
+# Python virtualenvs
+.venv-instaloader/
