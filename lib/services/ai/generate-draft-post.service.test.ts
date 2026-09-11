@@ -3399,6 +3399,59 @@ describe("generatePostFromContext — failed multi-agent run keeps objective pro
     if (!result.success) assert.equal(result.code, "MULTI_AGENT_BUDGET_EXHAUSTED");
   });
 
+  it("maps a QA non-convergence to its own code, NOT LLM_PROVIDER_ERROR", async () => {
+    // The production misclassification: every model call in that run succeeded
+    // and the REVIEWER is what refused, but the failure reached the user as
+    // "the AI provider returned an error" and was recorded on the
+    // GenerationRun as errorCode=LLM_PROVIDER_ERROR — which is what an
+    // operator then investigated as a sidecar/Ollama outage.
+    const { deps } = makeDeps();
+    deps.loadArticleBrief = async () => null as never;
+    deps.buildMultiAgentLoop = throwingMultiAgent(
+      new MultiAgentGenerationError(
+        "QA_NOT_CONVERGED",
+        "QA rejected every candidate across 3 attempt(s) (6 QA repair re-prompt(s) spent on malformed verdicts).",
+        undefined,
+        { ...PARTIAL, degradedStages: ["qa_not_converged"] }
+      )
+    ) as never;
+
+    const result = await generatePostFromContext(
+      ARTICLE_CONTEXT(),
+      "co-1",
+      { resolvedStrategy: MULTI_STRATEGY },
+      deps
+    );
+
+    assert.equal(result.success, false);
+    if (!result.success) {
+      assert.equal(result.code, "QA_NOT_CONVERGED");
+      assert.notEqual(result.code, "LLM_PROVIDER_ERROR");
+    }
+  });
+
+  it("keeps a genuine sidecar/transport failure on LLM_PROVIDER_ERROR", async () => {
+    // The other half of the same rule: only the QA verdict is reclassified. A
+    // timeout, an unreachable sidecar or a model that would not answer is still
+    // a provider fault and must still read as one.
+    for (const code of ["CREW_SIDECAR_UNAVAILABLE", "CREW_SIDECAR_NOT_CONFIGURED"] as const) {
+      const { deps } = makeDeps();
+      deps.loadArticleBrief = async () => null as never;
+      deps.buildMultiAgentLoop = throwingMultiAgent(
+        new MultiAgentGenerationError(code, "the sidecar did not answer")
+      ) as never;
+
+      const result = await generatePostFromContext(
+        ARTICLE_CONTEXT(),
+        "co-1",
+        { resolvedStrategy: MULTI_STRATEGY },
+        deps
+      );
+      assert.equal(result.success, false);
+      if (!result.success) assert.equal(result.code, "LLM_PROVIDER_ERROR", code);
+    }
+  });
+
   it("writes no objective measurement when no attempt completed (partial provenance absent)", async () => {
     const { deps } = makeDeps();
     const { store } = makeStore();

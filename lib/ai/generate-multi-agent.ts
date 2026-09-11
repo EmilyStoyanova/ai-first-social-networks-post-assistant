@@ -75,6 +75,7 @@ import {
 import {
   CrewSidecarClient,
   CrewSidecarError,
+  DEFAULT_MAX_QA_REPAIRS,
   DEFAULT_MAX_QA_ROUNDS,
   type CrewPostOutcome,
 } from "./crew/crew-sidecar.client";
@@ -113,8 +114,12 @@ export const MIN_MULTI_AGENT_ATTEMPT_BUDGET_MS = 1_500_000;
  * Three genuinely different failures get three genuinely different codes, and
  * conflating any two of them would mislead:
  *   • `CREW_SIDECAR_UNAVAILABLE`  — infrastructure. Retry helps.
- *   • `QA_NOT_CONVERGED`          — the critic refused, repeatedly and
- *                                    unactionably. Retry probably does not help.
+ *   • `QA_NOT_CONVERGED`          — the critic refused, repeatedly, and its own
+ *                                    QA repair re-prompts could not turn that
+ *                                    into something actionable. NOT a provider
+ *                                    fault: the service maps it to its own
+ *                                    `QA_NOT_CONVERGED` code, never to
+ *                                    `LLM_PROVIDER_ERROR`.
  *   • `CREW_SIDECAR_NOT_CONFIGURED` — this process has no sidecar and must not
  *                                    have attempted the call at all.
  *   • `MULTI_AGENT_BUDGET_EXHAUSTED` — a fresh outer attempt was NOT started
@@ -200,6 +205,17 @@ export interface MultiAgentDeps {
   /** Max QA REVISION cycles. Two by default (requirement 5). */
   maxQaRounds?: number;
   /**
+   * Max QA REPAIR calls on ONE candidate — re-asks of the same critic about the
+   * same unchanged post after a verdict that broke the QA contract. Two by
+   * default.
+   *
+   * This is what keeps a malformed verdict from costing an OUTER attempt: the
+   * repair happens inside the sidecar, on the candidate already written, so a
+   * `rejected_unroutable` that reaches this loop has already survived its
+   * repairs and is a real refusal rather than a formatting slip.
+   */
+  maxQaRepairs?: number;
+  /**
    * ms of generation budget still left, read fresh each time it is asked.
    * Defaults to the ambient request deadline — `+Infinity` outside one, so the
    * per-attempt gate below is inert on the interactive path and in tests that
@@ -226,6 +242,7 @@ export interface MultiAgentDeps {
  */
 export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
   const maxQaRounds = deps.maxQaRounds ?? DEFAULT_MAX_QA_ROUNDS;
+  const maxQaRepairs = deps.maxQaRepairs ?? DEFAULT_MAX_QA_REPAIRS;
   const readRemainingBudgetMs = deps.remainingBudgetMs ?? ambientRemainingBudgetMs;
   const minAttemptBudgetMs = deps.minAttemptBudgetMs ?? MIN_MULTI_AGENT_ATTEMPT_BUDGET_MS;
 
@@ -257,6 +274,14 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
     let writerCalls = 0;
     let editorCalls = 0;
     let qaCalls = 0;
+    /**
+     * QA calls the sidecar spent re-asking an unchanged candidate after a
+     * verdict that broke the QA contract. Summed across outer attempts and
+     * reported in the terminal message, so "the critic could not phrase a
+     * verdict" is distinguishable in the logs from "the critic kept refusing a
+     * post it could describe perfectly well". Already inside `qaCalls`.
+     */
+    let qaRepairCalls = 0;
     let maxQaRevisionRounds = 0;
     let latencyMs = 0;
     const degradedStages = new Set<string>();
@@ -357,6 +382,7 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
           attempt,
           maxAttempts,
           maxQaRounds,
+          maxQaRepairs,
           previousRejection: lastRejectionReason,
         },
       };
@@ -437,6 +463,7 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
       writerCalls += outcome.agentCalls.writer;
       editorCalls += outcome.agentCalls.editor;
       qaCalls += outcome.agentCalls.qa;
+      qaRepairCalls += outcome.qaRepairs;
       latencyMs += outcome.latencyMs;
       maxQaRevisionRounds = Math.max(maxQaRevisionRounds, outcome.qaRevisions);
       outcome.degradedStages.forEach((s) => degradedStages.add(s));
@@ -476,6 +503,7 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
 
       console.info(
         `[crew-diag] attempt ${attempt} qa=${outcome.qaState} revisions=${outcome.qaRevisions} ` +
+          `qaRepairs=${outcome.qaRepairs} ` +
           `gates=${verdict.needsRetry ? (verdict.rejectionReason ?? "retry") : "clean"} ` +
           `accepted=${accepted} willRetry=${willRetry}`
       );
@@ -486,6 +514,7 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
         rawProviderPayload: {
           qaState: outcome.qaState,
           qaRevisions: outcome.qaRevisions,
+          qaRepairs: outcome.qaRepairs,
           qaIssues: outcome.qaIssues,
           agentCalls: outcome.agentCalls,
           latencyMs: outcome.latencyMs,
@@ -524,7 +553,8 @@ export function bindMultiAgent(deps: MultiAgentDeps): typeof generateWithRetry {
       throw new MultiAgentGenerationError(
         "QA_NOT_CONVERGED",
         sawUnroutableRejection
-          ? `QA rejected every candidate across ${attemptsMade} attempt(s) without naming an actionable dimension.`
+          ? `QA rejected every candidate across ${attemptsMade} attempt(s) ` +
+              `(${qaRepairCalls} QA repair re-prompt(s) spent on malformed verdicts).`
           : `QA did not reach a passing verdict in ${attemptsMade} attempt(s).`,
         undefined,
         partialProvenanceSnapshot("qa_not_converged")

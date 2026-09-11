@@ -19,7 +19,7 @@ function passResponse(overrides: Partial<CrewPostResponse> = {}): CrewPostRespon
       raw: '{"text":"a post","coreMessage":"a claim"}',
       json: { text: "a post", hashtags: [], coreMessage: "a claim" },
     },
-    qa: { finalDecision: "pass", revisions: 0, issues: [], routes: [] },
+    qa: { finalDecision: "pass", revisions: 0, repairs: 0, issues: [], routes: [] },
     agentCalls: { writer: 1, editor: 1, qa: 1 },
     latencyMs: 1200,
     model: { tag: "qwen3.5:35b-a3b-q4_K_M", digest: "sha256:abc" },
@@ -42,6 +42,7 @@ describe("crewPostResponseSchema", () => {
         qa: {
           finalDecision: "looks_fine" as unknown as CrewPostResponse["qa"]["finalDecision"],
           revisions: 0,
+          repairs: 0,
           issues: [],
           routes: [],
         },
@@ -118,6 +119,60 @@ describe("crewPostResponseSchema", () => {
   });
 });
 
+describe("the QA repair count", () => {
+  it("defaults to 0 when a sidecar older than this contract omits it", () => {
+    // The ONE field on this strict schema allowed to be absent: a sidecar that
+    // makes no repairs and a sidecar that made zero are the same fact. Contrast
+    // `finalDecision`, where a default would manufacture a verdict.
+    const body = passResponse() as unknown as Record<string, unknown>;
+    const qa = { ...(body.qa as Record<string, unknown>) };
+    delete qa.repairs;
+    const parsed = crewPostResponseSchema.safeParse({ ...body, qa });
+    assert.equal(parsed.success, true);
+    assert.equal(parsed.success && parsed.data.qa.repairs, 0);
+  });
+
+  it("counts repairs toward the QA calls a run must have made", () => {
+    // A repair IS a QA call. A run claiming two repairs with only one QA call
+    // is reporting an arithmetic that did not happen.
+    const short = passResponse({
+      qa: { finalDecision: "pass", revisions: 0, repairs: 2, issues: [], routes: [] },
+      agentCalls: { writer: 1, editor: 1, qa: 1 },
+    });
+    const problem = validateCallCounts(short, 2);
+    assert.ok(problem, "a short QA count with repairs reported must be refused");
+    assert.match(problem.problem, /at least 3 QA call\(s\)/);
+
+    const honest = passResponse({
+      qa: { finalDecision: "pass", revisions: 0, repairs: 2, issues: [], routes: [] },
+      agentCalls: { writer: 1, editor: 1, qa: 3 },
+    });
+    assert.equal(validateCallCounts(honest, 2), null);
+  });
+
+  it("CATCHES a repair loop that ran past its bound", () => {
+    // An unbounded repair loop would spend a whole sidecar budget re-asking one
+    // critic the same question — caught here rather than found as an hour-long
+    // request.
+    const r = passResponse({
+      qa: { finalDecision: "pass", revisions: 0, repairs: 3, issues: [], routes: [] },
+      agentCalls: { writer: 1, editor: 1, qa: 4 },
+    });
+    const problem = validateCallCounts(r, 2, 2);
+    assert.ok(problem);
+    assert.match(problem.problem, /above the 2 allowed/);
+  });
+
+  it("allows the bound ONCE PER EVALUATION, not once per run", () => {
+    // 1 revision → 2 QA evaluations → up to 2 repairs each.
+    const r = passResponse({
+      qa: { finalDecision: "pass", revisions: 1, repairs: 4, issues: [], routes: ["editor"] },
+      agentCalls: { writer: 1, editor: 2, qa: 6 },
+    });
+    assert.equal(validateCallCounts(r, 2, 2), null);
+  });
+});
+
 describe("validateCallCounts — requirement 6, as arithmetic", () => {
   it("passes the clean 3-call run", () => {
     assert.equal(validateCallCounts(passResponse(), 2), null);
@@ -126,7 +181,7 @@ describe("validateCallCounts — requirement 6, as arithmetic", () => {
   it("passes an editor-routed round: 3 + 2R", () => {
     // Writer → Editor → QA → [Editor → QA] = 1 writer, 2 editor, 2 qa.
     const r = passResponse({
-      qa: { finalDecision: "pass", revisions: 1, issues: [], routes: ["editor"] },
+      qa: { finalDecision: "pass", revisions: 1, repairs: 0, issues: [], routes: ["editor"] },
       agentCalls: { writer: 1, editor: 2, qa: 2 },
     });
     assert.equal(validateCallCounts(r, 2), null);
@@ -135,7 +190,7 @@ describe("validateCallCounts — requirement 6, as arithmetic", () => {
   it("passes a writer-routed round: 3 + 3R, with the Editor re-entered", () => {
     // Writer → Editor → QA → [Writer → Editor → QA] = 2 writer, 2 editor, 2 qa.
     const r = passResponse({
-      qa: { finalDecision: "pass", revisions: 1, issues: [], routes: ["writer"] },
+      qa: { finalDecision: "pass", revisions: 1, repairs: 0, issues: [], routes: ["writer"] },
       agentCalls: { writer: 2, editor: 2, qa: 2 },
     });
     assert.equal(validateCallCounts(r, 2), null);
@@ -145,7 +200,7 @@ describe("validateCallCounts — requirement 6, as arithmetic", () => {
     // The regression the whole function exists for: Writer revised and went
     // straight back to QA, so the Editor count never moved off its initial 1.
     const r = passResponse({
-      qa: { finalDecision: "pass", revisions: 1, issues: [], routes: ["writer"] },
+      qa: { finalDecision: "pass", revisions: 1, repairs: 0, issues: [], routes: ["writer"] },
       agentCalls: { writer: 2, editor: 1, qa: 2 },
     });
     const problem = validateCallCounts(r, 2);
@@ -156,13 +211,25 @@ describe("validateCallCounts — requirement 6, as arithmetic", () => {
   it("CATCHES the same bypass at R=2, all writer-routed", () => {
     // 3 + 3R at R=2 is 2 writer + 3 editor + 3 qa... writer=3, editor=3, qa=3.
     const honest = passResponse({
-      qa: { finalDecision: "pass", revisions: 2, issues: [], routes: ["writer", "writer"] },
+      qa: {
+        finalDecision: "pass",
+        revisions: 2,
+        repairs: 0,
+        issues: [],
+        routes: ["writer", "writer"],
+      },
       agentCalls: { writer: 3, editor: 3, qa: 3 },
     });
     assert.equal(validateCallCounts(honest, 2), null);
 
     const bypassed = passResponse({
-      qa: { finalDecision: "pass", revisions: 2, issues: [], routes: ["writer", "writer"] },
+      qa: {
+        finalDecision: "pass",
+        revisions: 2,
+        repairs: 0,
+        issues: [],
+        routes: ["writer", "writer"],
+      },
       agentCalls: { writer: 3, editor: 2, qa: 3 },
     });
     assert.match(validateCallCounts(bypassed, 2)!.problem, /Editor was bypassed/);
@@ -173,6 +240,7 @@ describe("validateCallCounts — requirement 6, as arithmetic", () => {
       qa: {
         finalDecision: "pass",
         revisions: 3,
+        repairs: 0,
         issues: [],
         routes: ["writer", "editor", "writer"],
       },
@@ -184,7 +252,7 @@ describe("validateCallCounts — requirement 6, as arithmetic", () => {
 
   it("CATCHES a revision count that disagrees with the routes named", () => {
     const r = passResponse({
-      qa: { finalDecision: "pass", revisions: 2, issues: [], routes: ["editor"] },
+      qa: { finalDecision: "pass", revisions: 2, repairs: 0, issues: [], routes: ["editor"] },
       agentCalls: { writer: 1, editor: 3, qa: 3 },
     });
     assert.match(validateCallCounts(r, 2)!.problem, /named 1 routes/);
@@ -192,7 +260,7 @@ describe("validateCallCounts — requirement 6, as arithmetic", () => {
 
   it("CATCHES a revision that produced no QA call — accepted without re-judging", () => {
     const r = passResponse({
-      qa: { finalDecision: "pass", revisions: 1, issues: [], routes: ["editor"] },
+      qa: { finalDecision: "pass", revisions: 1, repairs: 0, issues: [], routes: ["editor"] },
       agentCalls: { writer: 1, editor: 2, qa: 1 },
     });
     assert.match(validateCallCounts(r, 2)!.problem, /require at least 2 QA call/);
@@ -200,7 +268,7 @@ describe("validateCallCounts — requirement 6, as arithmetic", () => {
 
   it("allows a short QA count only when QA is reported unavailable", () => {
     const r = passResponse({
-      qa: { finalDecision: "unavailable", revisions: 0, issues: [], routes: [] },
+      qa: { finalDecision: "unavailable", revisions: 0, repairs: 0, issues: [], routes: [] },
       agentCalls: { writer: 1, editor: 1, qa: 0 },
       degradedStages: ["qa"],
     });
@@ -311,7 +379,9 @@ describe("resolveQaState", () => {
   it("passes a terminal verdict through", () => {
     for (const state of ["pass", "rejected_unroutable", "unavailable"] as const) {
       const r = resolveQaState(
-        passResponse({ qa: { finalDecision: state, revisions: 0, issues: [], routes: [] } })
+        passResponse({
+          qa: { finalDecision: state, revisions: 0, repairs: 0, issues: [], routes: [] },
+        })
       );
       assert.equal(r.ok, true);
       assert.equal(r.ok === true ? r.state : null, state);
@@ -323,7 +393,9 @@ describe("resolveQaState", () => {
     // to unavailable would claim QA never ran when it plainly did.
     for (const state of ["revise_writer", "revise_editor"] as const) {
       const r = resolveQaState(
-        passResponse({ qa: { finalDecision: state, revisions: 1, issues: [], routes: ["writer"] } })
+        passResponse({
+          qa: { finalDecision: state, revisions: 1, repairs: 0, issues: [], routes: ["writer"] },
+        })
       );
       assert.equal(r.ok, false);
       assert.equal(r.ok === false ? r.code : null, "non_converged");

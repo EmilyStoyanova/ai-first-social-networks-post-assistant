@@ -270,7 +270,15 @@ export type GenerateDraftPostErrorCode =
   // not a transport timeout — no CrewAI request was made and no rejected
   // candidate was accepted. Distinct from LLM_PROVIDER_ERROR so a budget
   // shortfall is never mistaken for a sidecar outage.
-  | "MULTI_AGENT_BUDGET_EXHAUSTED";
+  | "MULTI_AGENT_BUDGET_EXHAUSTED"
+  // Multi-agent only: the QA critic ran, refused every candidate, and its own
+  // repair re-prompts could not turn that refusal into something actionable.
+  // THE PROVIDER DID NOT FAIL — every model call succeeded — so this is not
+  // LLM_PROVIDER_ERROR, which would send an operator looking for a sidecar or
+  // an Ollama outage that never happened. Sibling of POST_FAILED_COMPLIANCE:
+  // the request was fine and the generator could not produce a post its own
+  // reviewer would accept.
+  | "QA_NOT_CONVERGED";
 
 export interface GenerateDraftPostFailure {
   success: false;
@@ -1574,6 +1582,21 @@ async function runGeneration(
         "[llm-diag] generation aborted → code=MULTI_AGENT_BUDGET_EXHAUSTED (maps to HTTP 503)"
       );
       return { success: false, code: "MULTI_AGENT_BUDGET_EXHAUSTED", message: err.message };
+    }
+
+    // Same reasoning, different fault: the provider answered every call, and
+    // the REVIEWER is what refused. Reporting that as LLM_PROVIDER_ERROR is what
+    // put "the AI provider returned an error" in front of a user whose Ollama
+    // was healthy the whole time, and errorCode=LLM_PROVIDER_ERROR on the
+    // GenerationRun an operator then investigated as an outage. Also ahead of
+    // the LlmProviderError branch, which MultiAgentGenerationError extends.
+    // The three genuinely infrastructural multi-agent codes
+    // (CREW_SIDECAR_UNAVAILABLE / CREW_SIDECAR_NOT_CONFIGURED, and every
+    // timeout, transport and model failure underneath them) deliberately fall
+    // through to it, unchanged.
+    if (err instanceof MultiAgentGenerationError && err.multiAgentCode === "QA_NOT_CONVERGED") {
+      console.warn("[llm-diag] generation aborted → code=QA_NOT_CONVERGED (maps to HTTP 409)");
+      return { success: false, code: "QA_NOT_CONVERGED", message: err.message };
     }
 
     // Diagnostic: the terminal error code the route maps to HTTP 502. No prompt,

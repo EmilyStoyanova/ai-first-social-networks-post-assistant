@@ -116,6 +116,18 @@ export interface CrewAttemptContext {
   /** Max QA REVISION cycles, i.e. cycles after the first QA evaluation. */
   maxQaRounds: number;
   /**
+   * Max QA REPAIR calls on ONE candidate — re-asks of the same critic about the
+   * same unchanged post, made because its previous verdict broke the QA
+   * contract (a "revise" naming no actionable dimension, or naming one with no
+   * feedback attached).
+   *
+   * A separate bound from `maxQaRounds` because they buy different things: a
+   * revision round rewrites the POST, a repair only re-asks for a well-formed
+   * VERDICT. Conflating them would make a formatting slip eat a revision the
+   * post may still need.
+   */
+  maxQaRepairs: number;
+  /**
    * Why the previous outer attempt was rejected, when there was one. The gate's
    * own reason, so the Writer is told what to change rather than merely to try
    * again.
@@ -221,6 +233,17 @@ export const crewPostResponseSchema = z
         finalDecision: qaStateSchema,
         /** QA REVISION cycles used — never the number of QA evaluations. */
         revisions: z.number().int().nonnegative(),
+        /**
+         * QA calls spent re-asking the SAME candidate after a verdict that broke
+         * the QA contract. Already included in `agentCalls.qa`.
+         *
+         * `.default(0)` rather than required, and it is the one field on this
+         * strict schema that is allowed to be absent: a sidecar older than this
+         * contract makes no repairs, so "the key is missing" and "zero repairs
+         * happened" are the same fact — unlike `finalDecision`, where a default
+         * would manufacture a verdict nobody gave.
+         */
+        repairs: z.number().int().nonnegative().default(0),
         issues: z.array(qaIssueSchema).default([]),
         /** Which agent each revision was routed to, in order. */
         routes: z.array(z.enum(["writer", "editor"])).default([]),
@@ -297,6 +320,14 @@ export interface CallCountProblem {
 }
 
 /**
+ * Max QA REPAIR calls on one candidate. Two, matching the sidecar's own
+ * `DEFAULT_MAX_QA_REPAIRS` — and kept in this module, which is the one both
+ * ends of the boundary read, so the bound the caller sends and the bound the
+ * counter check enforces can never be two different numbers.
+ */
+export const DEFAULT_MAX_QA_REPAIRS = 2;
+
+/**
  * Checks the arithmetic a run reports about itself against the loop it claims
  * to have executed.
  *
@@ -312,21 +343,37 @@ export interface CallCountProblem {
  *     writer-routed round, plus one for each editor-routed round. A Flow that
  *     let a Writer revision go straight to QA would report a short Editor count
  *     and be refused here.
- *  4. Revisions never exceeded the bound the caller set.
+ *  4. Revisions never exceeded the bound the caller set, and neither did the
+ *     QA repair calls — an unbounded repair loop would spend a whole sidecar
+ *     budget re-asking one critic the same question.
  *
  * Returns null when the arithmetic holds.
  */
 export function validateCallCounts(
   response: CrewPostResponse,
-  maxQaRounds: number
+  maxQaRounds: number,
+  maxQaRepairs: number = DEFAULT_MAX_QA_REPAIRS
 ): CallCountProblem | null {
   const { writer, editor, qa } = response.agentCalls;
   const revisions = response.qa.revisions;
+  const repairs = response.qa.repairs;
   const routes = response.qa.routes;
 
   if (revisions > maxQaRounds) {
     return {
       problem: `QA reported ${revisions} revision cycles, above the ${maxQaRounds} allowed.`,
+    };
+  }
+  // Repairs are bounded PER QA EVALUATION, and a run makes `1 + revisions` of
+  // them. Checked so an unbounded repair loop — a critic re-asked forever
+  // because it never learns to name a dimension — is caught here rather than
+  // discovered as a run that spent an hour inside one sidecar call.
+  const maxRepairsForRun = maxQaRepairs * (1 + revisions);
+  if (repairs > maxRepairsForRun) {
+    return {
+      problem:
+        `QA reported ${repairs} repair call(s), above the ${maxRepairsForRun} allowed for ` +
+        `${1 + revisions} evaluation(s) at ${maxQaRepairs} repair(s) each.`,
     };
   }
   if (routes.length !== revisions) {
@@ -369,9 +416,12 @@ export function validateCallCounts(
     }
   }
 
-  if (!qaUnavailable && qa < 1 + revisions) {
+  // Every evaluation is one QA call, and every repair is one more on top.
+  if (!qaUnavailable && qa < 1 + revisions + repairs) {
     return {
-      problem: `${revisions} revision cycle(s) require at least ${1 + revisions} QA call(s), but ${qa} were reported.`,
+      problem:
+        `${revisions} revision cycle(s) and ${repairs} repair call(s) require at least ` +
+        `${1 + revisions + repairs} QA call(s), but ${qa} were reported.`,
     };
   }
 

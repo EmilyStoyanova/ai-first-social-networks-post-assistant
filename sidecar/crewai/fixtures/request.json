@@ -33,6 +33,7 @@
     "attempt": 1,
     "maxAttempts": 3,
     "maxQaRounds": 2,
+    "maxQaRepairs": 2,
     "previousRejection": null
   }
 }

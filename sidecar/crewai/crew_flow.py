@@ -64,11 +64,13 @@ from guards import assert_agent_posture
 # so each is testable without CrewAI or Ollama installed.
 from qa_verdict import (
     ADVISORY_DIMENSION_ORDER,
+    DEFAULT_MAX_QA_REPAIRS,
     QA_DIMENSION_ORDER,
     QA_VERDICT_RESPONSE_FORMAT,
     SEVERITY_ORDER,
     QaVerdict,
     parse_qa_reply,
+    qa_repair_instruction,
 )
 from inference_config import llm_kwargs
 from post_candidate import (
@@ -132,6 +134,13 @@ class RunCounters:
     editor: int = 0
     qa: int = 0
     revisions: int = 0
+    #: QA calls that re-asked the SAME candidate because the previous QA reply
+    #: broke its own contract. Counted separately from `revisions` — a revision
+    #: changes the post, a repair changes nothing but the critic's answer — and
+    #: reported to the caller, which is how a client can tell a run that needed
+    #: two extra QA calls from one that needed a whole extra outer attempt.
+    #: Already included in `qa`.
+    qa_repairs: int = 0
     routes: list[str] = field(default_factory=list)
     degraded_stages: list[str] = field(default_factory=list)
 
@@ -347,8 +356,11 @@ QA_JSON_CONTRACT = (
     + '>", "severity": '
     + " | ".join(f'"{severity}"' for severity in SEVERITY_ORDER)
     + ', "detail": "<what is wrong, in one sentence>" } ] }\n'
-    'Use "pass" only when nothing fails. When you use "revise" you MUST name at least one issue '
-    "with a dimension from that list — a rejection that names nothing cannot be acted on."
+    'Use "pass" only when nothing fails. When you use "revise" you MUST name EXACTLY ONE '
+    "blocking issue: one dimension from that list, and a `detail` that is one concrete sentence "
+    "saying what is wrong and what would fix it. A rejection that names no dimension, names a "
+    "dimension outside that list, or leaves `detail` empty cannot be acted on and will be "
+    "rejected and asked again."
 )
 
 # How to weigh the mined aspect/angle when judging. Delivered on EVERY QA call
@@ -426,6 +438,11 @@ def run_flow(request: dict[str, Any]) -> FlowResult:
     reqs = request["generationRequirements"]
     attempt_ctx = request.get("attemptContext") or {}
     max_qa_rounds = int(attempt_ctx.get("maxQaRounds", 2))
+    # QA-only re-prompts on ONE unchanged candidate, bounded separately from the
+    # revision rounds above: a revision rewrites the post, a repair only re-asks
+    # the critic. Absent on an older caller, which is why the default is here
+    # and not merely on the wire.
+    max_qa_repairs = int(attempt_ctx.get("maxQaRepairs", DEFAULT_MAX_QA_REPAIRS))
 
     inference = request["inferenceConfig"]
     # Two models off ONE pinned config, each constrained to the shape ITS stage
@@ -475,7 +492,7 @@ def run_flow(request: dict[str, Any]) -> FlowResult:
         raise StageFailure("writer", "The Writer produced no output.")
 
     candidate = _edit(editor, counters, draft, base_instructions)
-    verdict = _judge(qa_agent, counters, candidate, base_instructions)
+    verdict = _judge(qa_agent, counters, candidate, base_instructions, max_repairs=max_qa_repairs)
 
     # ── The revision cycles ─────────────────────────────────────────────────
     for round_index in range(1, max_qa_rounds + 1):
@@ -508,12 +525,18 @@ def run_flow(request: dict[str, Any]) -> FlowResult:
             )
 
         counters.revisions = round_index
-        verdict = _judge(qa_agent, counters, candidate, base_instructions)
+        verdict = _judge(
+            qa_agent, counters, candidate, base_instructions, max_repairs=max_qa_repairs
+        )
 
     # The loop ran out of rounds without a terminal verdict: the critic still
     # wants changes. That is not a pass, so it is reported as unroutable — a
     # non-converged attempt for the caller to spend an outer attempt on.
     if verdict.decision in {"revise_writer", "revise_editor"}:
+        # `contract_violation` is left None deliberately: this critic named a
+        # dimension every time and simply never stopped asking for changes.
+        # Nothing about its REPLY was malformed, so there is nothing for a
+        # repair re-prompt to name back to it.
         verdict = QaVerdict("rejected_unroutable", verdict.issues)
 
     # The transport boundary. The candidate must be a valid `PostCandidate`
@@ -578,24 +601,108 @@ def _edit(
     return edited
 
 
-def _judge(qa_agent: Agent, counters: RunCounters, candidate: str, base_instructions: str) -> QaVerdict:
-    """One QA pass. A QA that cannot run is `unavailable`, never a pass."""
+def _judge(
+    qa_agent: Agent,
+    counters: RunCounters,
+    candidate: str,
+    base_instructions: str,
+    *,
+    max_repairs: int = DEFAULT_MAX_QA_REPAIRS,
+) -> QaVerdict:
+    """One QA VERDICT on one candidate — re-asking the critic if it broke its own contract.
+
+    ── Why the repair loop is here and not one layer up ─────────────────────
+
+    A critic that answers "revise" without naming an actionable dimension has
+    said something the caller can neither accept (a critic ran and refused) nor
+    act on (nothing was named). Before this loop existed, that single malformed
+    sentence cost a whole OUTER attempt: the TypeScript loop threw the candidate
+    away and paid for a fresh Writer→Editor→QA pass — three to nine model calls
+    — to work around what was a formatting slip in one of them. Three such
+    attempts in a row ended the run as `QA_NOT_CONVERGED`, and the run was
+    reported as an AI provider outage.
+
+    So the repair is taken at the only place that can take it cheaply: the same
+    critic, the SAME unchanged candidate, one extra QA call, told explicitly
+    what was wrong with its previous answer. No Writer call, no Editor call, no
+    outer attempt.
+
+    ── What this loop must NOT do ───────────────────────────────────────────
+
+    It never converts a rejection into an approval. The repaired reply is parsed
+    by the same `parse_qa_reply` as any other and may come back `pass`,
+    `revise_*` or `rejected_unroutable` on its own merits — re-asking is not
+    pressure to agree, and `qa_repair_instruction` offers both answers.
+
+    It repairs only a CONTRACT breach (`verdict.contract_violation`). A verdict
+    that is unroutable for any other reason, and an `unavailable` QA that could
+    not be read at all, are left exactly as they were: there is nothing
+    malformed to name back, so a re-prompt would only spend calls.
+    """
+    verdict = _judge_once(qa_agent, counters, candidate, base_instructions)
+
+    repairs = 0
+    while verdict.contract_violation is not None and repairs < max_repairs:
+        repairs += 1
+        counters.qa_repairs += 1
+        print(
+            f"[crew-sidecar] qa verdict violated its contract "
+            f"({verdict.contract_violation}); re-asking the same candidate "
+            f"(repair {repairs}/{max_repairs})"
+        )
+        verdict = _judge_once(
+            qa_agent,
+            counters,
+            candidate,
+            base_instructions,
+            repair_note=qa_repair_instruction(verdict),
+        )
+
+    if verdict.contract_violation is not None:
+        # The repairs themselves could not produce a routable result. Recorded
+        # as its own degraded stage so the caller can tell this apart from a
+        # critic that converged on "still not good enough" — the two look
+        # identical in `finalDecision` and lead to different investigations.
+        print(
+            f"[crew-sidecar] qa still unroutable after {repairs} repair attempt(s) "
+            f"({verdict.contract_violation})"
+        )
+        counters.degrade("qa_contract")
+
+    return verdict
+
+
+def _judge_once(
+    qa_agent: Agent,
+    counters: RunCounters,
+    candidate: str,
+    base_instructions: str,
+    repair_note: str = "",
+) -> QaVerdict:
+    """One QA call. A QA that cannot run is `unavailable`, never a pass.
+
+    `repair_note`, when given, is placed FIRST — ahead of the post and the
+    rubric — because it is the instruction that overrides the previous answer,
+    and a correction buried after 2,000 tokens of brief is a correction the
+    model has already stopped reading.
+    """
     counters.qa += 1
+    parts = [
+        base_instructions,
+        "## Judge this post against the requirements above",
+        "",
+        candidate,
+        "",
+        QA_ASPECT_RUBRIC,
+        "",
+        QA_JSON_CONTRACT,
+    ]
+    if repair_note:
+        parts.insert(0, repair_note)
     try:
         reply = _run_single(
             qa_agent,
-            "\n\n".join(
-                [
-                    base_instructions,
-                    "## Judge this post against the requirements above",
-                    "",
-                    candidate,
-                    "",
-                    QA_ASPECT_RUBRIC,
-                    "",
-                    QA_JSON_CONTRACT,
-                ]
-            ),
+            "\n\n".join(parts),
             "A single JSON object holding the verdict.",
         )
     except Exception as err:  # noqa: BLE001 - see the docstring: never a pass

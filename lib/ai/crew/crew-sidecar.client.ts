@@ -57,6 +57,7 @@ import { z } from "zod";
 import {
   crewFailureResponseSchema,
   crewPostResponseSchema,
+  DEFAULT_MAX_QA_REPAIRS,
   resolveQaState,
   validateCallCounts,
   type CrewFailureCode,
@@ -76,6 +77,15 @@ import { requestTimeoutMs } from "@/lib/http/request-deadline";
  * ceiling. It is a ceiling against a wedged run holding a job lease, NOT an
  * expectation — the operational value comes from measured p95 and is set by
  * `CREW_SIDECAR_TIMEOUT_MS`.
+ *
+ * QA REPAIR calls are deliberately NOT added to this arithmetic. They are
+ * bounded (`maxQaRepairs` per evaluation) and they are the cheapest call the
+ * loop makes — a verdict under the `QaVerdict` grammar measured at ~50 output
+ * tokens against `qwen3.5:35b-a3b-q4_K_M`, versus a full post from the Writer —
+ * so they fit inside the headroom this ceiling already carries over the ~22.5
+ * min a real outer attempt cost in validation. If a deployment starts seeing
+ * repairs on most evaluations, raise `CREW_SIDECAR_TIMEOUT_MS`; that is the
+ * knob, not this bound.
  */
 export const OLLAMA_CALL_CEILING_MS = 300_000;
 
@@ -90,6 +100,12 @@ export { UNDICI_DEFAULT_HEADERS_TIMEOUT_MS };
 
 /** Max QA REVISION cycles. Two, per the strategy's own bound (requirement 5). */
 export const DEFAULT_MAX_QA_ROUNDS = 2;
+
+/**
+ * Max QA REPAIR calls on one candidate — re-exported from the contract, which
+ * both ends of the boundary read.
+ */
+export { DEFAULT_MAX_QA_REPAIRS };
 
 export class CrewSidecarError extends Error {
   constructor(
@@ -165,6 +181,13 @@ export interface CrewPostOutcome {
   parsed: ParsedLlmPost;
   qaState: QaState;
   qaRevisions: number;
+  /**
+   * QA calls spent re-asking the SAME candidate because the previous verdict
+   * broke the QA contract. Zero on a healthy run; already inside
+   * `agentCalls.qa`. Surfaced so a caller can tell a critic that needed a nudge
+   * to PHRASE its verdict from one that needed another revision round.
+   */
+  qaRepairs: number;
   qaIssues: CrewPostResponse["qa"]["issues"];
   agentCalls: CrewPostResponse["agentCalls"];
   latencyMs: number;
@@ -247,6 +270,7 @@ export class CrewSidecarClient {
 
   async generate(request: CrewPostRequest): Promise<CrewPostOutcome> {
     const maxQaRounds = request.attemptContext.maxQaRounds;
+    const maxQaRepairs = request.attemptContext.maxQaRepairs ?? DEFAULT_MAX_QA_REPAIRS;
 
     // The effective budget, computed ONCE so the signal and the timeout message
     // cannot disagree. Under an ambient cron deadline this is the smaller of the
@@ -350,7 +374,7 @@ export class CrewSidecarClient {
     }
     const response = parsed.data;
 
-    const counters = validateCallCounts(response, maxQaRounds);
+    const counters = validateCallCounts(response, maxQaRounds, maxQaRepairs);
     if (counters) {
       // A counter violation is a Flow regression, not a bad post: the run may
       // have produced perfectly good text while skipping a stage the design
@@ -367,6 +391,7 @@ export class CrewSidecarClient {
       parsed: response.candidate.json,
       qaState: qa.state,
       qaRevisions: response.qa.revisions,
+      qaRepairs: response.qa.repairs,
       qaIssues: response.qa.issues,
       agentCalls: response.agentCalls,
       latencyMs: response.latencyMs,

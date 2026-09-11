@@ -48,6 +48,11 @@ def qa_pass() -> str:
     return json.dumps({"decision": "pass", "issues": []})
 
 
+#: The exact shape of the reply that caused the production failure: a rejection
+#: that names nothing the router can act on. Schema-valid, and unusable.
+QA_REJECT_NO_DIMENSION = json.dumps({"decision": "revise", "issues": []})
+
+
 def qa_revise(dimension: str, severity: str) -> str:
     return json.dumps(
         {
@@ -654,3 +659,209 @@ class StructuredCandidateOutput(unittest.TestCase):
         self.assertEqual(ctx.exception.stage, "candidate")
         # It is NOT repaired into a success.
         self.assertIn("schema validation", ctx.exception.detail)
+
+
+class QaContractRepair(unittest.TestCase):
+    """A malformed VERDICT must not cost a whole generation.
+
+    The production failure (Instagram, `LLM_PROVIDER_ERROR` /
+    `"QA rejected every candidate across 3 attempt(s) without naming an
+    actionable dimension"`): QA answered "revise" and named nothing. That is a
+    formatting slip in ONE of nine model calls, and it used to throw the
+    candidate away and buy a whole fresh Writer→Editor→QA attempt — three times,
+    after which the run was reported as an AI provider outage.
+
+    The repair is taken where it is cheap: the SAME critic, the SAME unchanged
+    candidate, one extra QA call, told exactly what was wrong with its previous
+    answer. These scenarios pin that it stays cheap (no Writer call, no Editor
+    call), that it stays bounded, and that it never converts a rejection into an
+    approval by itself.
+    """
+
+    def run_with(self, scripted: ScriptedAgents, request: dict | None = None):
+        with mock.patch.object(crew_flow, "_run_single", side_effect=scripted):
+            return crew_flow.run_flow(request or REQUEST)
+
+    # ── the baseline: a well-formed rejection is never repaired ─────────────
+    def test_5a_a_reject_with_a_VALID_dimension_spends_no_repair(self) -> None:
+        scripted = ScriptedAgents(
+            [post_json()],
+            [post_json(), post_json("An edited post.")],
+            [qa_revise("voice", "style"), qa_pass()],
+        )
+        result = self.run_with(scripted)
+
+        self.assertEqual(result.qa.decision, "pass")
+        self.assertEqual(result.counters.qa_repairs, 0)
+        self.assertEqual(result.counters.routes, ["editor"])
+        self.assertEqual(
+            (result.counters.writer, result.counters.editor, result.counters.qa), (1, 2, 2)
+        )
+        self.assertNotIn("qa_contract", result.counters.degraded_stages)
+
+    # ── reject without a dimension → QA-ONLY retry ──────────────────────────
+    def test_5b_a_reject_with_no_dimension_re_asks_QA_AND_NOTHING_ELSE(self) -> None:
+        # The repaired verdict names a real dimension, so the run continues
+        # through the ordinary Editor correction path.
+        scripted = ScriptedAgents(
+            [post_json()],
+            [post_json(), post_json("An edited post.")],
+            [QA_REJECT_NO_DIMENSION, qa_revise("voice", "style"), qa_pass()],
+        )
+        result = self.run_with(scripted)
+
+        self.assertEqual(result.qa.decision, "pass")
+        self.assertEqual(result.counters.qa_repairs, 1)
+        # THE assertion: exactly one extra QA call, and not one extra Writer or
+        # Editor call. Compare with test_5a, which is the same run without the
+        # malformed verdict: writer and editor are identical, qa is one higher.
+        self.assertEqual(
+            (result.counters.writer, result.counters.editor, result.counters.qa), (1, 2, 3)
+        )
+        # The repair sits between the two QA calls, touching no other agent.
+        self.assertEqual(scripted.order, ["writer", "editor", "qa", "qa", "editor", "qa"])
+        # And it is a repair, not a revision: the POST did not change.
+        self.assertEqual(result.counters.revisions, 1)
+        self.assertEqual(result.counters.routes, ["editor"])
+
+    def test_5c_a_repaired_WRITER_route_still_re_enters_the_editor(self) -> None:
+        # The repair must not create a path around requirement 6.
+        scripted = ScriptedAgents(
+            [post_json(), post_json("A rewritten post.")],
+            [post_json(), post_json("An edited rewrite.")],
+            [QA_REJECT_NO_DIMENSION, qa_revise("grounding", "factual"), qa_pass()],
+        )
+        result = self.run_with(scripted)
+
+        self.assertEqual(result.qa.decision, "pass")
+        self.assertEqual(result.counters.qa_repairs, 1)
+        self.assertEqual(result.counters.routes, ["writer"])
+        self.assertEqual(
+            scripted.order, ["writer", "editor", "qa", "qa", "writer", "editor", "qa"]
+        )
+        self.assertEqual(
+            (result.counters.writer, result.counters.editor, result.counters.qa), (2, 2, 3)
+        )
+
+    # ── a repaired ACCEPT finishes the run ──────────────────────────────────
+    def test_5d_a_repaired_reply_that_PASSES_completes_successfully(self) -> None:
+        scripted = ScriptedAgents(
+            [post_json()], [post_json()], [QA_REJECT_NO_DIMENSION, qa_pass()]
+        )
+        result = self.run_with(scripted)
+
+        self.assertEqual(result.qa.decision, "pass")
+        self.assertEqual(result.counters.qa_repairs, 1)
+        self.assertEqual(result.counters.revisions, 0)
+        self.assertEqual(
+            (result.counters.writer, result.counters.editor, result.counters.qa), (1, 1, 2)
+        )
+        self.assertEqual(scripted.order, ["writer", "editor", "qa", "qa"])
+        self.assertNotIn("qa_contract", result.counters.degraded_stages)
+        self.assertTrue(result.candidate)
+
+    # ── the bound ───────────────────────────────────────────────────────────
+    def test_5e_a_critic_that_stays_malformed_stops_at_the_bound(self) -> None:
+        scripted = ScriptedAgents([post_json()], [post_json()], [QA_REJECT_NO_DIMENSION])
+        result = self.run_with(scripted)
+
+        # Never a pass — requirement 7 is untouched by the repair loop.
+        self.assertEqual(result.qa.decision, "rejected_unroutable")
+        self.assertNotEqual(result.qa.decision, "pass")
+        # Exactly the bound: one evaluation plus two repairs, and no more.
+        self.assertEqual(result.counters.qa_repairs, 2)
+        self.assertEqual(result.counters.qa, 3)
+        # Still no Writer or Editor call spent on it, and no revision round.
+        self.assertEqual((result.counters.writer, result.counters.editor), (1, 1))
+        self.assertEqual(result.counters.revisions, 0)
+        self.assertEqual(result.counters.routes, [])
+        # Named as its own degradation so this is distinguishable from a critic
+        # that converged on "still not good enough".
+        self.assertIn("qa_contract", result.counters.degraded_stages)
+
+    def test_5f_the_bound_is_PER_EVALUATION_not_per_run(self) -> None:
+        # A second malformed verdict, on the revised post, gets its own repair.
+        scripted = ScriptedAgents(
+            [post_json()],
+            [post_json(), post_json("An edited post.")],
+            [QA_REJECT_NO_DIMENSION, qa_revise("voice", "style"), QA_REJECT_NO_DIMENSION, qa_pass()],
+        )
+        result = self.run_with(scripted)
+
+        self.assertEqual(result.qa.decision, "pass")
+        self.assertEqual(result.counters.qa_repairs, 2)
+        self.assertEqual(result.counters.revisions, 1)
+        self.assertEqual(
+            (result.counters.writer, result.counters.editor, result.counters.qa), (1, 2, 4)
+        )
+
+    def test_5g_a_zero_repair_bound_restores_the_old_behaviour_exactly(self) -> None:
+        request = {
+            **REQUEST,
+            "attemptContext": {**REQUEST["attemptContext"], "maxQaRepairs": 0},
+        }
+        scripted = ScriptedAgents([post_json()], [post_json()], [QA_REJECT_NO_DIMENSION])
+        result = self.run_with(scripted, request)
+
+        self.assertEqual(result.qa.decision, "rejected_unroutable")
+        self.assertEqual(result.counters.qa_repairs, 0)
+        self.assertEqual(result.counters.qa, 1)
+
+    # ── what must NOT be repaired ───────────────────────────────────────────
+    def test_5h_exhausted_revision_rounds_are_NOT_a_contract_breach(self) -> None:
+        # This critic named a real dimension every time and simply never let go.
+        # Nothing about its REPLY is malformed, so re-asking it would only burn
+        # calls — the run must report the same 3 + 2R it always did.
+        scripted = ScriptedAgents([post_json()], [post_json()], [qa_revise("voice", "style")])
+        result = self.run_with(scripted)
+
+        self.assertEqual(result.qa.decision, "rejected_unroutable")
+        self.assertEqual(result.counters.qa_repairs, 0)
+        self.assertEqual(result.counters.revisions, 2)
+        self.assertEqual(
+            (result.counters.writer, result.counters.editor, result.counters.qa), (1, 3, 3)
+        )
+        self.assertNotIn("qa_contract", result.counters.degraded_stages)
+
+    def test_5i_an_UNREADABLE_qa_reply_is_not_repaired(self) -> None:
+        # `unavailable` means the critic said nothing at all. There is no
+        # previous answer to quote back, and the degraded path already handles
+        # it: the caller's deterministic gates become the whole verdict.
+        scripted = ScriptedAgents([post_json()], [post_json()], ["The post looks great!"])
+        result = self.run_with(scripted)
+
+        self.assertEqual(result.qa.decision, "unavailable")
+        self.assertEqual(result.counters.qa_repairs, 0)
+        self.assertEqual(result.counters.qa, 1)
+        self.assertIn("qa", result.counters.degraded_stages)
+        self.assertNotIn("qa_contract", result.counters.degraded_stages)
+
+    # ── what the critic is actually told ────────────────────────────────────
+    def test_5j_the_repair_call_carries_the_explicit_invalid_notice(self) -> None:
+        prompts: list[str] = []
+        scripted = ScriptedAgents(
+            [post_json()], [post_json()], [QA_REJECT_NO_DIMENSION, qa_pass()]
+        )
+
+        def recording(agent, description, expected_output):
+            if "review" in agent.role.lower():
+                prompts.append(description)
+            return scripted(agent, description, expected_output)
+
+        with mock.patch.object(crew_flow, "_run_single", side_effect=recording):
+            crew_flow.run_flow(REQUEST)
+
+        self.assertEqual(len(prompts), 2)
+        # The FIRST judgement is an ordinary one — the notice must not leak into
+        # a call that has nothing to correct.
+        self.assertNotIn("INVALID", prompts[0])
+        # The SECOND says the previous answer was invalid, why, and that the
+        # post is unchanged. Leading, so it is not buried after the brief.
+        self.assertIn("INVALID", prompts[1])
+        self.assertIn("listed no issues at all", prompts[1])
+        self.assertIn("SAME post", prompts[1])
+        self.assertTrue(prompts[1].startswith("## Your previous answer was INVALID"))
+        # And it still offers the critic BOTH answers — a re-prompt must never
+        # be pressure to approve (or to reject).
+        self.assertIn('"decision": "pass"', prompts[1])
+        self.assertIn('"decision": "revise"', prompts[1])

@@ -272,6 +272,12 @@ class Handler(BaseHTTPRequestHandler):
                 "qa": {
                     "finalDecision": result.qa.decision,
                     "revisions": counters.revisions,
+                    # QA-only re-asks of an UNCHANGED candidate whose previous
+                    # verdict broke its own contract. Already counted inside
+                    # `agentCalls.qa`; reported separately so the caller can
+                    # tell "the critic needed a nudge to phrase its verdict"
+                    # from "the post needed another revision round".
+                    "repairs": counters.qa_repairs,
                     "issues": result.qa.issues,
                     "routes": counters.routes,
                 },

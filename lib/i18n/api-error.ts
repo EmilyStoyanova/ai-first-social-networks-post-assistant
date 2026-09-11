@@ -40,6 +40,10 @@ export const API_ERROR_CODES = [
   // start another Writer→Editor→QA attempt. Not a provider error — a clean,
   // retryable stop.
   "MULTI_AGENT_BUDGET_EXHAUSTED",
+  // Multi-agent generation's QA reviewer refused every candidate and could not
+  // be repaired into an actionable verdict. Also not a provider error: every
+  // model call succeeded.
+  "QA_NOT_CONVERGED",
   "INVALID_REQUEST",
   "INVALID_PROFILE",
   // Publishing — the chosen Buffer profile is on a different social network

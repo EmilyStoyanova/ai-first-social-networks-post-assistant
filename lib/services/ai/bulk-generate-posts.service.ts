@@ -520,6 +520,10 @@ export function classifyBulkFailure(code: GenerateDraftPostErrorCode): BulkFailu
     case "CANNOT_GENERATE_UNIQUE_POST":
       return "not_unique";
     case "POST_FAILED_COMPLIANCE":
+    // The multi-agent reviewer's own refusal is a quality outcome, not a
+    // provider one: classifying it as `provider_error` would tell the user the
+    // AI was unreachable when it answered every call.
+    case "QA_NOT_CONVERGED":
       return "quality_gate";
     case "LLM_RATE_LIMITED":
     case "LLM_PROVIDER_ERROR":

@@ -26,6 +26,46 @@ QaDecision = Literal[
     "unavailable",
 ]
 
+# ── What a rejection has to carry to be actionable ──────────────────────────
+#
+# A `revise` is a REJECTION, and a rejection the router cannot act on wastes a
+# whole Writer→Editor→QA attempt: the caller cannot accept the candidate (a
+# critic ran and said no) and cannot correct it either (nothing was named). So
+# the contract is stated positively and checked here, in one place:
+#
+#   decision "revise"  ⇒  at least one BLOCKING issue, whose
+#                         • `dimension` is in `QA_DIMENSION_ORDER`, and
+#                         • `detail` is non-empty
+#                         The FIRST such issue is the one actionable dimension
+#                         the route is taken from; anything after it rides along
+#                         as context and decides nothing.
+#
+# Each way that can be broken gets its own name rather than a single "invalid",
+# because the name is read back TO THE CRITIC by `qa_repair_instruction`: a
+# re-prompt that says "you named no dimension" and one that says "your detail
+# was empty" ask for different corrections, and a generic "that was invalid"
+# asks for neither.
+QaContractViolation = Literal[
+    #: `revise` with no issues at all — the reported production failure.
+    "no_issues",
+    #: The blocking issue's dimension is not one the router can act on.
+    "unknown_dimension",
+    #: A recognised dimension with no concrete feedback attached to it.
+    "empty_detail",
+    #: `pass` that nonetheless lists failures. A contradiction, not a pass.
+    "pass_with_issues",
+]
+
+#: The most QA re-prompts allowed on ONE candidate before the rejection is
+#: taken at face value and the attempt is reported as non-converged.
+#:
+#: Two, matching `DEFAULT_MAX_QA_ROUNDS`: a malformed verdict is a formatting
+#: slip, and a critic that cannot state a dimension in three tries is not going
+#: to state one on the fourth. These are QA-ONLY calls on the SAME candidate —
+#: no Writer call, no Editor call, no outer attempt — which is the whole point:
+#: a formatting slip must not cost a complete generation.
+DEFAULT_MAX_QA_REPAIRS = 2
+
 # ── The routing table ───────────────────────────────────────────────────────
 #
 # Which agent fixes which kind of problem. An unrecognised dimension is NOT
@@ -93,6 +133,14 @@ ADVISORY_DIMENSIONS = frozenset(ADVISORY_DIMENSION_ORDER)
 class QaVerdict:
     decision: QaDecision
     issues: list[dict[str, str]] = field(default_factory=list)
+    #: Why a `rejected_unroutable` could not be routed — set ONLY when the
+    #: critic's own reply broke the contract above, and therefore only when
+    #: RE-ASKING THE SAME CRITIC ABOUT THE SAME CANDIDATE could still produce a
+    #: routable verdict. A `rejected_unroutable` reached any other way (the
+    #: revision rounds ran out with the critic still asking for changes) leaves
+    #: this None, because there is nothing malformed to repair there and
+    #: re-prompting would only burn calls.
+    contract_violation: QaContractViolation | None = None
 
 
 def parse_qa_reply(raw: str | None) -> QaVerdict:
@@ -110,10 +158,15 @@ def parse_qa_reply(raw: str | None) -> QaVerdict:
                                 second. Advisory issues alongside a blocking one
                                 ride along but do not decide the route.
       * `rejected_unroutable` — the critic rejected the post but named nothing
-                                actionable: no issues, only an unknown
-                                dimension, or a "pass" that also lists failures.
-                                A non-converged attempt — never acceptable, even
-                                when every deterministic gate passes.
+                                actionable: no issues, an unknown dimension, a
+                                recognised dimension with no feedback attached,
+                                or a "pass" that also lists failures. Never
+                                acceptable, even when every deterministic gate
+                                passes — but `contract_violation` says WHICH of
+                                those it was, so the caller can re-ask the SAME
+                                critic about the SAME candidate instead of
+                                spending a fresh Writer→Editor→QA attempt on a
+                                formatting slip.
       * `unavailable`         — the reply could not be read at all. Degraded;
                                 the caller's gates become the whole verdict.
     """
@@ -138,14 +191,18 @@ def parse_qa_reply(raw: str | None) -> QaVerdict:
         # pass. Refused rather than resolved in either direction: taking the
         # verdict would publish text the same reply says is broken, and taking
         # the issues would invent a rejection the critic did not make.
-        return QaVerdict("rejected_unroutable", issues) if issues else QaVerdict("pass", [])
+        return (
+            QaVerdict("rejected_unroutable", issues, "pass_with_issues")
+            if issues
+            else QaVerdict("pass", [])
+        )
 
     if decision != "revise":
         # Includes a missing decision and any word the contract does not define.
         return QaVerdict("unavailable", issues)
 
     if not issues:
-        return QaVerdict("rejected_unroutable", [])
+        return QaVerdict("rejected_unroutable", [], "no_issues")
 
     # Rotation guidance (`angle`/`hook`/`cta`) is advisory everywhere else in
     # the system, so QA is held to the same rule: those issues stay on the
@@ -157,12 +214,29 @@ def parse_qa_reply(raw: str | None) -> QaVerdict:
     if not blocking:
         return QaVerdict("pass", issues)
 
+    # THE one actionable dimension. Everything after it is context: the route,
+    # and therefore what the next agent is asked to fix, is taken from this
+    # issue alone.
     primary = blocking[0]
+
+    # The contract, checked before the routing table rather than after it.
+    # Checked FIRST because the severity was the older first signal, and a
+    # complaint whose dimension the router does not understand would otherwise
+    # be filed under "style" and acted on as if it were a voice note — the one
+    # thing the module docstring says must never happen. A dimension the router
+    # cannot act on and a dimension named with no feedback attached are both
+    # unroutable, and both are the critic's own reply to fix.
+    if primary["dimension"] not in EDITOR_DIMENSIONS and primary["dimension"] not in WRITER_DIMENSIONS:
+        return QaVerdict("rejected_unroutable", issues, "unknown_dimension")
+    if not primary["detail"].strip():
+        return QaVerdict("rejected_unroutable", issues, "empty_detail")
+
     if primary["severity"] in {"factual", "content"} or primary["dimension"] in WRITER_DIMENSIONS:
         return QaVerdict("revise_writer", issues)
-    if primary["severity"] in {"style", "clarity"} or primary["dimension"] in EDITOR_DIMENSIONS:
-        return QaVerdict("revise_editor", issues)
-    return QaVerdict("rejected_unroutable", issues)
+    # Every remaining dimension is an editor one — the two vocabularies are
+    # exhaustive over what reaches here — so this is a total branch, not a
+    # default.
+    return QaVerdict("revise_editor", issues)
 
 
 def _normalize_issues(raw_issues: object) -> list[dict[str, str]]:
@@ -190,6 +264,65 @@ def _normalize_issues(raw_issues: object) -> list[dict[str, str]]:
             }
         )
     return issues
+
+
+#: What each contract breach has to be told back to the critic, in ITS OWN
+#: terms. Keyed by `QaContractViolation` so a new breach cannot be added to the
+#: vocabulary without a sentence explaining it — a repair prompt that cannot
+#: name the mistake is just a second roll of the same dice.
+QA_REPAIR_REASONS: dict[str, str] = {
+    "no_issues": (
+        'you answered "revise" but listed no issues at all, so there is nothing to fix'
+    ),
+    "unknown_dimension": (
+        'you answered "revise" but the dimension you named is not one of the allowed '
+        "dimensions, so the rejection cannot be routed to an agent"
+    ),
+    "empty_detail": (
+        'you answered "revise" and named a dimension but left its "detail" empty, so '
+        "there is no concrete instruction to act on"
+    ),
+    "pass_with_issues": (
+        'you answered "pass" but also listed failing issues, which contradicts itself'
+    ),
+}
+
+
+def qa_repair_instruction(verdict: QaVerdict) -> str:
+    """The re-prompt for a critic whose previous reply broke the contract.
+
+    Deliberately explicit about three things, because a vague "try again" is
+    what produces the same malformed reply a second time:
+
+      1. The previous reply was INVALID, and exactly why.
+      2. The two ways out — either genuinely pass the post, or reject it with
+         one named dimension and one concrete sentence. Both are offered, so
+         the re-prompt cannot be read as pressure to reject (or to approve).
+      3. The dimension vocabulary again, verbatim from `QA_DIMENSION_ORDER`.
+
+    Returns "" when there is nothing to repair, so a caller can apply it
+    unconditionally without first re-deriving the check.
+    """
+    reason = QA_REPAIR_REASONS.get(verdict.contract_violation or "")
+    if reason is None:
+        return ""
+    return (
+        "## Your previous answer was INVALID and was not accepted\n"
+        "\n"
+        f"It was rejected because {reason}.\n"
+        "\n"
+        "Judge the SAME post again — it has not changed — and answer in exactly one of "
+        "these two ways:\n"
+        '- If nothing blocks publication: {"decision": "pass", "issues": []}.\n'
+        '- If something blocks publication: {"decision": "revise", "issues": [ one issue ]}, '
+        "where that issue names exactly ONE dimension from this list — "
+        + ", ".join(QA_DIMENSION_ORDER)
+        + " — and whose \"detail\" is one concrete sentence saying what is wrong and what "
+        "would fix it.\n"
+        "\n"
+        'Do not answer "revise" without naming a dimension from that list. Do not invent a '
+        "dimension of your own. Do not repeat your previous answer."
+    )
 
 
 def _qa_verdict_schema() -> dict[str, Any]:

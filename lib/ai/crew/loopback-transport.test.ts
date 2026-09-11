@@ -53,7 +53,7 @@ function passBody(overrides: Partial<CrewPostResponse> = {}): CrewPostResponse {
       raw: '{"text":"a post","coreMessage":"a claim"}',
       json: { text: "a post", hashtags: [], coreMessage: "a claim" },
     },
-    qa: { finalDecision: "pass", revisions: 0, issues: [], routes: [] },
+    qa: { finalDecision: "pass", revisions: 0, repairs: 0, issues: [], routes: [] },
     agentCalls: { writer: 1, editor: 1, qa: 1 },
     latencyMs: 10,
     model: { tag: "qwen3.5:35b-a3b-q4_K_M", digest: "sha256:abc" },

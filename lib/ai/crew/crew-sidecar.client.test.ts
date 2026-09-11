@@ -49,6 +49,7 @@ function request(overrides: Partial<CrewPostRequest["attemptContext"]> = {}): Cr
       attempt: 1,
       maxAttempts: 3,
       maxQaRounds: 2,
+      maxQaRepairs: 2,
       previousRejection: null,
       ...overrides,
     },
@@ -67,7 +68,7 @@ function passBody(overrides: Partial<CrewPostResponse> = {}): CrewPostResponse {
       raw: '{"text":"a post","coreMessage":"a claim"}',
       json: { text: "a post", hashtags: [], coreMessage: "a claim" },
     },
-    qa: { finalDecision: "pass", revisions: 0, issues: [], routes: [] },
+    qa: { finalDecision: "pass", revisions: 0, repairs: 0, issues: [], routes: [] },
     agentCalls: { writer: 1, editor: 1, qa: 1 },
     latencyMs: 900,
     model: { tag: "qwen3.5:35b-a3b-q4_K_M", digest: "sha256:abc" },
@@ -238,7 +239,7 @@ describe("successful outcomes", () => {
       LOOPBACK,
       ok(
         passBody({
-          qa: { finalDecision: "unavailable", revisions: 0, issues: [], routes: [] },
+          qa: { finalDecision: "unavailable", revisions: 0, repairs: 0, issues: [], routes: [] },
           agentCalls: { writer: 1, editor: 1, qa: 0 },
           degradedStages: ["qa"],
         })
@@ -260,6 +261,7 @@ describe("successful outcomes", () => {
           qa: {
             finalDecision: "rejected_unroutable",
             revisions: 0,
+            repairs: 0,
             issues: [{ dimension: "vibes", severity: "unknown", detail: "off" }],
             routes: [],
           },
@@ -391,7 +393,13 @@ describe("failures are explicit", () => {
       LOOPBACK,
       ok(
         passBody({
-          qa: { finalDecision: "revise_editor", revisions: 1, issues: [], routes: ["editor"] },
+          qa: {
+            finalDecision: "revise_editor",
+            revisions: 1,
+            repairs: 0,
+            issues: [],
+            routes: ["editor"],
+          },
           agentCalls: { writer: 1, editor: 2, qa: 2 },
         })
       )
@@ -409,7 +417,7 @@ describe("failures are explicit", () => {
       LOOPBACK,
       ok(
         passBody({
-          qa: { finalDecision: "pass", revisions: 1, issues: [], routes: ["writer"] },
+          qa: { finalDecision: "pass", revisions: 1, repairs: 0, issues: [], routes: ["writer"] },
           agentCalls: { writer: 2, editor: 1, qa: 2 },
         })
       )
@@ -427,7 +435,13 @@ describe("failures are explicit", () => {
       LOOPBACK,
       ok(
         passBody({
-          qa: { finalDecision: "pass", revisions: 2, issues: [], routes: ["editor", "editor"] },
+          qa: {
+            finalDecision: "pass",
+            revisions: 2,
+            repairs: 0,
+            issues: [],
+            routes: ["editor", "editor"],
+          },
           agentCalls: { writer: 1, editor: 3, qa: 3 },
         })
       )

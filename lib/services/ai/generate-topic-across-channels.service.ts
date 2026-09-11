@@ -557,6 +557,8 @@ function defaultFailureMessage(failure: GenerateDraftPostFailure): string {
       return "The post plus its source link exceeded this channel's character limit.";
     case "MULTI_AGENT_BUDGET_EXHAUSTED":
       return "Multi-agent generation ran out of time before it could finish this channel.";
+    case "QA_NOT_CONVERGED":
+      return "The reviewer would not approve any post written for this channel.";
     default:
       return "This channel's post could not be generated.";
   }

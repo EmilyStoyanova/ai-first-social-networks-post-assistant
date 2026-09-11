@@ -178,6 +178,24 @@ export function generationErrorResponse(result: GenerateDraftPostFailure): NextR
         { status: 409 }
       );
 
+    case "QA_NOT_CONVERGED":
+      // 409, like POST_FAILED_COMPLIANCE: the request was fine and nothing is
+      // broken — the generator's own reviewer would not sign off on any
+      // candidate it produced. Never 502: no provider failed, and a 502 here
+      // would point every investigation at a healthy sidecar.
+      return NextResponse.json(
+        {
+          error: {
+            code: "QA_NOT_CONVERGED",
+            // Fixed, not `result.message ?? …`: the service's message names
+            // attempt counts and QA repair counts, which are diagnostics for a
+            // log and noise for an API consumer. The UI translates the CODE.
+            message: "QA validation could not complete successfully. Please try again.",
+          },
+        },
+        { status: 409 }
+      );
+
     case "MULTI_AGENT_BUDGET_EXHAUSTED":
       // 503: the request was fine and nothing is broken — the worker simply ran
       // out of time to start another multi-agent attempt. Retryable, like

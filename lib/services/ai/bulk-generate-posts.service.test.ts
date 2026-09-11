@@ -1268,6 +1268,9 @@ describe("classifyBulkFailure", () => {
       SELECTED_SOURCE_UNAVAILABLE: "no_eligible_content",
       CANNOT_GENERATE_UNIQUE_POST: "not_unique",
       POST_FAILED_COMPLIANCE: "quality_gate",
+      // The reviewer refusing every candidate is a quality outcome. It must
+      // NOT land in `provider_error` — every model call succeeded.
+      QA_NOT_CONVERGED: "quality_gate",
       LLM_RATE_LIMITED: "provider_error",
       LLM_PROVIDER_ERROR: "provider_error",
       LLM_RESPONSE_PARSE_ERROR: "provider_error",

@@ -195,12 +195,13 @@ handling — and stub exactly one thing: `_run_single`, the single seam where an
 agent call leaves the process. That is the only part a script can replace,
 because it is the only part a model owns.
 
-| #                 | Path                                            | writer / editor / qa |
-| ----------------- | ----------------------------------------------- | -------------------- |
-| B-1 normal pass   | Writer → Editor → QA → PASS                     | 1 / 1 / 1            |
-| B-2 editor-routed | Writer → Editor → QA → **Editor → QA**          | 1 / 2 / 2            |
-| B-3 writer-routed | Writer → Editor → QA → **Writer → Editor → QA** | 2 / 2 / 2            |
-| B-4 termination   | QA rejects every round; stops at `maxQaRounds`  | 3 / 3 / 3 at R=2     |
+| #                 | Path                                              | writer / editor / qa |
+| ----------------- | ------------------------------------------------- | -------------------- |
+| B-1 normal pass   | Writer → Editor → QA → PASS                       | 1 / 1 / 1            |
+| B-2 editor-routed | Writer → Editor → QA → **Editor → QA**            | 1 / 2 / 2            |
+| B-3 writer-routed | Writer → Editor → QA → **Writer → Editor → QA**   | 2 / 2 / 2            |
+| B-4 termination   | QA rejects every round; stops at `maxQaRounds`    | 3 / 3 / 3 at R=2     |
+| B-5 QA repair     | QA rejects naming nothing → **QA re-asked alone** | 1 / 1 / 2 (+1 qa)    |
 
 **B-3 is the one that matters most**: it proves the Editor is re-entered after a
 Writer revision. The worst case is therefore `3 + 3R` calls, not `3 + 2R` — 9 at
@@ -212,6 +213,20 @@ so a regression surfaces at the caller too.
 
 `test_4c`/`test_4d` are requirement 7: an unreadable QA reply and a QA that
 raises both become `unavailable` — degraded, candidate kept, **never a pass**.
+
+**B-5 (`QaContractRepair`) is the cheap-failure guard.** A `revise` that names
+no actionable dimension is a formatting slip in one of nine model calls; before
+the repair loop it threw the candidate away and bought a whole fresh outer
+attempt, three times over, after which a run in which every model call SUCCEEDED
+was reported to the user as an AI provider outage. `_judge` now re-asks the SAME
+critic about the SAME unchanged candidate, telling it exactly what was wrong —
+at most `attemptContext.maxQaRepairs` (2) times per evaluation. **No Writer
+call, no Editor call, no outer attempt.** Repairs are reported as
+`qa.repairs` on the wire and are counted inside `agentCalls.qa`; the TypeScript
+client re-derives that arithmetic and refuses a run that overran the bound. The
+repair never converts a rejection into an approval: the repaired reply goes
+through the same `parse_qa_reply` as any other, and an exhausted repair keeps
+`rejected_unroutable` plus a `qa_contract` degraded stage.
 
 ### 2b. Contract conformance — the production client, not a curl
 

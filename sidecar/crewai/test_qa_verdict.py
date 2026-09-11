@@ -15,13 +15,16 @@ import unittest
 from qa_verdict import (
     ADVISORY_DIMENSION_ORDER,
     ADVISORY_DIMENSIONS,
+    DEFAULT_MAX_QA_REPAIRS,
     EDITOR_DIMENSIONS,
     QA_DIMENSION_ORDER,
+    QA_REPAIR_REASONS,
     QA_VERDICT_RESPONSE_FORMAT,
     SEVERITY_ORDER,
     VALID_SEVERITIES,
     WRITER_DIMENSIONS,
     parse_qa_reply,
+    qa_repair_instruction,
 )
 
 
@@ -152,10 +155,15 @@ class TestNormalization(unittest.TestCase):
         )
         self.assertEqual(v.issues[0]["severity"], "unknown")
 
-    def test_a_missing_dimension_becomes_unknown(self) -> None:
+    def test_a_missing_dimension_becomes_unknown_AND_does_not_route(self) -> None:
+        # The severity used to be enough on its own, so a complaint with no
+        # dimension at all was filed under the Editor and acted on as if it
+        # were a voice note. It is a rejection that named nothing actionable,
+        # which is precisely what the repair re-prompt exists for.
         v = parse_qa_reply('{"decision": "revise", "issues": [{"severity": "style"}]}')
         self.assertEqual(v.issues[0]["dimension"], "unknown")
-        self.assertEqual(v.decision, "revise_editor")
+        self.assertEqual(v.decision, "rejected_unroutable")
+        self.assertEqual(v.contract_violation, "unknown_dimension")
 
     def test_the_detail_is_bounded(self) -> None:
         v = parse_qa_reply(
@@ -408,6 +416,159 @@ class TestAdvisoryDimensions(unittest.TestCase):
             '{"decision": "pass", "issues": [%s]}' % _json(issue("angle", "content"))
         )
         self.assertEqual(v.decision, "rejected_unroutable")
+
+
+class TestTheRejectionContract(unittest.TestCase):
+    """A rejection must be ACTIONABLE, and say which way it was not.
+
+    The production failure this covers: a QA reply that rejected the post
+    without naming a dimension became `rejected_unroutable`, which cost a whole
+    Writer→Editor→QA outer attempt — three of them in a row ended the run as
+    `QA_NOT_CONVERGED`, reported to the user as an AI provider outage.
+
+    `contract_violation` is what makes that recoverable without spending an
+    attempt: it is set exactly when RE-ASKING THE SAME CRITIC ABOUT THE SAME
+    CANDIDATE could still produce a routable verdict, and it names which
+    correction to ask for.
+    """
+
+    # ── set: the four ways a rejection fails to be actionable ───────────────
+    def test_a_reject_with_no_issues_names_no_issues(self) -> None:
+        v = parse_qa_reply('{"decision": "revise", "issues": []}')
+        self.assertEqual(v.decision, "rejected_unroutable")
+        self.assertEqual(v.contract_violation, "no_issues")
+
+    def test_a_reject_with_an_unknown_dimension_names_unknown_dimension(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s]}' % _json(issue("vibes", "style"))
+        )
+        self.assertEqual(v.decision, "rejected_unroutable")
+        self.assertEqual(v.contract_violation, "unknown_dimension")
+
+    def test_a_reject_with_a_blank_detail_names_empty_detail(self) -> None:
+        # A recognised dimension with nothing said about it routes nowhere
+        # useful: the Writer would be told "- grounding (factual): " and asked
+        # to fix it.
+        for blank in ("", "   ", "\n"):
+            with self.subTest(detail=repr(blank)):
+                v = parse_qa_reply(
+                    '{"decision": "revise", "issues": [%s]}'
+                    % _json(issue("grounding", "factual", blank))
+                )
+                self.assertEqual(v.decision, "rejected_unroutable")
+                self.assertEqual(v.contract_violation, "empty_detail")
+
+    def test_a_pass_that_lists_failures_names_pass_with_issues(self) -> None:
+        v = parse_qa_reply(
+            '{"decision": "pass", "issues": [%s]}' % _json(issue("voice", "style"))
+        )
+        self.assertEqual(v.decision, "rejected_unroutable")
+        self.assertEqual(v.contract_violation, "pass_with_issues")
+
+    # ── unset: everything that is NOT the critic's reply to fix ─────────────
+    def test_a_well_formed_reject_carries_no_violation(self) -> None:
+        for dimension, severity, expected in (
+            ("grounding", "factual", "revise_writer"),
+            ("voice", "style", "revise_editor"),
+        ):
+            with self.subTest(dimension=dimension):
+                v = parse_qa_reply(
+                    '{"decision": "revise", "issues": [%s]}'
+                    % _json(issue(dimension, severity, "the second paragraph invents a date"))
+                )
+                self.assertEqual(v.decision, expected)
+                self.assertIsNone(v.contract_violation)
+
+    def test_a_clean_pass_carries_no_violation(self) -> None:
+        self.assertIsNone(parse_qa_reply('{"decision": "pass", "issues": []}').contract_violation)
+
+    def test_an_advisory_only_reject_carries_no_violation(self) -> None:
+        # It converges as a pass with notes; there is nothing malformed in it.
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s]}' % _json(issue("cta", "style"))
+        )
+        self.assertEqual(v.decision, "pass")
+        self.assertIsNone(v.contract_violation)
+
+    def test_an_UNREADABLE_reply_is_not_a_contract_violation(self) -> None:
+        # `unavailable` is a critic that could not be read at all. Re-asking it
+        # about its "previous answer" would be quoting an answer that does not
+        # exist, and the degraded path already handles this case correctly.
+        v = parse_qa_reply("the post looks fine to me")
+        self.assertEqual(v.decision, "unavailable")
+        self.assertIsNone(v.contract_violation)
+
+    def test_the_FIRST_blocking_issue_is_the_one_that_must_be_actionable(self) -> None:
+        # "Exactly one actionable dimension": the route is taken from the first
+        # blocking issue alone, so it is the first one the contract is checked
+        # against — a good second issue cannot rescue a bad first one.
+        v = parse_qa_reply(
+            '{"decision": "revise", "issues": [%s, %s]}'
+            % (_json(issue("vibes", "style")), _json(issue("grounding", "factual")))
+        )
+        self.assertEqual(v.decision, "rejected_unroutable")
+        self.assertEqual(v.contract_violation, "unknown_dimension")
+
+
+class TestTheRepairInstruction(unittest.TestCase):
+    """What a critic that broke the contract is told, and what it is not told."""
+
+    def _repair(self, reply: str) -> str:
+        return qa_repair_instruction(parse_qa_reply(reply))
+
+    def test_it_names_the_specific_breach(self) -> None:
+        text = self._repair('{"decision": "revise", "issues": []}')
+        self.assertIn("INVALID", text)
+        self.assertIn(QA_REPAIR_REASONS["no_issues"], text)
+        # And not somebody else's breach.
+        self.assertNotIn(QA_REPAIR_REASONS["pass_with_issues"], text)
+
+    def test_it_offers_BOTH_answers_so_it_is_not_pressure_to_reject(self) -> None:
+        # The one thing a re-prompt must never do is push the critic toward a
+        # verdict. Both ways out are spelled out, in the critic's own JSON.
+        text = self._repair('{"decision": "revise", "issues": []}')
+        self.assertIn('"decision": "pass"', text)
+        self.assertIn('"decision": "revise"', text)
+
+    def test_it_restates_the_dimension_vocabulary_verbatim(self) -> None:
+        # One taxonomy, not two: the repair prompt lists exactly the dimensions
+        # the router acts on and the response schema enumerates.
+        text = self._repair('{"decision": "revise", "issues": []}')
+        for dimension in QA_DIMENSION_ORDER:
+            self.assertIn(dimension, text)
+
+    def test_it_says_the_candidate_has_not_changed(self) -> None:
+        # A repair re-judges the SAME post. A critic that thought it was being
+        # handed a revision would look for changes that are not there.
+        self.assertIn("SAME post", self._repair('{"decision": "revise", "issues": []}'))
+
+    def test_there_is_a_reason_for_every_violation_in_the_vocabulary(self) -> None:
+        # A breach with no sentence explaining it would produce a re-prompt that
+        # cannot name the mistake — a second roll of the same dice.
+        for reply in (
+            '{"decision": "revise", "issues": []}',
+            '{"decision": "revise", "issues": [%s]}' % _json(issue("vibes", "style")),
+            '{"decision": "revise", "issues": [%s]}' % _json(issue("voice", "style", " ")),
+            '{"decision": "pass", "issues": [%s]}' % _json(issue("voice", "style")),
+        ):
+            with self.subTest(reply=reply):
+                self.assertNotEqual(self._repair(reply), "")
+
+    def test_nothing_to_repair_yields_an_empty_instruction(self) -> None:
+        # So a caller may apply it unconditionally without re-deriving the check.
+        self.assertEqual(self._repair('{"decision": "pass", "issues": []}'), "")
+        self.assertEqual(self._repair("unreadable"), "")
+        self.assertEqual(
+            self._repair(
+                '{"decision": "revise", "issues": [%s]}' % _json(issue("voice", "style", "flat"))
+            ),
+            "",
+        )
+
+    def test_the_repair_bound_is_two(self) -> None:
+        # Two, matching DEFAULT_MAX_QA_ROUNDS. A critic that cannot state a
+        # dimension in three tries will not state one on the fourth.
+        self.assertEqual(DEFAULT_MAX_QA_REPAIRS, 2)
 
 
 def _json(obj: dict[str, str]) -> str:

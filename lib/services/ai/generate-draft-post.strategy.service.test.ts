@@ -59,6 +59,7 @@ function multiOutcome(overrides: Partial<CrewPostOutcome> = {}): CrewPostOutcome
     parsed: JSON.parse(CANDIDATE_JSON) as CrewPostOutcome["parsed"],
     qaState: "pass",
     qaRevisions: 1,
+    qaRepairs: 0,
     qaIssues: [],
     agentCalls: { writer: 2, editor: 3, qa: 2 },
     latencyMs: 4321,
@@ -399,13 +400,17 @@ describe("generatePostFromContext — strategy wiring", () => {
       h.deps
     );
     assert.equal(r.success, false);
-    assert.equal(r.success ? "" : r.code, "LLM_PROVIDER_ERROR");
+    // Its OWN code, not the provider's. Every model call in this run succeeded;
+    // the reviewer is what refused, and LLM_PROVIDER_ERROR would send an
+    // operator hunting a sidecar/Ollama outage that never happened.
+    assert.equal(r.success ? "" : r.code, "QA_NOT_CONVERGED");
     assert.equal(h.created(), null, "a QA-rejected candidate is never persisted");
     assert.equal(h.singleAgentCalls(), 0, "must not fall through to single-agent");
     const run = h.savedRun();
     assert.equal(run!.status, "failed", "the run is failed, never a false 'completed'");
-    assert.equal(run!.errorCode, "LLM_PROVIDER_ERROR");
-    assert.match(run!.errorMessage ?? "", /without naming an actionable dimension/);
+    assert.equal(run!.errorCode, "QA_NOT_CONVERGED");
+    assert.notEqual(run!.errorCode, "LLM_PROVIDER_ERROR");
+    assert.match(run!.errorMessage ?? "", /QA rejected every candidate/);
   });
 
   /**

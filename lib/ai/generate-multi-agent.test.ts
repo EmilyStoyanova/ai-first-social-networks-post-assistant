@@ -43,6 +43,7 @@ function outcome(overrides: Partial<CrewPostOutcome> = {}): CrewPostOutcome {
     parsed: overrides.parsed ?? (JSON.parse(raw) as CrewPostOutcome["parsed"]),
     qaState: "pass",
     qaRevisions: 0,
+    qaRepairs: 0,
     qaIssues: [],
     agentCalls: { writer: 1, editor: 1, qa: 1 },
     latencyMs: 1000,
@@ -148,7 +149,7 @@ describe("bindMultiAgent — the acceptance rule", () => {
       (err: unknown) => {
         assert.ok(err instanceof MultiAgentGenerationError);
         assert.equal(err.multiAgentCode, "QA_NOT_CONVERGED");
-        assert.match(err.message, /without naming an actionable dimension/);
+        assert.match(err.message, /QA rejected every candidate across 3 attempt\(s\)/);
         return true;
       }
     );
@@ -236,7 +237,7 @@ describe("bindMultiAgent — the acceptance rule", () => {
             "a QA-rejected candidate must never be RETURNED as a successful result"
           );
           assert.equal(err.multiAgentCode, "QA_NOT_CONVERGED");
-          assert.match(err.message, /without naming an actionable dimension/);
+          assert.match(err.message, /QA rejected every candidate across 3 attempt\(s\)/);
           return true;
         }
       );
@@ -264,6 +265,129 @@ describe("bindMultiAgent — the acceptance rule", () => {
     assert.equal(sidecar.calls(), 2);
     assert.equal(result.attempts, 2);
     assert.equal(result.multiAgent?.qaState, "pass");
+  });
+});
+
+describe("bindMultiAgent — a malformed QA verdict costs no outer attempt", () => {
+  /**
+   * The production regression this file's newest guard is for (Instagram run:
+   * `errorCode: LLM_PROVIDER_ERROR`, `"QA rejected every candidate across 3
+   * attempt(s) without naming an actionable dimension"`, `degradedStages:
+   * ["qa_not_converged"]`).
+   *
+   * QA answered "revise" and named nothing the router could act on. That is a
+   * formatting slip in ONE of nine model calls, and it used to cost a whole
+   * fresh Writer→Editor→QA attempt — three of them, after which a run in which
+   * every model call SUCCEEDED was reported as an AI provider outage.
+   *
+   * The repair is taken inside the sidecar, on the same unchanged candidate
+   * (`sidecar/crewai/crew_flow.py::_judge`), which is the only place that can
+   * re-ask QA alone. What this side owns is the consequence: a repaired verdict
+   * arrives as an ordinary outcome and is accepted or rejected on its merits,
+   * and the outer attempt budget is untouched.
+   */
+
+  it("accepts on attempt 1 when the sidecar REPAIRED a malformed verdict into a pass", async () => {
+    const sidecar = scriptedSidecar([
+      outcome({
+        qaState: "pass",
+        qaRepairs: 1,
+        // One extra QA call and NOT one extra Writer or Editor call — the shape
+        // that proves the repair was QA-only.
+        agentCalls: { writer: 1, editor: 1, qa: 2 },
+      }),
+    ]);
+    const result = await bindMultiAgent(deps(sidecar))(PROVIDER, "sys", "user", NO_RECENT);
+
+    assert.equal(sidecar.calls(), 1, "a repaired verdict must not buy a fresh outer attempt");
+    assert.equal(result.attempts, 1);
+    assert.equal(result.multiAgent?.qaState, "pass");
+    // Not degraded: a verdict that was repaired successfully is a verdict.
+    assert.equal(result.multiAgent?.degraded, false);
+  });
+
+  it("continues the normal correction path when a repaired verdict names a dimension", async () => {
+    // The repaired verdict was a REJECTION with a real dimension, so the
+    // sidecar's revision round ran and the run converged on the same attempt.
+    const sidecar = scriptedSidecar([
+      outcome({
+        qaState: "pass",
+        qaRepairs: 1,
+        qaRevisions: 1,
+        agentCalls: { writer: 1, editor: 2, qa: 3 },
+      }),
+    ]);
+    const result = await bindMultiAgent(deps(sidecar))(PROVIDER, "sys", "user", NO_RECENT);
+
+    assert.equal(sidecar.calls(), 1);
+    assert.equal(result.multiAgent?.qaState, "pass");
+    assert.equal(result.multiAgent?.qaRevisionRounds, 1);
+  });
+
+  it("sends the repair bound to the sidecar, and lets the caller pin it", async () => {
+    const sidecar = scriptedSidecar([outcome()]);
+    await bindMultiAgent(deps(sidecar))(PROVIDER, "sys", "user", NO_RECENT);
+    assert.equal(sidecar.requests[0].attemptContext.maxQaRepairs, 2, "two by default");
+
+    const pinned = scriptedSidecar([outcome()]);
+    await bindMultiAgent(deps(pinned, { maxQaRepairs: 0 }))(PROVIDER, "sys", "user", NO_RECENT);
+    assert.equal(pinned.requests[0].attemptContext.maxQaRepairs, 0);
+  });
+
+  it("records the repair count on the attempt trace", async () => {
+    // So an operator reading a failed run can tell "the critic could not phrase
+    // a verdict" from "the critic kept refusing a post it described fine".
+    const records: GenerationAttemptRecord[] = [];
+    const sidecar = scriptedSidecar([
+      outcome({ qaState: "pass", qaRepairs: 2, agentCalls: { writer: 1, editor: 1, qa: 3 } }),
+    ]);
+    await bindMultiAgent(deps(sidecar))(
+      PROVIDER,
+      "sys",
+      "user",
+      NO_RECENT,
+      undefined,
+      undefined,
+      MAX_GENERATION_ATTEMPTS,
+      (r) => records.push(r)
+    );
+
+    const payload = records[0]?.rawProviderPayload as { qaRepairs?: number } | undefined;
+    assert.equal(payload?.qaRepairs, 2);
+  });
+
+  it("still fails as QA_NOT_CONVERGED when the repairs themselves could not be routed", async () => {
+    // Requirement 6: the terminal code is reached only AFTER the repair
+    // attempts have been spent, and the message says how many.
+    const sidecar = scriptedSidecar([
+      outcome({
+        qaState: "rejected_unroutable",
+        qaRepairs: 2,
+        agentCalls: { writer: 1, editor: 1, qa: 3 },
+        degradedStages: ["qa_contract"],
+      }),
+    ]);
+    await assert.rejects(
+      bindMultiAgent(deps(sidecar))(PROVIDER, "sys", "user", NO_RECENT),
+      (err: unknown) => {
+        assert.ok(err instanceof MultiAgentGenerationError);
+        assert.equal(err.multiAgentCode, "QA_NOT_CONVERGED");
+        // 2 repairs on each of the 3 outer attempts.
+        assert.match(err.message, /6 QA repair re-prompt\(s\)/);
+        return true;
+      }
+    );
+    assert.equal(sidecar.calls(), MAX_GENERATION_ATTEMPTS);
+  });
+
+  it("does NOT approve a post the repaired verdict still rejected", async () => {
+    // The one thing the repair loop must never buy: a rejection turned into an
+    // approval because it was re-asked. Gates clean, QA refused, no post.
+    const sidecar = scriptedSidecar([outcome({ qaState: "rejected_unroutable", qaRepairs: 2 })]);
+    await assert.rejects(
+      bindMultiAgent(deps(sidecar))(PROVIDER, "sys", "user", NO_RECENT),
+      (err: unknown) => err instanceof MultiAgentGenerationError
+    );
   });
 });
 

@@ -41,7 +41,7 @@ function passBody(overrides: Partial<CrewPostResponse> = {}): CrewPostResponse {
         coreMessage: "A real claim.",
       },
     },
-    qa: { finalDecision: "pass", revisions: 0, issues: [], routes: [] },
+    qa: { finalDecision: "pass", revisions: 0, repairs: 0, issues: [], routes: [] },
     agentCalls: { writer: 1, editor: 1, qa: 1 },
     latencyMs: 900,
     model: { tag: "qwen3.5:35b-a3b-q4_K_M", digest: "sha256:abc" },
@@ -348,7 +348,13 @@ describe("main — serialization is no longer satisfied by 503 + 503", () => {
           new Response(
             JSON.stringify(
               passBody({
-                qa: { finalDecision: "unavailable", revisions: 0, issues: [], routes: [] },
+                qa: {
+                  finalDecision: "unavailable",
+                  revisions: 0,
+                  repairs: 0,
+                  issues: [],
+                  routes: [],
+                },
                 agentCalls: { writer: 1, editor: 1, qa: 0 },
                 degradedStages: [],
               })
@@ -371,7 +377,13 @@ describe("main — serialization is no longer satisfied by 503 + 503", () => {
           new Response(
             JSON.stringify(
               passBody({
-                qa: { finalDecision: "pass", revisions: 1, issues: [], routes: ["writer"] },
+                qa: {
+                  finalDecision: "pass",
+                  revisions: 1,
+                  repairs: 0,
+                  issues: [],
+                  routes: ["writer"],
+                },
                 agentCalls: { writer: 2, editor: 1, qa: 2 },
               })
             )
