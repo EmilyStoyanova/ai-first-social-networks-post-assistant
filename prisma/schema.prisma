@@ -36,6 +36,12 @@ enum ContentSourceType {
   prompt
   product_page
   calendar_event
+  /// A structured listing/catalogue feed (boats, cars, property, jobs, products)
+  /// read through a provider adapter rather than scraped. Unlike `product_page`,
+  /// which stores ONE row per page, ingestion writes ONE FeedItem PER LISTING, so
+  /// each listing is independently claimable and backs exactly one post — the same
+  /// contract `rss` has. See lib/integrations/listing-feed/.
+  listing_feed
   // Competitive Analysis (Part 3A schema foundation — §3.0/§3.3 of the approved
   // plan). No ingestion, discovery, or CRUD is wired up in Part 3A; these exist
   // so the schema already carries the shape Part 3B's competitor-source

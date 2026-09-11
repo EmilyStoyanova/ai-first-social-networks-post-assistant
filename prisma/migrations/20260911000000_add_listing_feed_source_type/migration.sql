@@ -1,0 +1,14 @@
+-- Listings Feed content source.
+--
+-- One new ContentSourceType member and nothing else: a listing's structured data
+-- lives in the existing `feed_items.content` JSON column (the same place
+-- `product_page` and `calendar_event` already keep theirs), and its identity is
+-- the existing @@unique(source_id, url). No new columns, no new tables, no
+-- backfill — every pre-existing row is untouched by this migration.
+--
+-- Additive and non-destructive. Note that ADD VALUE cannot be undone by a
+-- reverse migration in PostgreSQL: removing an enum member requires recreating
+-- the type. Written by hand and applied with `migrate deploy` per the P3006 note
+-- in CLAUDE.md; mirrors 20260901000000_add_competitive_analysis, which added two
+-- members to this same enum the same way.
+ALTER TYPE "ContentSourceType" ADD VALUE 'listing_feed';

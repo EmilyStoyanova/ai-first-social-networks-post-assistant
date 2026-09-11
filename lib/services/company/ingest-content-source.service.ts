@@ -15,6 +15,9 @@ import {
   type TranslationConfig,
 } from "@/lib/ai/feed-item-translation";
 import { computeExtractionHash, extractionInstructionsOf } from "@/lib/ai/product-page-extraction";
+import { getListingProvider } from "@/lib/integrations/listing-feed/registry";
+import { buildListingIdentityIndex, planListingSync } from "@/lib/ai/listing-item";
+import { selectListingFields } from "@/lib/ai/listing-extraction";
 import {
   classificationFieldsForCreate,
   classificationFieldsForUpdate,
@@ -505,6 +508,174 @@ export async function runSourceIngestion(
     else updated++;
     if (requiresTranslation) translationWorkCreated++;
     if (requiresExtraction) extractionWorkCreated++;
+  } else if (source.type === "listing_feed") {
+    // ── One listing becomes one FeedItem ────────────────────────────────────
+    //
+    // The whole point of this source type, and the one thing that separates it
+    // from `product_page` above: a catalogue of a hundred listings produces a
+    // hundred rows, each with its own URL, its own image and its own claim, so
+    // each backs exactly one post and `usedInPost` stops the next post repeating
+    // it. Writing one row per CATALOGUE would give a hundred listings a single
+    // shared claim and a link pointing at the collection.
+    const cfg = (source.config ?? {}) as Record<string, unknown>;
+    const providerId = typeof cfg.provider === "string" ? cfg.provider : "";
+    const provider = getListingProvider(providerId);
+    if (!provider) {
+      // A configured provider that no longer exists. Thrown rather than silently
+      // skipped: nothing can be ingested, and a source that quietly reports
+      // "0 created" forever is worse than one that says why.
+      throw new Error(`Unknown listing provider "${providerId}" for source ${sourceId}.`);
+    }
+
+    const instructions = extractionInstructionsOf(source.config);
+
+    // A throw here aborts the whole source, which is correct and deliberate: a
+    // failed fetch means we learned NOTHING this run, so every stored listing
+    // must be left exactly as it is. This is the failure that must never be
+    // mistaken for "the feed is now empty".
+    const fetched = await provider.fetchListings({
+      url: typeof cfg.url === "string" ? cfg.url : undefined,
+      apiKey: typeof cfg.apiKey === "string" ? cfg.apiKey : undefined,
+    });
+
+    // Identity index: `provider:externalId` → the URL that identity is stored at.
+    // Consulted before the URL, so a listing whose SLUG changed (a re-titled ad)
+    // updates its existing row instead of being ingested a second time under a
+    // new address and posted about twice.
+    //
+    // Its own query rather than a `content: true` on the shared `existingRows`
+    // select above: that select runs for EVERY source type, and an RSS feed's
+    // `content` is the full article body — adding it there would pull megabytes
+    // of article text on every ingest of every feed to serve a lookup only this
+    // branch performs. A listing's stored JSON is a few hundred bytes.
+    const listingRows = await prisma.feedItem.findMany({
+      where: { sourceId },
+      select: { url: true, content: true },
+    });
+    const identityToUrl = buildListingIdentityIndex(listingRows);
+
+    // The whole identity decision, taken up front and without touching the
+    // database — see planListingSync.
+    const plans = planListingSync(fetched.listings, identityToUrl, provider.id);
+
+    // Listings whose extraction instruction matched none of their fields. Counted
+    // rather than silently tolerated: it almost always means the instruction is
+    // written in another provider's vocabulary, and the owner should be told.
+    let unmatchedInstruction = 0;
+
+    for (const { listing, renameFrom } of plans) {
+      // The identity is known at a DIFFERENT address — the listing was re-slugged.
+      // Move the existing row to the new URL so its history (and above all its
+      // `usedInPost` claim) follows the listing rather than being abandoned.
+      if (renameFrom) {
+        try {
+          await prisma.feedItem.update({
+            where: { sourceId_url: { sourceId, url: renameFrom } },
+            data: { url: listing.url },
+          });
+          existingUrls.delete(renameFrom);
+          existingUrls.add(listing.url);
+        } catch (err) {
+          // The new URL is already taken by another row (a duplicate the feed
+          // itself produced). Leave both alone and carry on — one confused
+          // listing must not stop the other ninety-nine.
+          console.warn("[listing-feed] could not move re-slugged listing", {
+            sourceId,
+            externalId: listing.externalId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          continue;
+        }
+      }
+
+      // ── Extraction, per listing, here at ingestion ───────────────────────
+      //
+      // The source's instruction is applied to THIS listing's fields and to
+      // nothing else — once per listing, not once per fetch — and what it
+      // selects becomes the item's factual content. The instruction itself is
+      // NOT stored: by the time the Writer sees this row, extraction is done.
+      //
+      // Canonical values are not in `fields` and never reach the selector, so no
+      // instruction can drop or alter the URL, the image, the id or the title.
+      const selection = selectListingFields(listing.fields, instructions);
+
+      const content = JSON.stringify({
+        provider: provider.id,
+        externalId: listing.externalId,
+        fields: selection.fields.map((f) => ({ label: f.label, value: f.value })),
+        ...(selection.unavailable.length > 0 ? { omitted: selection.unavailable } : {}),
+        basis: selection.basis,
+      } satisfies Record<string, unknown>);
+
+      if (selection.basis === "unmatched") unmatchedInstruction++;
+
+      const { outcome } = await upsertFeedItem(
+        sourceId,
+        companyId,
+        listing.url,
+        listing.title,
+        content,
+        listing.createdAt,
+        existingUrls,
+        // Listings are never translated: their fields are short canonical values
+        // (a price, a place, an enum token), and the title is the seller's own
+        // wording for their own item.
+        null,
+        existingTranslations,
+        // The listing's own photo, straight onto the column "Use source image"
+        // already reads. Nothing else is needed to put it on a post.
+        listing.imageUrl
+      );
+      if (outcome === "created") created++;
+      else updated++;
+    }
+
+    if (fetched.skipped.length > 0) {
+      // Sizes and reasons, never the payload.
+      console.warn("[listing-feed] some listings could not be ingested", {
+        sourceId,
+        provider: provider.id,
+        ingested: fetched.listings.length,
+        skippedCount: fetched.skipped.length,
+        reasons: fetched.skipped.slice(0, 10),
+      });
+    }
+
+    // ── Disappearance is deliberately NOT acted on ──────────────────────────
+    //
+    // Nothing below marks a stored listing inactive, and that is a decision
+    // rather than an omission. The only endpoint available today reports
+    // `complete: false` — it is a homepage selection, not the catalogue — so a
+    // listing absent from this response says nothing at all about whether it is
+    // still for sale. Disabling rows on that evidence would switch off most of a
+    // company's feed on the first run.
+    //
+    // TODO(client-confirmation): once a real active-listings endpoint exists and
+    // a provider can honestly return `complete: true`, the conservative rule is
+    // two strikes — absent from one complete sync marks a row a candidate, absent
+    // from a second (or reported inactive outright) sets `enabled = false`. It
+    // needs no new column: `enabled` already excludes an item from the candidate
+    // window, and the first strike can live in the stored JSON. Rows are NEVER
+    // deleted, and a post already written from a withdrawn listing is never
+    // touched — see the publishing note in the final report.
+    if (unmatchedInstruction > 0) {
+      console.warn("[listing-feed] extraction instruction matched no fields", {
+        sourceId,
+        provider: provider.id,
+        listings: unmatchedInstruction,
+        note: "every available fact was kept for those listings; check the instruction's wording against this provider's fields",
+      });
+    }
+
+    console.info("[listing-feed] ingested", {
+      sourceId,
+      provider: provider.id,
+      fetched: fetched.listings.length,
+      created,
+      updated,
+      complete: fetched.complete,
+      instructed: instructions !== null,
+    });
   } else if (source.type === "prompt") {
     const stableUrl = `prompt:${sourceId}`;
     const { outcome, requiresTranslation } = await upsertFeedItem(

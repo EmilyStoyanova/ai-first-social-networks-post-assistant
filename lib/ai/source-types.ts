@@ -11,12 +11,55 @@ import type { FeedItemContext } from "./types";
  * feed items are never claimed and never marked used, so the same prompt can
  * seed many posts across generations.
  */
-export const CONSUMABLE_SOURCE_TYPES = ["rss", "product_page"] as const;
+export const CONSUMABLE_SOURCE_TYPES = ["rss", "product_page", "listing_feed"] as const;
 export type ConsumableSourceType = (typeof CONSUMABLE_SOURCE_TYPES)[number];
 
 /** Whether a ContentSource.type produces single-use article feed items. */
 export function isConsumableSourceType(type: string): boolean {
   return (CONSUMABLE_SOURCE_TYPES as readonly string[]).includes(type);
+}
+
+/**
+ * Whether a source's ingestion writes ONE ROW PER THING, each of which is an
+ * individually addressable item that backs exactly one post.
+ *
+ * This is NOT the same question as `isConsumableSourceType`, and the difference
+ * is the whole reason both exist. `product_page` is consumable — its single row
+ * is a one-shot article — but ingestion writes exactly ONE row for the entire
+ * source, so a manual pick of it is read DIRECTLY from that row and reserves
+ * nothing (see planDirectContentSource); reserving it would make the source
+ * pickable once and permanently dry afterwards.
+ *
+ * `rss` and `listing_feed` are the per-item types: a feed has many articles and a
+ * listing feed has many listings, each with its own URL, its own image, and its
+ * own post. Those go down the RESERVING path, which is what sets
+ * `Post.primaryFeedItemId` — and therefore what makes the appended source link
+ * point at the individual listing rather than at the catalogue it came from.
+ *
+ * Used by the manual-pick router and the generation-source availability check, so
+ * the two can never disagree about which window a source is offered from.
+ */
+const PER_ITEM_SOURCE_TYPES: readonly string[] = ["rss", "listing_feed"];
+
+export function isPerItemSourceType(type: string | null | undefined): boolean {
+  return type !== null && type !== undefined && PER_ITEM_SOURCE_TYPES.includes(type);
+}
+
+/**
+ * Whether an item of this source type can carry its own stored image in
+ * `FeedItem.sourceImageUrl`.
+ *
+ * Deliberately separate from "can we scrape a page to find one": an RSS article
+ * has a readable page, so a missing image is resolved lazily by fetching it. A
+ * listing's image arrives as a field of the provider's API response and is stored
+ * at ingestion; its page is a JavaScript shell with no usable markup, so there is
+ * nothing to scrape and a missing image simply means the listing has none.
+ *
+ * Callers that only READ a stored image use this; the one caller that may also
+ * scrape keeps its own narrower `rss` check alongside it.
+ */
+export function providesSourceImage(type: string | null | undefined): boolean {
+  return type === "rss" || type === "listing_feed";
 }
 
 /**

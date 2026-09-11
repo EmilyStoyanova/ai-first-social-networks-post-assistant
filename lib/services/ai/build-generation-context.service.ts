@@ -3,6 +3,7 @@ import type { GenerationContext } from "@/lib/ai/types";
 import {
   CONSUMABLE_SOURCE_TYPES,
   isConsumableSourceType,
+  providesSourceImage,
   resolveItemPublicUrl,
 } from "@/lib/ai/source-types";
 import { resolveFeedItemContent } from "@/lib/ai/feed-item-translation";
@@ -528,9 +529,10 @@ async function loadContext(
         // than on the item.
         publicUrl: resolveItemPublicUrl(f.url, f.source.config),
         publishedAt: f.publishedAt,
-        // Only an RSS item has an "original article"; the others reach this map
-        // with a null column anyway, so the type check just makes it explicit.
-        sourceImageUrl: f.source.type === "rss" ? f.sourceImageUrl : null,
+        // An RSS article's own image, or a listing's own photo — both are stored
+        // on the row at ingestion. Every other type reaches this map with a null
+        // column anyway, so the check just makes the intent explicit.
+        sourceImageUrl: providesSourceImage(f.source.type) ? f.sourceImageUrl : null,
         sourceType: f.source.type,
         sourceName: f.source.name,
         sourceLinkPreference: extractSourceLinkPreference(f.source.config),

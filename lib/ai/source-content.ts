@@ -1,4 +1,6 @@
 import type { FeedItemContext } from "./types";
+import { readStoredListing, renderListing } from "./listing-item";
+import { publicUrlOf } from "./source-types";
 
 /**
  * How a stored FeedItem becomes prompt text.
@@ -59,7 +61,7 @@ export const CONTENT_PER_ITEM_LIMIT = 900;
 export const PRIMARY_CONTENT_LIMIT = 12_000;
 
 /** The source types whose `content` is a JSON object rather than prose. */
-const STRUCTURED_TYPES = new Set(["product_page", "calendar_event"]);
+const STRUCTURED_TYPES = new Set(["product_page", "calendar_event", "listing_feed"]);
 
 function truncate(text: string, limit: number): string {
   return text.length > limit ? text.slice(0, limit) + "…" : text;
@@ -235,6 +237,13 @@ export function renderFeedItemContent(
     body = renderCalendarEvent(stored, limit);
   } else if (stored && item.sourceType === "product_page") {
     body = renderProductPage(item, stored, limit);
+  } else if (item.sourceType === "listing_feed") {
+    // Read through its own parser rather than the shared `stored` record: a
+    // listing's payload has a typed shape (provider, externalId, fields[]) that
+    // `stringField` cannot express, and a row that fails to parse must fall back
+    // to the raw text rather than render an empty listing block.
+    const listing = readStoredListing(raw);
+    body = listing ? renderListing(listing, publicUrlOf(item)) : truncate(raw, limit);
   } else {
     body = truncate(raw, limit);
   }
@@ -254,6 +263,23 @@ export function renderFeedItemContent(
  * Exported so the prompt builder can state it as a requirement and aspect mining
  * can stand down: an aspect reaches the prompt as "build this post around this
  * one focus", which is the exact opposite of "list everything on the page".
+ */
+/**
+ * ONLY a product page, deliberately — a listing feed must never return here.
+ *
+ * A listing feed has an instruction of the same NAME and a completely different
+ * job. A product page's runs at generation time because the page is prose and
+ * the model is the thing that can read it; a listing feed's runs at INGESTION,
+ * where it selects which of the provider's already-structured fields become the
+ * item's content (see lib/ai/listing-extraction.ts). By the time a listing
+ * reaches a prompt, its extraction is finished and the facts ARE the content.
+ *
+ * Returning one here would do two specific harms, both observed:
+ *   • prompt-builder renders this under "Cover EVERY item the source block
+ *     provides" — list semantics, aimed at a page of many things, applied to a
+ *     post about ONE boat;
+ *   • it would ask the Writer to perform an extraction it cannot perform, since
+ *     the only thing in front of it is the already-extracted result.
  */
 export function sourceExtractionInstruction(item: FeedItemContext | null): string | null {
   if (!item || item.sourceType !== "product_page") return null;
@@ -313,6 +339,20 @@ export function framePrimarySource(item: FeedItemContext): PrimarySourceFraming 
       heading: "**PRIMARY SOURCE — CONTENT BRIEF — the post MUST follow THIS brief and no other.**",
       instruction:
         "The subject, facts, and angle of the post must come from the brief below. Do not replace it with a different subject, and do not invent facts the brief does not state.",
+    };
+  }
+  if (item.sourceType === "listing_feed") {
+    // Its own framing rather than the article one, for the reason the evergreen
+    // types have theirs: a listing is a single item for sale, not a news story,
+    // and asking for an article about it is what produces a post that reads as
+    // commentary on a market rather than an advert for one boat. The link
+    // promise is kept — unlike the evergreen types, a listing really does have
+    // its own page and it really is attached.
+    return {
+      heading:
+        "**PRIMARY SOURCE — MARKETPLACE LISTING — the post MUST be about THIS ONE listing and no other.**",
+      instruction:
+        "The subject of the post is this single item being offered for sale. Its details are listed below and are the only permitted facts about it. A link to this exact listing will be attached to the post, so the post text must be about this item — not about the seller, the category, or the marketplace in general.",
     };
   }
   return ARTICLE_FRAMING;

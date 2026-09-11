@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import type { ContentSourceType } from "@prisma/client";
 import { eligibleClassificationWhere } from "@/lib/ai/candidate-priority";
+import { isPerItemSourceType } from "@/lib/ai/source-types";
 
 /**
  * Why a listed source cannot currently be picked.
@@ -139,8 +140,12 @@ export async function listGenerationSourcesCore(
   });
   if (rows.length === 0) return { success: true, sources: [] };
 
-  const rssIds = rows.filter((r) => r.type === "rss").map((r) => r.id);
-  const directIds = rows.filter((r) => r.type !== "rss").map((r) => r.id);
+  // Split on per-item-ness, exactly as resolveManualContentSource routes the pick.
+  // These two MUST agree: a source offered from the direct window but generated
+  // through the reserving path (or the reverse) is a dropdown that promises a
+  // source and then fails with SELECTED_SOURCE_UNAVAILABLE.
+  const rssIds = rows.filter((r) => isPerItemSourceType(r.type)).map((r) => r.id);
+  const directIds = rows.filter((r) => !isPerItemSourceType(r.type)).map((r) => r.id);
 
   // The classification gate, on BOTH windows because generation applies it to
   // both. A REJECTED article cannot back a post, so a feed holding nothing else
@@ -185,7 +190,11 @@ export async function listGenerationSourcesCore(
         name: r.name,
         type: r.type,
         available: isAvailable,
-        unavailableReason: isAvailable ? null : r.type === "rss" ? "no_articles" : "no_content",
+        unavailableReason: isAvailable
+          ? null
+          : isPerItemSourceType(r.type)
+            ? "no_articles"
+            : "no_content",
       };
     }),
   };

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import { extractArticle, type ExtractedArticle } from "@/lib/integrations/rss/article-extractor";
 import { pickSourceImage } from "@/lib/integrations/rss/article-image";
+import { providesSourceImage } from "@/lib/ai/source-types";
 
 /**
  * Answering "does this post's article have an image we could use?".
@@ -35,7 +36,11 @@ export interface ArticleContext {
   feedItemId: string | null;
   /** The article's address. Only meaningful for an RSS item. */
   articleUrl: string | null;
-  /** True only for `rss`; a prompt / calendar event / product page has no article. */
+  /**
+   * True only for `rss` — the one type whose page can be SCRAPED for an image it
+   * has no stored value for. Deliberately false for `listing_feed`, whose image
+   * is an API field and whose page is an empty SPA shell.
+   */
   isArticle: boolean;
   /** What ingestion already stored, if anything. */
   sourceImageUrl: string | null;
@@ -117,13 +122,23 @@ export const prismaResolveSourceImageDeps: ResolveSourceImageDeps = {
     if (!post) return null;
 
     const item = post.primaryFeedItem;
+    // Two DIFFERENT questions, and conflating them is what would break a listing.
+    //
+    // `isArticle` gates the lazy SCRAPE below, and stays rss-only: an article has
+    // a readable page whose og:image can be fetched on demand. A listing's page is
+    // a JavaScript shell with no per-listing markup at all, so scraping one would
+    // spend a request to learn nothing — its image comes from the provider's API
+    // and was stored at ingestion or never existed.
+    //
+    // `sourceImageUrl` is the stored answer, which both types can have.
     const isArticle = item?.source.type === "rss";
+    const hasStoredImage = providesSourceImage(item?.source.type);
     return {
       companyId: post.companyId,
       feedItemId: item?.id ?? null,
       articleUrl: isArticle ? (item?.url ?? null) : null,
       isArticle,
-      sourceImageUrl: isArticle ? (item?.sourceImageUrl ?? null) : null,
+      sourceImageUrl: hasStoredImage ? (item?.sourceImageUrl ?? null) : null,
     };
   },
 

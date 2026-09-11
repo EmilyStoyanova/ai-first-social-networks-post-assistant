@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useTranslations } from "next-intl";
 import { Button } from "@/components/ui/Button";
 import type { ContentSourceItem } from "@/lib/services/company/list-content-sources.service";
+import { LISTING_PROVIDERS } from "@/lib/integrations/listing-feed/registry";
 
 export interface ContentSourcePayload {
   type: string;
@@ -44,6 +45,7 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
     { value: "rss", label: t("rssType") },
     { value: "prompt", label: t("promptType") },
     { value: "product_page", label: t("productPageType") },
+    { value: "listing_feed", label: t("listingFeedType") },
     { value: "calendar_event", label: t("calendarEventType") },
   ] as const;
 
@@ -55,6 +57,11 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
   // meta description); the key is omitted from the payload entirely.
   const [extractionInstructions, setExtractionInstructions] = useState(
     asText(initialData?.config.extractionInstructions)
+  );
+  // Listings feed only. The owner picks a provider, never an API endpoint — the
+  // adapter owns its own URL (see lib/integrations/listing-feed/).
+  const [listingProvider, setListingProvider] = useState(
+    asText(initialData?.config.provider) || (LISTING_PROVIDERS[0]?.id ?? "")
   );
   const [eventTitle, setEventTitle] = useState(asText(initialData?.config.title));
   const [eventDate, setEventDate] = useState(asText(initialData?.config.date));
@@ -102,6 +109,16 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
         ...(extractionInstructions.trim()
           ? { extractionInstructions: extractionInstructions.trim() }
           : {}),
+      };
+    } else if (type === "listing_feed") {
+      config = {
+        provider: listingProvider,
+        ...(extractionInstructions.trim()
+          ? { extractionInstructions: extractionInstructions.trim() }
+          : {}),
+        ...(sourceLinkPref === "inherit"
+          ? {}
+          : { includeSourceLink: sourceLinkPref === "include" }),
       };
     } else if (type === "prompt") {
       config = { promptText: promptText.trim() };
@@ -183,6 +200,47 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
         </div>
       )}
 
+      {/* Listings Feed — which provider reads it. No endpoint is asked for: the
+          adapter owns its own, so a changed API is not the owner's problem. */}
+      {type === "listing_feed" && (
+        <div>
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">
+            {t("listingProvider")}
+          </label>
+          <select
+            value={listingProvider}
+            onChange={(e) => setListingProvider(e.target.value)}
+            className={`${BASE} ${NORMAL}`}
+          >
+            {LISTING_PROVIDERS.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+          <p className="text-fg-faint mt-1 text-xs">{t("listingProviderHelp")}</p>
+        </div>
+      )}
+
+      {/* Listings Feed — what to pull out of EVERY listing. Optional. */}
+      {type === "listing_feed" && (
+        <div>
+          <label className="text-fg-muted mb-1.5 block text-sm font-medium">
+            {t("listingExtraction")}{" "}
+            <span className="text-fg-faint font-normal">{t("extractionInstructionsHint")}</span>
+          </label>
+          <textarea
+            rows={3}
+            value={extractionInstructions}
+            onChange={(e) => setExtractionInstructions(e.target.value)}
+            placeholder={t("listingExtractionPlaceholder")}
+            className={`${BASE} ${NORMAL} resize-none`}
+            maxLength={1000}
+          />
+          <p className="text-fg-faint mt-1 text-xs">{t("listingExtractionHelp")}</p>
+        </div>
+      )}
+
       {/* Product page — what to extract from it. Optional: blank keeps the
           original behaviour (the page's title and meta description). */}
       {type === "product_page" && (
@@ -203,8 +261,10 @@ export function ContentSourceForm({ initialData, saving, onSave, onCancel }: Pro
         </div>
       )}
 
-      {/* RSS — source link preference (inherit / include / exclude) */}
-      {type === "rss" && (
+      {/* RSS / Listings Feed — source link preference (inherit / include / exclude).
+          Both attach a link to the individual item a post was written from — an
+          article, or the listing's own page. */}
+      {(type === "rss" || type === "listing_feed") && (
         <div>
           <label className="text-fg-muted mb-1.5 block text-sm font-medium">
             {t("sourceLinkLabel")}

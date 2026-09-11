@@ -17,9 +17,20 @@
 import type { ContentSourceType } from "@prisma/client";
 import { hasPublicUrl, publicUrlOf } from "@/lib/ai/source-types";
 
-/** Mirrors Prisma's ContentSourceType. Duplicated so client components that
- *  render an origin need not pull in the Prisma client. */
-export type OriginSourceType = "rss" | "prompt" | "product_page" | "calendar_event";
+/** Mirrors the DISPLAYABLE subset of Prisma's ContentSourceType. Duplicated so
+ *  client components that render an origin need not pull in the Prisma client.
+ *
+ *  NOT derived from the Prisma enum, and it must not be: that enum also carries
+ *  the Competitive Analysis `competitor_rss`/`competitor_website` members, which
+ *  can never back a post. Because the two are maintained by hand, ADDING A MEMBER
+ *  TO `ContentSourceType` REQUIRES A DECISION HERE — and the matching edit to
+ *  `SOURCE_TYPES` below, which is the runtime half of the same list. A member
+ *  added to the enum but not to both of these degrades to `null` and renders as a
+ *  post with no source badge, silently. `post-origin.test.ts` asserts every
+ *  ContentSourceType value is handled, which is what turns that silence into a
+ *  failing test. */
+export type OriginSourceType =
+  "rss" | "prompt" | "product_page" | "calendar_event" | "listing_feed";
 
 export interface PostOriginView {
   kind: "brand_setup" | "source";
@@ -78,7 +89,14 @@ export interface PostOriginSnapshot {
   originSourceUrl: string | null;
 }
 
-const SOURCE_TYPES: readonly string[] = ["rss", "prompt", "product_page", "calendar_event"];
+/** The runtime half of `OriginSourceType` — keep the two in step. */
+const SOURCE_TYPES: readonly string[] = [
+  "rss",
+  "prompt",
+  "product_page",
+  "calendar_event",
+  "listing_feed",
+];
 
 /** Narrows a stored/joined type string, so an unknown value degrades to null
  *  rather than reaching the UI as a missing translation key. */

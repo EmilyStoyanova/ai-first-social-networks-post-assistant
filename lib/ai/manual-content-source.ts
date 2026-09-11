@@ -36,7 +36,7 @@
 
 import type { SourceScope } from "@/lib/services/ai/build-generation-context.service";
 import type { FeedItemContext } from "./types";
-import { isConsumableItem } from "./source-types";
+import { isConsumableItem, isPerItemSourceType } from "./source-types";
 
 /**
  * Sentinel dropdown values. Namespaced with a `__` prefix so they can never
@@ -60,11 +60,19 @@ export type ManualContentSourceRef =
 export type ManualContentSourceSelection =
   | { kind: "company_rules" }
   | { kind: "company_mission" }
-  /** An RSS feed: generation reserves one unused FeedItem and marks it used. */
+  /**
+   * A per-item source — an RSS feed or a listing feed. Generation reserves one
+   * unused FeedItem and marks it used, so each article/listing backs exactly one
+   * post and the post records which one (see isPerItemSourceType).
+   *
+   * Named `rss_source` because RSS was the only such type when this was written;
+   * the name is kept rather than churned through every call site, but the rule it
+   * encodes is per-item-ness, not RSS.
+   */
   | { kind: "rss_source"; sourceId: string }
   /**
-   * Any non-RSS source (product page, prompt, calendar event): generation reads
-   * the content ingestion already stored for it. Reusable — no reservation.
+   * A whole-source source (product page, prompt, calendar event): generation reads
+   * the single row ingestion stored for it. Reusable — no reservation.
    */
   | { kind: "content_source"; sourceId: string; sourceType: string };
 
@@ -94,7 +102,17 @@ export function resolveManualContentSource(
 ): ManualContentSourceSelection | null {
   if (ref.kind !== "source") return ref;
   if (sourceType === null) return null;
-  return sourceType === "rss"
+  // The split is "does this source hold many individually claimable items?", not
+  // "is it RSS". A listing feed holds one row per listing, each with its own page
+  // and its own image, so it takes the reserving path: that is what claims exactly
+  // one listing, marks it used so the next post picks a different one, and sets
+  // Post.primaryFeedItemId — which is in turn what makes the attached source link
+  // the individual listing rather than nothing at all.
+  //
+  // `product_page` deliberately stays on the direct path even though it is
+  // `isConsumableSourceType`: ingestion writes exactly ONE row for it, so
+  // reserving that row would make the source pickable once and dry forever.
+  return isPerItemSourceType(sourceType)
     ? { kind: "rss_source", sourceId: ref.sourceId }
     : { kind: "content_source", sourceId: ref.sourceId, sourceType };
 }

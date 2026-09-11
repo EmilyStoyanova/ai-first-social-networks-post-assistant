@@ -1,4 +1,5 @@
 import type { ContentSourceType } from "@prisma/client";
+import { providesSourceImage } from "@/lib/ai/source-types";
 import { prisma } from "@/lib/db/client";
 import { resolvePostOrigin, type PostOriginView } from "@/lib/posts/post-origin";
 
@@ -136,8 +137,9 @@ export const POST_ITEM_SELECT = {
  * deleted has no feed item and therefore no offer — correct, since the article
  * it pointed at is gone.
  *
- * Restricted to `rss`. A prompt or calendar event has no original article at
- * all, and ingestion resolves an image for neither.
+ * Restricted to the types that carry an image of their own — an RSS article and a
+ * marketplace listing. A prompt, calendar event or product page has no original
+ * image at all, and ingestion resolves one for none of them.
  */
 export function resolveSourceImageUrl(
   primaryFeedItem: {
@@ -145,7 +147,7 @@ export function resolveSourceImageUrl(
     source: { type: string };
   } | null
 ): string | null {
-  if (!primaryFeedItem || primaryFeedItem.source.type !== "rss") return null;
+  if (!primaryFeedItem || !providesSourceImage(primaryFeedItem.source.type)) return null;
   return primaryFeedItem.sourceImageUrl;
 }
 

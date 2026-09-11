@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LISTING_PROVIDER_IDS } from "@/lib/integrations/listing-feed/registry";
 
 const baseFields = {
   name: z.string().min(1, "Name is required.").max(200),
@@ -79,11 +80,48 @@ const calendarEventSchema = z.object({
   }),
 });
 
+/**
+ * A structured listing/catalogue feed, read through a provider adapter.
+ *
+ * The owner picks a PROVIDER, not an endpoint. That is the whole reason this
+ * config looks nothing like the product page's: asking a non-technical user to
+ * paste an internal JSON API path would be asking them to own a detail we have
+ * deliberately hidden inside the adapter, and one that is expected to change.
+ */
+const listingFeedSchema = z.object({
+  type: z.literal("listing_feed"),
+  ...baseFields,
+  config: z.object({
+    /**
+     * Which adapter reads this feed. Validated against the registry rather than a
+     * hand-written list, so a provider cannot be added in one place and forgotten
+     * in the other.
+     */
+    provider: z.enum(LISTING_PROVIDER_IDS, { message: "Unknown listing provider." }),
+    /**
+     * What every post from this feed should cover, in the owner's own words
+     * ("the model, the price, the location and the year"). Optional — blank means
+     * the Writer is given the listing's fields with no extra emphasis.
+     *
+     * Note this instruction never reaches an extraction model: a listing's facts
+     * arrive already structured, so the instruction is a WRITING brief applied per
+     * listing, not a retrieval task. See lib/ai/listing-item.ts.
+     *
+     * `min(1)` for the same reason the product page's has it: the form omits the
+     * key when blank, so an explicit "" is a malformed payload rather than "none".
+     */
+    extractionInstructions: z.string().min(1).max(1000).optional(),
+    /** Per-source source-link preference (v2-1). Omitted = inherit channel default. */
+    includeSourceLink: z.boolean().optional(),
+  }),
+});
+
 export const contentSourceSchema = z.discriminatedUnion("type", [
   rssSchema,
   promptSchema,
   productPageSchema,
   calendarEventSchema,
+  listingFeedSchema,
 ]);
 
 export type ContentSourceInput = z.infer<typeof contentSourceSchema>;

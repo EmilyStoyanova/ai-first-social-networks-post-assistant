@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db/client";
 import { AUDIT_ACTIONS, createAuditLog } from "@/lib/services/audit/audit-log.service";
 import { uploadImageToCloudinary } from "@/lib/integrations/cloudinary/upload-image";
 import { fetchRemoteImage } from "@/lib/integrations/images/fetch-remote-image";
+import { providesSourceImage } from "@/lib/ai/source-types";
 
 /**
  * Replacing a post's AI image with the main image of the article it was written
@@ -219,12 +220,14 @@ export const prismaSourceImageDeps: ApplySourceImageDeps = {
       companyId: post.companyId,
       companySlug: post.company.slug,
       mediaAssetId: post.mediaAssetId,
-      // Only an RSS article is an external article in this model. A prompt, a
-      // calendar event and a product page all reach here through the same
-      // relation, and none of them is the "original article" this feature is
-      // about — ingestion never resolves an image for them either, so this is
+      // The types that carry an image of their own: an RSS article's og:image,
+      // and a listing's photo from its provider's API. A prompt, a calendar event
+      // and a product page all reach here through the same relation and have no
+      // such image — ingestion never resolves one for them either, so this is
       // belt and braces rather than the only guard.
-      sourceImageUrl: item?.source.type === "rss" ? item.sourceImageUrl : null,
+      sourceImageUrl: providesSourceImage(item?.source.type)
+        ? (item?.sourceImageUrl ?? null)
+        : null,
     };
   },
 

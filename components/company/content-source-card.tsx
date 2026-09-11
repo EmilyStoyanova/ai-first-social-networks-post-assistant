@@ -11,6 +11,7 @@ import { ContentSourceForm } from "./content-source-form";
 import { RssArticlesPanel } from "./rss-articles-panel";
 import type { ContentSourceItem } from "@/lib/services/company/list-content-sources.service";
 import { formatDateTime } from "@/lib/i18n/format-date";
+import { LISTING_PROVIDERS } from "@/lib/integrations/listing-feed/registry";
 import type { ContentSourcePayload } from "./content-source-form";
 
 interface Props {
@@ -33,6 +34,12 @@ function asText(value: string | boolean | undefined): string {
 function sourcePreview(source: ContentSourceItem): string {
   const c = source.config;
   if (source.type === "rss" || source.type === "product_page") return asText(c.url);
+  // A listing feed has no user-facing URL — the adapter owns the endpoint — so
+  // the provider is what identifies it at a glance.
+  if (source.type === "listing_feed") {
+    const provider = asText(c.provider);
+    return LISTING_PROVIDERS.find((p) => p.id === provider)?.label ?? provider;
+  }
   if (source.type === "prompt") {
     const text = asText(c.promptText);
     return text.length > 80 ? text.slice(0, 80) + "…" : text;
@@ -66,6 +73,7 @@ export function ContentSourceCard({ slug, source, canManage, onDelete, onUpdate 
     rss: { label: t("rss"), variant: "warning" },
     prompt: { label: t("prompt"), variant: "neutral" },
     product_page: { label: t("productPage"), variant: "success" },
+    listing_feed: { label: t("listingFeed"), variant: "success" },
     calendar_event: { label: t("calendar"), variant: "editor" },
   };
 
